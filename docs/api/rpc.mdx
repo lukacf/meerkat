@@ -2233,9 +2233,14 @@ with `data.kind = "no_decision_store"`.
   `audience` (`{"kind": "approver", "approver_id": ...}` or `{"kind":
   "reviewer", "reviewer": ...}`), the digest of the rendering shown, the part
   size and the parts shown, the channel and message references, and the host
-  clock reading `at_ms`. It counts only when it shows every canonical part of
-  the held rendering to the party that decides now; a presentation at 0 is no
-  reading of when it was shown and is refused.
+  clock reading `at_ms`. A surface with a size limit that showed a summary
+  saying it is shortened records it with the `link` the summary carried to
+  the full presentation: `{"reference": ..., "served_digest": ...}`, the
+  digest of the rendering that link served. It counts only when it shows
+  every canonical part of the held rendering, or its link served the held
+  rendering (its served digest is the subject digest), to the party that
+  decides now; a presentation at 0 is no reading of when it was shown and is
+  refused. A decision's `presentations` carry each recorded link.
 - **`decision/withdraw`** withdraws an open decision as the host.
 
 A failed call is a JSON-RPC error. The answers the decision methods type

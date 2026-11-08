@@ -661,6 +661,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireDecisionReviewVerdict": schema_for!(crate::wire::WireDecisionReviewVerdict),
         "WireCanonicalPart": schema_for!(crate::wire::WireCanonicalPart),
         "WirePresentationAudience": schema_for!(crate::wire::WirePresentationAudience),
+        "WirePresentationLink": schema_for!(crate::wire::WirePresentationLink),
         "WirePresentationRecord": schema_for!(crate::wire::WirePresentationRecord),
         "WireDecisionEvidence": schema_for!(crate::wire::WireDecisionEvidence),
         "WireDecisionOutcome": schema_for!(crate::wire::WireDecisionOutcome),

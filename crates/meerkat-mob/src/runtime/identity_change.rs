@@ -160,7 +160,7 @@ pub enum IdentityChangeConsentInput<'a> {
 
 /// One identity a store-owned create commits: its declared spec, how its
 /// host prepares it before its first use (the host's rule for the spec's
-/// profile), and whether its host holds its creation.
+/// profile), whether its host holds its creation, and the peers it lists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CreatedIdentityRequest {
@@ -173,16 +173,25 @@ pub struct CreatedIdentityRequest {
     /// start seats it Dormant before its host created it, as a roster-owned
     /// identity declared held awaits its held creation.
     pub held_creation: bool,
+    /// The edges the create declares from the identity, each to a peer (an
+    /// identity of the mob of either custody, the requester included when it
+    /// is one, or another identity of the same create) with the peer rule
+    /// that admitted it: the identity owns each edge its create declares
+    /// first. Nothing else wires a new identity to anything, its requester
+    /// included, beyond its profile's definition wiring. An edge is realized
+    /// once both its ends are seated.
+    pub peers: Vec<crate::identity::OwnedIdentityEdge>,
 }
 
 impl CreatedIdentityRequest {
-    /// `spec`, with no host preparation, created by the commit.
+    /// `spec`, with no host preparation and no peer, created by the commit.
     #[must_use]
     pub fn new(spec: CreatedIdentitySpec) -> Self {
         Self {
             spec,
             preparation: IdentityPreparationMode::None,
             held_creation: false,
+            peers: Vec::new(),
         }
     }
 
@@ -197,6 +206,13 @@ impl CreatedIdentityRequest {
     #[must_use]
     pub fn with_held_creation(mut self, held_creation: bool) -> Self {
         self.held_creation = held_creation;
+        self
+    }
+
+    /// The edges the create declares from the identity ([`Self::peers`]).
+    #[must_use]
+    pub fn with_peers(mut self, peers: Vec<crate::identity::OwnedIdentityEdge>) -> Self {
+        self.peers = peers;
         self
     }
 }
@@ -349,6 +365,14 @@ pub struct StoreOwnedIdentityUpdate {
     pub expected_spec_digest: String,
     /// How the identity's host prepares it, under its new spec.
     pub preparation: IdentityPreparationMode,
+    /// The edges the update declares from the identity, each to a peer with
+    /// the peer rule that admitted it (see
+    /// [`CreatedIdentityRequest::peers`]): the identity owns each one no
+    /// identity owns yet; one an identity owns already is left to its owner.
+    pub peers_add: Vec<crate::identity::OwnedIdentityEdge>,
+    /// The peers whose edges the update ends: each must be an edge the
+    /// identity owns. The edge's realization is unwired.
+    pub peers_remove: Vec<AgentIdentity>,
 }
 
 impl StoreOwnedIdentityUpdate {
@@ -365,12 +389,28 @@ impl StoreOwnedIdentityUpdate {
             spec,
             expected_spec_digest: expected_spec_digest.into(),
             preparation: IdentityPreparationMode::None,
+            peers_add: Vec::new(),
+            peers_remove: Vec::new(),
         }
     }
 
     #[must_use]
     pub fn with_preparation(mut self, preparation: IdentityPreparationMode) -> Self {
         self.preparation = preparation;
+        self
+    }
+
+    /// The edges the update declares ([`Self::peers_add`]).
+    #[must_use]
+    pub fn with_peers_add(mut self, peers: Vec<crate::identity::OwnedIdentityEdge>) -> Self {
+        self.peers_add = peers;
+        self
+    }
+
+    /// The peers whose owned edges the update ends ([`Self::peers_remove`]).
+    #[must_use]
+    pub fn with_peers_remove(mut self, peers: Vec<AgentIdentity>) -> Self {
+        self.peers_remove = peers;
         self
     }
 }
@@ -584,6 +624,185 @@ pub enum IdentityChangeRefusal {
         identity: AgentIdentity,
         attempt: Option<u64>,
     },
+    /// A peer the change lists for `identity` is no identity of the mob (a
+    /// worker member's name, nothing's, or an identity whose removal is
+    /// retiring it).
+    PeerUnknown {
+        identity: AgentIdentity,
+        peer: AgentIdentity,
+    },
+    /// An adoption into store custody takes no identity of this shape:
+    /// `reason` says why. Retryable for a roster-owned identity its host
+    /// still settles ([`NotAdoptableReason::is_retryable`]).
+    NotAdoptable {
+        identity: AgentIdentity,
+        reason: NotAdoptableReason,
+    },
+    /// An adoption of a worker member names a generation that is not its
+    /// member's current one: observe the member again.
+    PredecessorMismatch { identity: AgentIdentity },
+    /// A member step of the identity an adoption names is in flight (a
+    /// spawn, a wake, a rotation, a retirement, a removal, an archive or a
+    /// held construction): retryable once it settled.
+    AdmissionUnsettled { identity: AgentIdentity },
+    /// A declared apply of the mob is open: an adoption waits for it to
+    /// close, retryable.
+    DeclaredApplyOpen,
+    /// The mob's rows of schema version 2 and later were purged before a
+    /// downgrade: its identity changes are refused until it restarts.
+    Purged,
+    /// The purge of the mob's rows is refused: `reason` says why.
+    PurgeRefused { reason: PurgeRefusedReason },
+}
+
+/// Why a purge of the mob's rows is refused
+/// ([`IdentityChangeRefusal::PurgeRefused`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PurgeRefusedReason {
+    /// Only the host operator purges.
+    NotHostOperator,
+    /// The mob's identity changes are not held: the cycle holds them first.
+    ChangesNotHeld,
+    /// The rows the store holds are not the export's: export them again.
+    /// `current_digest` is theirs.
+    ExportMismatch { current_digest: String },
+    /// Rows this build cannot read remain, which no import would restore.
+    UnreadableRows { identities: Vec<AgentIdentity> },
+    /// The mob holds no row of schema version 2 or later: nothing stands in
+    /// the way of a downgrade.
+    NothingToPurge,
+}
+
+impl PurgeRefusedReason {
+    /// The reason's stable token.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotHostOperator => "not_host_operator",
+            Self::ChangesNotHeld => "changes_not_held",
+            Self::ExportMismatch { .. } => "export_mismatch",
+            Self::UnreadableRows { .. } => "unreadable_rows",
+            Self::NothingToPurge => "nothing_to_purge",
+        }
+    }
+}
+
+impl std::fmt::Display for PurgeRefusedReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExportMismatch { current_digest } => write!(
+                formatter,
+                "export_mismatch (the rows' digest is {current_digest})"
+            ),
+            Self::UnreadableRows { identities } => {
+                formatter.write_str("unreadable_rows (")?;
+                for (index, identity) in identities.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{identity}")?;
+                }
+                formatter.write_str(")")
+            }
+            other => formatter.write_str(other.as_str()),
+        }
+    }
+}
+
+/// Why an adoption into store custody takes no identity of a shape
+/// ([`IdentityChangeRefusal::NotAdoptable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum NotAdoptableReason {
+    /// The identity is store-owned already.
+    StoreOwned,
+    /// A roster source names no roster-owned identity.
+    NotAnIdentity,
+    /// A worker source names a roster-owned identity: its adoption names
+    /// the roster as its source.
+    RosterOwned,
+    /// A worker source names no member.
+    NotAMember,
+    /// The member lives on a member host: an adoption keeps a local
+    /// member's binding only.
+    Placed,
+    /// The member is bound to no session.
+    NoSession,
+    /// The roster-owned identity is hosted on its first use: retryable
+    /// once its first use seated it. One placed on a member host is
+    /// seated as a placed member, whose adoption is refused `Placed`,
+    /// which is not retryable.
+    HostedOnFirstUse,
+    /// The roster-owned identity awaits its held creation: retryable once
+    /// its host released the held creation.
+    AwaitingHeldCreation,
+    /// The roster-owned identity awaits its host's preparation: retryable
+    /// once its host's preparation settled.
+    AwaitingHostPreparation,
+    /// The worker member was spawned with a profile or model override,
+    /// which a store-owned identity's spec does not carry.
+    ProfileOverride,
+}
+
+impl NotAdoptableReason {
+    /// The reason's stable token.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StoreOwned => "store_owned",
+            Self::NotAnIdentity => "not_an_identity",
+            Self::RosterOwned => "roster_owned",
+            Self::NotAMember => "not_a_member",
+            Self::Placed => "placed",
+            Self::NoSession => "no_session",
+            Self::HostedOnFirstUse => "hosted_on_first_use",
+            Self::AwaitingHeldCreation => "awaiting_held_creation",
+            Self::AwaitingHostPreparation => "awaiting_host_preparation",
+            Self::ProfileOverride => "profile_override",
+        }
+    }
+
+    /// Whether an adoption refused for this reason may commit later
+    /// unchanged: a roster-owned identity its host still settles (hosted
+    /// on its first use, awaiting its held creation or its host's
+    /// preparation) is adopted once its host settled it. Only the host's
+    /// own action settles it (the first use, the held creation's release,
+    /// the preparation), so a caller retries after it and bounds its
+    /// retries. An identity placed on a member host is the exception: its
+    /// first use seats a placed member, whose adoption is refused
+    /// `Placed`, which is not retryable.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::HostedOnFirstUse | Self::AwaitingHeldCreation | Self::AwaitingHostPreparation
+        )
+    }
+
+    /// The reason MobMachine's verdict names.
+    pub(super) fn from_machine(reason: mob_dsl::IdentityNotAdoptableReason) -> Self {
+        match reason {
+            mob_dsl::IdentityNotAdoptableReason::StoreOwned => Self::StoreOwned,
+            mob_dsl::IdentityNotAdoptableReason::NotAnIdentity => Self::NotAnIdentity,
+            mob_dsl::IdentityNotAdoptableReason::RosterOwned => Self::RosterOwned,
+            mob_dsl::IdentityNotAdoptableReason::NotAMember => Self::NotAMember,
+            mob_dsl::IdentityNotAdoptableReason::Placed => Self::Placed,
+            mob_dsl::IdentityNotAdoptableReason::NoSession => Self::NoSession,
+            mob_dsl::IdentityNotAdoptableReason::HostedOnFirstUse => Self::HostedOnFirstUse,
+            mob_dsl::IdentityNotAdoptableReason::AwaitingHeldCreation => Self::AwaitingHeldCreation,
+            mob_dsl::IdentityNotAdoptableReason::AwaitingHostPreparation => {
+                Self::AwaitingHostPreparation
+            }
+            mob_dsl::IdentityNotAdoptableReason::ProfileOverride => Self::ProfileOverride,
+        }
+    }
+}
+
+impl std::fmt::Display for NotAdoptableReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl IdentityChangeRefusal {
@@ -620,18 +839,34 @@ impl IdentityChangeRefusal {
             Self::ActivationPending { .. } => "activation_pending",
             Self::ConstructionRefused { .. } => "construction_refused",
             Self::HostPreparationPending { .. } => "host_preparation_pending",
+            Self::PeerUnknown { .. } => "peer_unknown",
+            Self::NotAdoptable { .. } => "not_adoptable",
+            Self::PredecessorMismatch { .. } => "predecessor_mismatch",
+            Self::AdmissionUnsettled { .. } => "admission_unsettled",
+            Self::DeclaredApplyOpen => "declared_apply_open",
+            Self::Purged => "purged",
+            Self::PurgeRefused { .. } => "purge_refused",
         }
     }
 
     /// Whether the same request may commit later unchanged: a changes hold
-    /// ends by itself, and an identity's pending preparation ends with its
-    /// settle.
+    /// ends by itself, an identity's pending preparation ends with its
+    /// settle, a member step in flight and an open declared apply end with
+    /// their own steps, and an adoption of a roster-owned identity its host
+    /// still settles ([`NotAdoptableReason::is_retryable`]) commits once
+    /// the host settled it. An identity placed on a member host is the
+    /// exception: its first use seats a placed member, whose adoption is
+    /// refused `not_adoptable` (`placed`), which is not retryable.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::ChangesHeld | Self::HostPreparationPending { .. }
-        )
+        match self {
+            Self::ChangesHeld
+            | Self::HostPreparationPending { .. }
+            | Self::AdmissionUnsettled { .. }
+            | Self::DeclaredApplyOpen => true,
+            Self::NotAdoptable { reason, .. } => reason.is_retryable(),
+            _ => false,
+        }
     }
 }
 
@@ -738,6 +973,29 @@ impl std::fmt::Display for IdentityChangeRefusal {
                 ),
                 None => write!(formatter, "'{identity}' awaits its host's preparation"),
             },
+            Self::PeerUnknown { identity, peer } => write!(
+                formatter,
+                "the peer '{peer}' listed for '{identity}' is no identity of the mob"
+            ),
+            Self::NotAdoptable { identity, reason } => {
+                write!(formatter, "'{identity}' is not adoptable: {reason}")
+            }
+            Self::PredecessorMismatch { identity } => write!(
+                formatter,
+                "the generation observed of '{identity}' is not its member's current one"
+            ),
+            Self::AdmissionUnsettled { identity } => write!(
+                formatter,
+                "a member step of '{identity}' is in flight: retry once it settled"
+            ),
+            Self::DeclaredApplyOpen => {
+                write!(formatter, "a declared apply is open: retry once it closed")
+            }
+            Self::Purged => formatter.write_str(
+                "the mob's identity rows were purged: its identity changes are refused until \
+                 it restarts",
+            ),
+            Self::PurgeRefused { reason } => write!(formatter, "the purge is refused: {reason}"),
         }
     }
 }
@@ -1110,6 +1368,41 @@ fn validate_create(create: &StoreOwnedIdentityCreate) -> Result<(), IdentityChan
                 request.spec.identity
             )));
         }
+        validate_declared_peers(&request.spec.identity, &request.peers)?;
+    }
+    Ok(())
+}
+
+/// Refuse peers a change of `identity` cannot declare: an invalid peer or
+/// rule, the identity itself, a peer listed twice, or an adopted edge, which
+/// only an adoption declares.
+fn validate_declared_peers(
+    identity: &AgentIdentity,
+    peers: &[crate::identity::OwnedIdentityEdge],
+) -> Result<(), IdentityChangeRefusal> {
+    let invalid = |problem: String| IdentityChangeRefusal::InvalidRequest { problem };
+    let mut listed = BTreeSet::new();
+    for edge in peers {
+        crate::identity::validate_identity(&edge.peer)
+            .map_err(|error| invalid(format!("peer '{}': {error}", edge.peer)))?;
+        edge.rule
+            .validate()
+            .map_err(|error| invalid(format!("peer '{}': {error}", edge.peer)))?;
+        if edge.rule == crate::identity::OwnedEdgeAdmission::Adopted {
+            return Err(invalid(format!(
+                "the edge to '{}' is listed as adopted: only an adoption declares an adopted edge",
+                edge.peer
+            )));
+        }
+        if edge.peer == *identity {
+            return Err(invalid(format!("'{identity}' lists itself as its peer")));
+        }
+        if !listed.insert(&edge.peer) {
+            return Err(invalid(format!(
+                "'{identity}' lists the peer '{}' twice",
+                edge.peer
+            )));
+        }
     }
     Ok(())
 }
@@ -1170,12 +1463,14 @@ pub(super) fn lower_created_spec(
     Ok(seat)
 }
 
-/// One identity a create's plan takes: its seat spec, and the request's
-/// facts its new entry is recorded from (MobMachine derives the cause it is
-/// unseated for until its seat, `RecordCreatedIdentityEntry`).
+/// One identity a create's plan takes: its seat spec, the request's facts
+/// its new entry is recorded from (MobMachine derives the cause it is
+/// unseated for until its seat, `RecordCreatedIdentityEntry`), and the edges
+/// its create declares.
 pub(super) struct CreatedIdentityPlanItem {
     pub(super) spec: SpawnMemberSpec,
     pub(super) facts: CreatedEntryFacts,
+    pub(super) peers: Vec<crate::identity::OwnedIdentityEdge>,
 }
 
 /// The facts of a create's request MobMachine records a new store-owned
@@ -1243,6 +1538,7 @@ pub(super) fn admission_refusal(
         Verdict::StaleSpec => Some(stale.unwrap_or(IdentityChangeRefusal::InvalidRequest {
             problem: "the change's spec is not its identity's current one".to_string(),
         })),
+        Verdict::RowsPurged => Some(IdentityChangeRefusal::Purged),
     }
 }
 
@@ -1693,6 +1989,31 @@ pub(super) enum IdentityChangeCommand {
         identity: AgentIdentity,
         reply_tx: oneshot::Sender<Result<mob_dsl::UnlistEntryVerdict, MobError>>,
     },
+    /// End the owned edge `owner` holds to `peer`: the host's policy reload
+    /// denies it.
+    EndDeniedEdge {
+        owner: AgentIdentity,
+        peer: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<super::owned_edges::OwnedEdgeEndOutcome, MobError>>,
+    },
+    /// Realize every owned edge whose ends are both seated and which the mob
+    /// has not wired yet.
+    RealizeOwnedEdges { reply_tx: oneshot::Sender<()> },
+    /// Commit one adoption into store custody.
+    CommitAdoption {
+        commit: Box<super::adoption::AdoptionCommit>,
+        reply_tx: oneshot::Sender<Result<super::adoption::AdoptionCommitted, MobError>>,
+    },
+    /// Commit the purge of the mob's rows of schema version 2 and later.
+    CommitPurge {
+        commit: Box<super::created_set::PurgeCommit>,
+        reply_tx: oneshot::Sender<Result<super::created_set::ChangeCommitted, MobError>>,
+    },
+    /// Commit the import of an export.
+    CommitImport {
+        commit: Box<super::created_set::ImportCommit>,
+        reply_tx: oneshot::Sender<Result<super::created_set::ChangeCommitted, MobError>>,
+    },
     /// Abort a held construction attempt before its activation.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
     AbortConstruction {
@@ -1757,10 +2078,13 @@ pub(super) enum DeclaredChangeKind {
     /// apply: its receipt, written with the declarations it answers.
     Roster,
     /// A store-owned identity's update to `spec`, decided against the spec
-    /// whose digest is `expected_spec_digest`.
+    /// whose digest is `expected_spec_digest`, with the edges it declares
+    /// and the peers whose owned edges it ends.
     StoreOwnedUpdate {
         spec: CreatedIdentitySpec,
         expected_spec_digest: String,
+        peers_add: Vec<crate::identity::OwnedIdentityEdge>,
+        peers_remove: Vec<AgentIdentity>,
     },
 }
 
@@ -2031,10 +2355,13 @@ pub(super) fn entry_change_row(
         )
     };
     Ok(match (verdict, current) {
+        // The removal ends the identity's owned edges with it: its
+        // tombstone owns none.
         (Verdict::Retiring | Verdict::Removed, Some(row)) => {
             let written = row
                 .clone()
-                .with_presence(CreatedIdentityPresence::Removed)
+                .with_owned_edges(Vec::new())
+                .and_then(|written| written.with_presence(CreatedIdentityPresence::Removed))
                 .and_then(|written| written.with_removal(removal()))
                 .map_err(invalid)?;
             Some(updated(row, written))
@@ -2103,6 +2430,22 @@ impl IdentityChangeCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::Unlist { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::EndDeniedEdge { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            // A realization pass answers nothing but its end.
+            Self::RealizeOwnedEdges { reply_tx } => {
+                let _ = reply_tx.send(());
+            }
+            Self::CommitAdoption { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CommitPurge { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::CommitImport { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -2641,11 +2984,17 @@ impl super::MobHandle {
     /// identity is hosted on its first use, and one whose host holds its
     /// creation ([`CreatedIdentityRequest::held_creation`]) awaits it:
     /// neither is seated, and its host's spawn holding its created custody
-    /// ([`super::SpawnMemberSpec::with_created_custody`]) creates it.
+    /// ([`super::SpawnMemberSpec::with_created_custody`]) creates it. The
+    /// peers each identity's create lists ([`CreatedIdentityRequest::peers`])
+    /// are its owned edges, in its row: each is wired by the seat that
+    /// makes both its ends seated, the commit's own included.
     ///
     /// Refused typed, with nothing written: more than
-    /// [`crate::identity::IDENTITY_CHANGE_BATCH_MAX`] identities, a malformed request, an
-    /// unknown profile, a name another identity, a worker, a removed
+    /// [`crate::identity::IDENTITY_CHANGE_BATCH_MAX`] identities, a malformed request (a
+    /// peer listed twice, the identity itself or an adopted edge among its
+    /// peers included), an unknown profile, a peer that is no identity of
+    /// the mob ([`IdentityChangeRefusal::PeerUnknown`]; another identity of
+    /// the same create is one), a name another identity, a worker, a removed
     /// identity or an unreadable row holds, another request under the same
     /// operation, a changes hold (retryable), a candidate composition, a
     /// custom storage composition, a mob that is not running, a decision's
@@ -2687,6 +3036,7 @@ impl super::MobHandle {
             items.push(CreatedIdentityPlanItem {
                 facts: CreatedEntryFacts::of(request, &spec),
                 spec,
+                peers: request.peers.clone(),
             });
         }
         let attribution_facts = ChangeAttribution::facts_of(
@@ -2905,6 +3255,7 @@ pub(super) fn create_rows_and_receipt(
     mob_id: &MobId,
     commit: &CreateCommit,
     causes: &[mob_dsl::UnseatedEntryCause],
+    owned: &BTreeMap<AgentIdentity, Vec<crate::identity::OwnedIdentityEdge>>,
     committed_at_ms: u64,
 ) -> Result<(Vec<CreatedIdentityRowWrite>, IdentityChangeReceipt), MobError> {
     let invalid = |error: crate::identity::IdentityIntentError| {
@@ -2960,6 +3311,14 @@ pub(super) fn create_rows_and_receipt(
             provenance,
         )
         .and_then(|record| record.with_held_creation(request.held_creation))
+        .and_then(|record| {
+            record.with_owned_edges(
+                owned
+                    .get(&request.spec.identity)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        })
         .map_err(invalid)?;
         let spec_digest = request.spec.spec_digest().map_err(invalid)?;
         entries.push(
@@ -3371,7 +3730,12 @@ impl super::MobHandle {
     /// starting point.
     ///
     /// A retry of a committed update with the same request answers
-    /// [`IdentityChangeOutcome::Replayed`], never a stale spec. An agent
+    /// [`IdentityChangeOutcome::Replayed`], never a stale spec. The update's
+    /// peers ([`StoreOwnedIdentityUpdate::peers_add`],
+    /// [`StoreOwnedIdentityUpdate::peers_remove`]) declare and end the
+    /// identity's own owned edges in the same step and transaction, its row
+    /// holding them; an edge whose ends are both seated is wired, or
+    /// unwired, once the step committed. An agent
     /// requester's update commits only what its grant's admission checked
     /// ([`IdentityGrantRequest::for_update`]: the new spec and the
     /// identity's current profile). Refused typed, with nothing written: a
@@ -3380,7 +3744,11 @@ impl super::MobHandle {
     /// revision), an agent's grant admitted for another change
     /// ([`IdentityChangeRefusal::InvalidRequest`]), an identity that is not
     /// store-owned ([`IdentityChangeRefusal::IdentityUnknown`], or
-    /// [`IdentityChangeRefusal::OwnerReadOnly`] for a roster-owned one), and
+    /// [`IdentityChangeRefusal::OwnerReadOnly`] for a roster-owned one), a
+    /// peer that is no identity of the mob
+    /// ([`IdentityChangeRefusal::PeerUnknown`]), a peer removed whose edge
+    /// the identity does not own ([`IdentityChangeRefusal::InvalidRequest`]:
+    /// its change ends only its own edges), and
     /// every refusal of [`Self::create_store_owned_identities`] that applies
     /// to a change. An identity whose member's spawn, wake, retirement,
     /// removal or archive, or whose held construction, is in flight is
@@ -3397,6 +3765,8 @@ impl super::MobHandle {
             spec,
             expected_spec_digest,
             preparation,
+            peers_add,
+            peers_remove,
         } = update;
         let invalid = |problem: String| refused(IdentityChangeRefusal::InvalidRequest { problem });
         if operation.operation_id.trim().is_empty() || operation.request_digest.trim().is_empty() {
@@ -3406,6 +3776,15 @@ impl super::MobHandle {
         }
         spec.validate()
             .map_err(|error| invalid(error.to_string()))?;
+        validate_declared_peers(&spec.identity, &peers_add).map_err(refused)?;
+        let mut removed = BTreeSet::new();
+        for peer in &peers_remove {
+            if !removed.insert(peer) || peers_add.iter().any(|edge| edge.peer == *peer) {
+                return Err(invalid(format!(
+                    "the peer '{peer}' is listed twice in one update"
+                )));
+            }
+        }
         if preparation != IdentityPreparationMode::None {
             return Err(refused(IdentityChangeRefusal::Unsupported {
                 feature: "a store-owned update's host preparation".to_string(),
@@ -3450,6 +3829,8 @@ impl super::MobHandle {
             kind: DeclaredChangeKind::StoreOwnedUpdate {
                 spec: spec.clone(),
                 expected_spec_digest,
+                peers_add,
+                peers_remove,
             },
         };
         #[cfg(test)]

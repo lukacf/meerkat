@@ -2257,6 +2257,17 @@ digest."""
 
 
 @dataclass
+class WirePresentationLink:
+    """The link a summary presentation carried to the full presentation of a
+decision's rendering, and the digest of the rendering that link served
+when it was followed. A surface with a size limit shows a summary that
+says it is shortened, with such a link; the summary counts as a complete
+presentation only when the link served the held rendering."""
+    reference: str
+    served_digest: str
+
+
+@dataclass
 class WirePresentationRecord:
     """One recorded presentation of a decision's rendering."""
     at_ms: int
@@ -2265,6 +2276,7 @@ class WirePresentationRecord:
     message_ref: str
     parts_shown: list[WireCanonicalPart]
     subject_digest: str
+    link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
 
 
@@ -2321,6 +2333,7 @@ class DecisionPresentationRequest:
     message_ref: str
     parts_shown: list[WireCanonicalPart]
     subject_digest: str
+    link: Optional[WirePresentationLink] = None
     max_part_bytes: Optional[int] = None
 
 
@@ -2383,8 +2396,9 @@ request and its canonical parts for the asked part size."""
 @dataclass
 class DecisionPresentParams:
     """`decision/present` parameters: record what a host presenter showed. It
-counts only when it shows every canonical part of the held rendering to
-the party that decides now."""
+counts only when it shows every canonical part of the held rendering, or
+is a summary whose link served the held rendering, to the party that
+decides now."""
     decision_id: str
     presentation: DecisionPresentationRequest
 

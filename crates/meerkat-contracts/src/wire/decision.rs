@@ -176,11 +176,36 @@ pub struct WirePresentationRecord {
     pub max_part_bytes: Option<u32>,
     /// The parts the audience was shown.
     pub parts_shown: Vec<WireCanonicalPart>,
+    /// For a summary presentation, the link it carried to the full
+    /// presentation and the digest of the rendering that link served;
+    /// absent for a presentation of the parts themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<WirePresentationLink>,
     /// Where the presentation was shown.
     pub channel_ref: String,
     pub message_ref: String,
     /// The host's clock reading of the presentation, in UNIX ms.
     pub at_ms: u64,
+}
+
+/// The link a summary presentation carried to the full presentation of a
+/// decision's rendering, and the digest of the rendering that link served
+/// when it was followed. A surface with a size limit shows a summary that
+/// says it is shortened, with such a link; the summary counts as a complete
+/// presentation only when the link served the held rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+// Closed for the request that carries it (`DecisionPresentationRequest`).
+// Results carry it too (`WirePresentationRecord`), which no client parses
+// with this type: the server only serializes them.
+#[serde(deny_unknown_fields)]
+pub struct WirePresentationLink {
+    /// Where the link points: the page or document that serves the full
+    /// presentation.
+    pub reference: String,
+    /// The digest of the rendering the link served (`sha256:` and 64
+    /// lowercase hex digits).
+    pub served_digest: String,
 }
 
 /// The durable evidence a decision was decided with. An authentication
@@ -484,6 +509,11 @@ pub struct DecisionPresentationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_part_bytes: Option<u32>,
     pub parts_shown: Vec<WireCanonicalPart>,
+    /// For a summary a surface with a size limit showed, the link it
+    /// carried to the full presentation and the digest of the rendering
+    /// that link served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<WirePresentationLink>,
     /// Where the rendering was shown.
     pub channel_ref: String,
     pub message_ref: String,
@@ -492,8 +522,9 @@ pub struct DecisionPresentationRequest {
 }
 
 /// `decision/present` parameters: record what a host presenter showed. It
-/// counts only when it shows every canonical part of the held rendering to
-/// the party that decides now.
+/// counts only when it shows every canonical part of the held rendering, or
+/// is a summary whose link served the held rendering, to the party that
+/// decides now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -641,6 +672,51 @@ mod tests {
                 "a decide body naming {field} is refused"
             );
         }
+    }
+
+    /// A presenter's request may carry a summary's link, closed like the
+    /// request; a recorded presentation without a link omits it.
+    #[test]
+    fn a_presentation_link_is_optional_and_closed() {
+        let request = serde_json::json!({
+            "audience": {"kind": "approver", "approver_id": "team:owners"},
+            "subject_digest": "sha256:1",
+            "parts_shown": [],
+            "link": {"reference": "decision-page", "served_digest": "sha256:1"},
+            "channel_ref": "chat:owners",
+            "message_ref": "message-1",
+            "at_ms": 2_000,
+        });
+        let decoded: DecisionPresentationRequest =
+            serde_json::from_value(request.clone()).expect("a request with a link reads");
+        assert_eq!(
+            decoded.link,
+            Some(WirePresentationLink {
+                reference: "decision-page".into(),
+                served_digest: "sha256:1".into(),
+            })
+        );
+        let mut unknown = request;
+        unknown["link"]["note"] = serde_json::json!("shortened");
+        assert!(
+            serde_json::from_value::<DecisionPresentationRequest>(unknown).is_err(),
+            "a link field this version does not know is refused"
+        );
+
+        let record = WirePresentationRecord {
+            audience: WirePresentationAudience::Approver {
+                approver_id: "team:owners".into(),
+            },
+            subject_digest: "sha256:1".into(),
+            max_part_bytes: None,
+            parts_shown: Vec::new(),
+            link: None,
+            channel_ref: "chat:owners".into(),
+            message_ref: "message-1".into(),
+            at_ms: 2_000,
+        };
+        let encoded = serde_json::to_value(&record).expect("encodes");
+        assert!(encoded.get("link").is_none(), "{encoded}");
     }
 
     /// A presented notice carries the whole rendering as one canonical

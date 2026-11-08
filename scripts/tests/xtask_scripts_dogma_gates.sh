@@ -385,7 +385,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # input_controller_holds_are_kept_unstaged_governed_inputs invariant violated.
 # durable_decision_audit.sh requires a final distinct-state count at or above
 # its floor, a coverage block in which each of its covered actions (of module
-# durable_decision_audit) generated a state, its twenty witnesses violated,
+# durable_decision_audit) generated a state, its twenty-two witnesses violated,
 # and with --mutants each seeded defect's invariant violated (the generated
 # first_presentation_is_a_reading included).
 # approval_grant_audit.sh (grant_authority) requires a final distinct-state
@@ -397,12 +397,12 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # witnesses violated, and with --mutants each seeded defect's target
 # invariant violated.
 # created_identity_audit.sh (mob_machine) requires a final distinct-state
-# count for each of its fourteen runs (at or above the floor of each
+# count for each of its seventeen runs (at or above the floor of each
 # measured one), a coverage block in which each covered action of every run
 # generated a state (an arm a run fires only through a named wrapper read
 # under the wrapper's name, by the runner's closed alias table: the
 # wrappers print so below, and a check further down drops each wrapper's
-# line in turn), its seventy-one
+# line in turn), its one hundred and thirteen
 # step witnesses violated, and with --mutants each seeded defect's generated
 # invariant, audit invariant, totality invariant or action property
 # violated and its created_custody_local_kept, recovered_removal_unmarked
@@ -919,6 +919,8 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessCleanupSettledAfterExecution is violated."' \
   'echo "Error: Invariant NotAuditWitnessCleanupSettledAfterExpiry is violated."' \
   'echo "Error: Invariant NotAuditWitnessReplySettledThenAnotherRefused is violated."' \
+  'echo "Error: Invariant NotAuditWitnessLinkedPresentationThenApproved is violated."' \
+  'echo "Error: Invariant NotAuditWitnessUncountedCarriedThenApproved is violated."' \
   'echo "Error: Invariant AuditTerminalsLatch is violated."' \
   'echo "Error: Invariant AuditApprovalIsAttested is violated."' \
   'echo "Error: Invariant AuditRejectionIsAttested is violated."' \
@@ -1098,6 +1100,48 @@ printf '%s\n' \
   'echo "Error: Action property NotAuditWitnessUnlistLeavesCreated is violated."' \
   'echo "Error: Action property NotAuditWitnessRecoveredRemovalEnds is violated."' \
   'echo "Error: Action property NotAuditWitnessRecoveredArchiveEnds is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeToUnseatedDeclared is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeSecondDeclaration is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgePeerUnknown is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByOwner is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByPolicy is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeNotOwner is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByPeerRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeEndedByOwnerRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeKeptByThirdRemoval is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeKeptByArchive is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeUnwireRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeRecovered is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeOutOfForce is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeOutOfForceUnwire is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeRealized is violated."' \
+  'echo "Error: Action property NotAuditWitnessEdgeRestoredToNoEntry is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRosterSeated is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRosterOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptWorker is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStaleGeneration is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptUnlistingRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptRetiringRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptApplyOpen is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStoreOwned is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptNotAMember is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptTombstoned is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptUnreadable is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptHeld is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptCandidate is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptStopped is violated."' \
+  'echo "Error: Action property NotAuditWitnessAdoptOverrideRefused is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleReserved is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleDeclaredKept is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleInPlace is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleOwedSeat is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleTombstone is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleNameTaken is violated."' \
+  'echo "Error: Action property NotAuditWitnessCycleReleased is violated."' \
+  'echo "Error: Action property NotAuditWitnessCyclePurgeNothing is violated."' \
+  'echo "Error: Action property NotAuditWitnessCyclePlainInPlace is violated."' \
+  'echo "Error: Action property NotAuditWitnessCyclePlainOtherSession is violated."' \
   'echo "Error: Invariant AuditUpdateExactlyOne is violated."' \
   'echo "Error: Action property AuditRemovalTombstones is violated."' \
   'echo "Error: Action property AuditArchivedKeepsItsName is violated."' \
@@ -1123,12 +1167,40 @@ printf '%s\n' \
   'echo "Error: Invariant archived_entry_is_store_owned is violated."' \
   'echo "Error: Action property AuditStoreUpdateKeepsStanding is violated."' \
   'echo "Error: Action property AuditCreatedEntryNeverDeclared is violated."' \
+  'echo "Error: Invariant AuditEdgesExactlyOne is violated."' \
+  'echo "Error: Action property AuditOnlyTheOwnerEndsItsEdge is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeEndsOnlyByItsOwnerOrAnEnd is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeKeepsItsOwner is violated."' \
+  'echo "Error: Action property AuditOwnedEdgeBindsIdentitiesOnly is violated."' \
+  'echo "Error: Action property AuditRestoreIsTheRecovery is violated."' \
+  'echo "Error: Invariant AuditAdoptExactlyOne is violated."' \
+  'echo "Error: Action property AuditAdoptionKeepsTheIncarnation is violated."' \
+  'echo "Error: Action property AuditAdoptionTakesASettledMember is violated."' \
+  'echo "Error: Action property AuditAdoptionTakesNoOverriddenWorker is violated."' \
+  'echo "Error: Invariant AuditCycleExactlyOne is violated."' \
+  'echo "Error: Action property AuditPurgeTouchesNothingElse is violated."' \
+  'echo "Error: Invariant AuditImportRestoresOverNoRow is violated."' \
+  'echo "Error: Action property AuditImportKeepsTheIncarnation is violated."' \
+  'echo "Error: Action property AuditPurgeNeedsRows is violated."' \
+  'echo "Error: Action property AuditImportBindsOnTheRecordsSession is violated."' \
+  'echo "Error: Invariant created_origin_without_row_is_unreadable is violated."' \
+  'for action in PurgeIdentityRowsPurged PurgeIdentityRowsNonAuthoritative PurgeIdentityRowsReplayed PurgeIdentityRowsOperationReused PurgeIdentityRowsRowsPurged PurgeIdentityRowsNotHostOperator PurgeIdentityRowsChangesNotHeld PurgeIdentityRowsNothingToPurge PurgeIdentityRowsMobNotRunningStopped RecoverRowlessCreatedEntryReservedRunning RecoverRowlessCreatedEntryReservedStopped RecoverRowlessCreatedEntryKeptRunning RecoverRowlessCreatedEntryKeptStopped ImportIdentityRecordRestoredInPlace ImportIdentityRecordRestoredOwedSeat ImportIdentityRecordRestoredPending ImportIdentityRecordRestoredArchived ImportIdentityRecordRestoredTombstone ImportIdentityRecordRestoredByAdoption ImportIdentityRecordUnchanged ImportIdentityRecordNameTakenMeanwhile ImportIdentityRecordUnsettled ImportIdentityRecordNonAuthoritative ImportIdentityRecordChangesHeld ImportIdentityRecordRowsPurged ImportIdentityRecordMobNotRunningStopped AdmitIdentityChangeRowsPurged; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'for action in AdoptIdentityIntoStoreAdopted AdoptIdentityIntoStoreNotAdoptable AdoptIdentityIntoStorePredecessorMismatch AdoptIdentityIntoStoreAdmissionUnsettled AdoptIdentityIntoStoreDeclaredApplyOpen AdoptIdentityIntoStoreNameUnreadable AdoptIdentityIntoStoreNameTombstoned AdoptIdentityIntoStoreNonAuthoritative AdoptIdentityIntoStoreChangesHeld AdoptIdentityIntoStoreMobNotRunningStopped UnlistIdentityEntryRetiring OpenDeclaredApplyOpened CloseDeclaredApplyRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
+  'echo "Error: Invariant owned_edge_joins_no_tombstone is violated."' \
+  'echo "Error: Invariant owned_edge_owner_is_a_store_owned_end is violated."' \
+  'for action in DeclareOwnedIdentityEdgeDeclared DeclareOwnedIdentityEdgeAlreadyOwned DeclareOwnedIdentityEdgePeerUnknown DeclareOwnedIdentityEdgeOwnerInvalid DeclareOwnedIdentityEdgeMobNotRunningStopped EndOwnedIdentityEdgeEnded EndOwnedIdentityEdgeNotOwner EndOwnedIdentityEdgeAbsent EndOwnedIdentityEdgeNonAuthoritative EndOwnedIdentityEdgeChangesHeld EndOwnedIdentityEdgeMobNotRunningStopped AdmitMemberUnwireAdmittedRunning AdmitMemberUnwireAdmittedStopped AdmitMemberUnwireOwnedEdgeRunning AdmitMemberUnwireOwnedEdgeStopped RecoverOwnedIdentityEdgeRecoveredRunning RecoverOwnedIdentityEdgeRecoveredStopped RecoverOwnedIdentityEdgeSkippedRunning RecoverOwnedIdentityEdgeSkippedStopped AdmitOwnedEdgeRealizationRealizeRunning AdmitOwnedEdgeRealizationRealizeStopped AdmitOwnedEdgeRealizationNotOwnedRunning AdmitOwnedEdgeRealizationNotOwnedStopped AdmitOwnedEdgeRealizationEndNotAnIdentityRunning RestoreOwnedIdentityEdgeRestored RestoreOwnedIdentityEdgeSkipped RestoreOwnedIdentityEdgeMobNotRunningStopped; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "<C1RecoverInBootOrder line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<ArchiveRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<RecoveredRetireReleasing line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<C1OneRowRemoving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<C1OneRowArchiving line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'echo "<C1OneRowUnreadable line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresInPlace line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresOwedSeat line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresPending line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresArchived line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresTombstone line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
+  'echo "<CycleRestoresByAdoption line 1, col 1 to line 1, col 2 of module created_identity_audit>: 1:1"' \
   'for action in SetOperatorInstructionNewRunning SetOperatorInstructionAdvanceRunning SetOperatorInstructionDuplicateRunning SetOperatorInstructionStaleRunning SetOperatorInstructionConflictRunning RevokeOperatorInstructionUnknownSlotRunning RevokeOperatorInstructionStaleRunning RevokeOperatorInstructionDuplicateRunning RevokeOperatorInstructionConflictRunning RevokeOperatorInstructionAdvanceRunning PrepareMemberInstructionDeliveryNotOwedRunning PrepareMemberInstructionDeliveryDeliverRunning PrepareMemberInstructionDeliveryUnbornRunning PrepareMemberInstructionDeliveryUnboundRunning RecordMemberInstructionTargetNotOwedRunning RecordMemberInstructionTargetStaleSessionRunning RecordMemberInstructionTargetSupersededRunning RecordMemberInstructionTargetCurrentRunning RecordMemberInstructionTargetUnmintedRunning RefuseMemberInstructionTargetNotOwedRunning RefuseMemberInstructionTargetStaleSessionRunning RefuseMemberInstructionTargetSupersededRunning RefuseMemberInstructionTargetBlockedRunning PrepareMemberInstructionDeliveryRetiringRunning RetireRunningReleasingArchiveOnly ResolveMemberInstructionReleaseAuthorizedRunning ResolveMemberInstructionReleaseNotNeededRunning; do echo "<$action line 1, col 1 to line 1, col 2 of module model>: 1:1"; done' \
   'echo "Error: Action property NotAuditWitnessProfileWriteOwesOne is violated."' \
   'echo "Error: Action property NotAuditWitnessRetargetOwesLeaver is violated."' \
@@ -1327,7 +1399,13 @@ for alias_case in "scan:C1RecoverInBootOrder:RecoverRosterMemberRunning" \
   "recovered:RecoveredRetireReleasing:RetireRunningReleasingArchiveOnly" \
   "recovered:C1OneRowRemoving:RecoverCreatedIdentityEntryRemovingRunning" \
   "recovered:C1OneRowArchiving:RecoverCreatedIdentityEntryArchivingRunning" \
-  "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning"; do
+  "recovered:C1OneRowUnreadable:RecoverCreatedIdentityEntryUnreadableRunning" \
+  "cycle:CycleRestoresInPlace:ImportIdentityRecordRestoredInPlace" \
+  "cycle:CycleRestoresOwedSeat:ImportIdentityRecordRestoredOwedSeat" \
+  "cycle:CycleRestoresPending:ImportIdentityRecordRestoredPending" \
+  "cycle:CycleRestoresArchived:ImportIdentityRecordRestoredArchived" \
+  "cycle:CycleRestoresTombstone:ImportIdentityRecordRestoredTombstone" \
+  "cycle:CycleRestoresByAdoption:ImportIdentityRecordRestoredByAdoption"; do
   alias_run="${alias_case%%:*}"
   alias_wrapper="${alias_case#*:}"
   alias_wrapper="${alias_wrapper%%:*}"

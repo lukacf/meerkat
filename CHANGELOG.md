@@ -141,6 +141,160 @@ them.
   literals need it): only a catalog for a connection that delivers decision
   notices lists `decision/notice`.
 
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  `DurableDecisionInput::Present` (meerkat-runtime `decision::dsl` and
+  meerkat-machine-schema `catalog::dsl::durable_decision`) and the kernel
+  `generated::durable_decision::inputs::Present` gain the public field
+  `link_served_digest: Option<DecisionDigest>`, the digest a summary's link
+  served, so code that builds them literally must set it (`None` keeps the
+  previous behaviour).
+
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`:
+  DurableDecisionMachine decides whether the presentation a human decision
+  carries counts (see Changed). `DurableDecisionInput::Decide`
+  (meerkat-runtime `decision::dsl` and meerkat-machine-schema
+  `catalog::dsl::durable_decision`) and the kernel
+  `generated::durable_decision::inputs::Decide` gain the public fields
+  `carried_audience: Option<DecisionParty>`, `carried_digest:
+  Option<DecisionDigest>`, `carried_complete: bool` and
+  `carried_link_served_digest: Option<DecisionDigest>`, the carried
+  presentation's facts (`None` and `false` when it carries none), so code that
+  builds them literally must set them. `DurableDecisionEffect::Approved` and
+  `DurableDecisionEffect::Rejected` (the same crates) and the kernel
+  `generated::durable_decision::effects::Approved` and `effects::Rejected`
+  gain the public field `carried_presentation_counted: bool`, so code that
+  builds them literally must set it.
+
+- `meerkat-mob`: an owned edge's `OwnedIdentityEdge::rule` is an
+  `OwnedEdgeAdmission` (the admitting peer rule's id, `Rule`, or `Adopted`)
+  in place of a `String`, and `OwnedIdentityEdge::new` takes one: build a
+  rule's with `OwnedEdgeAdmission::rule(id)`, which refuses the id
+  `adopted`. The row's stored form is unchanged (`{"peer": .., "rule":
+  ".."}`; the token `adopted` reads as `Adopted`).
+
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine keeps the mob's owned edges and decides when an edge is in force,
+  realized and restored by an import (see Added). `MobMachineInput`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `generated::mob`
+  `Input` gain `DeclareOwnedIdentityEdge { edge, owner }`,
+  `EndOwnedIdentityEdge { edge, owner, cause }`, `AdmitMemberUnwire { edge }`,
+  `AdmitOwnedEdgeRealization { edge }` and `RestoreOwnedIdentityEdge { edge,
+  owner }`, and `MobMachineInputVariant` and the kernel `InputKind` gain the
+  same names. `MobMachineSignal` and `MobMachineSignalVariant`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `Signal` and
+  `SignalKind` gain `RecoverOwnedIdentityEdge { edge, owner }`.
+  `MobMachineEffect` and `MobMachineEffectVariant` and the kernel `Effect` and
+  `EffectKind` gain `OwnedIdentityEdgeDeclared`, `OwnedIdentityEdgeEnded`,
+  `MemberUnwireAdmissionResolved`, `OwnedEdgeRealizationResolved` and
+  `OwnedIdentityEdgeRestored`. `MobMachineState` (meerkat-machine-schema and
+  meerkat-mob) and the kernel `State` gain the public field
+  `identity_edge_owners`, so code that builds either struct literally must set
+  it. The kernel `generated::mob::TransitionId` gains
+  `DeclareOwnedIdentityEdgeDeclared`, `DeclareOwnedIdentityEdgeAlreadyOwned`,
+  `DeclareOwnedIdentityEdgePeerUnknown`,
+  `DeclareOwnedIdentityEdgeOwnerInvalid`,
+  `DeclareOwnedIdentityEdgeMobNotRunningStopped`,
+  `DeclareOwnedIdentityEdgeMobNotRunningCompleted`,
+  `DeclareOwnedIdentityEdgeMobNotRunningDestroyed`,
+  `EndOwnedIdentityEdgeEnded`, `EndOwnedIdentityEdgeNotOwner`,
+  `EndOwnedIdentityEdgeAbsent`, `EndOwnedIdentityEdgeNonAuthoritative`,
+  `EndOwnedIdentityEdgeChangesHeld`,
+  `EndOwnedIdentityEdgeMobNotRunningStopped`,
+  `EndOwnedIdentityEdgeMobNotRunningCompleted`,
+  `EndOwnedIdentityEdgeMobNotRunningDestroyed`,
+  `AdmitMemberUnwireAdmittedRunning`, `AdmitMemberUnwireAdmittedStopped`,
+  `AdmitMemberUnwireAdmittedCompleted`, `AdmitMemberUnwireAdmittedDestroyed`,
+  `AdmitMemberUnwireOwnedEdgeRunning`, `AdmitMemberUnwireOwnedEdgeStopped`,
+  `AdmitMemberUnwireOwnedEdgeCompleted`,
+  `AdmitMemberUnwireOwnedEdgeDestroyed`,
+  `RecoverOwnedIdentityEdgeRecoveredRunning`,
+  `RecoverOwnedIdentityEdgeRecoveredStopped`,
+  `RecoverOwnedIdentityEdgeSkippedRunning`,
+  `RecoverOwnedIdentityEdgeSkippedStopped`,
+  `AdmitOwnedEdgeRealizationRealizeRunning`,
+  `AdmitOwnedEdgeRealizationRealizeStopped`,
+  `AdmitOwnedEdgeRealizationRealizeCompleted`,
+  `AdmitOwnedEdgeRealizationRealizeDestroyed`,
+  `AdmitOwnedEdgeRealizationNotOwnedRunning`,
+  `AdmitOwnedEdgeRealizationNotOwnedStopped`,
+  `AdmitOwnedEdgeRealizationNotOwnedCompleted`,
+  `AdmitOwnedEdgeRealizationNotOwnedDestroyed`,
+  `AdmitOwnedEdgeRealizationEndNotAnIdentityRunning`,
+  `AdmitOwnedEdgeRealizationEndNotAnIdentityStopped`,
+  `AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted`,
+  `AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed`,
+  `RestoreOwnedIdentityEdgeRestored`, `RestoreOwnedIdentityEdgeSkipped`,
+  `RestoreOwnedIdentityEdgeMobNotRunningStopped`,
+  `RestoreOwnedIdentityEdgeMobNotRunningCompleted` and
+  `RestoreOwnedIdentityEdgeMobNotRunningDestroyed`. Every new variant is
+  appended last, so no existing variant's discriminant moves. Every enum named
+  here is exhaustive: a downstream exhaustive match needs the new arms or a
+  wildcard arm.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides an adoption into store custody (see Added).
+  `MobMachineInput` (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob` `Input` gain `AdoptIdentityIntoStore { agent_identity,
+  source, generation, spawn_overridden }`, `MobMachineInputVariant` and the
+  kernel `InputKind` gain `AdoptIdentityIntoStore`, and `MobMachineEffect` and
+  `MobMachineEffectVariant` and the kernel `Effect` and `EffectKind` gain
+  `IdentityAdoptionResolved`. The kernel `generated::mob::TransitionId` gains
+  `AdoptIdentityIntoStoreAdopted`, `AdoptIdentityIntoStoreNotAdoptable`,
+  `AdoptIdentityIntoStorePredecessorMismatch`,
+  `AdoptIdentityIntoStoreAdmissionUnsettled`,
+  `AdoptIdentityIntoStoreDeclaredApplyOpen`,
+  `AdoptIdentityIntoStoreNameUnreadable`,
+  `AdoptIdentityIntoStoreNameTombstoned`,
+  `AdoptIdentityIntoStoreNonAuthoritative`,
+  `AdoptIdentityIntoStoreChangesHeld`,
+  `AdoptIdentityIntoStoreMobNotRunningStopped`,
+  `AdoptIdentityIntoStoreMobNotRunningCompleted` and
+  `AdoptIdentityIntoStoreMobNotRunningDestroyed`. Every new variant is
+  appended last, so no existing variant's discriminant moves. Every enum named
+  here is exhaustive: a downstream exhaustive match needs the new arms or a
+  wildcard arm.
+- `meerkat-machine-kernels`, `meerkat-machine-schema`, `meerkat-mob`:
+  MobMachine decides the downgrade cycle's purge, a start's reservation of a
+  store-owned identity whose row was purged, and the import (see Added).
+  `MobMachineInput` (meerkat-machine-schema and meerkat-mob) and the kernel
+  `generated::mob` `Input` gain `PurgeIdentityRows { receipt, host_operator,
+  rows_present }` and `ImportIdentityRecord { agent_identity, kind,
+  adopted_from_roster, row, last_session }`, and `MobMachineInputVariant` and
+  the kernel `InputKind` gain the same names. `MobMachineSignal` and
+  `MobMachineSignalVariant` and the kernel `Signal` and `SignalKind` gain
+  `RecoverRowlessCreatedEntry { agent_identity }`. `MobMachineEffect` and
+  `MobMachineEffectVariant` and the kernel `Effect` and `EffectKind` gain
+  `IdentityRowsPurgeResolved` and `IdentityRecordImportResolved`, and
+  `IdentityChangeAdmissionKind` gains `RowsPurged`. `MobMachineState`
+  (meerkat-machine-schema and meerkat-mob) and the kernel `State` gain the
+  public fields `identity_rows_purged` and `identity_entry_rowless`, so code
+  that builds either struct literally must set them. The kernel
+  `generated::mob::TransitionId` gains `AdmitIdentityChangeRowsPurged`,
+  `PurgeIdentityRowsPurged`, `PurgeIdentityRowsNonAuthoritative`,
+  `PurgeIdentityRowsReplayed`, `PurgeIdentityRowsOperationReused`,
+  `PurgeIdentityRowsRowsPurged`, `PurgeIdentityRowsNotHostOperator`,
+  `PurgeIdentityRowsChangesNotHeld`, `PurgeIdentityRowsMobNotRunningStopped`,
+  `PurgeIdentityRowsMobNotRunningCompleted`,
+  `PurgeIdentityRowsMobNotRunningDestroyed`,
+  `RecoverRowlessCreatedEntryReservedRunning`,
+  `RecoverRowlessCreatedEntryReservedStopped`,
+  `RecoverRowlessCreatedEntryKeptRunning`,
+  `RecoverRowlessCreatedEntryKeptStopped`,
+  `ImportIdentityRecordRestoredInPlace`,
+  `ImportIdentityRecordRestoredOwedSeat`,
+  `ImportIdentityRecordRestoredPending`,
+  `ImportIdentityRecordRestoredArchived`,
+  `ImportIdentityRecordRestoredTombstone`,
+  `ImportIdentityRecordRestoredByAdoption`, `ImportIdentityRecordUnchanged`,
+  `ImportIdentityRecordNameTakenMeanwhile`, `ImportIdentityRecordUnsettled`,
+  `ImportIdentityRecordNonAuthoritative`, `ImportIdentityRecordChangesHeld`,
+  `ImportIdentityRecordRowsPurged`,
+  `ImportIdentityRecordMobNotRunningStopped`,
+  `ImportIdentityRecordMobNotRunningCompleted`,
+  `ImportIdentityRecordMobNotRunningDestroyed` and
+  `PurgeIdentityRowsNothingToPurge`. Every new variant is appended last, so no
+  existing variant's discriminant moves. Every enum named here is exhaustive,
+  so a downstream exhaustive match needs the new arms, or a wildcard arm.
+
 - `meerkat-core`: consent decisions keep the login they were decided in
   (see Changed). `ApprovalConsentApprover` gains the public field
   `authentication_scope_digest: Option<Sha256Digest>`, so code that builds
@@ -751,6 +905,119 @@ them.
   does not know reads as `unknown`) and `WireDecisionNoticePresentation`,
   and the `decision/notice` entry of the RPC notification catalog.
 
+- `meerkat-core`, `meerkat-runtime`: a durable decision's presentation can
+  be a summary with a link. A surface with a size limit records
+  `PresentationRecord::linked`: a summary that says it is shortened, with a
+  `PresentationLink` (the reference the summary carried, and the digest of
+  the rendering that link served). It is a complete presentation only when
+  the link served the whole, unchanged rendering, that is when its served
+  digest is the decision's subject digest: `PresentationRecord::is_complete_for`
+  and `DurableDecisionMachine` count it for a recorded presentation and for
+  one a decision event carries, and a decision observed before it is refused
+  `decided_before_presentation`, as for a shown one. A summary with no link,
+  or whose link served another rendering, stays `presentation_incomplete`.
+  A record without a link is stored as before. On the RPC wire,
+  `decision/present` takes the summary's `link` (`reference`,
+  `served_digest`) and a decision's `presentations` carry it
+  (`meerkat-contracts`: `WirePresentationLink`, and the `link` of
+  `DecisionPresentationRequest` and `WirePresentationRecord`;
+  `meerkat-core`: `PresentationRecord::with_link`); the Python and
+  TypeScript SDK types carry it too.
+- `meerkat-mob`: owned edges. A store-owned identity's create lists its peers
+  (`CreatedIdentityRequest::with_peers`) and its update adds and removes them
+  (`StoreOwnedIdentityUpdate::with_peers_add`, `with_peers_remove`), each an
+  `OwnedIdentityEdge` to an identity of either custody with how it entered
+  (`OwnedEdgeAdmission`). The edge is owned by the identity whose change
+  declared it, held in its row (`CreatedIdentityRecord::owned_edges`, written
+  in the change's transaction), in force while both its ends are identity
+  entries, as MobMachine decides it, and wired once both its ends are seated:
+  by the change's own step, or by the later seat of the end that was not. A
+  second declaration of an owned edge gives no custody, and a peer that is no
+  identity of the mob is refused `IdentityChangeRefusal::PeerUnknown`
+  (`peer_unknown`). An archive of an end leaves the edge owned and unwired,
+  and the end's next seat wires it again. An unlisting of an end leaves the
+  edge owned and out of force: a worker that takes the end's free name is no
+  end of it (the edge wires nothing for it, and the worker's own wiring takes
+  a plain unwire), and the end's re-listing brings the edge back in force. The
+  edge belongs to the end's name: an identity created or adopted under a name
+  that was unlisted brings that name's owned edges back in force too, so end
+  the edge when that is not wanted. An
+  owned edge ends only by its owner's change (another identity's change naming
+  it is refused `invalid_request`), by the host's policy reload that denies it
+  (`MobHandle::end_denied_identity_edge`, naming its owner, answering an
+  `OwnedEdgeEndOutcome`), by the removal of either end (in the removal's own
+  store transaction, with the tombstone, which owns no edge) and by the mob's
+  reset or destroy; a plain unwire of an owned edge in force is refused
+  `MobError::OwnedIdentityEdge` (`owned_identity_edge`). An edge enables no
+  tool. A start recovers each edge from its owner's row and wires those a
+  crash left unwired.
+- `meerkat-mob`: adoption into store custody. `MobHandle::adopt_identity`
+  moves an existing member into store custody as one change
+  (`IdentityAdoption`, receipt kind `IdentityChangeKind::Adopt`): a
+  roster-owned identity (`AdoptionSource::roster`, with its roster's spec) or
+  a worker member (`AdoptionSource::worker`, at the generation its host
+  observed, its row's spec its member's role, labels and runtime mode). The
+  member keeps its runtime, generation, session and history: its row
+  (provenance `adopted`, with its former spawner), its binding row with the
+  Created origin and the receipt commit in one store transaction, and the
+  binding row makes the member a host root, live and on replay (its former
+  spawner's retirement no longer reaches it, and the agent lane answers
+  `identity_member` for it). Its current edges to other identities become its
+  owned edges (`OwnedEdgeAdmission::Adopted`); its edges to members that are
+  no identity stay plain wiring, and the receipt's entry names both
+  (`IdentityChangeReceiptEntry::owned_edges`, `plain_edges`). Refusals:
+  `IdentityChangeRefusal::NotAdoptable` (`not_adoptable`, with a
+  `NotAdoptableReason` MobMachine decides: a worker spawned with a profile or
+  model override is `ProfileOverride`, and a roster-owned identity its host
+  still settles is retryable, `NotAdoptableReason::is_retryable`: after its
+  first use, its held creation's release or its host's preparation, the
+  host's own action, so a caller bounds its retries; one placed on a member
+  host is the exception, since its first use seats a placed member, whose
+  adoption is refused `Placed`, which is not retryable),
+  `PredecessorMismatch` (`predecessor_mismatch`), and the retryable
+  `AdmissionUnsettled` (`admission_unsettled`) and `DeclaredApplyOpen`
+  (`declared_apply_open`). No start, reconcile or declared apply adopts.
+- `meerkat-mob`: the downgrade cycle of a mob's rows of schema version 2 and
+  later (store-owned identities, archived ones and the tombstones of removed
+  names), which a release before 0.9.9 does not read.
+  `MobHandle::export_created_identities` exports them
+  (`CreatedIdentitySetExport`, schema `meerkat.identity.created_set.v1`), each
+  with its session reference (its member's session, or its archived session),
+  sealed with a digest; session contents, memory and decisions are not in it.
+  `MobHandle::purge_created_identities` (`IdentityRowsPurge`, the host
+  operator only, under held identity changes, receipt kind
+  `IdentityChangeKind::Purge`) removes them in one store transaction only when
+  their digest is the export's, and never a session, a journal row or a
+  host-adopted intent; the mob then refuses every identity change
+  (`IdentityChangeRefusal::Purged`, `purged`) until it restarts. Refusals:
+  `IdentityChangeRefusal::PurgeRefused` (`purge_refused`, with a
+  `PurgeRefusedReason`: `not_host_operator`, `changes_not_held`,
+  `export_mismatch`, `unreadable_rows`, `nothing_to_purge`), and
+  `IdentityChangeRefusal::BatchTooLarge` (`batch_too_large`) for more rows
+  than one change commits (`IDENTITY_CHANGE_BATCH_MAX`, 256, tombstones
+  included), with nothing removed. A start that reads no row of a store-owned
+  identity's name reserves the name: it reads unreadable, and nothing acts on
+  it or seats it, until `MobHandle::import_created_identities`
+  (`IdentityImport`, mode `IdentityImportMode::Restore`, the host operator
+  only, under imported consent, receipt kind `IdentityChangeKind::Import`)
+  restores its row. The import restores each record and re-binds its session:
+  a member seated under the name in place (a plain member only when it is
+  bound to the session its record names), an unseated identity Dormant on its
+  archived session (a fresh session, with the history unavailable notice, when
+  that session is gone), pending, archived and removed names as recorded, and
+  an adopted identity a roster declared again by the adoption's step; it
+  restores the owned edges of the rows it restores as a start recovers them,
+  and a restored row keeps only the edges it restored. A
+  name another holder keeps (a plain member on another session among them) is
+  left as it is and reported (receipt outcome
+  `IdentityChangeEntryOutcome::NameTakenMeanwhile`); a record whose row the
+  store holds is `Unchanged`. A re-import under a new operation reports a
+  record whose restored row differs from it (the import left out an owned
+  edge another identity held, or the identity changed since) as
+  `NameTakenMeanwhile` and leaves the row as it is; a retry under the
+  import's own operation replays its receipt. An export of more records than
+  one change commits is refused `batch_too_large`, with nothing written.
+
 - Credential and configuration administration admissions settle a typed
   record to a recorder the host supplies. A host's `AdministrationEntry`
   can state, on the admission it grants, the administrator it
@@ -1319,6 +1586,16 @@ them.
   `ScopedRetainedResume::into_checks`.
 
 ### Changed
+
+- `meerkat-runtime`: DurableDecisionMachine, not the decision service, decides
+  whether the presentation a human decision carries counts: the service passes
+  the carried presentation's facts in `Decide` (its audience, the subject
+  digest it showed, whether it showed every canonical part, the digest of the
+  rendering its link served), the machine counts it only when it is a complete
+  presentation of the held subject to the approver, as it counts a recorded
+  one, and the decided row keeps the carried presentation only when the
+  machine says it counted it (`carried_presentation_counted`). What counts is
+  unchanged.
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
   sign-in is refused (`AttachmentRefused`), because it is governed and the
@@ -1963,6 +2240,31 @@ them.
   states `[governance.decisions]`: 0.9.10 refuses a `[governance]` section
   with a `decisions` key, so a 0.9.10 process on the realm fails to load
   the realm's configuration document as a whole.
+
+- A durable decision row that holds a linked presentation (recorded, or in a
+  decided decision's evidence) does not read under 0.9.10, which refuses the
+  record's `link` field: that decision reads as unreadable there. Rows
+  without a link read as before.
+- A 0.9.10 build reads a store-owned identity's owned edges in its row and
+  does not act on them: an edge wired before the downgrade stays wired as
+  plain wiring, which a plain unwire ends there, and the next 0.9.11 start
+  owns every edge its owner's row holds again.
+- A 0.9.10 build reads an adopted identity as the store-owned identity its
+  row records, and a replay of the adoption's operation there reads its
+  receipt (kind `adopt`) as unreadable. Its roster keeps the member's former
+  spawner: retiring that spawner there retires the adopted member too, and
+  the identity is owed its seat again.
+- A downgrade of a mob that holds rows of schema version 2 or later (the
+  census's `created_rows` above zero, the `identity-store-rows` doctor
+  finding) to a release before 0.9.9 is supported through the downgrade cycle
+  only: hold the identity changes, settle the pending preparations, bring the
+  stale seats up to date, export, purge, downgrade, and import after the
+  roll-forward (`docs/guides/upgrading.mdx`). A purge or an import commits at
+  most 256 identities (`IDENTITY_CHANGE_BATCH_MAX`, tombstones included): a
+  mob with more such rows is refused `batch_too_large` at its purge, with
+  nothing removed, and has no supported downgrade below 0.9.9 in this release.
+  A 0.9.9 or 0.9.10 build reads the rows themselves, so a downgrade to it
+  needs no cycle; it reads a purge's or an import's receipt as unreadable.
 
 - Consent rows and a rollback: a Core that predates
   `consent.approver.authentication_scope_digest` still opens the approval

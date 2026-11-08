@@ -95,8 +95,12 @@ const REQUIRED_ARM_FAMILIES: &[&str] = &[
 /// the identity changes (a change's admission, the record of a new
 /// store-owned entry, the host's changes hold, a removal, an archive and an
 /// unarchive), a held construction's start, a settle and an attempt's end,
-/// the one-entry unlist, and a host's takeover of an entry. They are written
-/// one arm per lifecycle phase as the residency arms are.
+/// the one-entry unlist, a host's takeover of an entry, the owned edges (a
+/// declaration, an end, a plain unwire's admission, a recovery, a
+/// realization and an import's restoration), the adoption into store
+/// custody, and the downgrade cycle (the purge, a start's reservation of a
+/// Created entry whose row was purged, and the import). They are written one
+/// arm per lifecycle phase as the residency arms are.
 const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "ProbeMemberAdmission",
     "BeginSpawnExec",
@@ -123,6 +127,16 @@ const IDENTITY_ENTRY_ARM_PREFIXES: &[&str] = &[
     "EndPreparationConstruction",
     "UnlistIdentityEntry",
     "TakeOverIdentityEntry",
+    "DeclareOwnedIdentityEdge",
+    "EndOwnedIdentityEdge",
+    "AdmitMemberUnwire",
+    "RecoverOwnedIdentityEdge",
+    "AdmitOwnedEdgeRealization",
+    "RestoreOwnedIdentityEdge",
+    "AdoptIdentityIntoStore",
+    "PurgeIdentityRows",
+    "RecoverRowlessCreatedEntry",
+    "ImportIdentityRecord",
 ];
 
 /// Identity-entry families that must each name at least one arm.
@@ -159,6 +173,24 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "TakeOverIdentityEntryAdopting",
     "TakeOverIdentityEntryMobNotRunning",
     "RecoverIdentityEntryAdoptingMarked",
+    "DeclareOwnedIdentityEdgeDeclared",
+    "DeclareOwnedIdentityEdgeMobNotRunning",
+    "EndOwnedIdentityEdgeEnded",
+    "EndOwnedIdentityEdgeMobNotRunning",
+    "AdmitMemberUnwireOwnedEdge",
+    "RecoverOwnedIdentityEdgeRecovered",
+    "AdmitOwnedEdgeRealizationRealize",
+    "AdmitOwnedEdgeRealizationEndNotAnIdentity",
+    "RestoreOwnedIdentityEdgeRestored",
+    "RestoreOwnedIdentityEdgeMobNotRunning",
+    "AdoptIdentityIntoStoreAdopted",
+    "AdoptIdentityIntoStoreMobNotRunning",
+    "PurgeIdentityRowsPurged",
+    "PurgeIdentityRowsNothingToPurge",
+    "PurgeIdentityRowsMobNotRunning",
+    "RecoverRowlessCreatedEntryReserved",
+    "ImportIdentityRecordRestoredInPlace",
+    "ImportIdentityRecordMobNotRunning",
 ];
 
 /// Transition-name prefixes of the `MeerkatMachine` arms that serve member

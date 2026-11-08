@@ -252,6 +252,14 @@ pub enum MobMachineCatalogInput {
     UnlistIdentityEntry,
     TakeOverIdentityEntry,
     ResolveMemberBuildPreparation,
+    DeclareOwnedIdentityEdge,
+    EndOwnedIdentityEdge,
+    AdmitMemberUnwire,
+    AdoptIdentityIntoStore,
+    PurgeIdentityRows,
+    ImportIdentityRecord,
+    AdmitOwnedEdgeRealization,
+    RestoreOwnedIdentityEdge,
 }
 
 impl MobMachineCatalogInput {
@@ -504,6 +512,14 @@ impl MobMachineCatalogInput {
         Self::UnlistIdentityEntry,
         Self::TakeOverIdentityEntry,
         Self::ResolveMemberBuildPreparation,
+        Self::DeclareOwnedIdentityEdge,
+        Self::EndOwnedIdentityEdge,
+        Self::AdmitMemberUnwire,
+        Self::AdoptIdentityIntoStore,
+        Self::PurgeIdentityRows,
+        Self::ImportIdentityRecord,
+        Self::AdmitOwnedEdgeRealization,
+        Self::RestoreOwnedIdentityEdge,
     ];
 
     #[must_use]
@@ -759,6 +775,14 @@ impl MobMachineCatalogInput {
             Self::UnlistIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::UnlistIdentityEntry,
             Self::TakeOverIdentityEntry => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::TakeOverIdentityEntry,
             Self::ResolveMemberBuildPreparation => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ResolveMemberBuildPreparation,
+            Self::DeclareOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::DeclareOwnedIdentityEdge,
+            Self::EndOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::EndOwnedIdentityEdge,
+            Self::AdmitMemberUnwire => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitMemberUnwire,
+            Self::AdoptIdentityIntoStore => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdoptIdentityIntoStore,
+            Self::PurgeIdentityRows => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::PurgeIdentityRows,
+            Self::ImportIdentityRecord => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::ImportIdentityRecord,
+            Self::AdmitOwnedEdgeRealization => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::AdmitOwnedEdgeRealization,
+            Self::RestoreOwnedIdentityEdge => meerkat_machine_schema::catalog::dsl::mob_machine::MobMachineInputVariant::RestoreOwnedIdentityEdge,
         }
     }
 
@@ -1039,6 +1063,14 @@ impl MobMachineCatalogInput {
             Self::UnlistIdentityEntry => "UnlistIdentityEntry",
             Self::TakeOverIdentityEntry => "TakeOverIdentityEntry",
             Self::ResolveMemberBuildPreparation => "ResolveMemberBuildPreparation",
+            Self::DeclareOwnedIdentityEdge => "DeclareOwnedIdentityEdge",
+            Self::EndOwnedIdentityEdge => "EndOwnedIdentityEdge",
+            Self::AdmitMemberUnwire => "AdmitMemberUnwire",
+            Self::AdoptIdentityIntoStore => "AdoptIdentityIntoStore",
+            Self::PurgeIdentityRows => "PurgeIdentityRows",
+            Self::ImportIdentityRecord => "ImportIdentityRecord",
+            Self::AdmitOwnedEdgeRealization => "AdmitOwnedEdgeRealization",
+            Self::RestoreOwnedIdentityEdge => "RestoreOwnedIdentityEdge",
         }
     }
 }

@@ -1510,6 +1510,50 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         input: MobMachineCatalogInput::TakeOverIdentityEntry,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
+    // Owned edges (0.9.11): an identity change's declaration and end of an
+    // owned edge and a policy reload's end of one, decided in the actor's
+    // steps, and a plain unwire's admission, decided before the unwire. None
+    // is a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::DeclareOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::EndOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdmitMemberUnwire,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // Adoption into store custody (0.9.11), decided in the actor's change
+    // step for the handle's adoption. Not a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdoptIdentityIntoStore,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // The downgrade cycle (0.9.11), decided in the actor's purge and import
+    // steps for the handle's purge and import. Not surface commands.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::PurgeIdentityRows,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ImportIdentityRecord,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // An owned edge's realization, a pure verdict a seat, a spawn and a
+    // realization pass read before their wire, and the import's
+    // restoration of an owned edge its restored record holds (0.9.11),
+    // decided in the actor's steps. Not surface commands.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdmitOwnedEdgeRealization,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RestoreOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
 ];
 
 #[doc(hidden)]

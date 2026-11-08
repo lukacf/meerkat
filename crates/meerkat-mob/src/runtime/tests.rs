@@ -91911,7 +91911,9 @@ fn mob_runtime_parity_field_value(
         // Identity entries: the parity probes declare none.
         | "spawn_exec_entry_custody"
         | "identity_entry_retiring"
-        | "identity_entry_adopting" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
+        | "identity_entry_adopting"
+        // The downgrade cycle: the parity probes purge no row.
+        | "identity_entry_rowless" => Some(MobRuntimeParityExprValue::Set(BTreeSet::new())),
         // Created identity entries, from the runtime's formal state.
         "identity_entry_tombstones" => Some(MobRuntimeParityExprValue::Set(
             snapshot.identity_entry_tombstones.clone(),
@@ -91947,13 +91949,17 @@ fn mob_runtime_parity_field_value(
         | "member_rotation_profile_names"
         | "identity_entry_origins"
         | "identity_entry_unseated"
-        | "identity_entry_archived_sessions" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
+        | "identity_entry_archived_sessions"
+        // Owned edges: the parity probes declare none.
+        | "identity_edge_owners" => Some(MobRuntimeParityExprValue::Map(BTreeMap::new())),
         "member_wake_attempt_sequence" | "member_materialization_drift_count" => {
             Some(MobRuntimeParityExprValue::U64(0))
         }
         "boot_plan_sealed"
         // The declared apply's open fact: the parity probes open no apply.
-        | "declared_apply_open" => Some(MobRuntimeParityExprValue::Bool(false)),
+        | "declared_apply_open"
+        // The downgrade cycle's purge: the parity probes purge nothing.
+        | "identity_rows_purged" => Some(MobRuntimeParityExprValue::Bool(false)),
         "member_restore_policy" => Some(MobRuntimeParityExprValue::String("OnDemand".to_string())),
         "composition_authority" => Some(MobRuntimeParityExprValue::String(
             "Authoritative".to_string(),
@@ -92748,6 +92754,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             format!("identity_change_refused:{}", refusal.kind())
         }
         MobError::IdentityArchived { .. } => "identity_archived".to_string(),
+        MobError::OwnedIdentityEdge { .. } => "owned_identity_edge".to_string(),
         MobError::SpawnCanceled { .. } => "spawn_canceled".to_string(),
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()

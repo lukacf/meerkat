@@ -191,9 +191,15 @@ pub use identity::{
     IdentityRetirementPlan, IdentitySessionCondition, IdentitySessionObservation,
     IdentitySessionStoreAuthority, IdentitySourceEvidence, IdentityStoredObservation,
     IdentityTargetObservationVersion, MemberToolAccessConstraint, MemberToolAccessDeclaration,
-    MemberToolCommitOutcome, MemberToolDeclaration, MemberToolMutationId, OwnedIdentityEdge,
-    PendingRoleMigration, ResolveIdentityConvergenceBlock, ResolveIdentityConvergenceBlockResult,
-    classify_created_identity_row, classify_identity_reconciliation,
+    MemberToolCommitOutcome, MemberToolDeclaration, MemberToolMutationId, OwnedEdgeAdmission,
+    OwnedIdentityEdge, PendingRoleMigration, ResolveIdentityConvergenceBlock,
+    ResolveIdentityConvergenceBlockResult, classify_created_identity_row,
+    classify_identity_reconciliation,
+};
+// The downgrade cycle's export (0.9.11).
+pub use identity::{
+    CREATED_IDENTITY_SET_SCHEMA, CreatedIdentitySetExport, ExportedIdentity,
+    ExportedSessionReference, ExportedSessionState, UnreadableIdentityRow,
 };
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
@@ -390,17 +396,19 @@ pub use runtime::{
     observe_member_status_view_via_read, profile_to_wire, render_bounded_delegation_task,
     stored_realm_profile_to_wire,
 };
+pub use runtime::{
+    AdoptionSource, CreatedIdentityRequest, IdentityAdoption, IdentityArchiveChange,
+    IdentityChangeConsentInput, IdentityChangeGrant, IdentityChangeOutcome, IdentityChangeRefusal,
+    IdentityChangeRequesterInput, IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest,
+    IdentityImport, IdentityImportMode, IdentityNameHolder, IdentityOperation, IdentityRemoval,
+    IdentityRosterChange, IdentityRowsPurge, IdentityUpdateOutcome, MemberGrantMint,
+    MemberGrantMintRequest, NotAdoptableReason, OwnedEdgeEndOutcome, PurgeRefusedReason,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+};
 pub use runtime::{CloseIfIdleOutcome, MobAdmissionCloseReason, MobBusy};
 pub use runtime::{
     ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
     IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
-};
-pub use runtime::{
-    CreatedIdentityRequest, IdentityArchiveChange, IdentityChangeConsentInput, IdentityChangeGrant,
-    IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
-    IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
-    IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
-    MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 pub use runtime::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,

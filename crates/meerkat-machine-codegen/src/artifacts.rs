@@ -11524,6 +11524,29 @@ impl<'a> MachineTlaCompiler<'a> {
             out,
             "    {{ edge \\in arg_wiring_edges : /\\ edge.a # arg_agent_identity /\\ edge.b # arg_agent_identity }}"
         );
+        // An edge's other end, and the owned edges a removal leaves (every
+        // owned edge of the removed identity ends, whichever end owns it):
+        // the catalog-native Rust helpers' mirrors.
+        writeln!(
+            out,
+            "{}(arg_edge, arg_agent_identity) ==",
+            prefix("mob_machine_wiring_edge_other")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_edge.a = arg_agent_identity THEN arg_edge.b ELSE arg_edge.a"
+        );
+        writeln!(
+            out,
+            "{}(arg_identity_edge_owners, arg_agent_identity) ==",
+            prefix("mob_machine_owned_edges_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [edge \\in {{ e \\in DOMAIN arg_identity_edge_owners : /\\ e.a # arg_agent_identity /\\ e.b # arg_agent_identity }} |-> arg_identity_edge_owners[edge]]"
+        );
         writeln!(
             out,
             "{}(arg_external_peer_edges, arg_agent_identity) ==",

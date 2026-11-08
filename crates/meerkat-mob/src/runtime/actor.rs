@@ -11,7 +11,9 @@ use super::terminalization::{FlowFailureCause, TerminalizationOutcome, Terminali
 use super::transaction::LifecycleRollback;
 use super::*;
 
+mod adoption;
 pub(super) mod boot_lift;
+mod created_set;
 mod declared_apply;
 mod dormant_kickoff;
 mod dormant_seat;
@@ -30,6 +32,7 @@ pub(super) mod member_wake;
 #[cfg(feature = "runtime-adapter")]
 pub(super) mod member_wake_turn;
 mod operator_instructions;
+mod owned_edges;
 mod placed_external_routes;
 pub(super) mod reload_revival;
 mod resume_post_commit;
@@ -49838,6 +49841,11 @@ impl MobActor {
     ) -> Result<wiring_io::WireHandled, MobError> {
         self.refuse_approval_branch_control(Self::wiring_endpoints(&local, &target))
             .await?;
+        // An owned edge takes no plain unwire (0.9.11): MobMachine's
+        // admission refuses it before the unwire touches anything.
+        if let super::handle::PeerTarget::Local(peer) = &target {
+            self.admit_member_unwire(&local, peer)?;
+        }
         match self
             .prepare_member_unwire(local, target, None, false)
             .await?

@@ -42,7 +42,9 @@ pub use keys::{
     DecisionIngress, DecisionKind, DecisionOperationId, DecisionPrincipalKey, DecisionReference,
     DecisionRenderer, DecisionRendering, DecisionRequestBody, DecisionSubjectKey, Sha256Digest,
 };
-pub use parts::{CanonicalPart, PresentationAudience, PresentationRecord, canonical_parts};
+pub use parts::{
+    CanonicalPart, PresentationAudience, PresentationLink, PresentationRecord, canonical_parts,
+};
 pub use record::{
     ConsentProvenance, DECISION_PRESENTATIONS_MAX, DecisionCleanup, DecisionDescriptor,
     DecisionHoldRequest, DecisionMachineState, DecisionNotice, DecisionOutcome, DecisionPhase,

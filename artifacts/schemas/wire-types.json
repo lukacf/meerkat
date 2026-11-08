@@ -99666,6 +99666,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -99681,6 +99700,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -100382,6 +100412,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -100397,6 +100446,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -167610,6 +167670,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -167625,6 +167704,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -168329,6 +168419,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -168344,6 +168453,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -169071,6 +169191,25 @@
           }
         ]
       },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
       "WirePresentationRecord": {
         "description": "One recorded presentation of a decision's rendering.",
         "properties": {
@@ -169086,6 +169225,17 @@
           "channel_ref": {
             "description": "Where the presentation was shown.",
             "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
           },
           "max_part_bytes": {
             "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
@@ -195780,6 +195930,27 @@
     ],
     "title": "WirePresentationAudience"
   },
+  "WirePresentationLink": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+    "properties": {
+      "reference": {
+        "description": "Where the link points: the page or document that serves the full\npresentation.",
+        "type": "string"
+      },
+      "served_digest": {
+        "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "reference",
+      "served_digest"
+    ],
+    "title": "WirePresentationLink",
+    "type": "object"
+  },
   "WirePresentationRecord": {
     "$defs": {
       "WireCanonicalPart": {
@@ -195861,6 +196032,25 @@
             "type": "object"
           }
         ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -195878,6 +196068,17 @@
       "channel_ref": {
         "description": "Where the presentation was shown.",
         "type": "string"
+      },
+      "link": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WirePresentationLink"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
       },
       "max_part_bytes": {
         "description": "The presenter's part size; absent when the rendering was presented\nas one part.",

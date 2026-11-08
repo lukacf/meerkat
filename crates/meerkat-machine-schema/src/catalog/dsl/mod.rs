@@ -4510,6 +4510,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "GrantRevoked",
                     "MobNotRunning",
                     "StaleSpec",
+                    "RowsPurged",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4610,6 +4611,116 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Deferred",
                     "NotADeclaredEntry",
                     "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
+            // Owned edges (0.9.11): why an owned edge ends, and the verdicts
+            // of a declaration, of an end and of a plain unwire's admission.
+            NamedTypeBinding::string_enum("OwnedEdgeEndCause", &["OwnerChange", "PolicyDenied"]),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeDeclareVerdict",
+                &[
+                    "Declared",
+                    "AlreadyOwned",
+                    "PeerUnknown",
+                    "OwnerInvalid",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeEndVerdict",
+                &[
+                    "Ended",
+                    "NotOwner",
+                    "Absent",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "MemberUnwireAdmission",
+                &["Admitted", "OwnedIdentityEdge"],
+            ),
+            // Owned edges (0.9.11): the verdicts of an owned edge's
+            // realization and of an import's restoration of one.
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeRealization",
+                &["Realize", "NotOwned", "EndNotAnIdentity"],
+            ),
+            NamedTypeBinding::string_enum(
+                "OwnedEdgeRestoreVerdict",
+                &["Restored", "Skipped", "MobNotRunning"],
+            ),
+            // Adoption into store custody (0.9.11): its source, its verdict
+            // and why an identity is not adoptable.
+            NamedTypeBinding::string_enum("IdentityAdoptionSource", &["Roster", "Worker"]),
+            NamedTypeBinding::string_enum(
+                "IdentityAdoptionVerdict",
+                &[
+                    "Adopted",
+                    "NotAdoptable",
+                    "PredecessorMismatch",
+                    "AdmissionUnsettled",
+                    "DeclaredApplyOpen",
+                    "NameUnreadable",
+                    "NameTombstoned",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "MobNotRunning",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "IdentityNotAdoptableReason",
+                &[
+                    "StoreOwned",
+                    "NotAnIdentity",
+                    "RosterOwned",
+                    "NotAMember",
+                    "Placed",
+                    "NoSession",
+                    "HostedOnFirstUse",
+                    "AwaitingHeldCreation",
+                    "AwaitingHostPreparation",
+                    "ProfileOverride",
+                ],
+            ),
+            // The downgrade cycle (0.9.11): the purge's verdict, an imported
+            // record's kind and its name's row, and the record's verdict.
+            NamedTypeBinding::string_enum(
+                "IdentityRowsPurgeVerdict",
+                &[
+                    "Purged",
+                    "NonAuthoritative",
+                    "Replayed",
+                    "OperationReused",
+                    "RowsPurged",
+                    "NotHostOperator",
+                    "ChangesNotHeld",
+                    "MobNotRunning",
+                    "NothingToPurge",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "ImportedRecordKind",
+                &["Present", "PendingPreparation", "Archived", "Tombstone"],
+            ),
+            NamedTypeBinding::string_enum("ImportedRowState", &["Absent", "Same", "Other"]),
+            NamedTypeBinding::string_enum(
+                "IdentityImportVerdict",
+                &[
+                    "RestoredInPlace",
+                    "RestoredOwedSeat",
+                    "RestoredPending",
+                    "RestoredArchived",
+                    "RestoredTombstone",
+                    "RestoredByAdoption",
+                    "Unchanged",
+                    "NameTakenMeanwhile",
+                    "Unsettled",
+                    "NonAuthoritative",
+                    "ChangesHeld",
+                    "RowsPurged",
                     "MobNotRunning",
                 ],
             ),
@@ -5291,6 +5402,27 @@ runtime_internal_inputs!(
         // reconciler's step before it retires or materializes the member.
         // Not a surface command.
         TakeOverIdentityEntry,
+        // Owned edges (0.9.11): an identity change's declaration and end of
+        // an owned edge, a policy reload's end of one, decided in the
+        // actor's steps, and a plain unwire's admission, decided before the
+        // unwire. None is a surface command.
+        DeclareOwnedIdentityEdge,
+        EndOwnedIdentityEdge,
+        AdmitMemberUnwire,
+        // Adoption into store custody (0.9.11), decided in the actor's change
+        // step. Not a surface command.
+        AdoptIdentityIntoStore,
+        // The downgrade cycle (0.9.11): the purge and each imported record,
+        // decided in the actor's purge and import steps. Not surface
+        // commands.
+        PurgeIdentityRows,
+        ImportIdentityRecord,
+        // An owned edge's realization, a pure verdict a seat, a spawn and a
+        // realization pass read before their wire, and the import's
+        // restoration of an owned edge its restored record holds (0.9.11),
+        // decided in the actor's steps. Not surface commands.
+        AdmitOwnedEdgeRealization,
+        RestoreOwnedIdentityEdge,
     ]
 );
 

@@ -532,8 +532,9 @@ impl MobStorage {
     /// The answer holds each mob of the file with at least one such row; a
     /// store with none answers an empty map. A row whose mob id is not text
     /// is in no mob's census and is not counted. Every mob in the answer has
-    /// no supported downgrade to a release before 0.9.9: those releases do
-    /// not read these rows, and this release has no step that deletes them.
+    /// no supported downgrade to a release before 0.9.9 but the downgrade
+    /// cycle: those releases do not read these rows, and only the cycle's
+    /// purge ([`crate::MobHandle::purge_created_identities`]) deletes them.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn read_identity_record_rows(
         path: impl AsRef<Path>,

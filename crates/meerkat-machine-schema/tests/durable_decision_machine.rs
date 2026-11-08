@@ -144,12 +144,20 @@ struct Decision {
     evidence: Option<&'static str>,
     eligible: bool,
     carried_presentation_at_ms: Option<u64>,
+    /// The carried presentation's audience, the subject digest it showed,
+    /// whether it showed every canonical part, and the digest of the
+    /// rendering its link served.
+    carried_audience: Option<&'static str>,
+    carried_digest: Option<&'static str>,
+    carried_complete: bool,
+    carried_link_served: Option<&'static str>,
     observed_at_ms: u64,
     now_ms: u64,
 }
 
 impl Decision {
-    /// Carries a presentation shown at `HELD_AT + 5`, and was observed at
+    /// Carries a complete presentation of the held subject to the
+    /// approver, shown at `HELD_AT + 5`, and was observed at
     /// `HELD_AT + 10`, when the owner decides it.
     fn valid(approve: bool) -> Self {
         Self {
@@ -160,6 +168,10 @@ impl Decision {
             evidence: Some(EVIDENCE),
             eligible: true,
             carried_presentation_at_ms: Some(HELD_AT + 5),
+            carried_audience: Some(APPROVER),
+            carried_digest: Some(SUBJECT),
+            carried_complete: true,
+            carried_link_served: None,
             observed_at_ms: HELD_AT + 10,
             now_ms: HELD_AT + 10,
         }
@@ -174,6 +186,10 @@ impl Decision {
             evidence_digest: self.evidence.map(str::to_owned),
             eligible: self.eligible,
             carried_presentation_at_ms: self.carried_presentation_at_ms,
+            carried_audience: self.carried_audience.map(party),
+            carried_digest: self.carried_digest.map(digest),
+            carried_complete: self.carried_complete,
+            carried_link_served_digest: self.carried_link_served.map(digest),
             observed_at_ms: self.observed_at_ms,
             now_ms: self.now_ms,
         }
@@ -207,7 +223,22 @@ fn present_at(
         audience: party(audience),
         digest: digest(subject),
         complete,
+        link_served_digest: None,
         presented_at_ms,
+        now_ms,
+    }
+}
+
+/// A summary presentation of `subject` that shows no canonical part, with a
+/// link to the full presentation that served the rendering whose digest is
+/// `served`, recorded when it was shown (`now_ms`).
+fn present_linked(audience: &str, subject: &str, served: &str, now_ms: u64) -> Input {
+    Input::Present {
+        audience: party(audience),
+        digest: digest(subject),
+        complete: false,
+        link_served_digest: Some(digest(served)),
+        presented_at_ms: now_ms,
         now_ms,
     }
 }
@@ -868,6 +899,7 @@ fn the_first_valid_decision_wins_and_end_phases_latch() {
         &[Effect::Approved {
             decision_id: DECISION.to_owned(),
             decided_at_ms: HELD_AT + 10,
+            carried_presentation_counted: true,
         }]
     );
     let state = authority.state();
@@ -1084,9 +1116,219 @@ fn a_presentation_time_of_zero_is_no_presentation() {
     }
 }
 
+/// A summary shown with a link to the full presentation is complete exactly
+/// when that link served the held subject's rendering: to the approver it
+/// is the first presentation, and a decision observed after it decides; to
+/// the reviewer it opens the review. A link that served another rendering,
+/// and a summary without a link, are incomplete and record nothing.
+#[test]
+fn a_linked_presentation_is_complete_only_when_its_link_served_the_held_subject() {
+    let mut authority = authority_in(Phase::Open);
+    let presented = apply(
+        &mut authority,
+        present_linked(APPROVER, SUBJECT, SUBJECT, HELD_AT + 1),
+    );
+    assert_eq!(labels(&presented), ["Presented"]);
+    assert_eq!(
+        authority.state().first_presented_to_approver_at_ms,
+        Some(HELD_AT + 1)
+    );
+    let approved = apply(
+        &mut authority,
+        Decision {
+            carried_presentation_at_ms: None,
+            ..Decision::valid(true)
+        }
+        .input(),
+    );
+    assert_eq!(labels(&approved), ["Approved"]);
+
+    let mut authority = Authority::new();
+    apply(&mut authority, hold_with(Some(REVIEWER), true));
+    let presented = apply(
+        &mut authority,
+        present_linked(REVIEWER, SUBJECT, SUBJECT, HELD_AT + 1),
+    );
+    assert_eq!(labels(&presented), ["Presented"]);
+    assert!(authority.state().presented_to_reviewer);
+
+    for (input, case) in [
+        (
+            present_linked(APPROVER, SUBJECT, OTHER_SUBJECT, HELD_AT + 1),
+            "a link that served another rendering",
+        ),
+        (
+            present(APPROVER, SUBJECT, false, HELD_AT + 1),
+            "a summary without a link",
+        ),
+    ] {
+        let mut authority = authority_in(Phase::Open);
+        let before = authority.state().clone();
+        let refused = apply(&mut authority, input);
+        assert_eq!(
+            refusal(&refused),
+            DurableDecisionRefusal::PresentationIncomplete,
+            "{case}"
+        );
+        assert_eq!(authority.state(), &before, "{case} records nothing");
+    }
+}
+
 // ===========================================================================
 // Deadline
 // ===========================================================================
+
+/// Row: the machine counts the presentation a human decision carries
+/// only when it is a complete presentation of the held subject to the
+/// approver: every canonical part shown, or a summary whose link served
+/// the held subject's rendering. Any other carried presentation counts as
+/// none: with no presentation recorded the decision is refused
+/// `PresentationIncomplete` and changes nothing; with one recorded, the
+/// decision is ordered after the recorded one alone and says it counted
+/// no carried presentation.
+#[test]
+fn a_carried_presentation_counts_only_when_complete_to_the_approver_on_the_held_subject() {
+    let counted = Decision::valid(true);
+    let linked = Decision {
+        carried_complete: false,
+        carried_link_served: Some(SUBJECT),
+        ..counted
+    };
+    for (shape, decision) in [
+        ("every part shown", counted),
+        ("a summary whose link served the held subject", linked),
+    ] {
+        for approve in [true, false] {
+            let mut authority = authority_in(Phase::Open);
+            let decided = apply(
+                &mut authority,
+                Decision {
+                    approve,
+                    ..decision
+                }
+                .input(),
+            );
+            let expected = if approve {
+                Effect::Approved {
+                    decision_id: DECISION.to_owned(),
+                    decided_at_ms: HELD_AT + 10,
+                    carried_presentation_counted: true,
+                }
+            } else {
+                Effect::Rejected {
+                    decision_id: DECISION.to_owned(),
+                    decided_at_ms: HELD_AT + 10,
+                    carried_presentation_counted: true,
+                }
+            };
+            assert_eq!(
+                decided.effects(),
+                &[expected],
+                "{shape} (approve {approve})"
+            );
+            assert_eq!(
+                authority.state().first_presented_to_approver_at_ms,
+                Some(HELD_AT + 5),
+                "{shape}: the carried presentation is the first"
+            );
+        }
+    }
+
+    let uncounted = [
+        (
+            "shown to another audience",
+            Decision {
+                carried_audience: Some(OTHER_APPROVER),
+                ..counted
+            },
+        ),
+        (
+            "of another subject",
+            Decision {
+                carried_digest: Some(OTHER_SUBJECT),
+                ..counted
+            },
+        ),
+        (
+            "a summary with no link",
+            Decision {
+                carried_complete: false,
+                ..counted
+            },
+        ),
+        (
+            "a summary whose link served another rendering",
+            Decision {
+                carried_complete: false,
+                carried_link_served: Some(OTHER_SUBJECT),
+                ..counted
+            },
+        ),
+    ];
+    for (shape, decision) in uncounted {
+        for approve in [true, false] {
+            let decision = Decision {
+                approve,
+                ..decision
+            };
+            let mut authority = authority_in(Phase::Open);
+            let before = authority.state().clone();
+            let refused = apply(&mut authority, decision.input());
+            assert_eq!(
+                refusal(&refused),
+                DurableDecisionRefusal::PresentationIncomplete,
+                "{shape} (approve {approve}): no presentation counts"
+            );
+            assert_eq!(authority.state(), &before, "{shape}");
+
+            // With a presentation recorded after the carried one was
+            // shown, the decision is ordered after the recorded one.
+            let mut authority = authority_in(Phase::Open);
+            apply(
+                &mut authority,
+                present(APPROVER, SUBJECT, true, HELD_AT + 8),
+            );
+            let before = authority.state().clone();
+            let refused = apply(
+                &mut authority,
+                Decision {
+                    observed_at_ms: HELD_AT + 6,
+                    ..decision
+                }
+                .input(),
+            );
+            assert_eq!(
+                refusal(&refused),
+                DurableDecisionRefusal::DecidedBeforePresentation,
+                "{shape} (approve {approve}): observed before the recorded presentation"
+            );
+            assert_eq!(authority.state(), &before, "{shape}");
+            let decided = apply(&mut authority, decision.input());
+            let counted_it = match decided.effects() {
+                [
+                    Effect::Approved {
+                        carried_presentation_counted,
+                        ..
+                    }
+                    | Effect::Rejected {
+                        carried_presentation_counted,
+                        ..
+                    },
+                ] => *carried_presentation_counted,
+                other => panic!("{shape}: expected a decision, got {other:?}"),
+            };
+            assert!(
+                !counted_it,
+                "{shape}: the carried presentation is not counted"
+            );
+            assert_eq!(
+                authority.state().first_presented_to_approver_at_ms,
+                Some(HELD_AT + 8),
+                "{shape}: the recorded presentation stays the first"
+            );
+        }
+    }
+}
 
 #[test]
 fn a_touch_at_the_deadline_records_expiry() {

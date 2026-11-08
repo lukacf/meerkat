@@ -863,9 +863,14 @@ fn meerkat_transcript_unsupported_arms_follow_every_published_variant() {
 /// MobMachine's arms of a host's adoption over a declared identity entry
 /// (0.9.11: the archive terminals that end the entry, the takeover's
 /// verdicts and the replay of its mark) are emitted on the machine's late
-/// tail after the legacy adoption's arms, so no `TransitionId`
-/// discriminant 0.9.10 renders moves: `UnlistIdentityEntryMobNotRunningDestroyed`,
-/// its last variant, keeps index 1902. Only the arms appended after them
+/// tail after the legacy adoption's arms. 0.9.11 removes the two arms that
+/// blocked a placed member's instruction delivery
+/// (`PrepareMemberInstructionDeliveryPlacedRunning` and
+/// `PrepareMemberInstructionDeliveryPlacedStopped`, declared Breaking),
+/// which moves every later 0.9.10 `TransitionId` variant down by two:
+/// `UnlistIdentityEntryMobNotRunningDestroyed`, 0.9.10's last variant, is
+/// at index 1900, and this pin guards that order from here on. Only the
+/// arms appended after them
 /// follow them: the build preparation retry's
 /// (`mob_build_preparation_retry_arms_follow_the_host_adoption_arms`), then
 /// the refusals of external work to an identity entry, last.
@@ -879,7 +884,7 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
             .position(|variant| variant == name)
             .expect("the named variant is a rendered TransitionId variant")
     };
-    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1902);
+    assert_eq!(index("UnlistIdentityEntryMobNotRunningDestroyed"), 1900);
     let host_adoption_arms = [
         "ObserveMemberRetirementArchivedLiveHostAdopted",
         "ObserveMemberRetirementArchivedRetiredHostAdopted",
@@ -909,7 +914,7 @@ fn mob_host_adoption_arms_follow_every_earlier_variant() {
         "the identity member refusals of external work are the last TransitionId variants"
     );
     assert!(
-        index("AdoptLegacyIdentityEntryRetireUnadopted") > 1902,
+        index("AdoptLegacyIdentityEntryRetireUnadopted") > 1900,
         "the legacy adoption's arms follow every variant 0.9.10 renders"
     );
 }

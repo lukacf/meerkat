@@ -24,12 +24,12 @@ spec = importlib.util.spec_from_file_location('official_installer', INSTALLER)
 owner = importlib.util.module_from_spec(spec); spec.loader.exec_module(owner)
 
 
-def bundle(root):
+def bundle(root, source_revision='a'*40):
     root.mkdir()
     binary = bytes.fromhex('cffaedfe0c0000010000000002000000') + b'INERT_NOT_AN_EXECUTABLE'
     template = {'mcpServers': {'github-selected-reads': {'command': 'ABS_GITHUB_INSTALL/github-mcp-server',
         'args': owner.OFFICIAL_ARGS, 'cwd': 'ABS_GITHUB_INSTALL', 'env': {}}}}
-    component = {'catalog_id':'github', 'source_revision':'a'*40, 'artifact':'github/github-mcp-server',
+    component = {'catalog_id':'github', 'source_revision':source_revision, 'artifact':'github/github-mcp-server',
         'artifact_sha256':owner.sha(binary), 'configuration_template':'github/mcp.template.json',
         'notices':'github/notices', 'selected_operations':owner.OFFICIAL_TOOLS,
         'required_secret_environment':[owner.OFFICIAL_ENV], 'runtime_profile':'fixture macOS arm64'}
@@ -88,6 +88,52 @@ class Fixture:
 
 
 class OfficialTests(Fixture,unittest.TestCase):
+    def test_only_reviewed_upstream_revision_publishes_raw_tool_names(self):
+        legacy = owner.official_consumer(self.args(official_describe=True))['help']
+        self.assertNotIn('operation_tools', legacy)
+        mapped = self.root / 'mapped'
+        pin = bundle(mapped, owner.OFFICIAL_MAPPED_REVISION)
+        help_value = owner.official_consumer(self.args(official_describe=True,
+            official_bundle=str(mapped), contents_sha256=pin))['help']
+        self.assertEqual(help_value['operation_tools'], {
+            'get_me':'get_me', 'list_commits':'list_commits', 'get_file_contents':'get_file_contents'})
+        self.assertEqual(help_value['operations'], owner.OFFICIAL_TOOLS)
+        self.assertFalse(help_value['selectable_operations'])
+
+    def test_retained_official_metadata_keeps_exact_launch_without_executing_github(self):
+        mapped = self.root / 'mapped'
+        pin = bundle(mapped, owner.OFFICIAL_MAPPED_REVISION)
+        c = self.controller(official_bundle=mapped, official_contents_sha256=pin,
+            verifier=INSTALLER.resolve(), verifier_sha256=owner.sha(INSTALLER.read_bytes()))
+        checked = self.checked(c)
+        job = c.install(checked)['job']; c.join()
+        self.assertEqual(c.job['status'], 'succeeded')
+        intent = c.install_intents[job['id']]
+        destination = intent['destination']
+        before = {p:p.read_bytes() for p in c.workspace.rglob('*') if p.is_file()}
+        entry = {'id':job['id'], 'sha256':job['recovery_request']['sha256']}
+        self.assertEqual(backend.retained_request_summary(c.workspace, entry), {
+            'family':'official-github', 'profile':'selected-reads', 'validation_id':checked['validation_id']})
+        offset = len(c.runner.calls)
+        observed = c.reconcile({'job_id':job['id']}, retained_setup_metadata=True)['observation']
+        self.assertEqual(observed['status'], 'matched')
+        metadata = observed['setup_metadata']
+        self.assertEqual(metadata['help']['operations'], [{'id':name, 'tool':name} for name in owner.OFFICIAL_TOOLS])
+        self.assertEqual(metadata['configuration_check'], {'credential_environment_references':[
+            {'field_path':['config','token_env'], 'environment_variable':owner.OFFICIAL_ENV}]})
+        self.assertEqual(metadata['selection'], self.request())
+        launch = observed['result']['mcp_configuration']['mcpServers'][intent['configuration']['server_name']]
+        self.assertEqual(launch, {'command':str(destination/'github-mcp-server'),
+            'args':owner.OFFICIAL_ARGS, 'cwd':str(destination), 'env':{}})
+        self.assertEqual(sum('--verify-existing' in argv for argv in c.runner.calls[offset:]), 2)
+        self.assertTrue(all(any(flag in argv for flag in ('--verify-existing','--official-describe','--check-config-only'))
+            for argv in c.runner.calls[offset:]))
+        self.assertEqual({p:p.read_bytes() for p in before}, before)
+        (destination/'github-mcp-server-config.json').write_text('{}')
+        refused = c.reconcile({'job_id':job['id']}, retained_setup_metadata=True)['observation']
+        self.assertEqual(refused['status'], 'unconfirmed')
+        self.assertNotIn('setup_metadata', refused)
+
     def test_fixed_operation_declaration_is_owned_strict_and_subset_refused(self):
         source=owner.official_consumer(self.args(official_describe=True))['help']
         self.assertIs(source['selectable_operations'],False)

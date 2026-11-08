@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "scope": "Controlled no-build selected installation for cold shared preparation cleanup; no discovery, service-use or account claim",
+  "adapted_from": "scripts/fixtures/source-built-mcp/server.cjs at 06ade8c601c4a985d122c84093b36dd4b3e0b5a0",
+  "files": {
+    "operation.schema.json": {
+      "bytes": 260,
+      "sha256": "4d5eb3040869f7ba6659019eb7e7ad9c327ffb6b93b1e95a6d54707bc0823005"
+    },
+    "package.json": {
+      "bytes": 115,
+      "sha256": "93828c6850df6011d8980dea5433272fe0903d0e2eaeeaf14b50231f417b5183"
+    },
+    "server.cjs": {
+      "bytes": 3828,
+      "sha256": "845da4bd92aab63cb37e21574841099cc74434eee7289d4d8b9a79f922e18562"
+    }
+  }
+}

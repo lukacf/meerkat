@@ -35,6 +35,46 @@ older delivery paths and passing runs do not qualify it. In the install and
 readback examples, select those current executables, add the plain-form flag
 above and use the raw declaration hash when choosing plain software.
 
+## Bind full activation to actual owners
+
+On the selected-Python portable MCP path, manifest owner and operation IDs are
+references, not names registered with a Connect dispatcher. The planner retains
+and validates metadata; it does not resolve `authentication.owner`,
+`requirement`, `credential_audience`, readiness check IDs, shutdown or rollback
+operations into runtime handlers. Its `declared_service` projection contains
+only authentication, raw operation mappings and optional secret environment
+slots. Configuration, policy and lifecycle remain declarations.
+
+| Declaration | Actual binding required from the consuming host |
+| --- | --- |
+| Configuration and policy references | The exact immutable host-owned selections and their real application to the chosen connection |
+| Authentication binding | Protected credential entry and the native realm secret/call-context owner; audience text alone establishes no account |
+| Readiness checks | The actual selected MCP connection's initialization, tool discovery and required operation observations |
+| Shutdown contract | Retained process/session cleanup and its joined outcome; `maximum_wait_ms` does not configure the selected-Python runtime |
+| Rollback contract | The effect owner's implemented recovery or reconciliation; partial writes and uncertain cleanup cannot be relabeled reversible |
+| Export enforcement contract | Independently classified operations, actual native grants and call-time enforcement |
+
+`ValidatedManifest::check_host` compares supported contract and service
+vocabulary. It does not register handlers or issue permission. The separate
+Compose backend has its own profile-owner checks; those do not apply to a
+selected-Python installation. Use IDs only for owners the consuming composition
+actually implements. If a required binding is missing, keep it unresolved.
+Do not copy fixture owner strings or remove package requirements to make the
+plain software form accept them.
+
+In the development Connect collection path, `SelectedServiceInputs` joins the
+retained checked selection to the installation and protected review. A trusted
+`CollectionProgram::declares_read_only` implementation classifies exact checked
+software through `SelectedPackageIdentity`. The native call policy and original
+`McpCallContextProvider` still enforce the selected operation, current grants
+and credentials. A declared read effect never overrides native `Mutating`.
+The continuation waits for its selected MCP connection, retains the actual
+`ConnectSession` through execution, consumes its close and checks durable
+terminal evidence. Setup finalization separately consumes `ClosedSetup` and
+`finish_host_cleanup`. These typed owners are not selected by manifest strings.
+See the [collection guide](../../docs/site/guides/service-collections.mdx) for
+composition and current native acceptance limits.
+
 ## Install the selected bundle
 
 The selected Python installer uses a new virtual environment and ordinary

@@ -145,23 +145,24 @@ cleanup retain their existing native paths.
 
 ## Selected SDK and qualification
 
-This source requires the delivered public Meta TS APIs and cleanup fixes
-through `162e2154bd3b1264087adbd5217b2561038b6f82`. The inspected full bodies at
-`fadbb7761547318a2f5f58b0a8fcd3e2ad849a17` plus the delivered `c953bc83d` and
-`162e2154b` successor diffs establish the public composition contract:
+This source requires the public Meta TypeScript composition and cleanup APIs:
 `MetaBuilder.gatewayTransport`, `preparedApplication`, `declareSpecUpdate`, and
 `PersistentTransport.startAsync`, `extraStdioEndpoint`, `requireHostStartup` and
 `sendAsync`, plus `lastTermination`, runtime `lastGatewayTermination` and the
-same-runtime `GatewayStartupCleanupError.cleanup` handle. The successor retains
+same-runtime `GatewayStartupCleanupError.cleanup` handle. Meta retains
 that handle on every rejected composed stop and preserves unprintable original
-errors without formatting them. This is source compatibility evidence, not
-qualification of a selected package. The optional peer is `@rkat/meta-sdk`
-version `0.9.0`; that version alone does not identify the required artifact. The existing qualification lane
-must supply the selected matching SDK package before Toolkit's normal build,
-typecheck and tests. The native-host control module imports it directly and
-does not skip when it is absent. No registry resolution, integrity or temporary
-source path has been invented in the lock file. Existing optional `@rkat/sdk`
-service use is unchanged.
+errors without formatting them.
+
+The source package pins its optional peers and development dependencies to
+published `@rkat/meta-sdk` 0.9.10 and `@rkat/sdk` 0.9.10. The npm lock contains
+their registry tarballs and integrity hashes; `npm ci --ignore-scripts` installs
+that exact selection before Toolkit's build and tests. The native-host control
+module imports Meta directly and does not skip when it is absent.
+
+Toolkit's own package version is 0.9.10. This source update does not replace
+an existing release asset or qualify an installed application. Other native
+development compositions must record their matching SDK source and actual
+staged bytes as described in [BUILDING.md](../../BUILDING.md#sdks).
 
 The new controls use the actual selected Meta builder, runtime, callback
 dispatcher and transport with an inert child. They cover exact private/native
@@ -174,8 +175,9 @@ preparation controls cover request-1/native-init/request-2 ordering, finalizer
 entry and settlement across abort, native Ready with a lost private reply,
 exact plan-carrier refusal, and same-runtime cleanup after that partial result.
 The Rust compiler and policy owner are inert in these SDK controls.
-They are authored source only here, not a local test result or proof of native
-member admission, surface verification, Ready, hardware or application success.
+They do not prove native member admission, surface verification, Ready, hardware
+or application success. See [current qualification](../../docs/releases/follow-up.md#current-integration-status)
+for results bound to the selected source and artifacts.
 
 ## Cleanup and retained failures
 
@@ -209,3 +211,90 @@ their formatting and avoids repeating a spent child shutdown horizon on rejoin.
 Toolkit relies on those existing native fixes. No private native fields, second
 process reaper or independent runtime are used; execution qualification remains
 with the selected SDK and native gateway lane.
+
+## Dynamic members and selected MCP access
+
+Applications declaring member classes require an existing gateway-composed
+build customizer at fresh or restored startup. Explicitly configuring the SDK's
+`agentCustomizer` is a straightforward supported setup; a pass-through is enough
+when the application needs no custom behavior. An existing memory customizer
+also satisfies this presence check, without requiring an SDK callback. This is
+not a reason to enable memory or proof that every callback works. Connect
+composes its selected member-class factory around the existing customizer;
+this does not add grants or replace application authority. Applications without
+member classes may continue to omit the customizer.
+
+The current selected native API reports a missing required customizer as the
+generic `native host composition refused admission` error before bootstrap.
+An actionable `AgentCustomizerRequired` diagnostic is pending Meta API adoption.
+
+Development source adds `host.hostControl.memberClasses` on the same private
+child. It exposes `beginAdd`, `add`, `join`, `observe` and `retire`. Import the
+request and observation types from `@rkat/toolkit/member-classes`. This local
+host adapter is not a public JSON-RPC endpoint or a model-callable tool.
+
+The application first commits its own hidden admitting row, using the exact
+Add ID, native identity and packaged class. Supply the selected native
+`DurableAgentSpec`, concrete member destination, local Console route and
+controller issuance intent in `MemberClassAddRequest`. The native owner checks
+those selections and the trusted class factory. The SDK does not create a
+second roster or authorize JSON selections.
+
+`beginAdd(request, publish, { timeoutMs })` returns the retained attempt and its
+`operationId` immediately after the command is queued. `attempt.result()` waits
+for its observation. Native requests `publish()` only inside held completion,
+after Connect policy commitment. That async callback must commit the existing
+application row's desired-roster listing without taking the application's
+reconcile lock. Await `attempt.joinListing()` before unlisting or closing the
+application's store; an entered write remains owned after observer loss.
+
+An observation timeout retains the attempt on `MemberClassObservationTimeout`.
+It does not retry Add or establish failure/rollback. `unsettled` is a native
+observation with its explicit `settlement_id`; call `join(settlementId)` to join
+that native observer. Native identity status and ordinary input stay on Meta.
+Native result, Connect authorization and cleanup are distinct fields of the
+returned observation. A retired record can be inspected without becoming
+authorized again. Native protocol counters outside JavaScript's safe integer
+range are refused instead of rounded.
+
+Upgrade the native host and Python/TypeScript SDKs together: private child
+preparation can return the closed-code result `observation_changed`, which older
+SDKs reject by closing the channel. It reports a stale authority observation,
+not that earlier effects are absent or that the whole command may be retried.
+
+Applications using the member-MCP path supply the same durable row's callbacks
+before native startup, including cold reconstruction:
+
+```ts
+import { MemberMcpApplication } from "@rkat/toolkit/member-classes";
+import { ToolkitHost } from "@rkat/toolkit/native-host";
+
+const memberMcp = new MemberMcpApplication({
+  retain: value => applicationMembers.retainExactBindings(value),
+  lookup: selection => applicationMembers.readExactBindings(selection),
+});
+const host = new ToolkitHost(selectedBootstrap, { memberMcp });
+// Configure and build the existing Meta builder as shown above.
+```
+
+`retain` must commit exactly the complete binding set to that nonvoided admitting
+row, rejecting a conflicting replay. `lookup` must read that exact row and
+refuse missing, retired, void or unreadable selections. An empty array is an
+explicit retained empty set; absence must never become an empty array. These
+callbacks neither issue grants nor publish the member. `MemberClassAddRequest`
+may include the exact native `mcp` intent with `origin: "operator_self"`, the
+existing Console enrollment locator, selected server/read-write operations and
+native lifetime. The actual protected native review owns permission; the
+locator and requested operations do not grant access.
+
+All three native-host constructors accept `memberMcp`. The participant belongs
+to one runtime/pipe and must not be reused for another child. Explicitly await
+`memberMcp.join()` before closing its application store. Runtime shutdown also
+closes new callback entry and joins entered work; a repeated join preserves
+any original failure. A successful application write with an unknown ACK remains
+uncertain. Native typed ACK refusal leaves the pipe usable, while an unsendable
+or invalid ACK fails the pipe to wake native's waiter.
+
+The focused tests use real Node streams and the selected Meta SDK with an inert
+child. They establish transport and cleanup behavior, not native grants, live
+provider access or production dynamic-member qualification.

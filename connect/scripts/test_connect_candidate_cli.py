@@ -60,6 +60,13 @@ def ready(tmp_path, monkeypatch, request):
     monkeypatch.setattr(p, "cli_producer_inputs", lambda supplied: (value, original.source, resources)
                         if supplied == work else pytest.fail("wrong retained producer"))
     calls = []
+    # A versioned assembly also requires the monorepo source identity of the
+    # checkout it runs in (the assembler's own tests cover that check). This
+    # synthetic producer has no Git checkout, so a stand-in records the call.
+    released = []
+    monkeypatch.setattr(f.ASSEMBLER, "checked_release_source", lambda raw: released.append(raw) or {
+        "repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+        "source_manifest_sha256": p.digest(original.source)})
 
     def run(self, name, argv, **kwargs):
         calls.append([str(v) for v in argv])
@@ -68,6 +75,7 @@ def ready(tmp_path, monkeypatch, request):
         original.record = Path(argv[argv.index("--build-record") + 1])
         destination = Path(argv[argv.index("--destination") + 1])
         original.assemble(destination=destination, release_version="1.2.3")
+        assert released == [original.record.read_bytes()]
         return {}, None
 
     monkeypatch.setattr(p.Recorder, "run", run)

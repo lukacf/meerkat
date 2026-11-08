@@ -673,17 +673,6 @@ explicit tables to the section, remove the `copilot_openai`,
 section with the same source; the route names and the account stay, so
 sessions that name the routes resume on them.
 
-<Note>
-Known limitation: Meerkat Connect's provider setup and first-target setup do
-not yet list the routes a `[copilot]` section declares, so a realm whose
-Copilot account is configured only by the section can look unconfigured
-there. Use the explicit tables with Connect until a later release. With the
-explicit tables, Connect can offer all three Copilot routes as targets for a
-model of one provider family; whichever is chosen, the session runs on the
-account's route of the model's family, on the same credential (choosing
-`copilot_openai` for an Anthropic model runs on `copilot_anthropic`).
-</Note>
-
 ### Use the binding
 
 ```bash

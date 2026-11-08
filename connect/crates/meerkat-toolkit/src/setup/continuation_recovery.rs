@@ -1,13 +1,53 @@
 //! Private acquisition-owner enumeration of its existing continuation effects.
 //! This page is historical work selection, never native retry authority.
 use super::*;
+use meerkat_authorization_contracts::work_association::InputAuthorityAssociation;
 use toolkit_store::{EffectKey, StoreScope};
+
+/// Immutable request identity for selecting possible workflow cleanup. This
+/// projection is neither current terminality nor permission to read or mutate
+/// the acquisition. A selected candidate must be reopened by its actual owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContinuationRecoveryCandidate {
+    operation: Id,
+    association: InputAuthorityAssociation,
+    correlation: Id,
+}
+impl ContinuationRecoveryCandidate {
+    pub fn operation(&self) -> &Id {
+        &self.operation
+    }
+    pub fn association(&self) -> &InputAuthorityAssociation {
+        &self.association
+    }
+    pub fn correlation(&self) -> &Id {
+        &self.correlation
+    }
+}
+impl SetupSnapshot {
+    /// Project only the validated immutable request identity. In particular,
+    /// this does not assert that this snapshot is still terminal or current.
+    pub fn continuation_recovery_candidate(
+        &self,
+    ) -> Result<ContinuationRecoveryCandidate, SetupError> {
+        Ok(ContinuationRecoveryCandidate {
+            operation: operation_id(self.request())?,
+            association: self.request().evidence().association().clone(),
+            correlation: self.request().host().correlation.clone(),
+        })
+    }
+}
 
 /// Content-free projection from this exact SetupStore scope. The host must
 /// guard every read outcome before using it and use step_continuation for work.
 /// A cursor is only pagination; it is neither a checkpoint nor a new journal.
 pub struct ContinuationRecoveryPage {
     pub operations: Vec<Id>,
+    /// Every validated terminal acquisition in this page, including one whose
+    /// continuation is already settled. This is only a cleanup candidate: its
+    /// current terminal record and exact membership must be reopened by the
+    /// host owner. Result delivery remains independently owned by operations.
+    pub terminal_operations: Vec<ContinuationRecoveryCandidate>,
     /// Due nonterminal requests, not expiry permission. The selected host must
     /// authorize each exact snapshot through SetupDeadlineOwner before expire.
     pub expiry_operations: Vec<Id>,
@@ -48,6 +88,7 @@ impl SetupStore<'_> {
         };
         let mut page = ContinuationRecoveryPage {
             operations: Vec::new(),
+            terminal_operations: Vec::new(),
             expiry_operations: Vec::new(),
             next_after_id,
             had_unavailable_records: false,
@@ -69,16 +110,21 @@ impl SetupStore<'_> {
                 }
                 continue;
             }
-            match self.recovery_operation(snapshot).await {
-                Ok(Some(operation)) => page.operations.push(operation),
-                Ok(None) => (),
+            match self.recovery_operation(&snapshot).await {
+                Ok(pending) => {
+                    page.terminal_operations
+                        .push(snapshot.continuation_recovery_candidate()?);
+                    if let Some(operation) = pending {
+                        page.operations.push(operation);
+                    }
+                }
                 Err(_) => page.had_unavailable_records = true,
             }
         }
         Ok(page)
     }
 
-    async fn recovery_operation(&self, snapshot: SetupSnapshot) -> Result<Option<Id>, SetupError> {
+    async fn recovery_operation(&self, snapshot: &SetupSnapshot) -> Result<Option<Id>, SetupError> {
         let state = snapshot.state();
         // The generated terminal state must have its exact existing outbox
         // intent. Absence or contradiction is unavailable, not completion.

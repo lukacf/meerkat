@@ -33,6 +33,7 @@ enum PreparedAuthorityState {
 }
 
 mod authorities;
+pub(crate) use authorities::controller_parent;
 mod helper_catalog;
 mod helper_mcp;
 pub use authorities::{
@@ -189,6 +190,7 @@ impl PreparedInstallationOwner {
                 self.source_scope.clone(),
                 self.selected.native_host.grant_administrator.clone(),
                 participant,
+                self.selected.native_host.member_classes.clone(),
             )
             .await?;
         originals.bind_service_tool_policy(service_policy)?;
@@ -460,6 +462,19 @@ fn adoption_refusal(stage: &'static str, error: HostLifetimeError) -> HostLifeti
 }
 
 impl PreparedInstalledHost {
+    /// Finalize the same held owner with no helper or helper-derived grants.
+    pub fn finalize_authorities_without_helper(
+        &mut self,
+        requests: &PreparationAuthorities,
+    ) -> Result<PreparedLocalPolicy, HostLifetimeError> {
+        let PreparedAuthorityState::Pending(owner) = &mut self.authorities else {
+            return Err(HostLifetimeError::InvalidSelection);
+        };
+        owner.configure_authorities_without_helper(requests)?;
+        self.finalize_selection()?;
+        self.selected().cloned()
+    }
+
     /// Resolve explicit requests only after the caller has joined each route
     /// to the actual held native report. This method does not obtain reports or
     /// treat a configured route key as evidence of a live controller. Failed
@@ -593,6 +608,30 @@ impl PreparedInstalledHost {
         self.policy.clone()
     }
 
+    /// Restrict a compiled workflow member before native construction. The
+    /// returned participant captures only the real registration destination;
+    /// workflow terms and the installed lifetime are bound after held creation.
+    /// This does not create an input, a session, or a grant.
+    pub async fn prepare_workflow_member(
+        &self,
+        route: &toolkit_package::Id,
+        original: &meerkat_authorization_contracts::evidence::EvidenceId,
+        spec: &meerkat_mobkit::identity_first::DurableAgentSpec,
+    ) -> Result<Arc<crate::private_originals::PreparedWorkflowMember>, HostLifetimeError> {
+        let PreparedAuthorityState::Pending(owner) = &self.authorities else {
+            return Err(HostLifetimeError::InvalidSelection);
+        };
+        self.originals
+            .prepare_workflow_member_for_host(owner.selected(), route, original, spec)
+            .await
+            .map_err(|error| match error {
+                crate::private_originals::PrivateOriginalError::Unavailable => {
+                    HostLifetimeError::Unavailable
+                }
+                _ => HostLifetimeError::Denied,
+            })
+    }
+
     /// Retain the actual native construction participants before bootstrap.
     /// The returned value forwards the same leased source, policy registry,
     /// early leaves and continuation owner into final installed composition.
@@ -617,6 +656,18 @@ impl PreparedInstalledHost {
             tools,
             continuation,
         ))
+    }
+
+    /// Same prepared native owners, without setup jobs or an acquisition namespace.
+    pub fn gateway_runtime_without_acquisition(
+        &self,
+        registration: Arc<prepared_registration::PreparedMemberRegistration>,
+    ) -> crate::host_gateway::PreparedGatewayRuntime {
+        crate::host_gateway::PreparedGatewayRuntime::without_acquisition(
+            self.originals.clone(),
+            registration,
+            self.tool_policy.registry(),
+        )
     }
 
     /// The actual gateway consumes its native owner configuration once. This
@@ -691,6 +742,7 @@ impl PreparedInstalledHost {
         Ok((
             owner,
             InstalledToolkitHost {
+                operation_review_policy: None,
                 originals: self.originals,
                 store: self.store,
                 source_scope: self.source_scope,
@@ -699,6 +751,7 @@ impl PreparedInstalledHost {
                 tool_policy,
                 surfaces,
                 update_associations: None,
+                prepared_application: None,
             },
         ))
     }
@@ -706,3 +759,245 @@ impl PreparedInstalledHost {
 
 #[cfg(test)]
 mod authority_tests;
+#[cfg(test)]
+mod workflow_tests;
+
+/// Finite read-only evidence for downstream native fixtures. No store, grant
+/// writer, configuration carrier or native permission is exposed.
+#[cfg(feature = "test-support")]
+pub struct PreparedHelperReadback {
+    store: Arc<SqliteStore>,
+    source: Arc<ToolkitOriginalOwner>,
+    scope: StoreScope,
+    application: meerkat_core::PrincipalRef,
+}
+#[cfg(feature = "test-support")]
+pub struct PreparedHelperRoleEvidence {
+    pub role: &'static str,
+    pub parent: Vec<meerkat_authorization_contracts::grant::GrantLineageRef>,
+    pub lineage: Vec<meerkat_authorization_contracts::grant::GrantLineageRef>,
+    pub issued: meerkat_authorization_contracts::grant::GrantLineageRef,
+    pub requested: meerkat_authorization_contracts::constraints::ExecutionRestrictions,
+    pub parent_restrictions: meerkat_authorization_contracts::constraints::ExecutionRestrictions,
+    pub child_restrictions: meerkat_authorization_contracts::constraints::ExecutionRestrictions,
+}
+#[cfg(feature = "test-support")]
+pub struct PreparedHelperEvidence {
+    pub record: toolkit_store::StoredRecord,
+    pub association: InputAuthorityAssociation,
+    pub roles: Vec<PreparedHelperRoleEvidence>,
+}
+/// Pending names only a validated canonical custody attempt, not an unreadable
+/// row, a grant refusal or permission to retry native admission.
+#[cfg(feature = "test-support")]
+pub enum PreparedHelperSnapshot {
+    Pending,
+    Ready(Vec<PreparedHelperEvidence>),
+}
+#[cfg(feature = "test-support")]
+impl PreparedInstalledHost {
+    pub fn helper_readback_for_test(&self) -> PreparedHelperReadback {
+        PreparedHelperReadback {
+            store: self.store.clone(),
+            source: self.source.clone(),
+            scope: self.source_scope.clone(),
+            application: match &self.authorities {
+                PreparedAuthorityState::Pending(owner) => {
+                    owner.selected.native_host.grant_administrator.clone()
+                }
+                PreparedAuthorityState::Finalized(selected) => {
+                    selected.native_host.grant_administrator.clone()
+                }
+            },
+        }
+    }
+}
+#[cfg(feature = "test-support")]
+impl PreparedHelperReadback {
+    /// This query reads the exact existing owner scope and at most sixteen
+    /// bound helper rows under the same owner exclusion as custody settlement.
+    /// Valid pending custody is explicit; only Promoted rows return evidence.
+    /// Unbound, withdrawn, changed or truncated evidence refuses. The returned
+    /// values are observations, never authority for another call.
+    pub async fn snapshot(
+        &self,
+        helper: &acquisition::InstalledSetupSelection,
+    ) -> Result<PreparedHelperSnapshot, String> {
+        use crate::original_ingress::{custody_attempt::CustodyDecision, helper_originals};
+        use meerkat_authorization_contracts::{
+            constraints::ExecutionRestrictions, evidence::EvidenceId,
+        };
+        use toolkit_store::ToolkitStore;
+        // These are store and grant reads only: none reenters the source writer
+        // or invokes native admission. Release it before a caller waits again.
+        let _writer = self.source.source_writer().await;
+        let scope = StoreScope {
+            realm: self.scope.realm.clone(),
+            owner: format!("toolkit/helper-originals/{}", self.scope.owner),
+        };
+        let rows = self
+            .store
+            .list_records(&scope, None, 17)
+            .await
+            .map_err(|e| e.to_string())?;
+        if rows.len() > 16 {
+            return Err("helper evidence would be truncated".into());
+        }
+        let mut bound = Vec::new();
+        let mut pending = false;
+        for row in rows {
+            let saved = self
+                .store
+                .get(&row.key)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("helper source disappeared")?;
+            if saved.data.body["facts"]["selection"]["helper"]
+                != serde_json::to_value(helper).map_err(|e| e.to_string())?
+            {
+                return Err("unexpected helper in the actual source scope".into());
+            }
+            let association =
+                crate::original_ingress::helper_originals::cold_association(&self.scope, &saved)
+                    .map_err(|e| format!("helper source read: {e:?}"))?;
+            let attempt = helper_originals::cold_bound_attempt(&self.scope, &saved, &association)
+                .map_err(|e| format!("helper custody read: {e:?}"))?
+                .ok_or("helper source has no canonical custody attempt")?;
+            match attempt.decision() {
+                CustodyDecision::Pending => pending = true,
+                CustodyDecision::Promoted => (),
+                CustodyDecision::Withdrawn => return Err("helper custody was withdrawn".into()),
+            }
+            bound.push((saved, association));
+        }
+        // Validate every selected row before reporting Pending; a second
+        // malformed, foreign or withdrawn row must not be hidden by the first.
+        if pending {
+            return Ok(PreparedHelperSnapshot::Pending);
+        }
+        let mut output = Vec::new();
+        for (saved, association) in bound {
+            let claims = association.candidate();
+            let capability = helper
+                .report_capability
+                .as_ref()
+                .ok_or("report parent missing")?;
+            let basis = &claims.authority_basis;
+            let selected = [
+                (
+                    "controller",
+                    helper.controller_parent.as_slice(),
+                    Some(claims.controller_grant_lineage.as_slice()),
+                ),
+                (
+                    "report",
+                    capability.parent.as_slice(),
+                    basis.lineage_for(Some(
+                        &acquisition::ConfiguredHelperReportCapability::target(),
+                    )),
+                ),
+                (
+                    "account",
+                    capability
+                        .account_parent
+                        .as_ref()
+                        .ok_or("account parent missing")?
+                        .as_slice(),
+                    basis.lineage_for(Some(
+                        &acquisition::ConfiguredHelperReportCapability::account_target(),
+                    )),
+                ),
+                (
+                    "public",
+                    capability
+                        .public_parent
+                        .as_ref()
+                        .ok_or("public parent missing")?
+                        .as_slice(),
+                    basis.lineage_for(Some(
+                        &acquisition::ConfiguredHelperReportCapability::public_target(),
+                    )),
+                ),
+                (
+                    "catalog",
+                    helper
+                        .catalog_capability
+                        .as_ref()
+                        .ok_or("catalog parent missing")?
+                        .parent
+                        .as_slice(),
+                    basis.lineage_for(None),
+                ),
+            ];
+            let mut roles = Vec::new();
+            for (role, parent, lineage) in selected {
+                let lineage = lineage.ok_or("actual child lineage missing")?;
+                let intent = if role == "controller" {
+                    &saved.data.body["controller"]
+                } else {
+                    &saved.data.body["controller"][role]
+                };
+                let id: EvidenceId =
+                    serde_json::from_value(intent["id"].clone()).map_err(|e| e.to_string())?;
+                let requested: ExecutionRestrictions =
+                    serde_json::from_value(intent["requested"].clone())
+                        .map_err(|e| e.to_string())?;
+                let issued = self
+                    .source
+                    .grants()
+                    .issued_reference(&id)
+                    .map_err(|e| format!("{e:?}"))?
+                    .ok_or("retained intent has no actual native child")?;
+                let parent_current = self
+                    .source
+                    .grants()
+                    .resolve_controller_lineage(
+                        parent,
+                        &self.application,
+                        helper.represented_subject.as_ref(),
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                let child_current = self
+                    .source
+                    .grants()
+                    .resolve_controller_lineage(
+                        lineage,
+                        &helper.logical_executor,
+                        helper.represented_subject.as_ref(),
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                parent_current
+                    .check_current()
+                    .map_err(|e| format!("{e:?}"))?;
+                child_current
+                    .check_current()
+                    .map_err(|e| format!("{e:?}"))?;
+                roles.push(PreparedHelperRoleEvidence {
+                    role,
+                    parent: parent.to_vec(),
+                    lineage: lineage.to_vec(),
+                    issued,
+                    requested,
+                    parent_restrictions: parent_current.restrictions().clone(),
+                    child_restrictions: child_current.restrictions().clone(),
+                });
+            }
+            if self
+                .store
+                .get(&saved.key)
+                .await
+                .map_err(|e| e.to_string())?
+                .as_ref()
+                != Some(&saved)
+            {
+                return Err("helper source changed during evidence read".into());
+            }
+            output.push(PreparedHelperEvidence {
+                record: saved,
+                association,
+                roles,
+            });
+        }
+        Ok(PreparedHelperSnapshot::Ready(output))
+    }
+}

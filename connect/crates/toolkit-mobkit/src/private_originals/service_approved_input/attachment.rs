@@ -371,7 +371,7 @@ impl PrivateOriginals {
             .member
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         if route.grant_target.as_str() != member.member {
             return Err(PrivateOriginalError::Denied);
         }

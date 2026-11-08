@@ -116,6 +116,101 @@ impl Drop for Release {
     }
 }
 
+struct IoLifetime {
+    publication: Arc<Publication>,
+    connection: std::sync::Weak<Mutex<OwnedConnection>>,
+    dropped: Mutex<Option<tokio::sync::oneshot::Sender<(bool, bool)>>>,
+}
+impl Drop for IoLifetime {
+    fn drop(&mut self) {
+        let publication_released = !self.publication.active.load(Ordering::SeqCst);
+        let connection_released = self.connection.upgrade().is_none_or(|connection| {
+            !matches!(
+                connection.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            )
+        });
+        if let Some(dropped) = self.dropped.get_mut().unwrap().take() {
+            let _ = dropped.send((publication_released, connection_released));
+        }
+    }
+}
+fn io_lifetime(
+    owner: &SqliteStore,
+    publication: &Arc<Publication>,
+) -> (
+    Arc<IoLifetime>,
+    tokio::sync::oneshot::Receiver<(bool, bool)>,
+) {
+    let (dropped, observed) = tokio::sync::oneshot::channel();
+    (
+        Arc::new(IoLifetime {
+            publication: publication.clone(),
+            connection: Arc::downgrade(&owner.connection),
+            dropped: Mutex::new(Some(dropped)),
+        }),
+        observed,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_sqlite_read_keeps_io_custody_through_return_or_worker_panic() {
+    for panic_after_read in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = SqliteStore::open(directory.path().join("store.sqlite")).unwrap();
+        let publication = Arc::new(Publication::default());
+        let (custody, mut dropped) = io_lifetime(&owner, &publication);
+        let block = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Release(block.clone());
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let reader = owner.clone();
+        let caller = tokio::spawn(async move {
+            retain_io_custody(
+                custody,
+                reader.with(move |connection, _| {
+                    let transaction = connection.transaction()?;
+                    let actual: i64 = transaction.query_row("SELECT 7", [], |row| row.get(0))?;
+                    entered.send(()).unwrap();
+                    let (lock, ready) = &*block;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = ready.wait(released).unwrap();
+                    }
+                    if panic_after_read {
+                        panic!("controlled SQLite worker panic after read");
+                    }
+                    transaction.commit()?;
+                    Ok(actual)
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            dropped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            owner.connection.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(release);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), dropped)
+                .await
+                .unwrap()
+                .unwrap(),
+            (true, true)
+        );
+        assert_eq!(owner.connection.is_poisoned(), panic_after_read);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abandoned_sqlite_write_retains_publication_and_physical_owner_through_commit_or_rollback()
 {
@@ -166,7 +261,17 @@ async fn abandoned_sqlite_write_retains_publication_and_physical_owner_through_c
             .unwrap();
         let writer = owner.clone();
         let change = transition(&prior);
-        let caller = tokio::spawn(async move { writer.compare_and_swap(change).await });
+        // Opaque lifetime probes exercise the actual detached transaction,
+        // not native permission. Nested scopes must preserve both owners.
+        let (outer, mut outer_dropped) = io_lifetime(&owner, &publication);
+        let (inner, mut inner_dropped) = io_lifetime(&owner, &publication);
+        let caller = tokio::spawn(async move {
+            retain_io_custody(
+                outer,
+                retain_io_custody(inner, writer.compare_and_swap(change)),
+            )
+            .await
+        });
         tokio::time::timeout(Duration::from_secs(10), waiting)
             .await
             .unwrap()
@@ -181,6 +286,14 @@ async fn abandoned_sqlite_write_retains_publication_and_physical_owner_through_c
         drop(observer);
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            outer_dropped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            inner_dropped.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
         drop(owner);
         assert!(
             matches!(
@@ -193,6 +306,16 @@ async fn abandoned_sqlite_write_retains_publication_and_physical_owner_through_c
         tokio::time::timeout(Duration::from_secs(10), publication.released.notified())
             .await
             .unwrap();
+        for dropped in [outer_dropped, inner_dropped] {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(10), dropped)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                (true, true),
+                "caller custody ends after publication and connection guards"
+            );
+        }
         let reopened = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match SqliteStore::open_existing(&path) {

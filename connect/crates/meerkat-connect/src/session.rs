@@ -26,6 +26,17 @@ use crate::{ConnectError, realm::read_config};
 
 const SETUP_INSTRUCTIONS: &str = include_str!("setup-instructions.md");
 
+#[cfg(all(test, unix, feature = "console"))]
+pub(crate) mod current_g_boundary_recovery;
+#[cfg(test)]
+mod failed_materialization_tests;
+#[cfg(all(test, unix))]
+mod older_boundary_capture_tests;
+#[cfg(unix)]
+mod private_services;
+#[cfg(all(test, unix))]
+mod receiptless_predecessor_tests;
+pub(crate) mod service_probe;
 mod standalone;
 pub use standalone::{ResumedStandalone, StandaloneContinuation};
 
@@ -44,6 +55,7 @@ pub struct SessionOptions {
 /// authority. There is no replacement token store.
 pub struct SessionStartup {
     pub(crate) storage: ResolvedStorage,
+    pub(crate) provider_store_root: Option<std::path::PathBuf>,
     pub(crate) config: Config,
     pub(crate) factory: AgentFactory,
     pub(crate) persistence: Option<meerkat::PersistenceBundle>,
@@ -57,10 +69,36 @@ impl SessionStartup {
         Self::with_config(storage, config).await
     }
 
+    /// Hosted provider setup and its later session must use the same trusted
+    /// native credential backend selection. Convention roots alone do not
+    /// change AgentFactory's process-default credentials. No keyring fallback.
+    pub async fn open_with_provider_store(
+        storage: ResolvedStorage,
+        credential_root: std::path::PathBuf,
+    ) -> Result<Self, ConnectError> {
+        if !credential_root.is_absolute() {
+            return Err(ConnectError::InvalidInput(
+                "Provider credential root must be absolute".into(),
+            ));
+        }
+        let persistence = meerkat_auth_core::auth_store::TokenStoreBackend::File {
+            root: credential_root.clone(),
+        }
+        .open_with_refresh_authority()
+        .map_err(|error| {
+            ConnectError::provider_setup("Open selected native credential backend", error)
+        })?;
+        let mut startup = Self::open(storage).await?;
+        startup.factory = startup.factory.with_provider_auth_persistence(persistence);
+        startup.provider_store_root = Some(credential_root);
+        Ok(startup)
+    }
+
     async fn with_config(storage: ResolvedStorage, config: Config) -> Result<Self, ConnectError> {
         let factory = Self::realm_factory(&storage);
         Ok(Self {
             storage,
+            provider_store_root: None,
             config,
             factory,
             persistence: None,
@@ -189,6 +227,32 @@ impl SessionStartup {
         options: SessionOptions,
         lazy: &crate::service_preparation::LazySetup,
     ) -> Result<ConnectSession, ConnectError> {
+        self.open_lazy_setup_session(options, lazy, None).await
+    }
+
+    /// Private Services moves this exact fresh Session into materialization
+    /// after constructing its guarded router. This is not a resume-by-ID API.
+    pub(crate) async fn open_private_services_setup(
+        self,
+        options: SessionOptions,
+        lazy: &crate::service_preparation::LazySetup,
+        session: Session,
+    ) -> Result<ConnectSession, ConnectError> {
+        if !lazy.owner().private_session_matches(session.id()) {
+            return Err(ConnectError::InvalidInput(
+                "Private Services requires its retained native attempt owner".into(),
+            ));
+        }
+        self.open_lazy_setup_session(options, lazy, Some(session))
+            .await
+    }
+
+    async fn open_lazy_setup_session(
+        self,
+        options: SessionOptions,
+        lazy: &crate::service_preparation::LazySetup,
+        session: Option<Session>,
+    ) -> Result<ConnectSession, ConnectError> {
         lazy.claim()?;
         let result = async {
             validate_lazy_options(&options, lazy)?;
@@ -203,16 +267,14 @@ impl SessionStartup {
                 options,
                 lazy.paired_host().research(),
                 Some(self),
+                session,
             ))
             .await?;
             session.service_preparation = Some(lazy.owner());
             Ok(session)
         }
         .await;
-        if result.is_err() {
-            lazy.owner().shutdown().await;
-        }
-        result
+        finish_lazy_open(result, lazy).await
     }
 }
 
@@ -233,6 +295,22 @@ fn validate_lazy_options(
         ));
     }
     Ok(())
+}
+
+async fn finish_lazy_open(
+    result: Result<ConnectSession, ConnectError>,
+    lazy: &crate::service_preparation::LazySetup,
+) -> Result<ConnectSession, ConnectError> {
+    match result {
+        Ok(session) => Ok(session),
+        Err(primary) => match lazy.owner().shutdown().await {
+            Ok(()) => Err(primary),
+            Err(cleanup) => Err(ConnectError::Cleanup {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup),
+            }),
+        },
+    }
 }
 
 /// One native setup conversation. Dropping a waiter does not cancel a native turn.
@@ -268,10 +346,7 @@ impl ConnectSession {
             Ok(config) => Self::open_lazy_claimed(storage, config, options, lazy).await,
             Err(error) => Err(error),
         };
-        if result.is_err() {
-            lazy.owner().shutdown().await;
-        }
-        result
+        finish_lazy_open(result, lazy).await
     }
 
     /// The config must be the native effective view of this exact realm. The
@@ -284,10 +359,7 @@ impl ConnectSession {
     ) -> Result<Self, ConnectError> {
         lazy.claim()?;
         let result = Self::open_lazy_claimed(storage, config, options, lazy).await;
-        if result.is_err() {
-            lazy.owner().shutdown().await;
-        }
-        result
+        finish_lazy_open(result, lazy).await
     }
 
     async fn open_lazy_claimed(
@@ -372,7 +444,7 @@ impl ConnectSession {
         // The shared native construction retains sizeable factory/config state.
         // Keep it out of every embedding caller's inline async stack frame.
         Box::pin(Self::open_composed(
-            storage, config, options, research, None,
+            storage, config, options, research, None, None,
         ))
         .await
     }
@@ -383,6 +455,7 @@ impl ConnectSession {
         mut options: SessionOptions,
         research: Option<crate::research::ResearchBinding>,
         startup: Option<SessionStartup>,
+        private_session: Option<Session>,
     ) -> Result<Self, ConnectError> {
         if options
             .build
@@ -448,7 +521,7 @@ impl ConnectSession {
             build_persistent_service_with_runtime_adapter(factory, config, 1, persistence)
                 .map_err(|error| ConnectError::native("Build persistent setup service", error))?;
         let service = Arc::new(service);
-        let session = Session::new();
+        let session = private_session.unwrap_or_default();
         let session_id = session.id().clone();
         let admission = service
             .reserve_create_session_admission()
@@ -583,6 +656,7 @@ impl ConnectSession {
             options,
             None,
             Some(startup),
+            None,
         ))
         .await
     }
@@ -704,10 +778,34 @@ impl ConnectSession {
         self.submit_input(notice.into_input()).await
     }
 
+    pub(crate) async fn submit_private_caller(
+        &self,
+        text: String,
+        caller: &meerkat::governed_realm::stock::caller::StockAuthenticatedCaller,
+    ) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
+        self.submit_input_for_caller(Input::Prompt(PromptInput::new(text, None)), Some(caller))
+            .await
+    }
+
     async fn submit_input(
         &self,
         input: Input,
     ) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
+        self.submit_input_for_caller(input, None).await
+    }
+
+    // An authenticated probe uses the same one-occurrence custody and native
+    // admission as existing stock submissions. It changes only who binds it.
+    async fn submit_input_for_caller(
+        &self,
+        input: Input,
+        caller: Option<&meerkat::governed_realm::stock::caller::StockAuthenticatedCaller>,
+    ) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
+        if caller.is_some() && self.stock.is_none() {
+            return Err(ConnectError::InvalidInput(
+                "A private probe requires current stock governance".into(),
+            ));
+        }
         if let Some(stock) = &self.stock {
             // This async-mutex guard reserves the one submission before any
             // actor lookup or bind await. An occupied slot is never rebound.
@@ -735,26 +833,37 @@ impl ConnectSession {
             // Both stock contracts retain this actual pin. Release the actor
             // boundary before native binding/admission, preserving input kind.
             drop(lease);
-            let bound = match input {
-                Input::Prompt(prompt) => {
-                    stock
-                        .bind_prompt(
-                            &self.machine,
-                            &self.session_id,
-                            Input::Prompt(prompt),
-                            controller,
-                        )
-                        .await
-                }
-                Input::ExternalEvent(event) => {
-                    stock
-                        .bind_host_outcome(&self.machine, &self.session_id, event, controller)
-                        .await
-                }
-                _ => {
+            let bound = if let Some(caller) = caller {
+                if !matches!(input, Input::Prompt(_)) {
                     return Err(ConnectError::InvalidInput(
-                        "Governed setup accepts human prompts or typed host outcomes".into(),
+                        "Private probe input must be freshly caller-bound".into(),
                     ));
+                }
+                stock
+                    .bind_caller_prompt(&self.machine, &self.session_id, input, controller, caller)
+                    .await
+            } else {
+                match input {
+                    Input::Prompt(prompt) => {
+                        stock
+                            .bind_prompt(
+                                &self.machine,
+                                &self.session_id,
+                                Input::Prompt(prompt),
+                                controller,
+                            )
+                            .await
+                    }
+                    Input::ExternalEvent(event) => {
+                        stock
+                            .bind_host_outcome(&self.machine, &self.session_id, event, controller)
+                            .await
+                    }
+                    _ => {
+                        return Err(ConnectError::InvalidInput(
+                            "Governed setup accepts human prompts or typed host outcomes".into(),
+                        ));
+                    }
                 }
             };
             let (input, pending) =
@@ -906,8 +1015,9 @@ impl ConnectSession {
     }
 
     /// Ask native custody to close this exact registration. Busy preserves
-    /// accepted work. Closed is actual terminal teardown, which can also finish
-    /// an ownerless drain. Non-Closed observations return this same owner.
+    /// accepted work. Closed proves the owned registration closed while quiescent.
+    /// An orphaned drain is not that proof; every non-Closed observation returns
+    /// this same owner for reconciliation.
     /// The entered native close is joined; caller cancellation is handled only
     /// after this method returns its actual outcome.
     pub async fn try_close_for_finalization(self) -> FinalizationClose {
@@ -941,11 +1051,13 @@ impl ConnectSession {
     /// retains this whole process-local owner. Dropping the final error or
     /// exiting the process is not evidence of joined cleanup.
     pub async fn close(self) -> Result<(), ConnectError> {
-        if let Some(owner) = &self.service_preparation {
+        let resources = if let Some(owner) = &self.service_preparation {
             // The preparation owner retires admission in both modes and closes
             // an adapter only when Toolkit originally created that adapter.
-            owner.shutdown().await;
-        }
+            owner.shutdown().await
+        } else {
+            Ok(())
+        };
         let unregister = self
             .machine
             .unregister_session_registration_until_terminal_if_current(&self.registration)
@@ -962,16 +1074,24 @@ impl ConnectSession {
                 cleanup: Box::new(cleanup),
             }),
             (Err(error), _) | (_, Err(error)) => Err(error),
-            (Ok(true), Ok(())) => {
-                self.stock_submission.release_after_confirmed_close().await;
-                Ok(())
-            }
+            (Ok(true), Ok(())) => Ok(()),
             (Ok(false), Ok(())) => Err(ConnectError::InvalidInput(
                 "This close did not confirm terminal teardown of the selected registration".into(),
             )),
         };
+        let result = match (resources, result) {
+            (Ok(()), result) => result,
+            (Err(error), Ok(())) => Err(error),
+            (Err(primary), Err(cleanup)) => Err(ConnectError::Cleanup {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup),
+            }),
+        };
         match result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.stock_submission.release_after_confirmed_close().await;
+                Ok(())
+            }
             Err(error) => Err(retain_failed_close(Arc::new(self), error)),
         }
     }
@@ -1096,11 +1216,17 @@ pub struct ClosedSetup {
 }
 
 impl ClosedSetup {
+    /// Retain this consumed native receipt if its transport cannot retry cleanup.
+    pub(crate) fn retain_error(self, error: ConnectError) -> ConnectError {
+        retain_failed_close(self.session, error)
+    }
     /// Finish only host cleanup. On failure retain this exact cleanup owner;
     /// an explicit retry never repeats native registration teardown.
     pub async fn finish_host_cleanup(self) -> Result<(), (Self, ConnectError)> {
-        if let Some(owner) = &self.session.service_preparation {
-            owner.shutdown().await;
+        if let Some(owner) = &self.session.service_preparation
+            && let Err(error) = owner.shutdown().await
+        {
+            return Err((self, error));
         }
         match self.session.service.try_shutdown().await {
             Ok(()) => {

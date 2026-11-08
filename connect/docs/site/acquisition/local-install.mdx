@@ -37,6 +37,12 @@ Prepare an `IntegrationPackage` in `package.json` and an `ActivationManifest` in
 
 Use `summary.package_content_digest` in the activation manifest. It identifies the canonical package content; raw file hashes identify the input files.
 
+The manifest's owner IDs need [actual runtime bindings](/reference/packages#bind-declarations-to-runtime-owners).
+Selected-Python installation does not resolve those names into authentication,
+readiness, shutdown or policy handlers. Keep the host's exact configuration and
+policy references, and bind the selected connection through the native owners.
+Do not substitute fixture IDs or remove unresolved package requirements.
+
 ## Input layouts
 
 <Tabs>

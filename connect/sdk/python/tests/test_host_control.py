@@ -13,8 +13,8 @@ import pytest
 
 from meerkat_toolkit.host_control import (
     HostCloseHandle, HostCloseReason, HostCloseScope, HostCloseState,
-    HostControlError, PrivateHostClient,
-    PrivateAuthenticatedEvent, PrivateSourceEvidence, PrivateOriginalRef,
+    HostControlError, PrivateHostClient, validate_native_original_operations_request,
+    PrivateAuthenticatedEvent, PrivateSourceEvidence, PrivateOriginalRef, PrivateOriginalSubmit,
     PrivateServiceAccessDecision, PrivateServiceGrantState,
 )
 
@@ -52,6 +52,115 @@ def original_for(event):
     return PrivateOriginalRef(event.route, event.original, hashlib.sha256(encoded).hexdigest())
 
 
+def native_operations_request():
+    return {"not_before_ms": 1, "expires_at_ms": 99999, "targets": [
+        {"issuance_id": "peer-root", "target": {"kind": "peer", "route": "actual-recipient-route", "actions": ["message", "request"]}},
+        {"issuance_id": "directory-root", "target": {"kind": "peer_directory"}},
+        {"issuance_id": "memory-root", "target": {"kind": "recorder_identity", "actions": ["read", "write", "delete"]}},
+    ]}
+
+
+@pytest.mark.parametrize("route", ["actual-recipient-route", "realm/peer:worker@host_1.2-3", "p" * 192])
+def test_native_operations_public_validation_returns_isolated_retention_snapshot(route):
+    request = native_operations_request()
+    request["targets"][0]["target"]["route"] = route
+    selected = validate_native_original_operations_request(request)
+    assert isinstance(selected, dict)
+    assert selected == request
+    assert validate_native_original_operations_request(selected) == selected
+    retained = json.loads(json.dumps(selected))
+    request["targets"][0]["target"]["route"] = "changed-before-retention"
+    request["targets"][2]["target"]["actions"].clear()
+    assert selected == retained
+    client, reader, writer = pipes()
+    event = source_event()
+    submission = PrivateOriginalSubmit(original_for(event), "untouched original text", event.original_authentication)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(client.prepare_original_native_operations, submission, selected)
+            command = receive(reader)
+            assert command["command"] == {"kind": "prepare_original_native_operations",
+                "submission": dataclasses.asdict(submission), "request": retained}
+            respond(writer, command, {"kind": "native_operations_prepared",
+                "original": dataclasses.asdict(submission.original)})
+            assert pending.result(timeout=2) == submission.original
+        assert selected == retained
+    finally:
+        client.close()
+        assert reader.read() == b"", "validation and preparation cannot submit or retry an original"
+        reader.close(); writer.close()
+    selected["targets"][0]["target"]["actions"].clear()
+    assert request["targets"][0]["target"]["actions"] == ["message", "request"]
+
+
+@pytest.mark.parametrize("reply_kind", ["matching", "foreign", "refused"])
+def test_native_operations_preserve_exact_new_original_selection(reply_kind):
+    from meerkat_toolkit.host_control import HostReplyError
+    client, reader, writer = pipes()
+    event = source_event()
+    submission = PrivateOriginalSubmit(original_for(event), "untouched original text", event.original_authentication)
+    selection = native_operations_request()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(client.prepare_original_native_operations, submission, selection)
+            command = receive(reader)
+            assert command["command"] == {"kind": "prepare_original_native_operations",
+                "submission": dataclasses.asdict(submission), "request": selection}
+            # The written intent is already a snapshot; mutation cannot retarget it.
+            selection["targets"][0]["target"]["route"] = "mutated-later"
+            if reply_kind == "refused":
+                respond(writer, command, {"kind": "error", "error": "denied"})
+            else:
+                reference = dataclasses.asdict(submission.original)
+                if reply_kind == "foreign": reference["original"] = "other"
+                respond(writer, command, {"kind": "native_operations_prepared", "original": reference})
+            if reply_kind == "matching": assert pending.result(timeout=2) == submission.original
+            else:
+                with pytest.raises(HostReplyError if reply_kind == "refused" else HostControlError):
+                    pending.result(timeout=2)
+    finally:
+        client.close()
+        assert reader.read() == b"", "preparation cannot submit or retry an original"
+        reader.close(); writer.close()
+
+
+_INVALID_NATIVE_PEER_ROUTES = {
+    "route_whitespace": "peer one",
+    "route_trailing_newline": "peer\n",
+    "route_line_separator": "peer\u2028",
+    "route_paragraph_separator": "peer\u2029",
+    "route_empty_segment": "peer//two",
+    "route_dot_segment": "peer/./two",
+    "route_parent_segment": "peer/../two",
+    "route_non_ascii": "peer/\u00e5",
+    "route_too_long": "p" * 193,
+    "route_leading_symbol": "_peer",
+}
+
+
+@pytest.mark.parametrize("change", ["mob", "audience", "peer_key", "duplicate", "actions", "infinite", "unordered", "boolean", "non_json", *_INVALID_NATIVE_PEER_ROUTES])
+def test_native_operations_invalid_or_invented_scope_never_writes(change):
+    client, reader, writer = pipes()
+    event = source_event()
+    submission = PrivateOriginalSubmit(original_for(event), "original", event.original_authentication)
+    request = native_operations_request()
+    if change == "mob": request["targets"][2]["target"]["kind"] = "recorder_mob"
+    elif change == "audience": request["targets"][0]["target"]["audience"] = "invented"
+    elif change == "peer_key": request["targets"][0]["target"]["peer"] = "invented"
+    elif change == "duplicate": request["targets"][1]["issuance_id"] = "peer-root"
+    elif change == "actions": request["targets"][2]["target"]["actions"] = ["propose"]
+    elif change == "infinite": request["expires_at_ms"] = 2**64 - 1
+    elif change == "unordered": request["targets"][2]["target"]["actions"] = ["write", "read"]
+    elif change == "boolean": request["not_before_ms"] = True
+    elif change in _INVALID_NATIVE_PEER_ROUTES: request["targets"][0]["target"]["route"] = _INVALID_NATIVE_PEER_ROUTES[change]
+    else: request["targets"] = object()
+    try:
+        with pytest.raises(HostControlError): validate_native_original_operations_request(request)
+        with pytest.raises(HostControlError): client.prepare_original_native_operations(submission, request)
+    finally:
+        client.close(); assert reader.read() == b""; reader.close(); writer.close()
+
+
 def test_authenticated_event_retention_is_pending_and_does_not_submit_work():
     client, reader, writer = pipes()
     event = source_event()
@@ -87,7 +196,7 @@ def test_authenticated_event_reply_cannot_replace_original():
     writer.close()
 
 
-@pytest.mark.parametrize("state", ["operations_cancelled", "operation_grant_revoked", "operations_cancelled_cleanup_pending"])
+@pytest.mark.parametrize("state", ["operations_cancelled", "operations_cancelled_cleanup_pending", "operation_grant_revoked", "settled"])
 def test_original_cancellation_reports_durable_disposition_not_legacy_grant_revoke(state):
     client, reader, writer = pipes()
     original = original_for(source_event())
@@ -95,10 +204,10 @@ def test_original_cancellation_reports_durable_disposition_not_legacy_grant_revo
         pending = executor.submit(client.cancel_original_operation, original)
         request = receive(reader)
         respond(writer, request, {"kind": "original_operation_cancelled", "original": dataclasses.asdict(original), "state": state})
-        if state == "operations_cancelled":
+        if state in ("operations_cancelled", "operations_cancelled_cleanup_pending"):
             result = pending.result(timeout=2)
             assert result.original == original
-            assert result.state == "operations_cancelled"
+            assert result.state == state
         else:
             with pytest.raises(HostControlError, match="cancellation response was rejected"):
                 pending.result(timeout=2)

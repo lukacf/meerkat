@@ -1,7 +1,7 @@
 # Google Calendar Events operations
 
 Import `GoogleCalendarOperations` from `@rkat/toolkit/connectors/google-calendar`.
-This Node 22+ ESM connector adds no dependency. It uses the existing host-selected
+This Node 22.12.0+ ESM connector adds no dependency. It uses the existing host-selected
 authenticated Fetch convention and shared strict JSON utility.
 
 ```ts

@@ -30,6 +30,8 @@ pub(crate) mod public;
 pub(crate) use application::compose_application_policy_requests;
 #[cfg(all(unix, feature = "console"))]
 pub(crate) use application::compose_selected_policy_requests;
+#[cfg(all(unix, feature = "console"))]
+pub(crate) use application::{ServicePolicySource, compose_shared_public_requests};
 #[cfg(test)]
 mod tests;
 
@@ -510,11 +512,19 @@ impl RequestTool {
         if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
             current = refreshed;
         }
-        let task = task.map_err(|error| match error {
-            toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => unavailable(),
-            toolkit_mobkit::private_originals::PrivateOriginalError::Conflict
-            | toolkit_mobkit::private_originals::PrivateOriginalError::Denied => {
-                ToolError::access_denied(call.name)
+        let task = task.map_err(|error| {
+            use toolkit_mobkit::{
+                installed_host::acquisition::ServiceTaskError,
+                private_originals::PrivateOriginalError,
+            };
+            match error {
+                ServiceTaskError::Refused(PrivateOriginalError::Unavailable) => unavailable(),
+                ServiceTaskError::Refused(
+                    PrivateOriginalError::Conflict | PrivateOriginalError::Denied,
+                ) => ToolError::access_denied(call.name),
+                ServiceTaskError::ReprepareRequired(refusal) => {
+                    ServiceTaskError::reprepare_required(refusal)
+                }
             }
         })?;
         if let Some(task) = &task {

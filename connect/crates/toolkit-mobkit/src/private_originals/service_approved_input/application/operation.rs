@@ -347,8 +347,10 @@ impl PreparedApplicationServiceInstruction {
             .map_err(|_| PrivateOriginalError::Denied)?;
         let retained_login = Arc::new(Mutex::new(login_reservation));
         let worker_login = retained_login.clone();
+        let workflow_task = task.clone();
         let current: ServiceOperationCurrent = Arc::new(move || {
             let _actual_login_custody = &worker_login;
+            workflow_task.workflow_effect_current()?;
             reservation.check_current()?;
             administrator.check_current()?;
             if !invocation() {
@@ -545,17 +547,20 @@ impl InstalledServiceTask {
             ApplicationServicePreparation::Prepared(prepared) => prepared,
         };
         if shared.retired.load(Ordering::Acquire) {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.retired_before_reserve"}}"#
+            );
             return Err(ServiceOperationError::Cancelled);
         }
-        let (_, _, authorizer) = policy
-            .parent_provisioning
-            .as_ref()
-            .ok_or(PrivateOriginalError::Denied)?;
-        let (_, parent) = prepared
-            .parent_provisioning
-            .as_mut()
-            .ok_or(PrivateOriginalError::Denied)?;
-        let proposal = parent.authorization_proposal()?;
+        let (_, _, authorizer) = policy.parent_provisioning.as_ref().ok_or(PrivateOriginalError::Denied)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.authorizer_absent"}}"#))?;
+        let (_, parent) = prepared.parent_provisioning.as_mut().ok_or(PrivateOriginalError::Denied)
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.parent_absent"}}"#))?;
+        let proposal = parent.authorization_proposal().inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.proposal"}}"#
+            )
+        })?;
         shared.observation.send_modify(|observed| {
             observed.parent_issuance_id = Some(proposal.issuance_id.clone())
         });
@@ -569,9 +574,16 @@ impl InstalledServiceTask {
         // Retirement keeps driving reserve until its actual producer settles.
         // It does not drop that future or mistake an answer for completion.
         if shared.retired.load(Ordering::Acquire) {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.retired_after_reserve"}}"#
+            );
             return Err(ServiceOperationError::Cancelled);
         }
-        let reservation = match authorization? {
+        let reservation = match authorization.inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.reserve"}}"#
+            )
+        })? {
             ServiceParentAuthorization::RequiresHuman => {
                 return Ok(ApplicationServicePreparation::RequiresHuman);
             }
@@ -579,23 +591,43 @@ impl InstalledServiceTask {
         };
         // An awaited answer does not bypass current source, service authority,
         // administrative authority or the original exact proposal binding.
-        prepared.task.current().await?;
-        policy.check(&prepared.task)?;
-        prepared.reservation.check_current()?;
-        reservation.check_current()?;
+        prepared.task.current().await.inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.current"}}"#
+            )
+        })?;
+        policy.check(&prepared.task).inspect_err(|_| {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.policy"}}"#
+            )
+        })?;
+        prepared.reservation.check_current()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.policy_reservation"}}"#))?;
+        reservation.check_current()
+            .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.parent_reservation"}}"#))?;
         if shared.retired.load(Ordering::Acquire) {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.retired_after_checks"}}"#
+            );
             return Err(ServiceOperationError::Cancelled);
         }
         if reservation.operator() != &proposal.operator
             || reservation.rule() != &proposal.rule
             || reservation.proposal_sha256() != proposal.proposal_sha256()?
         {
+            eprintln!(
+                r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.reservation_binding"}}"#
+            );
             return Err(PrivateOriginalError::Denied.into());
         }
         match (&proposal.tool_policy, reservation.tool_policy_approval()) {
-            (None, None) => {}
-            (Some(proposal), Some(approval)) => approval.check(proposal)?,
-            _ => return Err(PrivateOriginalError::Denied.into()),
+            (None, None) => {},
+            (Some(proposal), Some(approval)) => approval.check(proposal)
+                .inspect_err(|_| eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.tool_policy_approval"}}"#))?,
+            _ => {
+                eprintln!(r#"{{"event":"toolkit_shared_dispatch_refused","stage":"service.owned.tool_policy_binding"}}"#);
+                return Err(PrivateOriginalError::Denied.into());
+            }
         }
         parent.authorize(ServiceParentAuthorizationEvidence {
             proposal_sha256: reservation.proposal_sha256().to_owned(),

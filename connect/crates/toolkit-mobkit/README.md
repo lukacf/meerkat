@@ -50,12 +50,14 @@ It exercises this crate's actual discovery dispatcher, not a MobKit member or
 setup-agent continuation.
 
 From the repository root, explicitly select the
-[native candidate workspace](../../native-candidate/README.md) and retain the
-existing patch map and lock. These local development prerequisites do not
-establish a released native integration:
+[native candidate workspace](../../native-candidate/README.md) and its checked-in
+lock. The current manifest selects the development sources described in
+[the build guide](../../BUILDING.md); do not overlay the historical discovery
+run's patch configuration. These local development prerequisites do not establish
+a released native integration:
 
 ```sh
-./scripts/repo-cargo test --manifest-path native-candidate/Cargo.toml --config docs/reviews/native-mobkit-propagation-verification/upstream-patches.toml --locked -p toolkit-mobkit --test discovery
+./scripts/repo-cargo test --manifest-path native-candidate/Cargo.toml --locked -p toolkit-mobkit --test discovery
 ```
 
 See the [library contract](../toolkit-package/integrations/README.md),
@@ -67,35 +69,49 @@ usable-account verification remain required work.
 ## Acquisition admission
 
 `FindAndInstallTool` advertises one mutating tool, `find_and_install`, for
-explicitly selected agents. **Current production dispatch returns unavailable
-before host admission, reference resolution or storage access.** Native request
-custody, conditional worker publication and runtime continuation are unfinished.
-The private protocol fixtures do not remove this production refusal.
+explicitly selected agents. Direct construction with `FindAndInstallTool::new`
+retains standalone protocol dependencies but cannot enroll an installed native
+owner. Its context-aware production dispatch returns unavailable before host
+admission, reference resolution or storage access. Context-free dispatch refuses
+access.
+
+On Unix with `native-host`, the installed path uses
+[`InstalledAcquisitionTools`](src/installed_host/acquisition/enrollment.rs).
+The host's installed acquisition must adopt those exact dispatcher objects and
+retain their owner and bound native runtime. Constructing the tools does not
+register a bundle or grant permission; an unbound, retired or dropped owner
+cannot serve calls. The [dispatcher](src/lib.rs) enters the exact reviewed effect
+once before host admission and carries the entered native operation through
+acquisition and worker advancement. This implemented source path still requires
+the native and installed qualification described in [the build guide](../../BUILDING.md).
+The standalone protocol fixtures do not qualify that path.
 
 The model supplies original request text, supplied context and labeled
 observations. Strict deserialization rejects authority, routing, package,
 backend and correlation fields, including nested authority claims. Integration
 selection belongs to setup agents.
 
-The retained protocol requires `SetupToolHost::admit_invocation` on every call,
-including replay. Its application implementation must authenticate the actual
+Host admission uses `SetupToolHost::admit_invocation`, including on replay. Its
+application implementation must authenticate the actual
 runtime invocation, original interaction/task custody, selected optional
 capability and current requester ceiling. Public IDs, model call IDs and old
 snapshots cannot establish those facts. Exact retry correlation survives a lost
 reply while current permission is checked again.
 
 A successful protocol admission commits the acquisition and work-admission
-handoff before replying. Its reply contains only operation ID, generated
-revision/phase and whether this invocation created the operation. Admission is
-not setup completion, worker launch or business-task execution. A timeout can
+handoff before replying. The reply identifies the operation, generated
+revision/phase and whether this invocation created the operation. Installed
+dispatch can also return a worker observation and, when recorded by the
+acquisition, an observation that the approved follow-up instruction was admitted.
+The agent reports its business-task result separately. An admission receipt alone
+does not prove setup completion, worker launch or task success. A timeout can
 race a durable commit, so an exact retry recovers the same operation rather than
 creating another. Expired missing requests cannot create work; historical
 recovery does not restore effect permission.
 
-The isolated MobKit worktree adds
+The historical native fixtures use
 `MobBootstrapSpec::register_tool_bundle("toolkit", dispatcher)` and profile
-selection through `tools.rust_bundles`. Those APIs are development changes, not
-a published release. The recorded
+selection through `tools.rust_bundles`. The recorded
 [twelve-test native fixture](../../docs/reviews/mobkit-child-native-fixture/verification/20260929T222850.900201Z/manifest.json)
 checks selected-profile visibility, child inheritance, revival and explicit setup
 refusal through real local runtime and SQLite sessions. The separate
@@ -103,6 +119,7 @@ refusal through real local runtime and SQLite sessions. The separate
 checks actual recipe dispatch, hidden controls and retained history across revival
 and cold bootstrap with a deterministic LLM. Both pass strict fixture and actual
 MobKit library lint. Earlier successful setup admission/replay remains historical
-protocol evidence. Authenticated native invocation, setup-team launch and
-original-task continuation remain unfinished; no current result certifies a
-connected account or frontend.
+protocol evidence. These fixtures predate the current installed-owner path and
+do not qualify its authenticated invocation, setup-team launch or original-task
+continuation. Current qualification remains pending; no source description or
+historical fixture result certifies a connected account or frontend.

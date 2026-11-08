@@ -146,11 +146,24 @@ enum StartDisposition {
     Start,
     Obsolete,
 }
+#[derive(Clone)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one target per open console review, held in its Active entry"
+)]
+enum ReviewTarget {
+    Agent(InstalledServiceTask),
+    Member,
+}
+struct OperatorDecision {
+    reservation: toolkit_mobkit::private_host::ConsoleLoginReservation,
+    current: DecisionCheck,
+}
 struct Active {
     id: u64,
     software: bool,
     credential_review: bool,
-    task: InstalledServiceTask,
+    target: ReviewTarget,
     login: ConsoleLoginHandle,
     start: Mutex<Option<oneshot::Sender<StartDisposition>>>,
     prompt: Mutex<Option<Exchange>>,
@@ -167,7 +180,7 @@ struct Action {
     headers: HeaderMap,
     uri: Uri,
     login: ConsoleLoginHandle,
-    task: InstalledServiceTask,
+    target: ReviewTarget,
     identity: Arc<OnceLock<meerkat_mobkit::identity_first::AgentIdentity>>,
 }
 impl Action {
@@ -192,8 +205,11 @@ impl Action {
         Some(viewer)
     }
     async fn check(&self) -> Result<(), ConnectError> {
-        let identity = self
-            .task
+        let ReviewTarget::Agent(task) = &self.target else {
+            self.operator_current()?;
+            return Ok(());
+        };
+        let identity = task
             .check_console_viewer(&|| self.current(), &self.login)
             .await
             .map_err(|_| unavailable())?;
@@ -204,6 +220,62 @@ impl Action {
         }
         self.current().ok_or_else(unavailable)?;
         Ok(())
+    }
+    fn operator_current(&self) -> Result<ConsoleViewerContext, ConnectError> {
+        if !matches!(self.target, ReviewTarget::Member) {
+            return Err(unavailable());
+        }
+        let viewer = self.current().ok_or_else(unavailable)?;
+        if viewer.service_identity
+            || viewer
+                .human
+                .as_ref()
+                .is_none_or(|human| human.current().is_err())
+            || viewer
+                .access_view
+                .as_ref()
+                .is_none_or(|view| !view.can_administer())
+        {
+            return Err(unavailable());
+        }
+        Ok(viewer)
+    }
+    fn operator_decision(&self) -> Result<OperatorDecision, ConnectError> {
+        let viewer = self.operator_current()?;
+        let human = viewer.human.clone().ok_or_else(unavailable)?;
+        let principal = human.principal().map_err(|_| unavailable())?;
+        let scope = human.login_scope().ok_or_else(unavailable)?.to_owned();
+        let action = self.clone();
+        let current: DecisionCheck = Arc::new(move || {
+            // Native issuance already holds its existing owner fence. Recheck
+            // this accepted carrier directly, without current_login or another
+            // with_credential_entry fence, and without holding the login mutex.
+            let Ok(subject) = human.current() else {
+                return false;
+            };
+            let Some(viewer) = action.viewer.resolve(&action.headers, &action.uri) else {
+                return false;
+            };
+            action.login.check().is_ok()
+                && !viewer.service_identity
+                && viewer.human.as_ref() == Some(&human)
+                && human.principal().ok().as_ref() == Some(&principal)
+                && human.login_scope() == Some(scope.as_str())
+                && viewer.principal.as_ref() == Some(&subject)
+                && viewer
+                    .access_view
+                    .as_ref()
+                    .is_some_and(|view| view.can_administer())
+        });
+        let reservation = self.login.try_reserve().map_err(|_| unavailable())?;
+        if !current() {
+            reservation.settled();
+            return Err(unavailable());
+        }
+        Ok(OperatorDecision {
+            reservation,
+            current,
+        })
     }
     fn administration_check(&self) -> Result<crate::installed_service_review::account_request::credentials::administration::AdministrationCheck, ConnectError>{
         // Capture only the already accepted action, before any native wait.
@@ -370,7 +442,10 @@ impl ConsoleSetup {
         if active.start.lock().map_err(|_| unavailable())?.is_none() {
             return Ok(false);
         }
-        let terminal = matches!(active.task.console_terminal().await, Ok(true));
+        let terminal = match &active.target {
+            ReviewTarget::Agent(task) => matches!(task.console_terminal().await, Ok(true)),
+            ReviewTarget::Member => false,
+        };
         if !terminal {
             return Ok(false);
         }
@@ -395,17 +470,42 @@ impl ConsoleSetup {
     /// task was captured from its actual borrowed native dispatch, not HTTP.
     pub(crate) async fn present_software(
         &self,
+        prompt: ApprovalPrompt,
+        closed: &PrivateHostClosed,
+    ) -> Result<ApprovalPromptOutcome, ConnectError> {
+        self.present_approval(prompt, closed, None, &mut None).await
+    }
+    async fn present_approval(
+        &self,
         mut prompt: ApprovalPrompt,
         closed: &PrivateHostClosed,
+        operator: Option<(
+            toolkit_mobkit::installed_host::member_mcp_consumer::MemberMcpAdmissionSelection,
+            ConsoleLoginHandle,
+        )>,
+        operator_decision: &mut Option<OperatorDecision>,
     ) -> Result<ApprovalPromptOutcome, ConnectError> {
         // Only failure of shared presentation custody escapes as an owner
         // error. Missing or stale facts of this exact request remain local.
         self.reclaim_terminal().await?;
-        let Some(task) = prompt.console_task().cloned() else {
-            return Ok(ApprovalPromptOutcome::Refused(unavailable()));
-        };
-        let Some(login) = task.console_login().cloned() else {
-            return Ok(ApprovalPromptOutcome::Refused(unavailable()));
+        let (target, login) = match operator {
+            Some((_, login)) => {
+                if prompt.record().owner != meerkat_core::ApprovalOwnerRef::Runtime
+                    || prompt.console_task().is_some()
+                {
+                    return Ok(ApprovalPromptOutcome::Refused(unavailable()));
+                }
+                (ReviewTarget::Member, login)
+            }
+            None => {
+                let Some(task) = prompt.console_task().cloned() else {
+                    return Ok(ApprovalPromptOutcome::Refused(unavailable()));
+                };
+                let Some(login) = task.console_login().cloned() else {
+                    return Ok(ApprovalPromptOutcome::Refused(unavailable()));
+                };
+                (ReviewTarget::Agent(task), login)
+            }
         };
         if login.check().is_err() {
             return Ok(ApprovalPromptOutcome::Refused(unavailable()));
@@ -424,7 +524,7 @@ impl ConsoleSetup {
             id,
             software: true,
             credential_review: false,
-            task,
+            target,
             login: login.clone(),
             start: Mutex::new(Some(pending)),
             prompt: Mutex::new(None),
@@ -490,18 +590,30 @@ impl ConsoleSetup {
                 Err(_) => return Ok(ApprovalPromptOutcome::Refused(unavailable())),
             };
             if let Err(error) = action.check().await { return Ok(ApprovalPromptOutcome::Refused(error)); }
-            let current = match action.decision_check() {
-                Ok(current) => current,
-                Err(error) => return Ok(ApprovalPromptOutcome::Refused(error)),
-            };
             let PromptAnswer::Approval { decision } = answer else { return Ok(ApprovalPromptOutcome::Refused(unavailable())); };
-            if let Err(error) = prompt.decide_console(match decision {
+            let decision = match decision {
                 crate::stdio::wire::Decision::Approve => meerkat_core::ApprovalDecision::Approve,
                 crate::stdio::wire::Decision::Deny => meerkat_core::ApprovalDecision::Deny,
-            }, current) {
-                // A native write error can follow a recorded decision. Keep
-                // its existing owner and never claim that no effect occurred.
-                return Ok(ApprovalPromptOutcome::Refused(error));
+            };
+            match &action.target {
+                ReviewTarget::Agent(_) => {
+                    let current = match action.decision_check() {
+                        Ok(current) => current, Err(error) => return Ok(ApprovalPromptOutcome::Refused(error)),
+                    };
+                    if let Err(error) = prompt.decide_console(decision, current) {
+                        return Ok(ApprovalPromptOutcome::Refused(error));
+                    }
+                }
+                ReviewTarget::Member => {
+                    let entry = match action.operator_decision() {
+                        Ok(entry) => entry, Err(error) => return Ok(ApprovalPromptOutcome::Refused(error)),
+                    };
+                    if let Err(error) = prompt.decide_operator(decision, entry.current.clone()) {
+                        entry.reservation.uncertain();
+                        return Ok(ApprovalPromptOutcome::Refused(error));
+                    }
+                    *operator_decision = Some(entry);
+                }
             }
             // The existing Attempt now retains the decision predicate before
             // waking dispatch. Its own reservation spans physical settlement;
@@ -528,6 +640,51 @@ impl ConsoleSetup {
             },
         }
     }
+    pub(crate) async fn review_member(
+        &self,
+        approvals: crate::approval::LocalApprovals,
+        mut presenter: ApprovalPresenter,
+        selection: toolkit_mobkit::installed_host::member_mcp_consumer::MemberMcpAdmissionSelection,
+        login: ConsoleLoginHandle,
+        request: meerkat_core::ApprovalRequest,
+        closed: PrivateHostClosed,
+    ) -> Result<toolkit_mobkit::installed_host::member_mcp_consumer::MemberMcpApproval, ConnectError>
+    {
+        let cancellation = async {
+            tokio::select! { _ = closed.wait_closed() => {}, _ = login.closed() => {} }
+        };
+        let review = approvals.review_operator_access(request, cancellation);
+        tokio::pin!(review);
+        let prompt = tokio::select! { biased;
+            result = &mut review => return Err(result.err().unwrap_or_else(unavailable)),
+            prompt = presenter.next() => prompt.ok_or_else(unavailable)?,
+        };
+        let mut decision = None;
+        // Both futures keep their existing cancellation/deadline owners. A
+        // retired approval closes its prompt; a dropped prompt retires review.
+        let (approval, outcome) = tokio::join!(
+            &mut review,
+            self.present_approval(
+                prompt,
+                &closed,
+                Some((selection, login.clone())),
+                &mut decision
+            )
+        );
+        if !matches!(outcome?, ApprovalPromptOutcome::Continue) {
+            return Err(unavailable());
+        }
+        let approval = approval?;
+        let entry = decision.take().ok_or_else(unavailable)?;
+        Ok(
+            toolkit_mobkit::installed_host::member_mcp_consumer::MemberMcpApproval {
+                approval,
+                reservation: entry.reservation,
+                current: entry.current,
+            },
+        )
+    }
+
     pub(crate) async fn present(
         &self,
         accounts: &mut InstalledAccountRequests,
@@ -612,7 +769,7 @@ impl ConsoleSetup {
             id,
             software: false,
             credential_review: credentials.is_some(),
-            task,
+            target: ReviewTarget::Agent(task),
             login: login.clone(),
             start: Mutex::new(Some(start)),
             prompt: Mutex::new(None),

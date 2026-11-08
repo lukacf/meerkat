@@ -26689,8 +26689,10 @@ async fn cancel_after_boundary_reentrant_boundary_handle_converges_in_one_dispat
 /// The live callback runs without the session mutation gate, so unrelated
 /// machine inputs may commit while it is in flight. That state movement is
 /// not evidence that this cancel reached a boundary: the exact dispatch still
-/// completes, once, through the live handle, and nothing reaches the
-/// executor-wide cancel after the run.
+/// completes, once, through the live handle, its dispatch stays pending for
+/// the rest of the run (the fact that keeps a repeat cancel in the run from
+/// dispatching again), and nothing reaches the executor-wide cancel after
+/// the run.
 #[tokio::test]
 async fn cancel_after_boundary_unrelated_advance_during_callback_still_dispatches_once() {
     let mut race = start_boundary_cancel_callback_race(false).await;
@@ -26729,6 +26731,14 @@ async fn cancel_after_boundary_unrelated_advance_during_callback_still_dispatche
         race.handle_calls.load(Ordering::SeqCst),
         1,
         "unrelated state movement must not cause a duplicate live dispatch"
+    );
+    assert!(
+        race.adapter
+            .session_dsl_state(&race.session_id)
+            .await
+            .expect("running session should retain DSL authority")
+            .boundary_cancel_dispatch_pending,
+        "the unrelated advance leaves the delivered dispatch pending for the rest of the run"
     );
 
     race.first_apply_release

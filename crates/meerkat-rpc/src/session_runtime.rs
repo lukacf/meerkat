@@ -21238,6 +21238,74 @@ mod tests {
         .await;
     }
 
+    /// The same executor contract for the RPC crate's other executor, the
+    /// one mob-owned bridge sessions get: attached with its runtime, as the
+    /// RPC session runtime attaches it, a boundary cancel the runtime loop
+    /// applies while no run is active is a no-op.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_rpc_runtime_executor_idle_boundary_cancel_conformance() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let service = runtime.session_service();
+        let session_id = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create a mob-capable session without a turn")
+            .session_id;
+        service
+            .start_turn(
+                &session_id,
+                service_start_turn_request("materialize the session"),
+            )
+            .await
+            .expect("materialize the session");
+        let actor_witness = runtime
+            .mob_actor_witness(&session_id)
+            .expect("the session's live actor authority");
+        let runtime_for_factory = Arc::clone(&runtime);
+        let _attachment = match runtime
+            .runtime_adapter
+            .ensure_session_with_executor_factory(session_id.clone(), move |witness| {
+                let executor = crate::session_executor::MobRpcRuntimeExecutor::new(
+                    Arc::clone(&service),
+                    Some(Arc::clone(&runtime_for_factory)),
+                    actor_witness,
+                    crate::router::NotificationSink::noop(),
+                );
+                runtime_for_factory.record_runtime_publication_handle(
+                    witness,
+                    executor.replaceable_publication_handle(),
+                    RpcPublicationOwner::Mob {
+                        session_service: service,
+                    },
+                );
+                Box::new(executor) as Box<dyn CoreExecutor>
+            })
+            .await
+            .expect("prepare the mob RPC executor attachment")
+        {
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending) => pending
+                .commit()
+                .await
+                .expect("commit the mob RPC executor attachment"),
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(_) => {
+                panic!("the session must begin without an executor attachment")
+            }
+        };
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime.runtime_adapter(),
+            &session_id,
+        )
+        .await;
+    }
+
     fn mock_build_config() -> AgentBuildConfig {
         AgentBuildConfig {
             llm_client_override: Some(Arc::new(MockLlmClient)),

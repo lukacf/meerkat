@@ -651,11 +651,13 @@ async fn an_uncatalogued_id_with_thinking_omitted_survives_a_tools_change() {
     let (account, client, server) = spawn_account().await;
     let (_, second) = session_across_a_tools_change(&client, model, |request| request).await;
     let sent = account.last();
+    let requests = account.all().len();
     server.abort();
     assert!(
         second.succeeded(),
         "the turn after the tools change completes: {second:?}"
     );
+    assert_eq!(requests, 2, "one request a turn, none refused");
     assert!(sent.body.get("thinking").is_none(), "{}", sent.body);
     assert!(!sent.carries_binding_beta(), "{:?}", sent.betas);
     assert_eq!(replayed_thinking_blocks(&sent.body), 0, "{}", sent.body);
@@ -983,11 +985,17 @@ async fn a_route_without_the_control_survives_a_tools_change_between_turns() {
         .chain(["claude-mythos-5-1"])
     {
         for (label, shape) in shapes {
+            let before = account.all().len();
             let (_, second) = session_across_a_tools_change(&client, model, shape).await;
             let sent = account.last();
             assert!(
                 second.succeeded(),
                 "{model}, {label}: the turn after the tools change completes: {second:?}"
+            );
+            assert_eq!(
+                account.all().len() - before,
+                2,
+                "{model}, {label}: one request a turn, none refused"
             );
             assert!(
                 sent.body["thinking"].get("block_binding").is_none(),
@@ -1177,6 +1185,7 @@ async fn direct_requests_that_cannot_carry_the_control_survive_a_tools_change() 
         )
         .await;
         assert!(first.succeeded(), "{model}: {first:?}");
+        let before = account.all().len();
         let second = run(
             &client,
             &LlmRequest::new(
@@ -1191,6 +1200,11 @@ async fn direct_requests_that_cannot_carry_the_control_survive_a_tools_change() 
         assert!(
             second.succeeded(),
             "{model}: the turn after the tools change completes: {second:?}"
+        );
+        assert_eq!(
+            account.all().len() - before,
+            1,
+            "{model}: one request, none refused"
         );
         assert_eq!(
             sent.body["thinking"],

@@ -3227,6 +3227,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `SurfaceStageAddRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SurfaceStageGatedAddIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `SurfaceStageRemoveIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6383,6 +6392,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReplaceToolGrantGateStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyToolGrantOpenSetChangedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9412,6 +9451,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `tool_grant_open_names_are_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_not_mounted_are_not_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_ungated_servers_are_not_gated`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

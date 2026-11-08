@@ -376,7 +376,7 @@
       "result_type": "HelpResponse"
     },
     {
-      "description": "Grant a session's or a mob member identity's grant-gated tool name or built-in tool family for a bounded window",
+      "description": "Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window",
       "name": "tool_grants/grant",
       "params_type": "GrantToolParams",
       "result_type": "GrantToolResult"

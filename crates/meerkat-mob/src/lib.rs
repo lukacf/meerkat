@@ -475,6 +475,8 @@ pub use runtime::{
     MemberDestinationSelection, MemberRuntimeBuildIdentity, MemberRuntimeRegistrationHook,
 };
 pub use runtime::{MemberRespawn, MemberRotationRecord, ReleaseOutcome, RotationTarget};
+#[cfg(feature = "runtime-adapter")]
+pub use runtime::{MemberToolGrant, MemberToolGrantError};
 pub use runtime::{MobBeforeActivation, MobLifecycleObservation, MobReadHandle};
 pub use runtime::{MobpackCallableConfig, MobpackRunOutcome, MobpackRunSpec};
 pub use runtime::{SpawnBasePromptSource, StaticSpawnBasePromptSource};

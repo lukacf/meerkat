@@ -326,6 +326,9 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # mob_operator_grant_audit.sh requires each of its seven reachability
 # witnesses violated, and with --mutants each seeded defect's property or
 # invariant.
+# tool_grant_gate_audit.sh requires each of its ten reachability witnesses
+# violated, and with --mutants each of its nine seeded defects' property or
+# invariant.
 # generation_highwater_audit.sh requires each of its six reachability
 # witnesses violated, the success line for its reset run and its reset
 # witness violated, and with --mutants each seeded defect's property or
@@ -550,6 +553,22 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessResolveCleared is violated."' \
   'echo "Error: Action property AuditRebindDropsTheOtherScope is violated."' \
   'echo "Error: Invariant mob_operator_scopes_are_bound_to_an_incarnation is violated."' \
+  'echo "Error: Invariant NotAuditWitnessGatedServer is violated."' \
+  'echo "Error: Invariant NotAuditWitnessIgnoredName is violated."' \
+  'echo "Error: Invariant NotAuditWitnessModeWithUngated is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendChanged is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendUnchanged is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendByMode is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExtendGatedIgnored is violated."' \
+  'echo "Error: Invariant NotAuditWitnessOpenedExtended is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStagedNamed is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStagedByMode is violated."' \
+  'echo "Error: Action property AuditExtendNeverOpens is violated."' \
+  'echo "Error: Action property AuditExtendOnlyForGatedServers is violated."' \
+  'echo "Error: Action property AuditGatedStageOnlyStagesGatedServers is violated."' \
+  'echo "Error: Invariant tool_grant_open_names_are_gated is violated."' \
+  'echo "Error: Invariant tool_grant_not_mounted_are_not_gated is violated."' \
+  'echo "Error: Invariant tool_grant_ungated_servers_are_not_gated is violated."' \
   'echo "Error: Invariant NotAuditWitnessRecorded is violated."' \
   'echo "Error: Invariant NotAuditWitnessRaised is violated."' \
   'echo "Error: Invariant NotAuditWitnessSealedWithHighwater is violated."' \

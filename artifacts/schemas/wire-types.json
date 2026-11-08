@@ -113555,6 +113555,31 @@
         ],
         "type": "object"
       },
+      "WireToolGrantApplies": {
+        "description": "Whether an identity grant applies to the member's running build.",
+        "oneOf": [
+          {
+            "const": "now",
+            "description": "The identity's live member build runs a gate that covers the target\n(for a gated MCP server the member's profile configures, the build\nholds the server too).",
+            "type": "string"
+          },
+          {
+            "const": "not_mounted",
+            "description": "The target is not mounted: the live build ignored it, or, with no\nlive build, the next build cannot mount it.",
+            "type": "string"
+          },
+          {
+            "const": "at_next_build",
+            "description": "The member's next build applies it: the member is not live here, its\nlive build predates the gate that covers the target, or the target is\na gated MCP server the member's profile configures that the live\nbuild left unattached.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a value this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
       "WireToolGrantIssuer": {
         "description": "Who issued a grant.",
         "oneOf": [
@@ -113707,7 +113732,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -113751,6 +113776,32 @@
             "type": "object"
           },
           {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
             "properties": {
               "kind": {
@@ -113769,6 +113820,17 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`tool_grants/grant` result.",
     "properties": {
+      "applies": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireToolGrantApplies"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For an identity grant: whether it applies to the member's running\nbuild now. Advisory: the grant is issued either way."
+      },
       "grant": {
         "$ref": "#/$defs/WireToolGrant"
       }
@@ -117113,6 +117175,30 @@
   },
   "ListToolGrantsResult": {
     "$defs": {
+      "WireMemberToolGrantGate": {
+        "description": "A mob member identity's tool grant gate, as `tool_grants/list` answers\nit: what its live build runs, and what its next build resolves.",
+        "properties": {
+          "next_build": {
+            "$ref": "#/$defs/WireToolGrantGateView",
+            "description": "The gate the member's next build resolves: its own gate joined with\nits role's current gate."
+          },
+          "running": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireToolGrantGateView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the identity's live member build gates now (its gated names\nunder `tools`, with its gated servers and the unconfigured-servers\nmode) and the names it ignored as not mounted; `null` when no build\nof the member is live on this server."
+          }
+        },
+        "required": [
+          "next_build"
+        ],
+        "type": "object"
+      },
       "WireToolGrant": {
         "description": "One scoped tool grant.",
         "properties": {
@@ -117168,6 +117254,51 @@
           "issued_at_ms",
           "expires_at_ms"
         ],
+        "type": "object"
+      },
+      "WireToolGrantGateEntries": {
+        "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Whether every MCP server the build does not configure itself is\ngated.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "WireToolGrantGateView": {
+        "description": "A build's tool grant gate: what it gates, and the role entries it\nignores as not mounted (never gated, never open).",
+        "properties": {
+          "gated": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          },
+          "not_mounted": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          }
+        },
         "type": "object"
       },
       "WireToolGrantIssuer": {
@@ -117322,7 +117453,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -117366,6 +117497,32 @@
             "type": "object"
           },
           {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
             "properties": {
               "kind": {
@@ -117400,6 +117557,17 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`tool_grants/list` result. Due grants are settled as expired first.",
     "properties": {
+      "gate": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMemberToolGrantGate"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For an identity subject: the member's gate, running and next build.\nAdvisory."
+      },
       "grants": {
         "items": {
           "$ref": "#/$defs/WireToolGrant"
@@ -128549,10 +128717,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -128564,6 +128739,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -137298,10 +137477,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -137313,6 +137499,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -138518,10 +138708,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -138533,6 +138730,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -149003,7 +149204,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -149043,6 +149244,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -159579,6 +159806,11 @@
             "type": "string"
           },
           {
+            "const": "build",
+            "description": "A build reading which gated MCP servers a live grant covers.",
+            "type": "string"
+          },
+          {
             "const": "unknown",
             "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
             "type": "string"
@@ -159665,7 +159897,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -159705,6 +159937,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -179129,10 +179387,17 @@
   "WireGrantGatedTools": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+    "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
     "properties": {
       "families": {
         "description": "Built-in tool families, such as `shell`.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "mcp_servers": {
+        "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
         "items": {
           "type": "string"
         },
@@ -179144,6 +179409,10 @@
           "type": "string"
         },
         "type": "array"
+      },
+      "unconfigured_mcp_servers": {
+        "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+        "type": "boolean"
       }
     },
     "title": "WireGrantGatedTools",
@@ -193134,6 +193403,79 @@
     "title": "WireMemberToolDeclaration",
     "type": "object"
   },
+  "WireMemberToolGrantGate": {
+    "$defs": {
+      "WireToolGrantGateEntries": {
+        "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Whether every MCP server the build does not configure itself is\ngated.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "WireToolGrantGateView": {
+        "description": "A build's tool grant gate: what it gates, and the role entries it\nignores as not mounted (never gated, never open).",
+        "properties": {
+          "gated": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          },
+          "not_mounted": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A mob member identity's tool grant gate, as `tool_grants/list` answers\nit: what its live build runs, and what its next build resolves.",
+    "properties": {
+      "next_build": {
+        "$ref": "#/$defs/WireToolGrantGateView",
+        "description": "The gate the member's next build resolves: its own gate joined with\nits role's current gate."
+      },
+      "running": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireToolGrantGateView"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What the identity's live member build gates now (its gated names\nunder `tools`, with its gated servers and the unconfigured-servers\nmode) and the names it ignored as not mounted; `null` when no build\nof the member is live on this server."
+      }
+    },
+    "required": [
+      "next_build"
+    ],
+    "title": "WireMemberToolGrantGate",
+    "type": "object"
+  },
   "WireMobBackendKind": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "enum": [
@@ -194161,10 +194503,17 @@
       },
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -194176,6 +194525,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -195696,10 +196049,17 @@
     "$defs": {
       "WireGrantGatedTools": {
         "additionalProperties": false,
-        "description": "A scoped tool grant gate: the built-in tool families and the tool names a\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA session's build takes it on `session/create` (`grant_gated_tools`); a\nmob profile declares its members' (`tools.grant_gated`). A field this\nversion does not know is refused, never ignored.",
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
         "properties": {
           "families": {
             "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
             "items": {
               "type": "string"
             },
@@ -195711,6 +196071,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
           }
         },
         "type": "object"
@@ -210924,7 +211288,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -210964,6 +211328,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -211041,6 +211431,33 @@
     "title": "WireToolGrant",
     "type": "object"
   },
+  "WireToolGrantApplies": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whether an identity grant applies to the member's running build.",
+    "oneOf": [
+      {
+        "const": "now",
+        "description": "The identity's live member build runs a gate that covers the target\n(for a gated MCP server the member's profile configures, the build\nholds the server too).",
+        "type": "string"
+      },
+      {
+        "const": "not_mounted",
+        "description": "The target is not mounted: the live build ignored it, or, with no\nlive build, the next build cannot mount it.",
+        "type": "string"
+      },
+      {
+        "const": "at_next_build",
+        "description": "The member's next build applies it: the member is not live here, its\nlive build predates the gate that covers the target, or the target is\na gated MCP server the member's profile configures that the live\nbuild left unattached.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a value this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireToolGrantApplies"
+  },
   "WireToolGrantAuditEvent": {
     "$defs": {
       "WireToolGrantExpiryDriver": {
@@ -211054,6 +211471,11 @@
               "read",
               "revoke"
             ],
+            "type": "string"
+          },
+          {
+            "const": "build",
+            "description": "A build reading which gated MCP servers a live grant covers.",
             "type": "string"
           },
           {
@@ -211143,7 +211565,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -211183,6 +211605,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -211531,6 +211979,11 @@
             "type": "string"
           },
           {
+            "const": "build",
+            "description": "A build reading which gated MCP servers a live grant covers.",
+            "type": "string"
+          },
+          {
             "const": "unknown",
             "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
             "type": "string"
@@ -211617,7 +212070,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -211657,6 +212110,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -211717,12 +212196,99 @@
         "type": "string"
       },
       {
+        "const": "build",
+        "description": "A build reading which gated MCP servers a live grant covers.",
+        "type": "string"
+      },
+      {
         "const": "unknown",
         "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
         "type": "string"
       }
     ],
     "title": "WireToolGrantExpiryDriver"
+  },
+  "WireToolGrantGateEntries": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+    "properties": {
+      "families": {
+        "description": "Built-in tool families, such as `shell`.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "mcp_servers": {
+        "description": "MCP server names.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "tools": {
+        "description": "Tool names.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "unconfigured_mcp_servers": {
+        "description": "Whether every MCP server the build does not configure itself is\ngated.",
+        "type": "boolean"
+      }
+    },
+    "title": "WireToolGrantGateEntries",
+    "type": "object"
+  },
+  "WireToolGrantGateView": {
+    "$defs": {
+      "WireToolGrantGateEntries": {
+        "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Whether every MCP server the build does not configure itself is\ngated.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A build's tool grant gate: what it gates, and the role entries it\nignores as not mounted (never gated, never open).",
+    "properties": {
+      "gated": {
+        "$ref": "#/$defs/WireToolGrantGateEntries",
+        "default": {}
+      },
+      "not_mounted": {
+        "$ref": "#/$defs/WireToolGrantGateEntries",
+        "default": {}
+      }
+    },
+    "title": "WireToolGrantGateView",
+    "type": "object"
   },
   "WireToolGrantIssuer": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -211904,7 +212470,7 @@
   },
   "WireToolGrantTarget": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+    "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
     "oneOf": [
       {
         "description": "One tool name.",
@@ -211944,6 +212510,32 @@
         "required": [
           "kind",
           "family"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+        "properties": {
+          "kind": {
+            "const": "mcp_server",
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "server"
         ],
         "type": "object"
       },

@@ -773,6 +773,61 @@ them.
     `grant_gated: WireGrantGatedTools` (omitted when empty).
   - `meerkat_core::service::SessionBuildOptions` and
     `meerkat::AgentBuildConfig` gain `grant_gated_tools_where_mounted`.
+  - The MCP server gate: `meerkat_core::tool_grant::GrantGatedTools` gains
+    `mcp_servers` and `unconfigured_mcp_servers`, and
+    `meerkat_contracts::WireGrantGatedTools` gains the same fields (struct
+    literals need them). `ToolGrantTarget`, `ToolGrantTargetRequest` and
+    `WireToolGrantTarget` gain `McpServer { server, tools }`;
+    `ToolGrantTarget::covers` takes the server that provides the tool, and
+    `ToolGrantCall` gains `server`. `meerkat_contracts::GrantToolResult` gains
+    `applies` and `ListToolGrantsResult` gains `gate`.
+    `meerkat_runtime::tool_grant::ToolGrantExpiryDriver` and
+    `WireToolGrantExpiryDriver` gain `Build`. Both wire enums keep `Unknown`
+    last, so its implicit discriminant moves (`WireToolGrantTarget::Unknown`
+    from 2 to 3, `WireToolGrantExpiryDriver::Unknown` from 5 to 6): code
+    that casts the variant to a number must follow.
+  - `meerkat_core::tool_grant::SessionToolGrants::open_names` takes a
+    `GatedToolView` (the gate as the machine records it after the boundary's
+    extension, and the names each gated server provides now) instead of a
+    `GatedToolTable`, and `admit_call` no longer takes the table: the dispatch
+    gate decides that a call is gated before it asks. The trait gains the
+    defaulted `granted_servers`. `ToolGrantGate::new` takes the build's
+    `InstalledToolGrantGate` and its `GeneratedToolVisibilityOwner` instead of
+    a `GatedToolTable`; `ToolGrantGate::table` is now `install`, and
+    `is_gated` and `open_names` take the call's provenance and the view.
+  - `meerkat_core::ToolVisibilityOwner::replace_tool_grant_gate`,
+    `GeneratedToolVisibilityOwner::replace_tool_grant_gate` and
+    `ToolScope::replace_tool_grant_gate` take an `InstalledToolGrantGate`
+    instead of a name set; the trait gains the defaulted
+    `extend_tool_grant_gate`. `meerkat_core::SessionToolVisibilityState` gains
+    `tool_grant_gated_servers`, `tool_grant_gates_unconfigured_servers`,
+    `tool_grant_ungated_servers` and `tool_grant_not_mounted_names` (struct
+    literals need them). `ExternalToolSurfaceHandle` gains the defaulted
+    `stage_gated_add`.
+  - MeerkatMachine: `ReplaceToolGrantGate` carries the gated servers, the
+    unconfigured-servers mode, the ungated servers and the names a build
+    ignored as not mounted beside the gated names
+    (`MeerkatMachineInput::ReplaceToolGrantGate` of meerkat-machine-schema
+    and meerkat-runtime, and the kernel's `ReplaceToolGrantGate`, gain
+    `gated_servers`, `gates_unconfigured_servers`, `ungated_servers` and
+    `not_mounted_names`); the machine gains the `ExtendToolGrantGate` and
+    `SurfaceStageGatedAdd` inputs, four state fields (`MeerkatMachineState`
+    of meerkat-machine-schema and meerkat-runtime, and the kernel
+    `generated::meerkat::State`, gain `tool_grant_gated_servers`,
+    `tool_grant_gates_unconfigured_servers`, `tool_grant_ungated_servers` and
+    `tool_grant_not_mounted_names`; struct literals need them) and the
+    invariants `tool_grant_not_mounted_are_not_gated` and
+    `tool_grant_ungated_servers_are_not_gated`. The kernel
+    `generated::meerkat::TransitionId` gains `ExtendToolGrantGateChangedIdle`,
+    `ExtendToolGrantGateChangedAttached`, `ExtendToolGrantGateChangedRunning`,
+    `ExtendToolGrantGateChangedRetired`, `ExtendToolGrantGateChangedStopped`,
+    `ExtendToolGrantGateUnchangedIdle`, `ExtendToolGrantGateUnchangedAttached`,
+    `ExtendToolGrantGateUnchangedRunning`,
+    `ExtendToolGrantGateUnchangedRetired`,
+    `ExtendToolGrantGateUnchangedStopped`, `SurfaceStageGatedAddIdle`,
+    `SurfaceStageGatedAddAttached` and `SurfaceStageGatedAddRunning`, and
+    `MeerkatMachineRuntimeInternalInput` gains `ExtendToolGrantGate` and
+    `SurfaceStageGatedAdd`, each after every released variant.
 - `meerkat_mob::DesiredMemberMaterial` gains `profile_source`
   (`DesiredProfileSource`): where a store-owned identity's desired material
   took its profile from, which decides its member's tool grant gate (struct
@@ -828,7 +883,10 @@ them.
   member's build installs the gate its profile and its role declare (it
   installed none), so a member resume never restores an older recorded
   gate. A member whose own gate or role gate names anything is refused
-  placement on another host.
+  placement on another host. A call of a closed grant-gated tool behind the
+  deferred catalog is refused at the dispatch gate (`tool_grant_required`,
+  audited), as a call of one the model sees is, instead of
+  `access_denied`.
 - `meerkat-machine-kernels`: the kernel `generated::mob::TransitionId`
   gains `ObserveRespawnTopologyAbandonedStaleEndedSuccessor`, appended after
   every published variant, so no existing variant's discriminant moves;
@@ -1819,6 +1877,73 @@ them.
   the decision it made before issuing (non-empty, at most 1024 bytes, no
   control character): the grant's issuer, its listing and its `granted`
   audit row carry it, as attribution only.
+- MCP server grant gate: a gate names MCP servers (`mcp_servers` in
+  `grant_gated_tools` on `session/create` and in a mob profile's
+  `tools.grant_gated`). Every tool a gated server provides is hidden and
+  refused, by its provenance from the moment it appears, until a live grant
+  of that server opens it; each model-request boundary gates the names a
+  gated server provides then. `unconfigured_mcp_servers: true` gates every
+  MCP server the build does not configure itself, whatever path attaches it
+  later (`mcp/add` included); the servers it configures stay open. A gated
+  server a build configures starts no process until a live server grant
+  covers it when the build reads the grants (a lapsed grant the build finds
+  is settled expired by `build`), and a build whose gate names a server owns
+  a router even with none configured. `tool_grants/grant` takes
+  `target: {"kind": "mcp_server", "server", "tools"?}`; `tools` narrows the
+  grant to the named tools of that server. A tool name only a gated server
+  provides is granted through its server: a `tool` target naming it is
+  refused `target_not_gated`, with a message that names the server form. A
+  role server, like a role tool name, never fails a member's build, and a
+  deny name a gated server the build does not configure may provide is
+  checked at call time instead of failing the build. The gate authorizes an
+  MCP call before the host's call preparation, so a refused call never
+  selects a credential.
+- `tool_grants/grant` answers `applies` for an identity subject (`now`,
+  `not_mounted` or `at_next_build`: whether the member's running build gates
+  the target; a gated MCP server the member's profile configures answers
+  `at_next_build` while the running build has left it unattached, since no
+  live grant covered it when that build read the grants, and a gated server
+  no build configures answers `now`), and `tool_grants/list` answers the
+  identity's `gate`: `running` (what its live build gates and ignores,
+  `null` when none is live here) and `next_build` (what its next build
+  resolves). Both are advisory; a field of the gate this version does not
+  know is ignored.
+- Rust: `GrantGatedTools::with_mcp_server`, `with_unconfigured_mcp_servers`
+  and `gates_mcp_server`; `InstalledToolGrantGate`, `RunningToolGrantGate`
+  (with `attached_servers`, the servers the session's surface holds) and
+  `GatedToolView`; `ToolGrantTarget::mcp_server` and `is_empty`;
+  `SessionToolVisibilityState::tool_grant_gates_server`,
+  `tool_is_grant_gated` and `tool_is_closed_by_grant_gate`;
+  `meerkat_core::tool_grant::server_is_grant_gated`, the one MCP server
+  predicate (a gate's gated servers, its unconfigured-servers mode and its
+  ungated servers) that `tool_grant_gates_server`,
+  `InstalledToolGrantGate::gates_server` and `gates_mcp_server` answer
+  through, stating MeerkatMachine's server guards (`ExtendToolGrantGate`,
+  `SurfaceStageGatedAdd`) in Rust;
+  `MeerkatMachine::tool_grant_gate`; `McpRouter::stage_add_gated` and
+  `McpRouterAdapter::stage_add_gated`, the stage of a grant-time live attach
+  of a gated server, which MeerkatMachine admits only for a server the
+  build's gate gates (`SurfaceStageGatedAdd`): nothing calls them yet, since
+  their caller lands with the live attach, and a build's lazy residency of a
+  gated server it configures is the factory's build-composition filter;
+  `meerkat_contracts::WireToolGrantApplies`, `WireToolGrantGateView`,
+  `WireToolGrantGateEntries` (a gate's entries as `tool_grants/list` shows
+  them, ignoring a field this version does not know) and
+  `WireMemberToolGrantGate`.
+- Python and TypeScript SDKs: `grant_tool` takes `mcp_server` and
+  `server_tools`, and `grantTool` takes `{ mcpServer, serverTools? }`; the
+  generated types carry a gate's `mcp_servers` and
+  `unconfigured_mcp_servers`, the `mcp_server` target, `applies` and `gate`.
+- `meerkat_mob::MobHandle::grant_member_tool` (with `MemberToolGrant` and
+  `MemberToolGrantError`) issues a member identity's grant through the mob's
+  actor, which decides it against its live roster as it commits, in order
+  with the retirements that end an identity's grants: a grant never
+  outlives a retirement whose roster read came before it.
+  `tool_grants/grant` commits identity grants this way.
+  `MeerkatMachine::arm_tool_grant_deadline` arms a grant issued so. The
+  direct writers, `MeerkatMachine::grant_tool` and `ToolGrantService::grant`
+  with a member subject, do not consult the roster: grant a member identity
+  through `grant_member_tool`.
 - Rust: `meerkat_core::tool_grant::ToolGrantRequestRefusal` (`subject_unknown`,
   `target_not_gated`, `server_not_installed`, `no_live_grant`,
   `invalid_wait`, `invalid_window`, `empty_target`, `not_found`,
@@ -1828,7 +1953,8 @@ them.
   `ToolGrantIssuer::operator`; `GrantGatedTools::FIELD_NAMES`, `extend` and
   `without`; the defaulted `SessionToolGrants::for_member`;
   `meerkat::resolve_grant_target`; `meerkat_mob::MobHandle::member_grant_gate`
-  and `MemberGrantGate`; `MeerkatMachine::tool_grant` and
+  and `MemberGrantGate` (with `configured_servers`, the servers the member's
+  own profile configures); `MeerkatMachine::tool_grant` and
   `MeerkatMachine::end_tool_grants_of`; `ToolGrantService::load` and
   `ToolGrantService::revoke_subject`;
   `RuntimeSessionToolGrants::for_member_subject`;
@@ -2779,17 +2905,20 @@ them.
   `sqlite.rs:606-625`, `IdentityAuthorityBlocked`). Recover by upgrading
   again: 0.9.10 refuses a new adoption of such an identity too, as it
   refuses every write over a malformed intent row (`sqlite.rs:5975-6006`).
+  An older binary drops a gate's `mcp_servers` and
+  `unconfigured_mcp_servers` (a recorded gate and a profile's gate alike),
+  so the servers they gate run ungated there and a gated server a profile
+  configures starts at every build; its `session/create` refuses them
+  (v0.9.10 `meerkat-core/src/tool_grant.rs:80-88`, a recorded gate's
+  struct, keeps only `families` and `tools` and refuses no unknown field;
+  `meerkat-contracts/src/wire/tool_grant.rs:18-22`, the wire gate, refuses
+  one). A grant of an MCP server is unreadable to an older binary: it opens
+  nothing there and is listed as unreadable (v0.9.10
+  `meerkat-core/src/tool_grant.rs:301-310`, a grant target is a tool or a
+  family only). Take the server gates out, or the servers they gate, before
+  a rollback.
 
 ### Known limitations
-
-- A grant to a mob member identity can land after the end of the identity
-  it races: `tool_grants/grant` checks the mob's roster before it writes
-  the grant, and nothing orders that write against the identity's end. Such
-  a grant stays live until it expires (at most the maximum lifetime, 24
-  hours by default), and a name created again in the same mob incarnation
-  holds it. Grant only to a member whose retirement you have not started,
-  or revoke the identity's grants (`tool_grants/list`, then
-  `tool_grants/revoke`) once its end completes.
 
 - When an identity ends, its grants end with the grants of the session the
   mob holds for it then, but not those of an archived session the mob no

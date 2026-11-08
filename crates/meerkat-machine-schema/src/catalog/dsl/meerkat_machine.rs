@@ -4063,6 +4063,25 @@ macro_rules! meerkat_catalog_machine_dsl {
             // grant service's adjudication, applied as an input.
             tool_grant_gated_names: Set<ToolName>,
             tool_grant_open_names: Set<ToolName>,
+            // The MCP servers this build marked grant-gated, by server name.
+            // Every tool a gated server provides is gated from the moment it
+            // appears: a boundary adds its names (ExtendToolGrantGate), and
+            // a grant-time live attach stages only a server the gate gates
+            // (SurfaceStageGatedAdd). Replaced by every build.
+            tool_grant_gated_servers: Set<String>,
+            // Whether this build gates every MCP server it does not configure
+            // ungated: one the installation provides, at the build or later,
+            // and one attached later by any path. Replaced by every build.
+            tool_grant_gates_unconfigured_servers: bool,
+            // The servers this build configures and leaves ungated: while the
+            // mode above is on, the only servers it does not gate. Empty while
+            // the mode is off. Replaced by every build.
+            tool_grant_ungated_servers: Set<String>,
+            // The role gate entries this build ignored outright: the names of
+            // a role family the member does not mount and the role names the
+            // build's tool policy refuses. Never gated and never open; kept so
+            // a listing can show them as not mounted. Replaced by every build.
+            tool_grant_not_mounted_names: Set<ToolName>,
 
             // --- Input lifecycle substate ---
             // Authenticated shell supplies exact opaque association bytes. These
@@ -4911,6 +4930,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             turn_tool_overlay_deny_names = EmptySet,
             tool_grant_gated_names = EmptySet,
             tool_grant_open_names = EmptySet,
+            tool_grant_gated_servers = EmptySet,
+            tool_grant_gates_unconfigured_servers = false,
+            tool_grant_ungated_servers = EmptySet,
+            tool_grant_not_mounted_names = EmptySet,
             // Input lifecycle substate
             input_authority_bindings = EmptyMap,
             input_authority_batch_keys = EmptyMap,
@@ -7403,9 +7426,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             HoldInputController { input_id: String },
             ReleaseInputController { input_id: String },
             // The scoped tool grant gate: every build replaces the gated
-            // names (every open name closes), and every model-request
-            // boundary applies the gated names a live grant opens.
-            ReplaceToolGrantGate { gated: Set<ToolName> },
+            // names, the gated servers, the unconfigured-servers mode, the
+            // ungated servers and the not-mounted names (every open name
+            // closes), and every model-request boundary applies the gated
+            // names a live grant opens.
+            ReplaceToolGrantGate {
+                gated: Set<ToolName>,
+                gated_servers: Set<String>,
+                gates_unconfigured_servers: bool,
+                ungated_servers: Set<String>,
+                not_mounted_names: Set<ToolName>,
+            },
             ApplyToolGrantOpenSet { open: Set<ToolName> },
             // A failed until-changed switch-turn reconfigure withdraws the
             // request it staged, and nothing else
@@ -7423,6 +7454,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             // keeps its place.
             HoldResumedRunForAdmission { run_id: RunId },
             ReleaseResumedRunAdmission { run_id: RunId },
+            // A model-request boundary gates the names a gated MCP server
+            // provides now (ExtendToolGrantGate): the gate only grows within
+            // a build, and no name opens.
+            ExtendToolGrantGate { server: String, gated: Set<ToolName> },
+            // A grant-time live attach stages an MCP server the gate gates,
+            // and no other (SurfaceStageGatedAdd); the ordinary stage is
+            // SurfaceStageAdd.
+            SurfaceStageGatedAdd { surface_id: String, now_ms: u64 },
         }
 
         surface_only [
@@ -10806,6 +10845,19 @@ macro_rules! meerkat_catalog_machine_dsl {
         invariant tool_grant_open_names_are_gated {
             for_all(name in self.tool_grant_open_names,
                 self.tool_grant_gated_names.contains(name))
+        }
+
+        // A role entry the build ignored is never gated, so no grant can
+        // ever open it.
+        invariant tool_grant_not_mounted_are_not_gated {
+            for_all(name in self.tool_grant_not_mounted_names,
+                !self.tool_grant_gated_names.contains(name))
+        }
+
+        // A server the build configures ungated is never a gated server.
+        invariant tool_grant_ungated_servers_are_not_gated {
+            for_all(server in self.tool_grant_ungated_servers,
+                !self.tool_grant_gated_servers.contains(server))
         }
 
 
@@ -23750,6 +23802,82 @@ macro_rules! meerkat_catalog_machine_dsl {
             on input SurfaceStageAdd { surface_id, now_ms }
             guard { self.lifecycle_phase == Phase::Running }
             guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Running
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+
+        // SurfaceStageGatedAdd: a grant-time live attach's stage of a gated
+        // MCP server, the live attach's check (its caller lands with the
+        // live attach; a build's lazy residency of a gated server it
+        // configures is the factory's build-composition filter). It is the
+        // ordinary add stage, admitted only for a server the build's scoped
+        // tool grant gate gates (a server the gate names, or, while the build
+        // gates every server it does not configure ungated, any server
+        // outside its ungated servers). Its apply is the ordinary
+        // SurfaceApplyBoundary.
+        transition SurfaceStageGatedAddIdle {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Idle
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+        transition SurfaceStageGatedAddAttached {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
+            update {
+                self.known_surfaces.insert(surface_id);
+                self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
+                self.reload_staged_surfaces.remove(surface_id);
+                self.next_staged_intent_sequence = self.next_staged_intent_sequence + 1;
+                self.surface_staged_intent_sequence.insert(surface_id, self.next_staged_intent_sequence);
+            }
+            to Attached
+            emit SurfaceStageRecorded {
+                surface_id: surface_id,
+                staged_intent_sequence: self.next_staged_intent_sequence,
+            }
+        }
+        transition SurfaceStageGatedAddRunning {
+            on input SurfaceStageGatedAdd { surface_id, now_ms }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "surface_operating" { self.surface_phase == SurfacePhase::Operating }
+            guard "server_is_grant_gated" {
+                self.tool_grant_gated_servers.contains(surface_id)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(surface_id))
+            }
             update {
                 self.known_surfaces.insert(surface_id);
                 self.surface_staged_op.insert(surface_id, SurfaceStagedOp::Add);
@@ -36812,20 +36940,88 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // ReplaceToolGrantGate: every build installs its scoped tool grant
-        // gate, the names it marked grant-gated, and every open name closes.
-        // A new build therefore starts closed until a model-request boundary
-        // applies the open set a live grant admits. A build without a gate
-        // installs the empty gate, which clears the last build's.
+        // gate (the names it marked grant-gated, the MCP servers it gated,
+        // whether it gates every server it does not configure ungated, the
+        // servers it configures ungated, and the role entries it ignored as
+        // not mounted), and every open name closes. A new build therefore
+        // starts closed until a model-request boundary applies the open set a
+        // live grant admits. A build without a gate installs the empty gate,
+        // which clears the last build's. An ignored name is never gated and
+        // an ungated server is never a gated server: a gate that says
+        // otherwise matches no arm and is refused.
         transition ReplaceToolGrantGate {
             per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ReplaceToolGrantGate { gated }
+            on input ReplaceToolGrantGate {
+                gated,
+                gated_servers,
+                gates_unconfigured_servers,
+                ungated_servers,
+                not_mounted_names
+            }
             guard "session_registered" { self.session_id != None }
+            guard "not_mounted_disjoint" {
+                for_all(name in not_mounted_names, !gated.contains(name))
+            }
+            guard "server_sets_disjoint" {
+                for_all(server in ungated_servers, !gated_servers.contains(server))
+            }
             update {
                 self.tool_grant_gated_names = gated;
                 self.tool_grant_open_names = EmptySet;
+                self.tool_grant_gated_servers = gated_servers;
+                self.tool_grant_gates_unconfigured_servers = gates_unconfigured_servers;
+                self.tool_grant_ungated_servers = ungated_servers;
+                self.tool_grant_not_mounted_names = not_mounted_names;
             }
             to Idle
             emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        // ExtendToolGrantGate: a model-request boundary gates the names an MCP
+        // server the gate gates provides now (a server the gate names, or,
+        // while the build gates every server it does not configure ungated,
+        // any server outside its ungated servers). Within a build the gated
+        // names only grow, and no name opens; a name the build ignored as not
+        // mounted that such a server provides becomes gated. An extension for
+        // a server the gate does not gate matches no arm and is refused.
+        transition ExtendToolGrantGateChanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ExtendToolGrantGate { server, gated }
+            guard "session_registered" { self.session_id != None }
+            guard "server_is_gated" {
+                self.tool_grant_gated_servers.contains(server)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(server))
+            }
+            // The negation of the unchanged arm's `already_gated`, so the two
+            // arms exclude each other by their guards' form.
+            guard "adds_names" {
+                !for_all(name in gated, self.tool_grant_gated_names.contains(name))
+            }
+            update {
+                for name in gated {
+                    self.tool_grant_gated_names.insert(name);
+                    self.tool_grant_not_mounted_names.remove(name);
+                }
+            }
+            to Idle
+            emit RefreshVisibleSurfaceSet { snapshot_epoch: self.snapshot_epoch }
+        }
+
+        transition ExtendToolGrantGateUnchanged {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input ExtendToolGrantGate { server, gated }
+            guard "session_registered" { self.session_id != None }
+            guard "server_is_gated" {
+                self.tool_grant_gated_servers.contains(server)
+                || (self.tool_grant_gates_unconfigured_servers
+                    && !self.tool_grant_ungated_servers.contains(server))
+            }
+            guard "already_gated" {
+                for_all(name in gated, self.tool_grant_gated_names.contains(name))
+            }
+            update {}
+            to Idle
         }
 
         // ApplyToolGrantOpenSet: a model-request boundary applies the gated

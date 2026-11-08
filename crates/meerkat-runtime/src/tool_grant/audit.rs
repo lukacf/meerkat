@@ -24,6 +24,9 @@ pub enum ToolGrantExpiryDriver {
     Read,
     /// A revoke at or after the deadline.
     Revoke,
+    /// A build reading which gated MCP servers a live grant covers, to
+    /// decide which to attach.
+    Build,
 }
 
 /// Why a gated call was refused.

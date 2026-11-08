@@ -2667,32 +2667,44 @@ class MeerkatClient:
         mob_id: str | None = None,
         identity: str | None = None,
         decision_ref: str | None = None,
+        mcp_server: str | None = None,
+        server_tools: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Grant one of a subject's grant-gated tool names or tool families.
+        """Grant one of a subject's grant-gated tool names, tool families or
+        MCP servers.
 
         The subject is a session (``session_id``) or a mob member identity
         (``mob_id`` and ``identity``): an identity's grant applies to the
         member's builds in the mob's running incarnation, across respawns.
-        Name exactly one of ``tool`` and ``family``: the session's build, or
-        the member's gate (its profile's joined with its role's), must gate
-        it. Bound the grant by exactly one of ``duration_ms`` and
+        Name exactly one of ``tool``, ``family`` and ``mcp_server``: the
+        session's build, or the member's gate (its profile's joined with its
+        role's), must gate it. A server grant covers every tool the server
+        provides, or with ``server_tools`` (a non-empty list) only those of
+        them. Bound the grant by exactly one of ``duration_ms`` and
         ``expires_at_ms`` (UNIX ms), at most the server's maximum lifetime.
         ``decision_ref`` records the host's reference to the decision it made
         before issuing, as attribution. Returns the ``tool_grants/grant``
         result, ``{"grant": {...}}``: a family grant's ``target.names`` are
-        the names the server took for it.
+        the names the server took for it, and an identity grant's ``applies``
+        says whether the member's running build gates the target.
         """
-        if (tool is None) == (family is None):
-            raise ValueError("exactly one of tool or family must be provided")
+        if sum(target is not None for target in (tool, family, mcp_server)) != 1:
+            raise ValueError("exactly one of tool, family or mcp_server must be provided")
+        if server_tools is not None and mcp_server is None:
+            raise ValueError("server_tools narrows an mcp_server grant only")
         if (duration_ms is None) == (expires_at_ms is None):
             raise ValueError(
                 "exactly one of duration_ms or expires_at_ms must be provided"
             )
-        target: dict[str, Any] = (
-            {"kind": "tool", "name": tool}
-            if tool is not None
-            else {"kind": "family", "family": family}
-        )
+        target: dict[str, Any]
+        if tool is not None:
+            target = {"kind": "tool", "name": tool}
+        elif family is not None:
+            target = {"kind": "family", "family": family}
+        else:
+            target = {"kind": "mcp_server", "server": mcp_server}
+            if server_tools is not None:
+                target["tools"] = list(server_tools)
         params: dict[str, Any] = {
             "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "target": target,
@@ -2736,6 +2748,11 @@ class MeerkatClient:
         readable. Ended (expired or revoked) grants are listed only with
         ``include_ended``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the server cannot read.
+        For a member identity in the mob's roster the result also carries
+        ``"gate"``: ``"running"``, what the member's live build gates and the
+        names it ignored as not mounted (``None`` when no build of it is live
+        on the server), and ``"next_build"``, the gate its next build
+        resolves. The gate is advisory.
         """
         params: dict[str, Any] = {
             "subject": self._tool_grant_subject(session_id, mob_id, identity),

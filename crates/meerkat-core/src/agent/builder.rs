@@ -584,9 +584,9 @@ impl AgentBuilder {
         if tool_grant_gate.is_some() && !tools.adjudicates_tool_grants() {
             return Err(AgentBuildPolicyError::ToolGrantGateWithoutAdjudication);
         }
-        let tool_grant_gated_names = tool_grant_gate
+        let tool_grant_install = tool_grant_gate
             .as_ref()
-            .map(|gate| gate.table().gated_names())
+            .map(|gate| gate.install().clone())
             .unwrap_or_default();
         let initial_visibility_authority = self.initial_visibility_authority.clone();
         let tool_visibility_owner = self.tool_visibility_owner.clone();
@@ -1050,14 +1050,13 @@ impl AgentBuilder {
                 message: err.to_string(),
             });
         }
-        // Install this build's grant gate: every gated name starts closed
-        // until a boundary admits a live grant. A runtime-backed build always
-        // replaces the gate, so a rebuild without one clears the last
-        // build's. An owner without gate authority refuses a non-empty gate.
-        if (runtime_tool_visibility_owner_required || !tool_grant_gated_names.is_empty())
-            && let Err(err) = agent
-                .tool_scope
-                .replace_tool_grant_gate(tool_grant_gated_names)
+        // Install this build's grant gate: every gated name and every tool
+        // of a gated server starts closed until a boundary admits a live
+        // grant. A runtime-backed build always replaces the gate, so a
+        // rebuild without one clears the last build's. An owner without gate
+        // authority refuses a gate that records anything.
+        if (runtime_tool_visibility_owner_required || !tool_grant_install.is_empty())
+            && let Err(err) = agent.tool_scope.replace_tool_grant_gate(tool_grant_install)
         {
             return Err(AgentBuildPolicyError::ToolVisibilityRestore {
                 message: format!("failed to install the tool grant gate: {err}"),

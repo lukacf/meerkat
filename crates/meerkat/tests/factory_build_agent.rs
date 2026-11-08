@@ -6010,7 +6010,7 @@ mod scoped_tool_grants {
     use super::*;
     use meerkat::{GrantGateBuildError, tool_family_names};
     use meerkat_core::tool_grant::{
-        GatedToolTable, GrantGatedTools, SessionToolGrants, ToolGrantIssuer, ToolGrantSubject,
+        GatedToolView, GrantGatedTools, SessionToolGrants, ToolGrantIssuer, ToolGrantSubject,
         ToolGrantTarget,
     };
     use meerkat_core::types::ToolName;
@@ -6064,13 +6064,11 @@ mod scoped_tool_grants {
         (base, visible)
     }
 
-    /// One model-request boundary over the session's grants.
+    /// One model-request boundary over the session's grants: no MCP server
+    /// serves the shell family, so the view is its gated names.
     async fn boundary(agent: &meerkat::DynAgent, grants: &Arc<dyn SessionToolGrants>) {
-        let table = GatedToolTable::new(
-            BTreeMap::from([("shell".to_string(), shell_names())]),
-            BTreeSet::new(),
-        );
-        let open = grants.open_names(&table).await.expect("grants read");
+        let view = GatedToolView::new(shell_names(), BTreeMap::new());
+        let open = grants.open_names(&view).await.expect("grants read");
         agent
             .tool_scope()
             .apply_tool_grant_open_set(open.into_inner().into_iter().collect())
@@ -6535,6 +6533,52 @@ mod scoped_tool_grants {
                 .tooling
                 .grant_gated,
             shell_gate()
+        );
+    }
+
+    /// A deny list may name a tool no vocabulary declares while the gate
+    /// names an MCP server the build does not configure, or gates every
+    /// server it does not configure: such a server may be attached later and
+    /// provide any name, so the name is enforced by name at call time instead
+    /// of failing the build. Without such a gate the build refuses it.
+    #[tokio::test]
+    async fn a_gated_unconfigured_server_defers_an_unknown_deny_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        for gate in [
+            GrantGatedTools::default().with_mcp_server("tickets"),
+            GrantGatedTools::default().with_unconfigured_mcp_servers(),
+        ] {
+            let mut build = gated_runtime_build(
+                &machine,
+                Session::new(),
+                meerkat_core::SessionBuildIntent::Mint,
+                Some(gate.clone()),
+            )
+            .await;
+            build.declared_tool_restriction = Some(declared_restriction(&["open_ticket"], false));
+            temp_factory(&temp)
+                .build_agent(build, &Config::default())
+                .await
+                .unwrap_or_else(|err| panic!("{gate:?} defers the name: {err:?}"));
+        }
+
+        let mut build = gated_runtime_build(
+            &machine,
+            Session::new(),
+            meerkat_core::SessionBuildIntent::Mint,
+            None,
+        )
+        .await;
+        build.declared_tool_restriction = Some(declared_restriction(&["open_ticket"], false));
+        let err = temp_factory(&temp)
+            .build_agent(build, &Config::default())
+            .await
+            .err()
+            .expect("without a gated unconfigured server the name is unknown");
+        assert!(
+            matches!(&err, BuildAgentError::DeclaredToolUnknown(unknown) if unknown.tool == "open_ticket"),
+            "got: {err:?}"
         );
     }
 }

@@ -391,6 +391,8 @@ mod member_grant_gate;
 mod placed_completion_reconciler;
 mod placed_kickoff_reconciler;
 pub use member_grant_gate::MemberGrantGate;
+#[cfg(feature = "runtime-adapter")]
+pub use member_grant_gate::{MemberToolGrant, MemberToolGrantError};
 pub mod recovery;
 mod remote_flow_ticket;
 mod remote_turn_reconciler;

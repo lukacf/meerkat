@@ -538,7 +538,8 @@ def build_model(root, output):
     # durable peer claim whose answer was lost stays Core's FIFO head (the drain's call failed;
     # a re-offer of an admitted key is deduplicated). A re-offered claim whose record Core
     # admitted passes no new fence: Core's dedup answers it (the readmitted-fence mutant fences
-    # it again).
+    # it again). The fence's refusal keeps its cause, checked in the decision's order (a closed
+    # admission, a closed source, a denied authority): it decides the binder's answer to Core.
     action('B_Entry', ['sp[p].pc = "Entry"', 'meta_holder = p', 'alive',
                        'LET r == sp[p]\n'
                        '           fence == \\/ r.kind = "core" /\\ ObservedAdmitted(r.slot) /\\ Fault # "readmitted-fence"\n'
@@ -561,7 +562,8 @@ def build_model(root, output):
                        "            /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Settle\",\n"
                        '                         !.ans = CASE res \\in {"LostAfter", "LostBefore"} -> "Unresolved"\n'
                        '                                   [] res = "NotAdmitted" -> "CoreRefused"\n'
-                       '                                   [] OTHER -> res]]',
+                       '                                   [] OTHER -> res,\n'
+                       '                         !.cause = IF res = "EntryRefused" THEN EntryFenceCause ELSE @]]',
                        "meta_holder' = 0"],
            {'native', 'admitted_stale', 'core_refusals', 'refusals', 'lost_count', 'jr', 'sp', 'meta_holder'},
            params=PROC)
@@ -579,6 +581,10 @@ def build_model(root, output):
     # of this process meets the same verdict over the same ambiguity, so the model takes none
     # until the record changes) and a read by key is owed: a Found read settles the record (the
     # next re-offer binds), a final absence ends the ambiguity (the next re-offer is denied).
+    # The entry fence's refusal of a durable delivery is answered the same way (EntryKeep):
+    # NotReady for a closed admission and for a verdict over an ambiguous record (its dispatch
+    # fed to the owner as not submitted: the fence stopped it before native submission), Denied
+    # only for a verdict over a clear record (the fence's typed refusal settles the record).
     # The lost-as-not-submitted mutant feeds a lost answer as not submitted; receipt-wrong-kind
     # feeds the fence's refusal as Core's.
     action('B_Settle', ['sp[p].pc = "Settle"', 'alive',
@@ -587,8 +593,9 @@ def build_model(root, output):
                         '           open == OPhase(i) = "Offered" /\\ r.d \\in OOpen(i)\n'
                         '           fed == CASE Fault = "lost-as-not-submitted" /\\ r.ans = "Unresolved" -> "NotSubmitted"\n'
                         '                    [] Fault = "receipt-wrong-kind" /\\ r.ans = "EntryRefused" -> "CoreRefused"\n'
+                        '                    [] EntryKeep(r) -> "NotSubmitted"\n'
                         '                    [] OTHER -> r.ans\n'
-                        '           keep == KeepClaim(r)\n'
+                        '           keep == KeepClaim(r) \\/ EntryKeep(r)\n'
                         '           hold == keep /\\ r.cause # "AdmissionClosed" /\\ OPhaseNext(i) = "Offered"\n'
                         '       IN /\\ IF open THEN OAnswer(i, r.d, fed) ELSE UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
                         "          /\\ jr' = [jr EXCEPT ![i] =\n"
@@ -601,7 +608,7 @@ def build_model(root, output):
                         "          /\\ claimed' = (claimed \\/ (r.ans = \"Admitted\" /\\ (mode = \"production\" \\/ Fault = \"fixture-claims\")))\n"
                         "          /\\ sp' = [sp EXCEPT ![p] = CASE r.ans = \"Admitted\" -> EndRec(r, \"Admitted\", r.cause)\n"
                         '                                     [] r.ans = "CoreRefused" -> EndRec(r, "NotAdmitted", "None")\n'
-                        '                                     [] r.ans = "EntryRefused" -> EndRec(r, "Refused", "EntryRefused")\n'
+                        '                                     [] r.ans = "EntryRefused" /\\ ~EntryKeep(r) -> EndRec(r, "Refused", "EntryRefused")\n'
                         '                                     [] r.ans = "Unresolved" -> EndRec(r, "Unresolved", "None")\n'
                         '                                     [] keep -> [Finish(r) EXCEPT !.out = "Pending"]\n'
                         '                                     [] OTHER -> Finish(r)]',
@@ -758,7 +765,7 @@ def build_model(root, output):
                        '                              !.held = FALSE,\n'
                        '                              !.fifo = @ \\/ (ClaimedPeer /\\ OPhase(i) # "Absent"\n'
                        '                                             /\\ \\E q \\in Procs : Live(q) /\\ sp[q].slot = i\n'
-                       '                                                /\\ (sp[q].pc # "Settle" \\/ KeepClaim(sp[q])))]]',
+                       '                                                /\\ (sp[q].pc # "Settle" \\/ KeepClaim(sp[q]) \\/ EntryKeep(sp[q])))]]',
                        "orphan_claim' = (orphan_claim \\/ (ClaimedPeer /\\ \\E q \\in Procs : Live(q)\n"
                        '                                    /\\ (sp[q].slot = 0 \\/ OPhase(sp[q].slot) = "Absent")))',
                        "crashed_offered' = (crashed_offered \\/ (RecordRows /\\ \\E i \\in Slots : OPhase(i) = \"Offered\"))"],
@@ -959,6 +966,19 @@ def build_model(root, output):
         '                /\\ \\/ r.cause = "AdmissionClosed" /\\ Fault # "closed-admission-denied"\n'
         '                   \\/ /\\ r.cause \\in {"PolicyDenied", "SourceClosed"} /\\ Ambiguous(r.slot, r.d)\n'
         '                      /\\ Fault # "denied-over-ambiguity"',
+        '\\* The same answer for a durable delivery the entry fence refused (in the same section,\n'
+        '\\* before Core\'s dedup), by the fence\'s cause: NotReady for a closed admission, and for a\n'
+        '\\* verdict met while another dispatch of the record may have admitted (the claim held, a read\n'
+        '\\* owed); Denied (the claim ends, the fence\'s typed refusal settles the record) only for a\n'
+        '\\* verdict over a clear record. The fence-closed-admission-denied and\n'
+        '\\* fence-denied-over-ambiguity mutants deny the first two.',
+        'EntryKeep(r) == /\\ ClaimedPeer /\\ r.ans = "EntryRefused"\n'
+        '                /\\ \\/ r.cause = "AdmissionClosed" /\\ Fault # "fence-closed-admission-denied"\n'
+        '                   \\/ /\\ r.cause \\in {"PolicyDenied", "SourceClosed"} /\\ Ambiguous(r.slot, r.d)\n'
+        '                      /\\ Fault # "fence-denied-over-ambiguity"',
+        '\\* The fence\'s cause, in the decision\'s order: a closed admission, a closed source, a denied\n'
+        '\\* authority.',
+        'EntryFenceCause == IF ~Admission THEN "AdmissionClosed" ELSE IF ~SourceOpen THEN "SourceClosed" ELSE "PolicyDenied"',
         '\\* A re-offered claim reuses the dispatch its delivery opened in this process, if any.',
         'ClaimDispatch(i) == LET cur == {d \\in OOpen(i) : ODispatchEpochs(i)[d] = epoch}\n'
         '                    IN IF OPhase(i) = "Offered" /\\ cur # {} THEN MaxOf(cur) ELSE 0',
@@ -1006,7 +1026,8 @@ def build_model(root, output):
         '\\* Core\'s vocabulary the peer binder answers Denied only for a verdict, never over another\n'
         '\\* dispatch that may have admitted; a closed admission and contention (a held source, a\n'
         '\\* replaced session: a not-now, waited out in Core\'s waiter within the delivery\'s one\n'
-        '\\* deadline) answer NotReady, the claim staying queued (B_Settle, B_CommitRefuse, B_Lookup).\n'
+        '\\* deadline) answer NotReady, the claim staying queued (B_Settle, B_CommitRefuse, B_Lookup;\n'
+        '\\* the entry fence\'s refusal by the same rule, EntryKeep).\n'
         '\\* The held-refused and stale-refused mutants refuse contention.',
         'DecisionAt(p, site) ==\n'
         '    LET r == sp[p]\n'
@@ -1320,6 +1341,13 @@ def build_model(root, output):
         'NotRowLookupClosedClaimKept': ('~(stage = "B" /\\ door = "Peer" /\\ life_cur = 2 /\\ ObservedAdmitted(1)\n'
                                         '    /\\ OPrepEpoch(1) = 2 /\\ OCloseEpoch(1) = 0 /\\ Cardinality(native) = 1\n'
                                         '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")'),
+        # A durable delivery the entry fence refused for the closing admission answers Core
+        # NotReady: its dispatch ended without native submission, Core keeps the claim and
+        # re-offers it to the next process after the stop, where the same record is admitted once
+        # (the fence-closed-admission-denied mutant ends the claim).
+        'NotRowEntryClosedClaimKept': ('~(stage = "B" /\\ door = "Peer" /\\ life_cur = 2 /\\ ObservedAdmitted(1)\n'
+                                       '    /\\ <<1, 1, "EntryRefused">> \\in refusals /\\ NativeKeys = {<<"inc1", "k1", 2>>}\n'
+                                       '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Admitted")'),
         # Never Denied over ambiguity: a re-offered claim whose record has an unresolved dispatch
         # meets a revoked authority in the section; it answers NotReady and Core keeps the claim
         # (the denied-over-ambiguity mutant denies it).
@@ -1417,14 +1445,18 @@ def build_model(root, output):
             "[][\\A p \\in Procs : (door = \"Peer\" /\\ ~Live(p) /\\ sp'[p].pc = \"Lookup\" /\\ sp'[p].kind = \"caller\")\n"
             "       => ~QueuedClaim]_vars",
         # A durable peer delivery ends its claim (Core's Denied) only for a verdict, never over
-        # another dispatch of its record that may have admitted; otherwise Core keeps the claim
-        # (NotReady): a closed admission, a replaced session, a record withdrawn for no verdict.
-        # Core's own refusals (NotAdmitted, the entry fence) and a failed preparation end it too.
+        # another dispatch of its record that may have admitted, at the decision and at the entry
+        # fence alike (the fence's refusal ends it only for a verdict cause, the cause the fence
+        # recorded with it); otherwise Core keeps the claim (NotReady): a closed admission, a
+        # replaced session, a record withdrawn for no verdict. A re-offer of a record Core refused
+        # (NotAdmitted) and a failed preparation end it too.
         'I6_ClaimEndsOnlyForVerdict':
             "[][\\A p \\in Procs : (ClaimedPeer /\\ sp[p].pc # \"Done\" /\\ sp'[p].pc = \"Done\" /\\ sp'[p].out = \"Refused\")\n"
             "       => \\/ /\\ sp'[p].cause \\in {\"PolicyDenied\", \"SourceClosed\"}\n"
             "             /\\ (sp[p].slot # 0 => ~Ambiguous(sp[p].slot, sp[p].d))\n"
-            "          \\/ sp'[p].cause \\in {\"OfferNotAdmitted\", \"EntryRefused\", \"PreparationRefused\"}\n"
+            "          \\/ /\\ sp'[p].cause = \"EntryRefused\" /\\ sp[p].cause \\in {\"PolicyDenied\", \"SourceClosed\"}\n"
+            "             /\\ ~Ambiguous(sp[p].slot, sp[p].d)\n"
+            "          \\/ sp'[p].cause \\in {\"OfferNotAdmitted\", \"PreparationRefused\"}\n"
             "          \\/ sp'[p].cause = \"PreparationWithdrawn\" /\\ OVerdictWithdrawal(sp[p].slot)]_vars",
         # The entry fence guards a new admission only: a re-offered claim whose record Core
         # admitted is answered by Core's dedup and never refused at the entry.
@@ -1892,6 +1924,12 @@ PROFILES = {
                                  env=['close']),
     'denied-over-ambiguity': m('denied-over-ambiguity', 'I6_ClaimEndsOnlyForVerdict', door=['Peer'],
                                env=['lost', 'revoke']),
+    # The same at the entry fence: its refusal for a closing admission, or for a verdict over an
+    # ambiguous record, ends Core's claim.
+    'fence-closed-admission-denied': m('fence-closed-admission-denied', 'I6_ClaimEndsOnlyForVerdict', door=['Peer'],
+                                       env=['close']),
+    'fence-denied-over-ambiguity': m('fence-denied-over-ambiguity', 'I6_ClaimEndsOnlyForVerdict', door=['Peer'],
+                                     env=['lost', 'revoke']),
     # The re-offer of an admitted record fenced again at the entry, after the source closed.
     'readmitted-fence': m('readmitted-fence', 'I9_AdmittedReofferNotFenced', door=['Peer'], env=['lost', 'srcclose']),
     # Owner mutants: the generated owner with one guard conjunct replaced.
@@ -2026,6 +2064,7 @@ PROFILES = {
     'row-withdrawn-stop-prepared-again': r('NotRowWithdrawnStopPreparedAgain', door=['Peer'], env=['close', 'stop']),
     'row-peer-verdict-withdrawal-refused': r('NotRowPeerVerdictWithdrawalRefused', door=['Peer'], env=['revoke']),
     'row-lookup-closed-claim-kept': r('NotRowLookupClosedClaimKept', door=['Peer'], env=['close', 'stop']),
+    'row-entry-closed-claim-kept': r('NotRowEntryClosedClaimKept', door=['Peer'], env=['close', 'stop']),
     'row-no-denial-over-ambiguity': r('NotRowNoDenialOverAmbiguity', door=['Peer'], env=['lost', 'revoke']),
     'row-held-claim-denied-after-restart': r('NotRowHeldClaimDeniedAfterRestart', door=['Peer'],
                                              env=['lost', 'revoke', 'crash']),

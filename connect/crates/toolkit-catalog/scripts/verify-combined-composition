@@ -555,6 +555,23 @@ def stage_b_checks(f, actions):
         'denied-over-ambiguity': b and last == 'B_Settle' and f.get('door') == '"Peer"' and f.get('auth_ok') == 'FALSE'
             and phase(1) == 'Offered' and o(1, 'unresolved_dispatches') != '{}' and jr(1, 'fifo') == 'FALSE'
             and proc(kind='core', out='Refused', cause='PolicyDenied'),
+        # Core's claim ended at the entry fence by the closing admission: the fence's typed
+        # refusal settles the record and the claim is gone.
+        'fence-closed-admission-denied': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('life_phase') == '"Closing"' and not_admitted(1) and o(1, 'receipt_kind') == 'EntryRefused'
+            and ['1', '1', 'EntryRefused'] in refused and proc(out='Refused', cause='EntryRefused')
+            and jr(1, 'fifo') == 'FALSE' and f.get('orphan_claim') == 'FALSE',
+        # Core's claim ended at the entry fence for a verdict met over an unresolved dispatch.
+        'fence-denied-over-ambiguity': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('auth_ok') == 'FALSE' and phase(1) == 'Offered' and o(1, 'unresolved_dispatches') != '{}'
+            and jr(1, 'fifo') == 'FALSE' and proc(kind='core', out='Refused', cause='EntryRefused'),
+        # A durable delivery the entry fence refused for the closing admission: Core keeps the
+        # claim and re-offers it to the next process after the stop, where the record is admitted
+        # once.
+        'row-entry-closed-claim-kept': b and f.get('door') == '"Peer"' and f.get('life_cur') == '2' and admitted(1)
+            and ['1', '1', 'EntryRefused'] in refused and keys3 == [['inc1', 'k1', '2']]
+            and proc(kind='core', out='Admitted') and 'B_LifeBeginClose' in actions and 'B_Stop' in actions
+            and before_last('B_Life2Open', 'B_CoreReoffer'),
         # The re-offer of an admitted record refused at the entry fence after the source closed.
         'readmitted-fence': b and last == 'B_Entry' and f.get('door') == '"Peer"' and admitted(1)
             and f.get('src_readiness') == '"ClosedToOffers"' and proc(kind='core', ans='EntryRefused'),

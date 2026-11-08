@@ -725,6 +725,11 @@ them.
   effect. A snapshot that would not fit the bridge's frame together with the
   materialize is not carried; the delivery takes it after the spawn.
 
+- `meerkat-mob`: `MobHandle::operator_instruction_owed_members()` counts the
+  members owed an operator-instruction snapshot their sessions have not
+  recorded, from the mob machine's published state, without reading a
+  session.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -1137,6 +1142,14 @@ them.
   closed as interrupted, and no `tool_process_interrupted` block is added
   for it; a background shell job, a monitor or a command hook keeps the
   notice.
+
+- `meerkat-mob`: a mob composed non-authoritative
+  (`MobBuilder::with_composition_authority(MobCompositionAuthority::NonAuthoritative)`,
+  a host's candidate launch over the shared mob store, which may not act on
+  it) delivers no operator instruction. A member owed a snapshot stays owed
+  for the authoritative launch, which delivers it. Before, the mob's delivery
+  owner recorded the snapshot in the member's session and journaled the
+  delivery wave in the shared mob store. Affects 0.9.9 and 0.9.10.
 
 ### Security
 

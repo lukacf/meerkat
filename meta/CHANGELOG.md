@@ -383,6 +383,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
   who revoked.
 
+- Operator instructions for the gateway's mob: `meta/set_instruction`,
+  `meta/revoke_instruction` and `meta/instruction_status` (Python
+  `set_instruction`, `revoke_instruction` and `instruction_status`;
+  TypeScript `setInstruction`, `revokeInstruction` and
+  `instructionStatus`). A host keeps standing System-plane instructions by
+  slot and revision for every member, the members of one profile or one
+  identity; each member applies them at its next run start, never inside a
+  run, and the status read names every member by its identity and wakes
+  none. They map onto Meerkat's mob operator instructions and keep no Meta
+  state. Host verbs: listed where an identity runtime is configured, never
+  agent tools; a candidate launch refuses the two writes with `-32047`
+  `candidate_launch` and answers the read. A candidate delivers no
+  instruction either: a member owed its snapshot stays owed until the
+  authoritative launch delivers it, and a `candidate launch census` WARN
+  counts such members.
+
 ### Changed
 
 - The stock console sends no approver with a decision and shows approvals
@@ -473,6 +489,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A console session revocation records who revoked (`revoked_by` in the
   fence record and the answer), and an access edit its author, time and
   revision (`last_edit` on `meta/access/get`).
+
+- Docs: `meta/member_activate_instruction` (and the SDKs'
+  `activate_member_instruction` / `activateMemberInstruction`) is
+  deprecated in favour of operator instructions (`meta/set_instruction`).
+  The method keeps working.
 
 ### Fixed
 

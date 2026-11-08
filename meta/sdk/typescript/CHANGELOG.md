@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `MetaRuntime.setInstruction(namespace, key, revision, body, target, {
+  contentSha256 })`, `MetaRuntime.revokeInstruction(namespace, key,
+  revision)` and `MetaRuntime.instructionStatus({ namespace, key, identity,
+  profile, offset, limit })` call `meta/set_instruction`,
+  `meta/revoke_instruction` and `meta/instruction_status`: operator
+  instructions for the members of the gateway's mob, by slot and revision,
+  for every member (`{ kind: "mob" }`), one profile (`{ kind: "profile",
+  profile }`) or one identity (`{ kind: "member", identity }`). The results
+  are the gateway's, unchanged; a refusal rejects with an RPC error whose
+  `data.instruction_set_code` names it.
+- `MetaRuntime.activateMemberInstruction` is deprecated in favour of
+  `setInstruction` in the docs; it keeps working.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

@@ -1022,6 +1022,19 @@ impl MobHandle {
         .await?
     }
 
+    /// How many members are owed an operator-instruction snapshot their
+    /// sessions have not recorded, from the mob machine's published state:
+    /// no session is read. A non-authoritative composition (a host's
+    /// candidate launch) delivers none of them, so a host can say how many
+    /// it leaves to the authoritative launch.
+    #[must_use]
+    pub fn operator_instruction_owed_members(&self) -> usize {
+        self.machine_state_watch_rx
+            .borrow()
+            .member_instruction_owed
+            .len()
+    }
+
     /// The mob's operator-instruction status: its records and, for one page
     /// of members, each member's residency, delivery state, and per slot the
     /// member's desired view, its session's recorded target and the committed

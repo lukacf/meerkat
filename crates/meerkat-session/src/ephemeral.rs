@@ -12410,6 +12410,15 @@ async fn session_task<A: SessionAgent>(
                 let result = agent
                     .reconcile_runtime_compaction_projections(&intents)
                     .await;
+                // The runtime reconciles between turns, when no turn reads
+                // the agent's event channel: forward what the agent queued
+                // (a finalized compaction's `CompactionCompleted`) to the
+                // session's event stream before the runtime hears back, so
+                // it neither waits for the next turn nor ends with the actor.
+                while let Ok(event) = agent_event_rx.try_recv() {
+                    let envelope = stamp_event_envelope(&next_seq, &source, event);
+                    control.publish_session_event(envelope).await;
+                }
                 let _ = reply_tx.send(result);
             }
             SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {

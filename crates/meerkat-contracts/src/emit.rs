@@ -711,6 +711,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobProfileUpdateParams": schema_for!(crate::wire::MobProfileUpdateParams),
         "MobProfileDeleteParams": schema_for!(crate::wire::MobProfileDeleteParams),
         "MobStreamOpenParams": schema_for!(crate::wire::MobStreamOpenParams),
+        "MobStreamCursor": schema_for!(crate::wire::MobStreamCursor),
         "MobStreamCloseParams": schema_for!(crate::wire::MobStreamCloseParams),
         "MobMemberSendParams": schema_for!(crate::wire::MobMemberSendParams),
         "MobIngressInteractionParams": schema_for!(crate::wire::MobIngressInteractionParams),

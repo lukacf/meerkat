@@ -3876,6 +3876,7 @@ class MobStreamOpenParams:
     """Request payload for `mob/stream_open`."""
     mob_id: str
     agent_identity: Optional[str] = None
+    cursor: Optional[MobStreamCursor] = None
 
 
 @dataclass
@@ -4718,6 +4719,14 @@ class WireProviderParamsOverride:
     temperature: Optional[float] = None
     thinking_budget_tokens: Optional[int] = None
     top_p: Optional[float] = None
+
+
+@dataclass
+class MobStreamCursor:
+    """A position in a mob member's event sequence: the `epoch` a member
+`mob/stream_event` names and the `seq` of its event (`event.seq`)."""
+    epoch: str
+    seq: int
 
 
 @dataclass

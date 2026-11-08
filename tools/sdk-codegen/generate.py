@@ -787,6 +787,8 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "WireGeminiThinkingConfig",
     "WireOpenAiPromptCacheOptions",
     "WireProviderParamsOverride",
+    # `MobStreamOpenParams.cursor`: the member stream resume position.
+    "MobStreamCursor",
 ]
 
 # Item 6 / K20 pattern: the `skills/list` RPC result is catalog-typed

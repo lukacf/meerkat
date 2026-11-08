@@ -357,6 +357,7 @@ pub use wire::{
     MobStopMemberRunResult,
     MobStreamCloseParams,
     MobStreamCloseResult,
+    MobStreamCursor,
     MobStreamOpenParams,
     MobStreamOpenResult,
     MobSubmitWorkParams,

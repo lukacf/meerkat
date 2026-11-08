@@ -48,7 +48,7 @@ import type {
   WireReachability,
   MobStopMemberRunResult,
 } from "./generated/types.js";
-import type { MeerkatClient, MobMemberLiveOpenOptions } from "./client.js";
+import type { MeerkatClient, MobMemberEventsOptions, MobMemberLiveOpenOptions } from "./client.js";
 import type { Usage } from "./events.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -321,8 +321,8 @@ export class Member {
     return this.client.sendMobMemberContent(this.mobId, this.agentIdentity, content, options);
   }
 
-  async events(): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity);
+  async events(options?: MobMemberEventsOptions): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity, options);
   }
 }
 
@@ -589,8 +589,11 @@ export class Mob {
     await this.client.cancelMobFlow(this.mobId, runId);
   }
 
-  async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity);
+  async subscribeMemberEvents(
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity, options);
   }
 
   async subscribeEvents(): Promise<EventSubscription<AttributedMobEvent>> {

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { EventSubscriptionError, MeerkatClient, MeerkatError } from "../dist/index.js";
+import { EventSubscriptionError, MeerkatClient, MeerkatError, Mob } from "../dist/index.js";
 
 // Shared with the Python SDK: no native build or provider is needed.
 const fixture = fileURLToPath(new URL("../../python/tests/fixtures/fake_stream_rpc.mjs", import.meta.url));
@@ -171,4 +171,50 @@ describe("standalone subscription terminal errors", () => {
       });
     }
   }
+});
+
+describe("mob member stream resume position", () => {
+  it("sends a resume cursor and reports the epoch of the last event", async () => {
+    const client = new MeerkatClient(fixture);
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push([method, params]);
+      return { stream_id: `stream-${calls.length}` };
+    };
+    const cursor = { epoch: "0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a", seq: 41 };
+    const sub = await client.subscribeMobMemberEvents("mob-1", "agent-a", { cursor });
+    await new Mob(client, "mob-1").subscribeMemberEvents("agent-a", { cursor });
+    await client.subscribeMobMemberEvents("mob-1", "agent-a");
+    assert.deepEqual(calls, [
+      ["mob/stream_open", { mob_id: "mob-1", agent_identity: "agent-a", cursor }],
+      ["mob/stream_open", { mob_id: "mob-1", agent_identity: "agent-a", cursor }],
+      ["mob/stream_open", { mob_id: "mob-1", agent_identity: "agent-a" }],
+    ]);
+
+    const memberEvent = (sequence, seq, payload, epoch) => client.handleLine(JSON.stringify({
+      jsonrpc: "2.0", method: "mob/stream_event", params: {
+        stream_id: "stream-1", sequence, ...(epoch == null ? {} : { epoch }),
+        event: {
+          event_id: "00000000-0000-4000-8000-000000000020", source: { type: "callback" },
+          seq, timestamp_ms: 1, payload,
+        },
+      },
+    }));
+    memberEvent(1, 41, { type: "text_delta", delta: "a" }, "epoch-a");
+    memberEvent(2, 0, { type: "stream_truncated", reason: { kind: "stream_lagged", dropped: 1 } }, "epoch-b");
+    memberEvent(3, 7, { type: "text_delta", delta: "b" }, "epoch-b");
+    memberEvent(4, 8, { type: "text_delta", delta: "c" });
+    const iterator = sub[Symbol.asyncIterator]();
+    assert.equal(sub.lastEventEpoch, undefined);
+    await iterator.next();
+    assert.deepEqual([sub.lastEventEpoch, sub.lastEventSeq], ["epoch-a", 41]);
+    // A gap marker moves neither half of the resume position.
+    await iterator.next();
+    assert.deepEqual([sub.lastEventEpoch, sub.lastEventSeq], ["epoch-a", 41]);
+    await iterator.next();
+    assert.deepEqual([sub.lastEventEpoch, sub.lastEventSeq], ["epoch-b", 7]);
+    // An event that names no epoch (a mob-wide stream's) names none.
+    await iterator.next();
+    assert.deepEqual([sub.lastEventEpoch, sub.lastEventSeq], [undefined, 8]);
+  });
 });

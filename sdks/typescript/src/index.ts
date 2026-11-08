@@ -24,6 +24,7 @@
 export { MeerkatClient } from "./client.js";
 export type {
   ConnectOptions,
+  MobMemberEventsOptions,
   MobMemberLiveOpenOptions,
   ToolGrantMemberSubject,
 } from "./client.js";
@@ -478,6 +479,7 @@ export type {
   MobSpawnPolicyInput,
   MobSpawnReceiptWire,
   MobSpawnSpecParams,
+  MobStreamCursor,
   MobRotateSupervisorResult,
   MobClaimCallbackRouteParams,
   MobClaimCallbackRouteResult,

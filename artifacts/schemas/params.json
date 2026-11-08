@@ -40239,7 +40239,53 @@
     "title": "MobStreamCloseParams",
     "type": "object"
   },
+  "MobStreamCursor": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "A position in a mob member's event sequence: the `epoch` a member\n`mob/stream_event` names and the `seq` of its event (`event.seq`).",
+    "properties": {
+      "epoch": {
+        "description": "The sequence space of the position (a UUID).",
+        "type": "string"
+      },
+      "seq": {
+        "description": "The last envelope sequence the client received in that space.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "epoch",
+      "seq"
+    ],
+    "title": "MobStreamCursor",
+    "type": "object"
+  },
   "MobStreamOpenParams": {
+    "$defs": {
+      "MobStreamCursor": {
+        "additionalProperties": false,
+        "description": "A position in a mob member's event sequence: the `epoch` a member\n`mob/stream_event` names and the `seq` of its event (`event.seq`).",
+        "properties": {
+          "epoch": {
+            "description": "The sequence space of the position (a UUID).",
+            "type": "string"
+          },
+          "seq": {
+            "description": "The last envelope sequence the client received in that space.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "epoch",
+          "seq"
+        ],
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "description": "Request payload for `mob/stream_open`.",
@@ -40249,6 +40295,17 @@
           "string",
           "null"
         ]
+      },
+      "cursor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MobStreamCursor"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Resume the member stream `agent_identity` names right after this\nposition: the events the member still retains after it are replayed,\nthen the stream is live. Absent opens the stream live. A mob-wide\nstream (no `agent_identity`) takes no cursor."
       },
       "mob_id": {
         "type": "string"

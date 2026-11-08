@@ -356,6 +356,10 @@ struct ScopedSessionStreamEventNotificationParams<'a> {
 struct MobStreamEventNotificationParams<'a> {
     stream_id: String,
     sequence: u64,
+    /// The sequence space of a member event's `event.seq`; absent on a
+    /// mob-wide stream, whose events come from several members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<String>,
     event: &'a serde_json::Value,
 }
 
@@ -528,16 +532,19 @@ impl NotificationSink {
     /// Emit a mob stream event as a JSON-RPC notification.
     ///
     /// For mob-wide streams the event is an [`AttributedEvent`] (source + profile + envelope).
-    /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`].
+    /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`], and
+    /// `epoch` names the sequence space of its `seq`.
     async fn emit_mob_stream_event(
         &self,
         stream_id: &StreamRef,
         sequence: u64,
+        epoch: Option<meerkat_core::comms::SessionEventEpoch>,
         event: &serde_json::Value,
     ) -> StreamEmitStatus {
         let params = MobStreamEventNotificationParams {
             stream_id: stream_id.as_string(),
             sequence,
+            epoch: epoch.map(|epoch| epoch.to_string()),
             event,
         };
         let notification = match RpcNotification::try_new_with_admission(
@@ -1219,6 +1226,92 @@ async fn close_session_stream(
             .map_err(|error| format!("session stream terminal sender failed: {error}"))?;
     }
     close
+}
+
+/// Where a `mob/stream_open` member stream starts: live without a cursor,
+/// else right after the cursor's position. A cursor names one member's
+/// sequence space, so a mob-wide stream takes none, and its epoch is the
+/// UUID a member `mob/stream_event` named.
+#[cfg(feature = "mob")]
+fn member_stream_cursor(
+    cursor: Option<&meerkat_contracts::MobStreamCursor>,
+    member_stream: bool,
+) -> Result<meerkat_core::comms::SessionEventCursor, String> {
+    let Some(cursor) = cursor else {
+        return Ok(meerkat_core::comms::SessionEventCursor::Live);
+    };
+    if !member_stream {
+        return Err(
+            "Invalid params: a cursor resumes a member stream and needs agent_identity; \
+             a mob-wide stream has no single sequence space"
+                .to_string(),
+        );
+    }
+    let epoch = cursor
+        .epoch
+        .parse::<meerkat_core::comms::SessionEventEpoch>()
+        .map_err(|_| "Invalid params: the cursor epoch is not a UUID".to_string())?;
+    Ok(meerkat_core::comms::SessionEventCursor::After {
+        epoch,
+        seq: cursor.seq,
+    })
+}
+
+/// Subscribe to a member's agent events for `mob/stream_open` from `cursor`.
+///
+/// A position the member's current sequence space cannot resume from (one
+/// of another epoch, after a runtime restart or a move to a new host
+/// binding, or one ahead of the space's newest event) replays the current
+/// space from its earliest retained event instead; the stream's events then
+/// name the current epoch, so the client sees the change.
+#[cfg(feature = "mob")]
+async fn subscribe_member_events_resuming(
+    mob_state: &meerkat_mob_mcp::MobMcpState,
+    mob_id: &meerkat_mob::MobId,
+    identity: &meerkat_mob::AgentIdentity,
+    cursor: meerkat_core::comms::SessionEventCursor,
+) -> Result<meerkat_mob::AgentEventSubscription, meerkat_mob::MobError> {
+    match mob_state
+        .subscribe_agent_events_from(mob_id, identity, cursor)
+        .await
+    {
+        Err(meerkat_mob::MobError::AgentEventCursorRejected { .. })
+            if matches!(
+                cursor,
+                meerkat_core::comms::SessionEventCursor::After { .. }
+            ) =>
+        {
+            mob_state
+                .subscribe_agent_events_from(
+                    mob_id,
+                    identity,
+                    meerkat_core::comms::SessionEventCursor::Earliest,
+                )
+                .await
+        }
+        result => result,
+    }
+}
+
+/// The sequence space a member stream's events belong to: the one its
+/// subscription named or, for a member that was not materialized when the
+/// stream opened, the one its woken actor names at the attach, which is set
+/// before the stream's first event.
+#[cfg(feature = "mob")]
+struct MemberStreamEpoch {
+    named: Option<meerkat_core::comms::SessionEventEpoch>,
+    attached: Option<Arc<std::sync::OnceLock<Option<meerkat_core::comms::SessionEventEpoch>>>>,
+}
+
+#[cfg(feature = "mob")]
+impl MemberStreamEpoch {
+    fn current(&self) -> Option<meerkat_core::comms::SessionEventEpoch> {
+        self.named.or_else(|| {
+            self.attached
+                .as_ref()
+                .and_then(|attached| attached.get().copied().flatten())
+        })
+    }
 }
 
 async fn resolve_mob_stream_open_authority(
@@ -5300,6 +5393,11 @@ impl MethodRouter {
         };
 
         let mob_id = meerkat_mob::MobId::from(params.mob_id.as_str());
+        let cursor =
+            match member_stream_cursor(params.cursor.as_ref(), params.agent_identity.is_some()) {
+                Ok(cursor) => cursor,
+                Err(message) => return RpcResponse::error(id, error::INVALID_PARAMS, message),
+            };
 
         let stream_id = StreamRef::mint();
         let notification_sink = self.notification_sink.clone();
@@ -5318,18 +5416,23 @@ impl MethodRouter {
             }
         };
         let opened = if let Some(agent_identity) = params.agent_identity {
-            // Per-member stream: subscribe to a specific member's agent events.
+            // Per-member stream: subscribe to a specific member's agent events,
+            // live or right after the client's cursor.
             let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
-            let stream: meerkat_core::comms::EventStream = match self
-                .mob_state
-                .subscribe_agent_events(&mob_id, &identity)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    return handlers::mob::mob_error_response(id, &e);
-                }
+            let subscription =
+                match subscribe_member_events_resuming(&self.mob_state, &mob_id, &identity, cursor)
+                    .await
+                {
+                    Ok(subscription) => subscription,
+                    Err(e) => {
+                        return handlers::mob::mob_error_response(id, &e);
+                    }
+                };
+            let epoch = MemberStreamEpoch {
+                named: subscription.epoch,
+                attached: subscription.attached_epoch,
             };
+            let stream = subscription.stream;
 
             let open_authority =
                 match resolve_mob_stream_open_authority(&self.stream_authority, &stream_id).await {
@@ -5399,6 +5502,7 @@ impl MethodRouter {
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            epoch.current(),
                                             &event_json,
                                         )
                                         .await;
@@ -5509,10 +5613,13 @@ impl MethodRouter {
                                             break;
                                         }
                                     };
+                                    // A mob-wide stream interleaves several members'
+                                    // sequence spaces, so its events name no epoch.
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            None,
                                             &event_json,
                                         )
                                         .await;
@@ -14390,7 +14497,12 @@ mod tests {
             .map(|_| admission.try_admit(1).expect("data permit"))
             .collect();
         let emit = sink
-            .emit_mob_stream_event(&stream_id, 1, &serde_json::json!({"type": "synthetic"}))
+            .emit_mob_stream_event(
+                &stream_id,
+                1,
+                None,
+                &serde_json::json!({"type": "synthetic"}),
+            )
             .await;
         assert_eq!(emit, StreamEmitStatus::Overflow);
         let (observation, detail) = terminal_observation_from_emit_status(emit).unwrap();
@@ -15356,11 +15468,13 @@ mod tests {
         });
 
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 1, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 1, None, &event)
+                .await,
             StreamEmitStatus::Delivered
         );
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 2, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 2, None, &event)
+                .await,
             StreamEmitStatus::Overflow
         );
 
@@ -15420,7 +15534,9 @@ mod tests {
             }
         });
 
-        let emit_status = sink.emit_mob_stream_event(&stream_id, 1, &event).await;
+        let emit_status = sink
+            .emit_mob_stream_event(&stream_id, 1, None, &event)
+            .await;
         assert_eq!(emit_status, StreamEmitStatus::ReceiverGone);
         let (observation, detail) = terminal_observation_from_emit_status(emit_status)
             .expect("closed receiver should lower into a terminal observation");

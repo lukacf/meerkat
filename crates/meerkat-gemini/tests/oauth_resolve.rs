@@ -563,7 +563,10 @@ async fn resolve_after_refresh_failure(
     expired.expires_at = Some(Utc::now() - ChronoDuration::minutes(5));
     expired.last_refresh = Some(Utc::now() - ChronoDuration::hours(2));
     let (marked, auth_lease_handle) = marked_tokens_with_valid_auth_lease_handle(&expired);
-    store.save(&key, &marked).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .unwrap();
     let env = ResolverEnvironment::testing()
         .with_provider_auth_persistence(ProviderAuthPersistence::new(
             store,

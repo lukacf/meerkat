@@ -16,6 +16,7 @@ import {
 } from "./live.js";
 import { ToolResultContent } from "./tool-content.js";
 import { parseToolCallRequester } from "./tool-requester.js";
+import { runAsToolCallback } from "./decisions.js";
 import {
   DetachedJobContext,
   DetachedJobExecution,
@@ -46,6 +47,16 @@ import {
   type TopologyProvider,
   type ProviderCallbackContext,
 } from "./types.js";
+
+/**
+ * A host's handler of `meta/decisions/notice`: one open durable decision,
+ * noticed once per stdio connection when the host lists it. `event` is
+ * `held` (nothing of its content shown) or `presented` (shown to the stdio
+ * operator, with the rendering).
+ */
+export type DecisionNoticeHandler = (
+  notice: Record<string, unknown>,
+) => void | Promise<void>;
 
 // -- Protocol -------------------------------------------------------------
 
@@ -118,6 +129,7 @@ export class CallbackDispatcher {
     string,
     (output: LiveAssistantOutputAddress) => void
   >();
+  private _decisionNoticeHandler: DecisionNoticeHandler | null = null;
 
   registerBuilder(builder: SessionAgentBuilder): void {
     this._builder = builder;
@@ -125,6 +137,11 @@ export class CallbackDispatcher {
 
   registerErrorCallback(callback: ErrorCallback): void {
     this._errorCallback = callback;
+  }
+
+  /** Receive each `meta/decisions/notice` the stdio gateway writes. */
+  registerDecisionNoticeHandler(handler: DecisionNoticeHandler): void {
+    this._decisionNoticeHandler = handler;
   }
 
   registerRosterProvider(provider: RosterProvider): void {
@@ -193,6 +210,14 @@ export class CallbackDispatcher {
     params: Record<string, unknown>,
     callbackContext?: ProviderCallbackContext,
   ): Promise<unknown> {
+    if (method === "meta/decisions/notice") {
+      // One open durable decision, noticed once per gateway connection; a
+      // host without a handler is told nothing more.
+      if (this._decisionNoticeHandler !== null) {
+        await this._decisionNoticeHandler(params);
+      }
+      return null;
+    }
     if (method === "meta/live/assistant_output_available") {
       const output = parseLiveAssistantOutputAddress(params);
       const consumer = this._liveOutputConsumers.get(output.channelId);
@@ -326,9 +351,13 @@ export class CallbackDispatcher {
         );
       }
 
-      // The gateway names the run's requester here, never in the arguments;
-      // absent or malformed is no requester.
-      const result = await handler(args, parseToolCallRequester(params.requester));
+      // The handler serves an agent's tool call: a durable decision's decide
+      // refuses inside it, and inside the work it starts. The gateway names
+      // the run's requester here, never in the arguments; absent or
+      // malformed is no requester.
+      const result = await runAsToolCallback(async () =>
+        handler(args, parseToolCallRequester(params.requester)),
+      );
       // Rich content is opt-in: only an explicit ToolResultContent is delivered
       // as content blocks (images / multi-block). Any other return keeps the
       // legacy single-text-block behavior.

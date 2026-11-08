@@ -19,7 +19,11 @@ export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   { id: "view", label: "View", actions: ["agent.view", "topology.view", "topology.audit", "mob.observe"] },
   { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
   { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
-  { id: "approvals", label: "Approvals", actions: ["gating.view", "gating.decide"] },
+  {
+    id: "approvals",
+    label: "Approvals",
+    actions: ["gating.view", "gating.decide", "decisions.view", "decisions.decide", "decisions.admin"],
+  },
   {
     id: "memory",
     label: "Memory",
@@ -38,7 +42,7 @@ export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   {
     id: "admin",
     label: "Admin",
-    actions: ["access.admin", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
+    actions: ["access.admin", "audit.view", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
   },
 ];
 

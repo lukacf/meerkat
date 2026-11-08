@@ -22,8 +22,8 @@ use tokio::sync::{Mutex, RwLock, broadcast, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::agent_memory::{
-    AgentMemoryError, AgentMemoryForgetResult, AgentMemoryRecallRequest, AgentMemoryRecord,
-    AgentMemoryRuntimeInjector, NewAgentMemory,
+    AgentMemoryError, AgentMemoryForgetResult, AgentMemoryProvider, AgentMemoryRecallRequest,
+    AgentMemoryRecord, AgentMemoryRuntimeInjector, NewAgentMemory,
 };
 use super::bridge::{
     BridgeAdmissionError, BridgeError, BridgeTurnError, DeclaredIdentityAnswer,
@@ -56,7 +56,8 @@ use super::types::{
 };
 use crate::actor_loop_health::{ActorLoopHealth, ActorLoopHealthKind, ActorLoopHealthReport};
 use crate::memory::records::{
-    ManifestTier, MemoryId, MemoryKind, MemoryScope, NewMemoryRecord, RecordMeta, UsageEvent,
+    ManifestTier, MemoryAuthor, MemoryId, MemoryKind, MemoryScope, NewMemoryRecord, RecordMeta,
+    UsageEvent,
 };
 
 mod build_preparation;
@@ -5684,25 +5685,47 @@ impl IdentityRuntime {
             .is_some_and(|injector| injector.provider().supports_manifest())
     }
 
-    pub async fn remember_agent_memory(
+    /// The configured memory provider, for a write to `identity`'s memory:
+    /// the identity must be registered.
+    async fn agent_memory_for_write(
         &self,
-        realm: &str,
         identity: &AgentIdentity,
-        memory: NewAgentMemory,
-    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+    ) -> Result<Arc<dyn AgentMemoryProvider>, AgentMemoryError> {
         self.status(identity)
             .await
             .map_err(|err| AgentMemoryError::InvalidConfig(err.to_string()))?;
-        let provider = self
-            .agent_memory
+        self.agent_memory
             .read()
             .await
             .as_ref()
             .map(AgentMemoryRuntimeInjector::provider)
             .ok_or_else(|| {
                 AgentMemoryError::InvalidConfig("agent memory is not configured".to_string())
-            })?;
-        provider.remember(realm, identity, memory).await
+            })
+    }
+
+    pub async fn remember_agent_memory(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory: NewAgentMemory,
+    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+        self.remember_agent_memory_by(realm, identity, memory, MemoryAuthor::Application)
+            .await
+    }
+
+    /// [`Self::remember_agent_memory`], recorded as written by `author`.
+    pub(crate) async fn remember_agent_memory_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory: NewAgentMemory,
+        author: MemoryAuthor,
+    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+        self.agent_memory_for_write(identity)
+            .await?
+            .remember_by(realm, identity, memory, author)
+            .await
     }
 
     pub async fn forget_agent_memory(
@@ -5711,19 +5734,22 @@ impl IdentityRuntime {
         identity: &AgentIdentity,
         memory_id: &str,
     ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
-        self.status(identity)
+        self.forget_agent_memory_by(realm, identity, memory_id, MemoryAuthor::Application)
             .await
-            .map_err(|err| AgentMemoryError::InvalidConfig(err.to_string()))?;
-        let provider = self
-            .agent_memory
-            .read()
+    }
+
+    /// [`Self::forget_agent_memory`], recorded as done by `author`.
+    pub(crate) async fn forget_agent_memory_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory_id: &str,
+        author: MemoryAuthor,
+    ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
+        self.agent_memory_for_write(identity)
+            .await?
+            .forget_by(realm, identity, memory_id, author)
             .await
-            .as_ref()
-            .map(AgentMemoryRuntimeInjector::provider)
-            .ok_or_else(|| {
-                AgentMemoryError::InvalidConfig("agent memory is not configured".to_string())
-            })?;
-        provider.forget(realm, identity, memory_id).await
     }
 
     /// Supersede `memory_id` within its lineage (the D4 fix): the new
@@ -5736,18 +5762,26 @@ impl IdentityRuntime {
         memory_id: &str,
         memory: NewAgentMemory,
     ) -> Result<MemoryId, AgentMemoryError> {
-        self.status(identity)
-            .await
-            .map_err(|err| AgentMemoryError::InvalidConfig(err.to_string()))?;
-        let provider = self
-            .agent_memory
-            .read()
-            .await
-            .as_ref()
-            .map(AgentMemoryRuntimeInjector::provider)
-            .ok_or_else(|| {
-                AgentMemoryError::InvalidConfig("agent memory is not configured".to_string())
-            })?;
+        self.update_agent_memory_by(
+            realm,
+            identity,
+            memory_id,
+            memory,
+            MemoryAuthor::Application,
+        )
+        .await
+    }
+
+    /// [`Self::update_agent_memory`], recorded as written by `author`.
+    pub(crate) async fn update_agent_memory_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory_id: &str,
+        memory: NewAgentMemory,
+        author: MemoryAuthor,
+    ) -> Result<MemoryId, AgentMemoryError> {
+        let provider = self.agent_memory_for_write(identity).await?;
         let scope = MemoryScope::Identity {
             realm: realm.to_string(),
             identity: identity.as_str().to_string(),
@@ -5761,7 +5795,9 @@ impl IdentityRuntime {
             evidence: Vec::new(),
             verification: None,
         };
-        provider.supersede(&scope, memory_id, record).await
+        provider
+            .supersede_by(&scope, memory_id, record, author)
+            .await
     }
 
     /// Tiered metadata manifest for the identity's own scope (§8.3).

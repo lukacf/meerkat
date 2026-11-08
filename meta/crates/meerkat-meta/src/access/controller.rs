@@ -14,7 +14,7 @@ use super::engine::{
 };
 use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
-    validate_access_config,
+    check_declared_ingresses, validate_access_config,
 };
 
 /// Cached resource attributes for one agent, keyed by console identity.
@@ -108,6 +108,39 @@ fn new_edit_identity() -> Option<String> {
 struct AccessState {
     config: Arc<AccessControlConfig>,
     revision: u64,
+    /// The edit that committed `revision`; `None` until this controller
+    /// commits one.
+    last_edit: Option<AccessLastEdit>,
+}
+
+/// The edit that committed a configuration revision: who made it, when, and
+/// the revision it committed. Kept for this controller's lifetime only; the
+/// console audit log keeps the history of edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccessLastEdit {
+    /// The administrator whose edit it was, as the access policy names
+    /// them; `None` when the edit named no one (the host's own edit through
+    /// the direct API).
+    pub principal: Option<String>,
+    /// Milliseconds since the epoch.
+    pub at_ms: u64,
+    pub revision: u64,
+}
+
+/// An administrator's read of the configuration: the configuration, its
+/// revision and the edit that committed it, all from one read.
+pub(crate) struct AccessAdminRead {
+    pub config: Arc<AccessControlConfig>,
+    pub revision: u64,
+    pub last_edit: Option<AccessLastEdit>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 struct AccessControllerInner {
@@ -131,6 +164,10 @@ struct AccessControllerInner {
     /// The revision of the configuration last committed, sent after the
     /// commit is visible ([`AccessController::subscribe_revision`]).
     revision_signal: watch::Sender<u64>,
+    /// The decision ingresses the launch declared, once it declared them
+    /// ([`AccessController::declare_decision_ingresses`]): every edit may
+    /// name no other ingress in the approver map.
+    decision_ingresses: RwLock<Option<BTreeSet<String>>>,
 }
 
 /// These access facts already joined an authorization publication; they
@@ -193,6 +230,7 @@ impl AccessController {
                 state: RwLock::new(AccessState {
                     config: Arc::new(config),
                     revision: 0,
+                    last_edit: None,
                 }),
                 persist_path: RwLock::new(None),
                 attributes: RwLock::new(BTreeMap::new()),
@@ -200,6 +238,7 @@ impl AccessController {
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
                 revision_signal: watch::Sender::new(0),
+                decision_ingresses: RwLock::new(None),
             }),
         })
     }
@@ -329,6 +368,34 @@ impl AccessController {
         self.mutate(AccessMutation::SetEnabled(enabled))
     }
 
+    /// Bind the decision ingresses the launch declares
+    /// (`runtime_options.decisions`): the approver map may name no other
+    /// ingress, the built-in `operator` aside, now and in every later edit,
+    /// which is refused [`AccessConfigError::UnknownIngress`] otherwise.
+    ///
+    /// # Errors
+    /// [`AccessConfigError::UnknownIngress`] when the current configuration
+    /// names another ingress; nothing is bound then.
+    pub fn declare_decision_ingresses<I, S>(&self, ingresses: I) -> Result<(), AccessConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let declared: BTreeSet<String> = ingresses.into_iter().map(Into::into).collect();
+        let _mutation = self
+            .inner
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        check_declared_ingresses(&self.snapshot().0, &declared)?;
+        *self
+            .inner
+            .decision_ingresses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(declared);
+        Ok(())
+    }
+
     pub(crate) fn edit_identity(&self) -> Option<&str> {
         self.inner.owner_instance.as_deref()
     }
@@ -343,6 +410,37 @@ impl AccessController {
             return Err(AccessEditError::Denied);
         }
         Ok((view.config, revision))
+    }
+
+    /// [`Self::admin_config`] with the edit that committed the revision,
+    /// all from one read.
+    pub(crate) fn admin_read(
+        &self,
+        subject: Option<&str>,
+    ) -> Result<AccessAdminRead, AccessEditError> {
+        let (config, revision, last_edit) = {
+            let state = self
+                .inner
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                Arc::clone(&state.config),
+                state.revision,
+                state.last_edit.clone(),
+            )
+        };
+        if !self
+            .view_from_config(Arc::clone(&config), subject)
+            .can_administer()
+        {
+            return Err(AccessEditError::Denied);
+        }
+        Ok(AccessAdminRead {
+            config,
+            revision,
+            last_edit,
+        })
     }
 
     /// Authorize the caller and construct the target preview from one config
@@ -390,7 +488,7 @@ impl AccessController {
                 actual: revision,
             });
         }
-        self.edit_and_commit((*config).clone(), mutation)
+        self.edit_and_commit((*config).clone(), mutation, subject)
             .map_err(AccessEditError::Config)
     }
 
@@ -408,29 +506,44 @@ impl AccessController {
     }
 
     /// Serialized direct compatibility mutation; shares the exact edit and
-    /// persist-before-publish path with checked administrative writes.
+    /// persist-before-publish path with checked administrative writes. It
+    /// names no editor: it is the host's own edit.
     fn mutate(&self, mutation: AccessMutation) -> Result<u64, AccessConfigError> {
         let _mutation = self
             .inner
             .mutation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.edit_and_commit((*self.snapshot().0).clone(), mutation)
+        self.edit_and_commit((*self.snapshot().0).clone(), mutation, None)
     }
 
     fn edit_and_commit(
         &self,
         mut config: AccessControlConfig,
         mutation: AccessMutation,
+        editor: Option<&str>,
     ) -> Result<u64, AccessConfigError> {
         mutation.apply(&mut config)?;
         super::model::normalize_access_config_for_memory_actions(&mut config);
         super::model::normalize_access_config_for_schedule_actions(&mut config);
         validate_access_config(&config)?;
-        self.commit(config)
+        if let Some(declared) = self
+            .inner
+            .decision_ingresses
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            check_declared_ingresses(&config, declared)?;
+        }
+        self.commit(config, editor)
     }
 
-    fn commit(&self, config: AccessControlConfig) -> Result<u64, AccessConfigError> {
+    fn commit(
+        &self,
+        config: AccessControlConfig,
+        editor: Option<&str>,
+    ) -> Result<u64, AccessConfigError> {
         // Every caller retains the mutation mutex. Refuse exhaustion before
         // persistence or publication so a checked precondition cannot wrap.
         let next_revision = self
@@ -461,6 +574,11 @@ impl AccessController {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.config = Arc::new(config);
             state.revision = next_revision;
+            state.last_edit = Some(AccessLastEdit {
+                principal: editor.map(str::to_string),
+                at_ms: now_ms(),
+                revision: next_revision,
+            });
         }
         // Signal only once both the state lock and the publication's change
         // are released, so a woken holder reads the new configuration. The
@@ -812,8 +930,9 @@ impl AccessView {
     }
 
     /// The approver identities this principal holds in this snapshot of the
-    /// configuration's `approvers` bindings, directly or through a group. An
-    /// unauthenticated principal holds none.
+    /// configuration's `approvers` bindings, directly, through a group, or
+    /// as a person the binding's `people` names. An unauthenticated
+    /// principal holds none.
     pub fn held_approver_ids(&self) -> BTreeSet<String> {
         let Some(subject) = self.principal.subject.as_deref() else {
             return BTreeSet::new();
@@ -827,6 +946,10 @@ impl AccessView {
                         .groups
                         .iter()
                         .any(|group| self.principal.groups.contains(group))
+                    || holders
+                        .people
+                        .iter()
+                        .any(|person| person.subjects.iter().any(|holder| holder == subject))
             })
             .map(|(approver, _)| approver.clone())
             .collect()

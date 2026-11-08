@@ -254,6 +254,11 @@ persistent state, its timeline stays in memory. The console-only
 `meta_gateway` also keeps its timeline in memory. Do not infer timeline
 durability from the presence of the same browser shell and route names.
 
+The console audit log (`meta/console/audit`, which `audit.view` reads) and
+the gating state follow the metadata store the same way: durable for
+`rpc_gateway` over persistent state or a host store realm, kept for the
+process on `meta_gateway`. Both reads report it as `retention`.
+
 ## Layout
 
 The console uses a configurable workbench layout built on the shared `ConsoleWorkbench` component:
@@ -395,8 +400,12 @@ counts.
 | --- | --- |
 | Pending | Current requests, each marked **For you** or **Waiting for** its approver, with Approve, Reject, and Escalate controls when the caller can decide them; requests decided elsewhere stay, saying by whom. |
 | Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
-| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
+| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. A decision whose record names its verified decider reads "Decided by" that principal, the approver label it decided as, and the assurance it was authenticated with (for example "alice@example.test (as Release manager) - person authenticated"); an older record keeps the approver label. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
+
+When the gateway keeps the gating records in its memory (`meta/gating/audit`
+reports `retention: "process"`), the Audit and Auto tabs say so: "Kept in the
+gateway's memory: decisions from before a gateway restart may be missing."
 
 Risk tiers display in words with their code: R0 Minimal, R1 Low, R2 Elevated and
 R3 High. A request's chip reads "High risk", with the tier code in its tooltip, and
@@ -467,6 +476,11 @@ as they were.
 
 - The side chat runs with the agent's role, profile and model overrides and
   tools, and inherits the agent's labels.
+- It records who opened it: your console principal, in its
+  `side_chat_creator` label (nothing on an open console when you sent no
+  token). The record grants nothing, and the console shows it only to you
+  and to the admins of an enforced access policy: other viewers of the side
+  chat see it without the label.
 - Its audience is exactly the agent's: every agent check on a side chat is
   the agent's, so whoever may see the agent, send to it or retire it may do
   the same with its side chats, a deny on the agent hides them, and a grant

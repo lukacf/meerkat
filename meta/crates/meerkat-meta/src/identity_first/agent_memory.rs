@@ -281,6 +281,20 @@ pub trait AgentMemoryProvider: Send + Sync {
         false
     }
 
+    /// [`Self::remember`] on behalf of `author`, the principal the write is
+    /// recorded as (the console names the person who wrote it). A provider
+    /// that keeps authorship records `author`; the default ignores it and
+    /// calls [`Self::remember`], whose author the provider chooses.
+    async fn remember_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory: NewAgentMemory,
+        _author: crate::memory::records::MemoryAuthor,
+    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+        self.remember(realm, identity, memory).await
+    }
+
     async fn forget(
         &self,
         _realm: &str,
@@ -294,6 +308,18 @@ pub trait AgentMemoryProvider: Send + Sync {
 
     fn supports_forget(&self) -> bool {
         false
+    }
+
+    /// [`Self::forget`] on behalf of `author`, as
+    /// [`Self::remember_by`] is to [`Self::remember`].
+    async fn forget_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory_id: &str,
+        _author: crate::memory::records::MemoryAuthor,
+    ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
+        self.forget(realm, identity, memory_id).await
     }
 
     // ---- v2 surface (docs/design/agent-memory-architecture.md §7.3) ----
@@ -334,6 +360,18 @@ pub trait AgentMemoryProvider: Send + Sync {
 
     fn supports_supersede(&self) -> bool {
         false
+    }
+
+    /// [`Self::supersede`] on behalf of `author`, as
+    /// [`Self::remember_by`] is to [`Self::remember`].
+    async fn supersede_by(
+        &self,
+        scope: &MemoryScope,
+        prior: &str,
+        record: NewMemoryRecord,
+        _author: crate::memory::records::MemoryAuthor,
+    ) -> Result<MemoryId, AgentMemoryError> {
+        self.supersede(scope, prior, record).await
     }
 
     /// Mechanical usage-ledger updates (§9.2). Deliberately flag-less: it is

@@ -13,6 +13,22 @@
   requester is not `carried` and that its principal's `kind`, `id` and
   `trustDomainId` are its owner's.
 
+- Durable decisions: `MobHandle.decisionsList({kind, phase, approverId,
+  requester, after, limit})`, `decisionsGet(decisionId, {includeRequest})`,
+  `decisionsRendering(decisionId, {maxPartBytes})`,
+  `decisionsPresent(decisionId, presentation)`,
+  `decisionsWithdraw(decisionId)` and `decisionsDecide(decisionId,
+  {approve, presentedDigest, reason, attestation})` call the gateway's
+  `meta/decisions/*` methods; `DecisionAttestation` carries a declared
+  ingress's attestation of the person who decided.
+  `MetaRuntime.onDecisionNotice(handler)` (a `DecisionNoticeHandler`)
+  receives each `meta/decisions/notice`, and
+  `MetaBuilder.decisionIngresses([...])` (`DecisionIngressDeclaration`)
+  declares the ingresses as `runtime_options.decisions`.
+- A decide called while the SDK serves a host tool callback rejects with
+  `DecideInsideToolCallbackError` (`DECIDE_INSIDE_TOOL_CALLBACK_KIND`,
+  `"decide_inside_tool_callback"`) and sends nothing.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

@@ -76,6 +76,48 @@ cannot be chosen per fork. See
 [Fork instruction policy](/reference/configuration#fork-instruction-policy)
 for what each value does and what `reactivate_inherited` trusts.
 
+## Durable decisions
+
+`MobHandle` calls the [durable decision methods](/api/rpc#durable-decision-methods)
+of the stdio gateway: `decisionsList({kind, phase, approverId, requester,
+after, limit})`, `decisionsGet(decisionId, {includeRequest})`,
+`decisionsRendering(decisionId, {maxPartBytes})`,
+`decisionsPresent(decisionId, presentation)`, `decisionsWithdraw(decisionId)`
+and `decisionsDecide(decisionId, {approve, presentedDigest, reason,
+attestation})`. Each resolves to the gateway's result object.
+
+```typescript
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .persistentState("./state")
+  .accessControl("config/access.toml")
+  .decisionIngresses([{ ingress: "chat", attests: "person", maxClockSkewMs: 5000 }])
+  .build();
+
+rt.onDecisionNotice((notice) => console.log(notice.event, notice.decision_id));
+const page = await mob.decisionsList({ phase: "open" }); // notices are written before the answer
+await mob.decisionsDecide(decisionId, {
+  approve: true,
+  presentedDigest: subjectDigest,
+  attestation: {
+    ingress: "chat",
+    subject: "U123",
+    scope: "chat-session-1",
+    eventRef: "chat:event-1",
+    observedAtMs: Date.now(),
+  },
+});
+```
+
+`decisionIngresses` declares the ingresses as `runtime_options.decisions`.
+`MetaRuntime.onDecisionNotice(handler)` receives each `meta/decisions/notice`.
+The gateway writes the notices before a list answers; a handler may still be
+running after `decisionsList` resolves. Without an `attestation` the stdio
+operator decides, eligible only for a decision presented to it on this
+connection. A decide called while the SDK serves a host tool callback rejects
+with `DecideInsideToolCallbackError` (`kind = "decide_inside_tool_callback"`)
+and sends nothing: an agent's tool call never decides.
+
 ## Member restore
 
 Every roster identity is a member of the gateway's mob from ready, and is

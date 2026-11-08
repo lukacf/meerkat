@@ -63,6 +63,12 @@ const INVALID_ACCESS_REASONS = {
   approver_without_holders: { words: "An approver needs a person, service or group to hold it", showDetail: true },
   unknown_approver_group: { words: "An approver names a group that does not exist", showDetail: true },
   unknown_rule: { words: "The rule to delete does not exist", showDetail: true },
+  invalid_ingress_name: { words: "An approver names an ingress that is not an ingress name", showDetail: true },
+  operator_ingress_with_subject: { words: "An approver lists the operator with a subject", showDetail: true },
+  invalid_ingress_subject: { words: "An approver's ingress identity needs a subject without surrounding spaces", showDetail: true },
+  approver_person_without_identity: { words: "An approver's person entry names no identity", showDetail: true },
+  unknown_ingress: { words: "An approver names an ingress this runtime does not declare", showDetail: true },
+  duplicate_person_identity: { words: "An approver lists one identity in two person entries", showDetail: true },
   invalid_toml: { words: "The access configuration file cannot hold this configuration", showDetail: false },
 } as const satisfies Record<string, { words: string; showDetail: boolean }>;
 

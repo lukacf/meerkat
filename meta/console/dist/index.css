@@ -19530,6 +19530,47 @@ svg[data-svg=fit],
   min-width: 0;
   overflow: hidden;
 }
+.gating-inbox__decisions .cc-decision {
+  margin: 0;
+}
+.cc-decision__who {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.cc-decision__label {
+  color: var(--_cc-foreground-meta);
+}
+.cc-decision__approver,
+.cc-decision__requester {
+  font-weight: 500;
+  color: var(--_cc-foreground);
+  overflow-wrap: anywhere;
+}
+.cc-decision__rendering {
+  max-height: 320px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--_cc-border-soft);
+  border-radius: var(--_cc-radius-sm);
+  background: var(--_cc-surface-soft);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--_cc-font-mono);
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground);
+}
+.cc-decision__note,
+.cc-decision__hint {
+  margin: 10px 0 0;
+  font-size: var(--_cc-text-xs);
+  color: var(--_cc-foreground-meta);
+}
+.cc-decision .cc-approval__details {
+  margin-top: 10px;
+}
 
 /* src/styles/access.css */
 .access-panel__state {

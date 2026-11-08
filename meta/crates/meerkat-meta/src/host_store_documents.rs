@@ -45,7 +45,7 @@ use crate::mob_handle_runtime::DelegateIdleRetireOverride;
 use crate::runtime::{
     IdentityRotationIntent, IdentityToolRecord, LifecycleEffectFailure, LifecycleEffectIntent,
     LifecycleEffectKind, LifecycleIntentKey, LifecycleIntentSlot, LifecycleProjectionCursor,
-    MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore,
+    MemberIdleRetireOverrideRecord, MetadataStoreError, PersistentMetadataStore, RecordRetention,
     decode_identity_record, encode_identity_record, lifecycle_effect_failure_order,
 };
 
@@ -77,6 +77,14 @@ const LIFECYCLE_PREFIX: &str = "lifecycle/";
 const EFFECT_PREFIX: &str = "effect/";
 const FAILURE_PREFIX: &str = "failure/";
 const HARVEST_FAILURE_PREFIX: &str = "harvest-failure/";
+
+/// The key prefix of the realm documents
+/// ([`PersistentMetadataStore::realm_document`]): the document's key follows.
+const REALM_DOCUMENT_PREFIX: &str = "realm-document/";
+
+fn realm_document_key(key: &str) -> String {
+    format!("{REALM_DOCUMENT_PREFIX}{key}")
+}
 
 /// The format version of the cursor and idle opt-in documents.
 const ENTRY_VERSION: u32 = 1;
@@ -1060,6 +1068,44 @@ impl PersistentMetadataStore for SpiMetadataStore {
             )
             .await
             .map_err(io_error)
+    }
+
+    /// Documents of the host store realm: as durable as the realm.
+    fn realm_document_retention(&self) -> Option<RecordRetention> {
+        Some(RecordRetention::Durable)
+    }
+
+    async fn realm_document(&self, key: &str) -> Result<Option<String>, MetadataStoreError> {
+        let key = realm_document_key(key);
+        let Some(bytes) = self.documents.read(&key).await.map_err(io_error)? else {
+            return Ok(None);
+        };
+        std::str::from_utf8(&bytes)
+            .map(|document| Some(document.to_string()))
+            .map_err(|error| decode_error(&key, error))
+    }
+
+    async fn set_realm_document(
+        &self,
+        key: &str,
+        document: Option<&str>,
+    ) -> Result<(), MetadataStoreError> {
+        self.documents
+            .write(
+                &realm_document_key(key),
+                document.map(|document| document.as_bytes().to_vec()),
+            )
+            .await
+            .map_err(io_error)
+    }
+
+    async fn realm_document_keys(&self, prefix: &str) -> Result<Vec<String>, MetadataStoreError> {
+        Ok(self
+            .documents
+            .keys_with_prefix(&realm_document_key(prefix))
+            .into_iter()
+            .filter_map(|key| key.strip_prefix(REALM_DOCUMENT_PREFIX).map(str::to_string))
+            .collect())
     }
 }
 

@@ -454,6 +454,12 @@ pub struct UnifiedRuntimeCore {
     // Optional ABAC enforcement shared by the console/SSE surfaces.
     access_controller: Option<crate::access::AccessController>,
 
+    // The runtime's durable decisions: the decision owner of its persistent
+    // state directory, the decision ingresses its launch declares, and its
+    // record of attested decide events. A runtime without a persistent
+    // state directory keeps none.
+    durable_decisions: crate::durable_decisions::RuntimeDecisions,
+
     // The Console's session fence record, shared by every console and SSE
     // route; it exists whether or not access control is installed.
     console_session_fences: crate::auth::session_fence::ConsoleSessionFences,
@@ -529,6 +535,21 @@ pub struct UnifiedRuntimeCore {
     // subscription cursor). Falls back to `InMemoryMetadataStore` when not
     // explicitly configured — see `UnifiedRuntimeBuilder::persistent_metadata`.
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
+
+    /// The console audit log, kept in `persistent_metadata` and shared by
+    /// every console router this runtime builds; `None` when that store
+    /// keeps no realm documents.
+    console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    /// The gating owner's state kept in `persistent_metadata`, once the
+    /// composition keeps it (`keep_gating_state_in_realm`).
+    gating_persistence: tokio::sync::Mutex<Option<GatingPersistence>>,
+}
+
+/// The gating owner's state kept in the realm's metadata store, and the task
+/// that writes it after every gating change.
+struct GatingPersistence {
+    persistence: Arc<crate::gating_persistence::GatingStatePersistence>,
+    task: Option<JoinHandle<()>>,
 }
 
 enum MobEventIngress {
@@ -855,6 +876,11 @@ impl UnifiedRuntime {
             )
             .map(|policy| Arc::new(policy) as Arc<dyn EdgeDiscovery>);
         let state_dir_claims = mob_runtime.state_dir_claim_refs();
+        let console_audit = crate::console_audit::ConsoleAuditLog::over(
+            Arc::clone(&persistent_metadata),
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .map(Arc::new);
         Self::assemble(
             UnifiedRuntimeCore {
                 mob_runtime,
@@ -917,6 +943,7 @@ impl UnifiedRuntime {
                 identity_first_context: None,
                 bootstrap_member_build_wiring: None,
                 access_controller: None,
+                durable_decisions: crate::durable_decisions::RuntimeDecisions::unavailable(),
                 console_session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(
                 ),
                 flow_editor_host_deploy: false,
@@ -937,6 +964,8 @@ impl UnifiedRuntime {
                 console_schedule_doors: Default::default(),
                 metadata_table,
                 persistent_metadata,
+                console_audit,
+                gating_persistence: tokio::sync::Mutex::new(None),
             },
             public_owner,
         )
@@ -2205,6 +2234,44 @@ impl UnifiedRuntime {
         self.access_controller.as_ref()
     }
 
+    /// The runtime's durable decisions: the decision owner of its
+    /// persistent state directory (`approval_decisions.sqlite3`), and the
+    /// decision ingresses its launch declares. A runtime without a
+    /// persistent state directory, or on a host store realm, keeps none.
+    pub fn durable_decisions(&self) -> &crate::durable_decisions::RuntimeDecisions {
+        &self.durable_decisions
+    }
+
+    /// The runtime's durable decision owner. A host composition holds its
+    /// own kinds' decisions through it; a runtime that keeps none answers
+    /// every call unavailable.
+    pub fn decision_owner(&self) -> &meerkat_runtime::decision::DurableDecisionService {
+        self.durable_decisions.owner()
+    }
+
+    /// Install the runtime's durable decisions. The builder and the stdio
+    /// gateway install those of a persistent state directory at their build.
+    pub fn set_durable_decisions(&mut self, decisions: crate::durable_decisions::RuntimeDecisions) {
+        self.durable_decisions = decisions;
+    }
+
+    /// Meta's answer to whether the party that decided a decision may still
+    /// do so, for a host's decision executor: `Eligible` while the live
+    /// approver map (the access controller's `approvers`) lists the identity
+    /// that decided (this runtime's stdio operator, or a person a declared
+    /// ingress attests) for the decision's approver id, re-read when the
+    /// execution commits; `Refused` once it no longer does, and for operator
+    /// evidence whose decider is not this runtime's operator. A runtime
+    /// without an access controller has no map and refuses.
+    pub fn decision_approver_currentness(
+        &self,
+    ) -> Arc<dyn meerkat_runtime::decision::DecisionApproverCurrentness> {
+        Arc::new(crate::durable_decisions::MapApproverCurrentness::new(
+            self.access_controller.clone(),
+            self.durable_decisions.realm(),
+        ))
+    }
+
     /// Optional topology control-plane policy and durable intent store.
     pub fn topology_controller(&self) -> &crate::topology_control::TopologyController {
         &self.topology_controller
@@ -2240,6 +2307,12 @@ impl UnifiedRuntime {
     /// persisted cursor reach through this accessor.
     pub fn persistent_metadata(&self) -> &Arc<dyn PersistentMetadataStore> {
         &self.persistent_metadata
+    }
+
+    /// The console audit log the console routers this runtime builds write
+    /// and read; `None` when the metadata store keeps no realm documents.
+    pub(crate) fn console_audit_log(&self) -> Option<Arc<crate::console_audit::ConsoleAuditLog>> {
+        self.console_audit.clone()
     }
 
     /// Replace the label set associated with this mob.

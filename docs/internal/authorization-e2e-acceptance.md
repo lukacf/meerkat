@@ -93,7 +93,9 @@ workspace I/O and a denied outside write followed by a permitted sibling
 operation on the same shell owner.
 
 Bind durable `ProcessCustody` and have the target read its own record as its
-first effect. The recorded PID must match the target, with custody committed
+first effect. The recorded PID must match the target (on Linux, the launch's
+init, pid 1 of the launch's pid namespace, whose start time the target, pid 2
+there, reads from its own `/proc/1/stat`), with custody committed
 before the gate opens. A successful kill dispatch must not remove the record
 while a real descendant remains alive; only observed group exit permits
 release. Exercise this on the production foreground owner, including timeout,

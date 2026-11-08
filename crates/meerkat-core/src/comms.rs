@@ -2406,7 +2406,10 @@ pub enum PeerWakeRefusal {
     /// The member's host has preparation pending for it (a first-boot row, or
     /// its build preparation asked to be retried).
     HostPreparationPending,
-    /// The member's durable resume gate was unavailable at the wake.
+    /// The member's durable resume gate was unavailable at the wake, or its
+    /// session could not be built now for a cause that clears with no change
+    /// to the member (for example a provider credential whose source or
+    /// store cannot answer now or whose lookup is in flight).
     ResumeGateUnavailable,
     /// The member is placed on a member host, which owns its materialization.
     HostOwned,

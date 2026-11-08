@@ -9255,11 +9255,27 @@ mod tests {
             );
         }
 
+        /// A real connection failure: a request to a local port nothing
+        /// listens on.
+        async fn refused_connection() -> reqwest::Error {
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = closed.local_addr().unwrap();
+            drop(closed);
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/user"))
+                .send()
+                .await
+                .expect_err("nothing listens on a closed port")
+        }
+
         /// GitHub unavailable: an identity lookup that answers a 5xx, times
         /// out or cannot connect fails the resolution as `source_unavailable`,
         /// which clears on its own: the lease stays valid, nothing pauses the
         /// account, and the next resolution looks the account up again. A
-        /// lookup answer that refuses the token stays `refresh_failed` (T5).
+        /// lookup answer that refuses the token stays `refresh_failed`.
         #[tokio::test]
         async fn an_unavailable_identity_lookup_fails_as_source_unavailable() {
             let failures: Vec<(&str, Outcome)> = vec![
@@ -9271,6 +9287,12 @@ mod tests {
                     )),
                 ),
                 ("timeout", Err(CopilotHttpTransportError::Timeout)),
+                (
+                    "cannot connect",
+                    Err(CopilotHttpTransportError::Request(
+                        refused_connection().await,
+                    )),
+                ),
             ];
             for (label, failure) in failures {
                 let harness = Harness::new([failure, Ok(svc_bot()), Ok(models_response())]);
@@ -9963,6 +9985,37 @@ mod tests {
                 .await
                 .expect("the lookup and the listing run again after the wait");
             assert_eq!(harness.transport.request_count(), 4);
+        }
+
+        /// A required model listing that fails for a cause a later listing
+        /// would meet again (a 500 or a 400: neither rate limited nor worth an
+        /// immediate second attempt) stays `refresh_failed`: only a listing
+        /// failure that clears on its own answers `source_unavailable`.
+        #[tokio::test]
+        async fn a_listing_failure_that_does_not_clear_stays_refresh_failed() {
+            for status in [500, 400] {
+                let harness = Harness::new([
+                    Ok(unanswered_lookup(404)),
+                    Ok(json_response(
+                        status,
+                        serde_json::json!({"message": "listing failed"}),
+                    )),
+                ]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-broken"));
+                let detail = refresh_failure(
+                    harness
+                        .resolve(CopilotProviderRoute::OpenAi)
+                        .await
+                        .err()
+                        .unwrap_or_else(|| panic!("{status}: no route without the model list")),
+                );
+                assert!(
+                    detail.contains("model listing failed"),
+                    "{status}: {detail}"
+                );
+            }
         }
 
         /// T9: the token never goes to an API host outside

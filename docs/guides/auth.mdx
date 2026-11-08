@@ -1129,14 +1129,13 @@ On resolve, the runtime:
    `source_unavailable` after a transient failure (a kind that clears on
    its own: the next resolve refreshes again) and `user_reauth_required`
    after a permanent one. A failure the machine did not classify stays
-   `refresh_failed`. A refresh the host refuses on its own side, before the
-   provider judges the credential (for example its egress profile refuses
-   the token endpoint, or the token endpoint answers with a redirect, which
-   credential requests never follow), is a transient failure too: it answers
+   `refresh_failed`. A refresh that fails on the host's own side, where the
+   provider refused nothing (for example the token endpoint answers with a
+   redirect, which credential requests never follow, or with a token whose
+   expiry is out of range), is a transient failure too: it answers
    `source_unavailable`, and a mob member whose first wake meets it stays
-   dormant. Only a change on the host's side (its egress profile or the
-   endpoint's configuration) lets a later refresh succeed; until then each
-   resolve tries the refresh again.
+   dormant. It passes only once the host's configuration or the endpoint's
+   answer changes; until then each resolve tries the refresh again.
 
 The lifecycle is TLC-verified in `specs/machines/auth/`.
 

@@ -1615,6 +1615,24 @@ mod tests {
         assert!(s.contains("\"detail\":\"timeout\""));
     }
 
+    /// A credential source that cannot answer now keeps its kind on the
+    /// wire: an SDK or a browser host reads `source_unavailable` with its
+    /// detail, never the catch-all `other`.
+    #[test]
+    fn a_source_unavailable_auth_error_keeps_its_kind_on_the_wire() {
+        let wire: WireAuthError = meerkat_core::AuthError::SourceUnavailable {
+            reason: "token endpoint answered 503".into(),
+        }
+        .into();
+        assert_eq!(
+            serde_json::to_value(&wire).unwrap(),
+            serde_json::json!({
+                "kind": "source_unavailable",
+                "detail": "token endpoint answered 503"
+            })
+        );
+    }
+
     #[test]
     fn device_complete_result_serializes_terminal_and_ready_shapes() {
         let pending = serde_json::to_value(WireDeviceCompleteResult::Pending).unwrap();

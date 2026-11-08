@@ -600,6 +600,8 @@ mod tests {
             Success,
             Transient,
             InvalidGrant,
+            /// A 200 whose `expires_in` the host cannot represent.
+            ExpiryOutOfRange,
         }
         struct Endpoint {
             arrived: Notify,
@@ -618,6 +620,7 @@ mod tests {
                 Reply::Success => Json(serde_json::json!({"access_token":"ce-access-b", "refresh_token":"ce-refresh-b", "expires_in":3600})).into_response(),
                 Reply::Transient => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"temporarily_unavailable"}))).into_response(),
                 Reply::InvalidGrant => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_grant"}))).into_response(),
+                Reply::ExpiryOutOfRange => Json(serde_json::json!({"access_token":"ce-access-b", "refresh_token":"ce-refresh-b", "expires_in":u64::MAX})).into_response(),
             }
         }
         const REFUSED_REREAD: &str = "failure-path reread needs credential interaction";
@@ -1142,13 +1145,13 @@ mod tests {
 
         /// A refresh the host refuses on its own side says nothing about the
         /// credential. Here the token endpoint answers with a redirect, which
-        /// credential requests never follow; an egress profile that refuses
-        /// the endpoint is observed the same way. AuthMachine's verdict is
+        /// credential requests never follow. AuthMachine's verdict is
         /// transient, the lease closes to Expiring, the stored record stays,
         /// and the resolution answers `source_unavailable`, a kind that
-        /// clears on its own: a mob member whose first wake meets it stays
-        /// dormant instead of breaking, and only a change on the host's side
-        /// lets a later refresh succeed.
+        /// clears with no change to the credential: a mob member whose first
+        /// wake meets it stays dormant instead of breaking, and only a change
+        /// of the host's configuration or the endpoint's answer lets a later
+        /// refresh succeed.
         #[tokio::test]
         async fn ce_provider_host_refused_refresh_answers_source_unavailable() {
             let mut fixture = Fixture::start(Reply::Success).await;
@@ -1193,6 +1196,51 @@ mod tests {
                     )
                 ),
                 "a host-refused refresh answers source_unavailable: {resolution:?}"
+            );
+        }
+
+        /// A refresh whose token answer the host cannot use (here a 200
+        /// whose `expires_in` is out of range) fails without an observation
+        /// of its own: the managed-store refresh still records AuthMachine's
+        /// verdict on it (transient, as for any failure on the host's side),
+        /// the lease closes to Expiring, the stored record stays, and the
+        /// resolution answers `source_unavailable` instead of
+        /// `refresh_failed`.
+        #[tokio::test]
+        async fn ce_provider_unusable_token_answer_answers_source_unavailable() {
+            let mut fixture = Fixture::start(Reply::ExpiryOutOfRange).await;
+            let result = fixture.finish().await;
+            fixture.assert_one_original_exchange();
+            let Err(error) = result else {
+                panic!("a token whose expiry is out of range is never stored");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    OpenAiOAuthError::Refresh(RefreshError::Classified {
+                        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+                        ..
+                    })
+                ),
+                "an unusable token answer carries AuthMachine's transient verdict: {error:?}"
+            );
+            assert_eq!(
+                fixture.auth.snapshot(&fixture.lease).phase,
+                Some(AuthLeasePhase::Expiring)
+            );
+            assert_eq!(
+                fixture.store.load(&fixture.key).await.unwrap(),
+                Some(fixture.original.clone())
+            );
+            let resolution = crate::runtime::openai_oauth_refresh_error(error, String::new());
+            assert!(
+                matches!(
+                    &resolution,
+                    meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                        meerkat_core::AuthError::SourceUnavailable { .. }
+                    )
+                ),
+                "an unusable token answer answers source_unavailable: {resolution:?}"
             );
         }
         #[tokio::test]
@@ -1619,7 +1667,7 @@ mod tests {
                         assert_eq!(stored, fixture.original);
                         assert_eq!(snapshot.phase, Some(AuthLeasePhase::Expiring));
                     }
-                    Reply::InvalidGrant => unreachable!(),
+                    Reply::InvalidGrant | Reply::ExpiryOutOfRange => unreachable!(),
                 }
                 fixture.assert_one_original_exchange();
             }

@@ -232,7 +232,9 @@ them.
   identity or token endpoint) cannot answer now. `meerkat-contracts`:
   `WireAuthError` gains `SourceUnavailable { detail }`. Exhaustive matches on
   any of the three must handle it. The SDKs' generated `AuthErrorKind` and
-  `WireAuthError` types include it.
+  `WireAuthError` types include it, and so does `@rkat/web`'s
+  `ExternalAuthFailure`, the shape a host's external resolver rejects with
+  (`{ kind: 'source_unavailable', detail }`).
 
 - Behaviour-only (not measured by the gate): a provider credential that
   cannot be had now answers `source_unavailable` where it answered
@@ -251,14 +253,15 @@ them.
   error, the verdict dropped), and the resolution answers
   `source_unavailable` for a transient verdict and `user_reauth_required`
   for a permanent one (before, `refresh_failed` for both). AuthMachine's
-  transient verdict also covers a refresh the host refuses on its own side
-  before the provider judges the credential (for example its egress profile
-  refuses the token endpoint, or the token endpoint answers with a
-  redirect), so such a refresh answers `source_unavailable` too, and a mob
-  member whose first wake meets it stays dormant until the host's side is
-  fixed. A failure the machine did not classify stays `refresh_failed`. A
-  request still fails as before (`LlmError::AuthenticationFailed`, or the
-  Copilot exchange outage's retryable class).
+  transient verdict also covers a refresh that fails on the host's own side
+  where the provider refused nothing (for example the token endpoint answers
+  with a redirect, or with a token whose expiry is out of range), so such a
+  refresh answers `source_unavailable` too, and a mob member whose first
+  wake meets it stays dormant until the host's configuration or the
+  endpoint's answer changes. A failure the machine did not classify stays
+  `refresh_failed`. A request still fails as before
+  (`LlmError::AuthenticationFailed`, or the Copilot exchange outage's
+  retryable class).
 
 ### Added
 
@@ -507,9 +510,10 @@ them.
   same release, keeps its closed vocabulary. `mob_check_member` gives such a
   member a note of its own (see Fixed).
 - `meerkat-core`: `AuthErrorKind::clears_on_its_own()`, true for the kinds
-  whose cause passes with no change to the credential or its configuration:
-  `source_unavailable`, `credential_store_unavailable` and
-  `credential_access_pending`.
+  whose cause passes with no change to the credential: `source_unavailable`,
+  `credential_store_unavailable` and `credential_access_pending`. A refresh
+  the host's own side refused also answers `source_unavailable`; it passes
+  only once the host's configuration or the endpoint's answer changes.
 
 ### Changed
 

@@ -81,9 +81,12 @@ pub enum AuthError {
     #[error("credential store unavailable: {0}")]
     CredentialStoreUnavailable(String),
     /// The credential's source (a token exchange, an identity or token
-    /// endpoint) cannot answer now: nothing was refused, and a later attempt
-    /// can succeed without any change to the credential or its
-    /// configuration. Not a credential fact.
+    /// endpoint) cannot answer now, or the host could not use its answer:
+    /// nothing refused the credential, and a later attempt can succeed with
+    /// no change to the credential. A refresh the host's own side refused
+    /// (for example a token endpoint that answered with a redirect, which
+    /// credential requests never follow) succeeds only once the host's
+    /// configuration or the endpoint's answer changes. Not a credential fact.
     #[error("credential source unavailable: {reason}")]
     SourceUnavailable { reason: String },
 }
@@ -170,10 +173,11 @@ impl AuthErrorKind {
         }
     }
 
-    /// Whether a failure of this kind clears on its own, with no change to
-    /// the credential or its configuration: the credential's source cannot
-    /// answer now ([`Self::SourceUnavailable`]), the operating-system
-    /// credential store cannot answer now
+    /// Whether a failure of this kind clears with no change to the
+    /// credential: the credential's source cannot answer now
+    /// ([`Self::SourceUnavailable`]; a refresh the host's own side refused
+    /// clears only once the host's configuration or the endpoint's answer
+    /// changes), the operating-system credential store cannot answer now
     /// ([`Self::CredentialStoreUnavailable`]), or a lookup of the credential
     /// is already in flight ([`Self::CredentialAccessPending`]). A build that
     /// fails for such a cause is worth trying again later.

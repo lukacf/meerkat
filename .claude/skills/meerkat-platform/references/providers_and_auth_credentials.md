@@ -206,10 +206,11 @@ default_model = "my-deployment"     # the Azure deployment name
   processes). A permanent failure leaves `reauth_required`: log in again.
   The resolve that ran a failed refresh answers AuthMachine's verdict:
   `source_unavailable` for a transient failure and `user_reauth_required`
-  for a permanent one. A refresh the host refuses on its own side (for
-  example its egress profile refuses the token endpoint, or the endpoint
-  answers with a redirect, which credential requests never follow) is
-  transient too: `source_unavailable` until the host's side is fixed.
+  for a permanent one. A refresh that fails on the host's own side where
+  the provider refused nothing (for example the token endpoint answers with
+  a redirect, which credential requests never follow, or with a token whose
+  expiry is out of range) is transient too: `source_unavailable` until the
+  host's configuration or the endpoint's answer changes.
   `source_unavailable`, `credential_store_unavailable`
   and `credential_access_pending` clear on their own
   (`AuthErrorKind::clears_on_its_own`): a mob member whose first wake meets

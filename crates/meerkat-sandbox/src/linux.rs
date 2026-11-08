@@ -771,6 +771,8 @@ impl Target {
             raw(unsafe { libc::dup2(gate, 3) }).map_err(SetupStep::Gate.failed())?;
             raw(unsafe { libc::fcntl(3, libc::F_SETFD, 0) }).map_err(SetupStep::Gate.failed())?;
         }
+        // Raw system calls only, never glibc's sigaction: this process is a
+        // raw clone of the multithreaded host (`kernel_signal_action`).
         default_signal_actions().map_err(SetupStep::Exec.failed())?;
         let mut unblocked = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
         unsafe {
@@ -826,10 +828,9 @@ impl LaunchPlan<'_> {
         // The leader of the launch's process group, which every process of
         // the launch stays in (the filter refuses setpgid and setsid).
         raw(unsafe { libc::setpgid(0, 0) }).map_err(SetupStep::ProcessGroup.failed())?;
-        // std's spawn leaves the command SIGPIPE at its default action.
-        if unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) } == libc::SIG_ERR {
-            return Err(SetupStep::ProcessGroup.failed()(errno()));
-        }
+        // std's spawn leaves the command SIGPIPE at its default action. The
+        // raw system call, as every call up to the exec (`kernel_signal_action`).
+        kernel_signal_action(libc::SIGPIPE, true).map_err(SetupStep::ProcessGroup.failed())?;
         self.policy.apply(self.bound, self.sources)?;
         let mut release = [-1; 2];
         raw(unsafe { libc::pipe2(release.as_mut_ptr(), libc::O_CLOEXEC) })
@@ -863,10 +864,9 @@ impl LaunchPlan<'_> {
             unsafe { libc::close(descriptor) };
         }
         // A SIGCHLD the host left ignored would reap the command before the
-        // init waits for it. The command keeps the host's disposition.
-        if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) } == libc::SIG_ERR {
-            return Err(failed(errno()));
-        }
+        // init waits for it. Set after the command's clone, so a command
+        // keeps an ignored SIGCHLD, as across any exec.
+        kernel_signal_action(libc::SIGCHLD, true).map_err(&failed)?;
         let argv = [c"meerkat-init".as_ptr(), std::ptr::null()];
         let envp = [std::ptr::null()];
         // A launch site of the confinement backend: the launch's init.
@@ -1040,27 +1040,72 @@ fn reap(pid: libc::pid_t, kill: bool) {
 /// default action ends the command before its program runs; and SIGPIPE,
 /// which the host ignores, at its default action, as std's spawn leaves it,
 /// so a pipeline behaves as outside the launch. Other ignored signals stay
-/// ignored, as across any exec. glibc's own two real-time signals answer
-/// EINVAL and keep theirs. Allocation-free.
+/// ignored, as across any exec. 32 and 33 are glibc's own (thread
+/// cancellation and setxid), whose handlers act only on what glibc itself
+/// sends; they keep theirs. Raw system calls only (`kernel_signal_action`).
+/// Allocation-free.
 fn default_signal_actions() -> Result<(), i32> {
     // Signals 1 to 64, Linux's SIGRTMAX.
     for number in 1..=64 {
-        if number == libc::SIGKILL || number == libc::SIGSTOP {
+        if [libc::SIGKILL, libc::SIGSTOP, 32, 33].contains(&number) {
             continue;
         }
-        let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
-        if unsafe { libc::sigaction(number, std::ptr::null(), current.as_mut_ptr()) } == -1 {
-            continue;
-        }
-        let handler = unsafe { current.assume_init() }.sa_sigaction;
+        let handler = kernel_signal_action(number, false)?;
         if handler == libc::SIG_DFL || (handler == libc::SIG_IGN && number != libc::SIGPIPE) {
             continue;
         }
-        let mut default = unsafe { std::mem::zeroed::<libc::sigaction>() };
-        default.sa_sigaction = libc::SIG_DFL;
-        raw(unsafe { libc::sigaction(number, &raw const default, std::ptr::null_mut()) })?;
+        kernel_signal_action(number, true)?;
     }
     Ok(())
+}
+
+/// The kernel's `struct sigaction` of rt_sigaction(2) on x86_64 and aarch64,
+/// whose uapi headers both define SA_RESTORER: handler, flags, restorer and a
+/// mask of 64 signals. glibc's `struct sigaction` is another layout.
+#[repr(C)]
+struct KernelSignalAction {
+    handler: libc::sighandler_t,
+    flags: libc::c_ulong,
+    restorer: usize,
+    mask: u64,
+}
+
+/// Returns `number`'s current handler and, when `default` is set, sets its
+/// action to the default first, by the rt_sigaction system call itself.
+/// Between a launch's clone and its exec only async-signal-safe raw system
+/// calls are safe: each process of a launch is a raw clone of the
+/// multithreaded host, holding glibc's internal locks in whatever state
+/// another host thread left them, and nothing resets them as fork does.
+/// glibc's own sigaction is not: from 2.41 on, it takes the abort lock for
+/// SIGABRT, which another thread's posix_spawn holds until its child has
+/// executed, so a copied holder would wait forever. Allocation-free.
+fn kernel_signal_action(number: libc::c_int, default: bool) -> Result<libc::sighandler_t, i32> {
+    let action = KernelSignalAction {
+        handler: libc::SIG_DFL,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
+    let mut previous = KernelSignalAction {
+        handler: libc::SIG_DFL,
+        flags: 0,
+        restorer: 0,
+        mask: 0,
+    };
+    raw_long(unsafe {
+        libc::syscall(
+            libc::SYS_rt_sigaction,
+            libc::c_long::from(number),
+            if default {
+                &raw const action
+            } else {
+                std::ptr::null()
+            },
+            &raw mut previous,
+            std::mem::size_of::<u64>(),
+        )
+    })?;
+    Ok(previous.handler)
 }
 
 /// The top of a stack in `region`, 16-byte aligned: stacks grow down.
@@ -3456,5 +3501,63 @@ mod tests {
         let mut contents = Vec::new();
         File::from(init).read_to_end(&mut contents).unwrap();
         assert_eq!(contents, init_image());
+    }
+
+    extern "C" fn caught(_: libc::c_int) {}
+
+    /// The command's signal reset (`default_signal_actions`), in a forked
+    /// child: a caught standard signal, a caught real-time signal and an
+    /// ignored SIGPIPE end at their default actions; another ignored signal
+    /// stays ignored. glibc reads back what the raw system calls set, which
+    /// also checks the kernel's `struct sigaction` layout.
+    #[test]
+    fn default_signal_actions_reset_caught_signals_and_sigpipe_only() {
+        let caught_handler = caught as *const () as libc::sighandler_t;
+        // A test's own child, not a launch: signal actions are per process.
+        #[allow(clippy::disallowed_methods)]
+        let pid = unsafe { libc::fork() };
+        assert_ne!(pid, -1);
+        if pid == 0 {
+            // The child allocates nothing and cannot panic; its exit code
+            // names the step that failed.
+            let code = unsafe {
+                let handler = |number: libc::c_int| {
+                    let mut current: libc::sigaction = std::mem::zeroed();
+                    libc::sigaction(number, std::ptr::null(), &raw mut current);
+                    current.sa_sigaction
+                };
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = caught_handler;
+                let realtime = libc::SIGRTMIN() + 5;
+                if libc::sigaction(libc::SIGUSR1, &raw const action, std::ptr::null_mut()) != 0 {
+                    10
+                } else if libc::sigaction(realtime, &raw const action, std::ptr::null_mut()) != 0 {
+                    11
+                } else if libc::signal(libc::SIGPIPE, libc::SIG_IGN) == libc::SIG_ERR {
+                    12
+                } else if libc::signal(libc::SIGHUP, libc::SIG_IGN) == libc::SIG_ERR {
+                    13
+                } else if handler(libc::SIGUSR1) != caught_handler {
+                    14
+                } else if default_signal_actions().is_err() {
+                    15
+                } else if handler(libc::SIGUSR1) != libc::SIG_DFL {
+                    20
+                } else if handler(realtime) != libc::SIG_DFL {
+                    21
+                } else if handler(libc::SIGPIPE) != libc::SIG_DFL {
+                    22
+                } else if handler(libc::SIGHUP) != libc::SIG_IGN {
+                    23
+                } else {
+                    0
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "{status:#x}");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "the child's failed step");
     }
 }

@@ -1481,8 +1481,14 @@ impl Case {
         for name in IDENTITIES {
             let binding = member(name);
             let native_id = MemberIdentity::from(binding.member.clone());
+            // The identity label marks this spawn as the identity's member, as
+            // Meta marks its own: registering the identity below then adopts
+            // the member as the identity's entry, where an unmarked one is
+            // refused as a worker holding the name.
             handle
-                .spawn_spec(SpawnMemberSpec::new(name, native_id.clone()))
+                .spawn_spec(SpawnMemberSpec::new(name, native_id.clone()).with_labels(
+                    BTreeMap::from([("agent_identity".to_owned(), name.to_owned())]),
+                ))
                 .await
                 .unwrap();
             let session = handle

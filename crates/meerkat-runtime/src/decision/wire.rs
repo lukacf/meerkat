@@ -7,10 +7,10 @@ use std::num::NonZeroU32;
 
 use meerkat_contracts::{
     DecisionAudienceRequest, DecisionListResult, DecisionPresentationRequest, WireCanonicalPart,
-    WireDecision, WireDecisionAssurance, WireDecisionEvidence, WireDecisionNoticeState,
-    WireDecisionOutcome, WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict,
-    WireDecisionStage, WireDecisionTier, WirePresentationAudience, WirePresentationLink,
-    WirePresentationRecord, WireUnreadableDecision,
+    WireDecision, WireDecisionAssurance, WireDecisionEffect, WireDecisionEvidence,
+    WireDecisionNoticeState, WireDecisionOutcome, WireDecisionPhase, WireDecisionRefusal,
+    WireDecisionReviewVerdict, WireDecisionStage, WireDecisionTier, WirePresentationAudience,
+    WirePresentationLink, WirePresentationRecord, WireUnreadableDecision,
 };
 use meerkat_core::ApprovalAssurance;
 use meerkat_core::approval::decision::{
@@ -20,10 +20,11 @@ use meerkat_core::approval::decision::{
     Sha256Digest, StoredDecision, UnreadableDecision,
 };
 
+use super::effect::{DecisionEffect, decision_effect};
 use super::service::{DecisionListing, DecisionRefusal};
 
 /// One decision as its row stands, with its held request when
-/// `include_request`.
+/// `include_request`, and, once it is executed, the effect its kind names.
 #[must_use]
 pub fn wire_decision(row: &StoredDecision, include_request: bool) -> WireDecision {
     let descriptor = &row.descriptor;
@@ -60,6 +61,7 @@ pub fn wire_decision(row: &StoredDecision, include_request: bool) -> WireDecisio
         presentations: row.presentations.iter().map(wire_presentation).collect(),
         outcome: row.outcome.as_ref().map(wire_decision_outcome),
         execution_refusal: row.execution_refusal.as_ref().map(ToString::to_string),
+        effect: decision_effect(row).map(|effect| wire_decision_effect(&effect)),
         revision: row.revision,
         request: include_request
             .then(|| serde_json::from_str(descriptor.request.get()).ok())
@@ -196,6 +198,14 @@ fn wire_decision_outcome(outcome: &DecisionOutcome) -> WireDecisionOutcome {
             _ => WireDecisionTier::Unknown,
         },
         evidence: wire_decision_evidence(&outcome.evidence),
+    }
+}
+
+fn wire_decision_effect(effect: &DecisionEffect) -> WireDecisionEffect {
+    match effect {
+        DecisionEffect::Grant { grant_id } => WireDecisionEffect {
+            grant_id: Some(grant_id.as_str().to_owned()),
+        },
     }
 }
 

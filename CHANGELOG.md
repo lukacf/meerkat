@@ -1018,6 +1018,18 @@ them.
   `withdrawDecision`; neither decides a decision. The wrappers need a 0.9.11
   or newer server: an older one answers method not found (`-32601`), which
   both SDKs raise as an error that names the method.
+- The decision wire names what an executed decision did: `WireDecision`
+  gains `effect` (`meerkat-contracts`: `WireDecisionEffect`), set by the
+  decision's kind. An executed `grant.child` decision names the
+  approval-carried grant its execution issued (`effect.grant_id`); its
+  executor records the decision executed only once that grant exists. A
+  decision that is not executed, and an executed decision of another kind,
+  names none. Every answer that carries a decision carries it
+  (`decision/get`, `decision/list`, `decision/present`, `decision/withdraw`
+  and the host adapter's `decision/decide`). It is derived from the
+  decision's id, so the stored row does not change. A later version may add
+  fields to `effect`; the Python and TypeScript SDKs return it as the
+  server wrote it.
 - Host-adapter decide: `meerkat-rpc`:
   `MethodRouter::dispatch_with_decision_event` decides `decision/decide`
   (`DECISION_DECIDE_METHOD`) with an `AuthenticatedDecisionEvent` the host

@@ -504,6 +504,7 @@ pub use wire::{
     WireControlScope,
     WireDecision,
     WireDecisionAssurance,
+    WireDecisionEffect,
     WireDecisionErrorData,
     WireDecisionEvidence,
     WireDecisionNotice,

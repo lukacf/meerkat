@@ -673,7 +673,8 @@ impl AgentMemoryRuntimeInjector {
         self.distiller.is_some()
     }
 
-    /// The Distiller's harvest of a compaction `session_key` ended owing
+    /// The Distiller's harvest of the compactions `session_key`, a session
+    /// a retirement ends, holds
     /// (`DistillerEngine::harvest_compaction_within_bound`), bounded like
     /// the pre-rotation distillation: of `discards`, the batch Core's cold
     /// settle answered, or, with none, of the session's compaction

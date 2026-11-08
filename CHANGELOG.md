@@ -611,12 +611,14 @@ them.
 - `meerkat-mob`: a rotation of a member onto a fresh session (a
   `rotate_member`: a reset, or a deleted identity created anew) settles the
   session it leaves before its terminal step. A member that compacted inside
-  a run its stop committed as interrupted owed that compaction's memory
-  projection until its next wake, and a lazy start does not wake it for
-  that: rotated while dormant, its batch stayed staged and invisible and its
-  outbox row pending, for good. Now the batch is finalized into the old
-  session's memory and the row acknowledged. A settle that fails leaves
-  them owed, as before, and never fails the rotation.
+  a run that a stop, or the rotation's own cancel of the running run,
+  committed as interrupted owed that compaction's memory projection until
+  its next wake, and a lazy start does not wake it for that: once rotated,
+  its batch stayed staged and invisible and its outbox row pending, for
+  good. Now the batch is finalized into the old session's memory and the
+  row acknowledged before the rotation journals the member's retirement. A
+  settle that fails leaves them owed, as before, and never fails the
+  rotation.
 
 ### Upgrade notes
 
@@ -680,22 +682,13 @@ them.
   thinking-block binding a thinking session there still fails after a
   mid-session tool change.
 
-- `meerkat-mob`: a rotation a host starts directly on the mob
-  (`MobHandle::rotate_member`) finalizes a dormant member's owed compaction
-  projection, but Meerkat Meta does not distill its discards into agent
-  memory; use Meta's verbs (delete, reset, a role move, the roster's
-  unlisting) to have them distilled.
-
 - `meerkat-mob`: a worker's `respawn` and a mob's destroy end a member's
   session for good without settling it: a dormant worker that owes a
   compaction projection keeps its batch staged and its outbox row pending,
-  as before.
-
-- Meerkat Meta keeps the compaction harvest a step owes the session it
-  ends (the settled batch, or the fallback read of the session's memory)
-  in process until the retirement's side effects run: a restart in
-  between leaves the records searchable in the old session's memory but
-  never distilled.
+  as before. A plain retirement (`MobHandle::retire`) does not settle the
+  member's session either, since the session can be resumed: a compaction
+  projection it owes (one a stop committed, or the retirement's own cancel
+  of a running run) stays owed until the session's next wake.
 
 ## [0.9.10] - 2026-11-04
 

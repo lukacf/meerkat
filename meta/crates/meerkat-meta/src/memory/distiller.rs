@@ -728,6 +728,8 @@ impl DiscardEntry {
 /// Host-side read over a session's compaction discards.
 #[async_trait]
 pub trait CompactionDiscardSource: Send + Sync {
+    /// The newest `limit` of the session's compaction discards, in durable
+    /// order: a compaction's batch is the newest its session's scope holds.
     async fn read_discards(
         &self,
         session_key: &str,
@@ -763,9 +765,9 @@ pub trait CompactionDiscardSource: Send + Sync {
 /// via `MemoryStore::enumerate_scoped` — exact, provenance-ordered (durable
 /// id), paged — instead of the old generous-limit `search` approximation.
 /// Enumeration is read-only and additive; it does not touch indexing/search
-/// semantics. The per-page `limit` is the total safety ceiling on rows read;
-/// if a scope exceeds it the harvest stops and logs (never silently), but at
-/// per-session compaction-row counts the full scope fits well within it.
+/// semantics. The harvest pages the whole scope and keeps its newest `limit`
+/// records, where a compaction's batch is: a scope that holds more yields
+/// those, never only its oldest, and the read logs it (never silently).
 pub struct HnswDiscardSource {
     dir: PathBuf,
 }
@@ -803,21 +805,21 @@ impl CompactionDiscardSource for HnswDiscardSource {
             .map_err(|err| DistillerError::Store(err.to_string()))?;
         let scope = MemorySearchScope::for_session(session_id);
 
-        // Ask 8: page the scope exactly, in durable-id order, until it is
-        // exhausted or the safety ceiling is hit — no relevance ranking, no
-        // silent truncation.
-        let mut entries = Vec::new();
+        // Ask 8: page the scope exactly, in durable-id order, to its end, and
+        // keep its newest `limit` records (a compaction's batch is the newest
+        // the scope holds): no relevance ranking, no silent truncation.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut entries = std::collections::VecDeque::new();
+        let mut read = 0usize;
         let mut offset = 0usize;
         loop {
-            let remaining = limit.saturating_sub(entries.len());
-            if remaining == 0 {
-                break;
-            }
             let page = store
                 .enumerate_scoped(
                     &scope,
                     MemoryEnumerationRequest {
-                        limit: HARVEST_PAGE_ROWS.min(remaining),
+                        limit: HARVEST_PAGE_ROWS,
                         offset,
                         source_overlap: None,
                         indexed_after: None,
@@ -825,22 +827,28 @@ impl CompactionDiscardSource for HnswDiscardSource {
                 )
                 .await
                 .map_err(|err| DistillerError::Store(err.to_string()))?;
-            entries.extend(page.records.into_iter().map(DiscardEntry::from_record));
-            match page.next_offset {
-                Some(next) if entries.len() < limit => offset = next,
-                Some(_) => {
-                    tracing::warn!(
-                        session_key,
-                        limit,
-                        "compaction discard harvest hit its row ceiling; \
-                         scope has more rows than were read"
-                    );
-                    break;
+            for record in page.records {
+                read += 1;
+                if entries.len() == limit {
+                    entries.pop_front();
                 }
+                entries.push_back(DiscardEntry::from_record(record));
+            }
+            match page.next_offset {
+                Some(next) => offset = next,
                 None => break,
             }
         }
-        Ok(entries)
+        if read > limit {
+            tracing::warn!(
+                session_key,
+                limit,
+                records = read,
+                "compaction discard harvest hit its row ceiling; \
+                 it read the scope's newest rows only"
+            );
+        }
+        Ok(entries.into())
     }
 
     async fn drop_scope(&self, session_key: &str) -> Result<usize, DistillerError> {
@@ -1264,7 +1272,9 @@ impl DistillOutcome {
 /// Post-compaction follow-up hook (§8.6 trigger sequencing): invoked with
 /// `(identity, session_key, outcome)` after every compaction-cause
 /// distillation attempt, on the same detached task — so a wired Hygienist
-/// runs strictly AFTER the distiller's harvest for that boundary.
+/// runs strictly AFTER the distiller's harvest for that boundary. A
+/// retirement's harvest of the compactions a session it ends holds does not
+/// invoke it: no life resumes that session.
 pub type CompactionFollowUp = Arc<dyn Fn(&str, &str, &DistillOutcome) + Send + Sync>;
 
 /// Compaction-observation hook: invoked synchronously with
@@ -1502,18 +1512,21 @@ impl DistillerEngine {
         session_key: &str,
         cause: DistillCause,
     ) -> DistillOutcome {
-        self.distill_now_with(identity, session_key, cause, None)
+        self.distill_now_with(identity, session_key, cause, None, true)
             .await
     }
 
     /// [`Self::distill_now`]; a compaction-cause run given `discards`
-    /// harvests them instead of reading the discard source.
+    /// harvests them instead of reading the discard source, and fires the
+    /// compaction follow-up only with `follow_up` (a retirement's harvest
+    /// of a session it ends fires none).
     async fn distill_now_with(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         cause: DistillCause,
         discards: Option<Vec<DiscardEntry>>,
+        follow_up: bool,
     ) -> DistillOutcome {
         let outcome = self
             .distill_inner(identity, session_key, cause, discards)
@@ -1521,7 +1534,7 @@ impl DistillerEngine {
         self.with_window(identity, session_key, |state| {
             state.in_flight = false;
         });
-        if cause == DistillCause::Compaction {
+        if follow_up && cause == DistillCause::Compaction {
             let follow_up = self
                 .compaction_follow_up
                 .lock()
@@ -1989,12 +2002,12 @@ impl DistillerEngine {
         });
     }
 
-    /// A compaction-cause harvest of a session that ended owing a
-    /// compaction's projection. Its evidence is `discards`, the batch
-    /// Core's cold settle published and answered
-    /// (`OwedCompactionSettlement::Settled`), or, with none, the session's
-    /// compaction discards read from its memory, as the
-    /// `CompactionCompleted` harvest reads them. Bounded like the
+    /// A compaction-cause harvest of the compactions a session a retirement
+    /// ends holds. Its evidence is `discards`, the batch Core's cold settle
+    /// published and answered (`OwedCompactionSettlement::Settled`), or,
+    /// with none, the session's compaction discards read from its memory,
+    /// as the `CompactionCompleted` harvest reads them. It fires no
+    /// compaction follow-up: no life resumes the session. Bounded like the
     /// pre-rotation distillation: answers the run's outcome, or the bound
     /// it did not end within.
     pub(crate) async fn harvest_compaction_within_bound(
@@ -2004,8 +2017,13 @@ impl DistillerEngine {
         discards: Option<Vec<DiscardEntry>>,
     ) -> Result<DistillOutcome, Duration> {
         let timeout = self.pre_rotation_timeout;
-        let harvest =
-            self.distill_now_with(identity, session_key, DistillCause::Compaction, discards);
+        let harvest = self.distill_now_with(
+            identity,
+            session_key,
+            DistillCause::Compaction,
+            discards,
+            false,
+        );
         if let Ok(outcome) = tokio::time::timeout(timeout, harvest).await {
             return Ok(outcome);
         }
@@ -2013,8 +2031,8 @@ impl DistillerEngine {
             identity,
             session_key,
             timeout_ms = timeout.as_millis() as u64,
-            "agent memory distiller: the settled compaction's harvest timed out; the step \
-             proceeds without it"
+            "agent memory distiller: the retired session's compaction harvest timed out; the \
+             retirement proceeds without it"
         );
         if let Some(sink) = self
             .events
@@ -2033,10 +2051,12 @@ impl DistillerEngine {
         Err(timeout)
     }
 
-    /// [`Self::harvest_compaction_within_bound`], detached: of an answered
+    /// A compaction-cause harvest, detached and unbounded: of an answered
     /// batch, or, with none, of the session's compaction discards read from
     /// its memory, for a session that goes on (Core refused the step that
-    /// would have ended it), off every critical path.
+    /// would have ended it), off every critical path. It fires the
+    /// compaction follow-up, as the session's live compaction's harvest
+    /// does.
     pub(crate) fn spawn_compaction_harvest(
         self: &Arc<Self>,
         identity: &str,
@@ -2048,7 +2068,13 @@ impl DistillerEngine {
         let session_key = session_key.to_string();
         tokio::spawn(async move {
             engine
-                .distill_now_with(&identity, &session_key, DistillCause::Compaction, discards)
+                .distill_now_with(
+                    &identity,
+                    &session_key,
+                    DistillCause::Compaction,
+                    discards,
+                    true,
+                )
                 .await;
         });
     }
@@ -3373,12 +3399,14 @@ mod tests {
 
     /// The harvest a retirement runs of the compactions the session it ends
     /// holds fires no compaction follow-up: no life resumes that session,
-    /// so a hygiene pass over it would revise a transcript nobody reads.
+    /// so a hygiene pass over it would revise a transcript nobody reads. The
+    /// detached harvest of a session that goes on (Core refused the step
+    /// that would have ended it) fires it, as a live compaction's does.
     #[tokio::test]
     async fn a_retirement_s_compaction_harvest_runs_no_follow_up() {
         let provider = Arc::new(CapturingProvider::default());
         let (engine, _client) = engine_with(
-            vec![ONE_OP_REPLY],
+            vec![ONE_OP_REPLY, NOOP_REPLY],
             provider,
             Some(slice(&[("user", "hello")])),
             Vec::new(),
@@ -3392,16 +3420,13 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(session.to_string());
         }));
+        let discards = vec![DiscardEntry {
+            content: "discarded: wrapper reminder".to_string(),
+            range: Some((0, 2)),
+        }];
 
         let outcome = engine
-            .harvest_compaction_within_bound(
-                "identity:a",
-                "sess-retired",
-                Some(vec![DiscardEntry {
-                    content: "discarded: wrapper reminder".to_string(),
-                    range: Some((0, 2)),
-                }]),
-            )
+            .harvest_compaction_within_bound("identity:a", "sess-retired", Some(discards.clone()))
             .await
             .expect("the harvest ends within its bound");
         assert!(
@@ -3414,6 +3439,28 @@ mod tests {
                 .is_empty(),
             "a retirement's harvest runs no compaction follow-up"
         );
+
+        engine.spawn_compaction_harvest("identity:a", "sess-goes-on", Some(discards));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let fired = seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if !fired.is_empty() {
+                assert_eq!(
+                    fired,
+                    vec!["sess-goes-on".to_string()],
+                    "the detached harvest of a session that goes on fires the follow-up"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the detached harvest of a session that goes on fires the follow-up"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     struct StaticDiscards(Vec<DiscardEntry>);

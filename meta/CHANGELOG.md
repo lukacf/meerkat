@@ -95,10 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the exported bridge implement it.
 
 - `LifecycleEffectKind::CompactionHarvest` (`compaction_harvest` on
-  `lifecycle_effect_failed`): the harvest of the discards of a compaction a
-  step owed the session it ended failed. Its record has its own key, apart
-  from the retirement's distillation, and goes once the fallback read of
-  the session's memory harvested them. Earlier releases neither write nor
+  `lifecycle_effect_failed`): the harvest of the compactions a retired
+  session holds failed. Its record has its own key, apart from the
+  retirement's distillation, and goes once the fallback read of the
+  session's memory harvested them. Earlier releases neither write nor
   read it. Rust: `PersistentMetadataStore::clear_lifecycle_effect_failure`
   (provided, removes nothing by default) removes such a record; the SQLite,
   in-memory and host store placements implement it.
@@ -155,43 +155,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   it as attached. The pass now skips such a subscription, as it skips a
   member it finds dormant, and the member's wake runs the pass again.
 
-- A delete, reset, role move or unlisting of an identity whose member was
-  stopped after it compacted inside a run, and has not woken since, now
-  harvests that compaction's discarded history into agent memory. The stop
-  had committed the run with the compaction's memory projection still owed,
-  a lazy start does not wake the member for it, and the distiller harvests
-  discards only when a live member finalizes them, so the identity's next
-  life lost them. The step now settles the projection in Core before it
-  asks Core to end the session, and the distiller reads the settled
-  discards before it distills the transcript (and, for a delete, before the
-  session's memory scope is dropped). When the settle answers no discards
-  (an earlier finalization published them), the distiller reads the
-  compaction's discards from the session's memory instead. When the
-  settle fails or is busy, it reads them there once Core ended the
-  session, which publishes them only for a reset, a role move or a delete
-  (Core's rotation settles the session it leaves) and only when that
-  settle succeeds; the roster's unlisting leaves them owed in Core, as
-  before, for the session's next settle or wake. A harvest that times out,
-  is denied by the realm's budget or fails is recorded as a failed
-  compaction harvest (`lifecycle_effect_failed`, effect
-  `compaction_harvest`) and attempted again through that read, bounded
-  like the other side effects; the record goes once that read harvested
-  the discards. A step Core refuses before any of it reaches Core harvests
-  the discards it settled, or those the session's memory already holds, as
-  the session's live compaction's would be.
+- A delete, reset, role move or unlisting of an identity, and a rotation a
+  host starts directly on the mob, now harvest the compactions the session
+  they end holds into agent memory. The distiller harvested a compaction's
+  discarded history only when a live member finalized it, so a member
+  stopped after it compacted inside a run (the stop committed the run with
+  the compaction's memory projection still owed, and a lazy start does not
+  wake the member for it), and a live member whose run the step's rotation
+  cancelled, lost them to the identity's next life. Each of Meta's steps
+  settles the projection in Core before it asks Core to end the session,
+  and Core's rotation onto a fresh session settles the session it leaves
+  after its archive. The retirement's side effects, run from Core's
+  journal (so a restart in between runs them too), then harvest the batch
+  the step's settle answered, or else read the compactions the session's
+  memory holds, before they distill the transcript and before a delete
+  drops the session's memory scope. That memory holds what the session
+  still owed only when one of those settles succeeded: the roster's
+  unlisting is not a rotation, so a batch its own settle could not publish
+  stays owed in Core, as before, for the session's next settle or wake. A
+  harvest that times out, is denied by the realm's budget or fails is
+  recorded as a failed compaction harvest (`lifecycle_effect_failed`,
+  effect `compaction_harvest`) and attempted again through that read,
+  bounded like the other side effects; the record goes once that read
+  harvested the discards. A step Core refuses before any of it reaches
+  Core harvests the discards it settled, or those the session's memory
+  already holds, as the session's live compaction's would be.
 
-### Known limitations
-
-- A rotation a host starts directly on the mob (`MobHandle::rotate_member`),
-  with no Meta verb behind it, finalizes a dormant member's owed compaction
-  projection, but its discards are not distilled into agent memory; use a
-  delete, reset, role move or the roster's unlisting to have them
-  distilled.
-
-- The compaction harvest a step owes the session it ends (the settled
-  batch, or the fallback read of the session's memory) is kept in process
-  until the retirement's side effects run: a restart in between leaves the
-  records searchable in the old session's memory but never distilled.
+- The distiller's compaction harvest reads the newest 64 records of a
+  session's memory scope, where the latest compaction's discards are. It
+  read the oldest 64, so in a session whose scope had grown past that, each
+  harvest read the same old records and none of the latest compaction's.
 
 ## [0.9.10] - 2026-11-04
 

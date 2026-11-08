@@ -627,10 +627,9 @@ pub enum LifecycleEffectKind {
     ExitInterview,
     /// The distillation of a retired session.
     Distillation,
-    /// The harvest of the discards of a compaction a step owed the session
-    /// it ended: the batch Core's settle answered, then a fallback read of
-    /// the session's memory. Its record is removed once the fallback
-    /// harvested them.
+    /// The harvest of the compactions a retired session holds: the batch
+    /// the step's settle answered, then a fallback read of the session's
+    /// memory. Its record is removed once the fallback harvested them.
     CompactionHarvest,
 }
 

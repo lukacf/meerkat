@@ -3897,10 +3897,14 @@ async fn held_teardown_session() -> HeldTeardownSession {
 /// store's execution custody free for an immediate reopen.
 ///
 /// The unregister is held in its executor cleanup until the test has seen the
-/// watcher dispatch its wait, and the current-thread runtime runs the watcher
-/// to its first suspension before this test resumes, so no scheduling decides
-/// what is observed. Every wait is bounded, and the unregister is released and
-/// joined before anything observed is judged.
+/// watcher dispatch its wait, so the watcher is still waiting when the test
+/// counts the machine's handles. The runtime loop and the watcher run on
+/// runtimes of their own and upgrade their weak handles for moments (the
+/// watcher reports its wait before its kickoff drops the machine), so the
+/// count is read until it settles at this test's one handle, within a bound:
+/// a watcher that waited with the machine would hold it for the whole wait.
+/// Every wait is bounded, and the unregister is released and joined before
+/// anything observed is judged.
 #[cfg(feature = "test-support")]
 #[tokio::test]
 async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
@@ -3912,7 +3916,6 @@ async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
         cleanup_started,
         release_cleanup,
     } = held_teardown_session().await;
-    let handles = Arc::strong_count(&machine);
     let watcher_wait = machine.test_witness_next_unregister_wait();
 
     // The shutdown owner starts the exact unregister and follows its result.
@@ -3927,7 +3930,16 @@ async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
     let watcher_dispatched = tokio::time::timeout(Duration::from_secs(5), watcher_wait).await;
     let cleanup_reached =
         tokio::time::timeout(Duration::from_secs(5), cleanup_started.notified()).await;
-    let handles_while_waiting = Arc::strong_count(&machine);
+    let handles_while_waiting = {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let handles = Arc::strong_count(&machine);
+            if handles == 1 || tokio::time::Instant::now() >= deadline {
+                break handles;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
 
     // Release and join the unregister before judging what was observed.
     release_cleanup.notify_one();
@@ -3947,7 +3959,7 @@ async fn teardown_watcher_waits_for_its_unregister_without_the_machine() {
     );
     cleanup_reached.expect("the unregister reaches its held executor cleanup");
     assert_eq!(
-        handles_while_waiting, handles,
+        handles_while_waiting, 1,
         "the watcher waits for the unregister without retaining the machine"
     );
     joined

@@ -38,6 +38,8 @@ mod parallel_resume_restore;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod poisoned_scope_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+mod respawn_abandonment_replay_rows;
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod retryable_restore_rows;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod rotation_intent_rows;

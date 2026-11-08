@@ -9291,6 +9291,211 @@ mod tests {
         );
     }
 
+    /// The name's later life, as a resume replays it: recovered at
+    /// generation 1 (fence 8) on its own runtime, then retired by its own
+    /// ordinary terminal.
+    fn recover_retired_later_life(authority: &mut MobMachineAuthority, identity: &AgentIdentity) {
+        let later_runtime = AgentRuntimeId::from("abandoning-member:1");
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMember {
+                agent_identity: identity.clone(),
+                agent_runtime_id: later_runtime.clone(),
+                fence_token: FenceToken(8),
+                generation: Generation(1),
+                profile_name: "worker".to_string(),
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                external_addressable: true,
+            })
+            .expect("the name's later life");
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMemberRetired {
+                agent_identity: identity.clone(),
+                agent_runtime_id: later_runtime,
+                generation: Generation(1),
+                preserve_machine_topology: false,
+                preservation_started: false,
+                session_archived: true,
+                hosted_incarnation: false,
+            })
+            .expect("the later life retires");
+        assert!(
+            !authority.state().identity_to_runtime.contains_key(identity),
+            "the later life's terminal leaves the name unbound"
+        );
+        assert_eq!(
+            authority.state().identity_runtime_generations.get(identity),
+            Some(&Generation(1)),
+            "the name's recorded generation is the later life's"
+        );
+    }
+
+    /// The abandonment of a respawn after the old member's archive, replayed
+    /// after the name was spawned again and that later life retired, names
+    /// a generation the name has moved past: MobMachine answers it as a
+    /// no-op. It records nothing, prunes nothing and ends nothing, since the
+    /// abandoned generation's hold and tombstone went with the later spawn,
+    /// and the later life ended at its own terminal.
+    #[test]
+    fn a_terminal_abandonment_replayed_after_a_later_life_retired_is_a_no_op() {
+        let (
+            mut authority,
+            identity,
+            runtime_id,
+            fence_token,
+            session_id,
+            _member_edge,
+            _external_edge,
+            _external_key,
+        ) = seed_preserving_retirement_with_topology();
+        authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+            })
+            .expect("retire the old runtime");
+        authority
+            .apply_signal(MobMachineSignal::ObserveMemberRetirementArchived {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+                generation: Generation(0),
+                session_id: Some(session_id),
+                disposal: MemberSessionDisposal::Archived,
+                preserve_machine_topology: true,
+            })
+            .expect("the old member's archive keeps the respawn hold");
+        let abandonment_signal = || MobMachineSignal::ObserveRespawnTopologyAbandoned {
+            agent_identity: identity.clone(),
+            agent_runtime_id: runtime_id.clone(),
+            fence_token,
+            generation: Generation(0),
+        };
+        authority
+            .apply_signal(abandonment_signal())
+            .expect("the live terminal abandonment");
+        recover_retired_later_life(&mut authority, &identity);
+        let before = authority.state().clone();
+
+        let replayed = authority
+            .apply_signal(abandonment_signal())
+            .expect("the stale marker's replay is answered");
+        assert!(
+            replayed.effects().is_empty(),
+            "the stale marker ends nothing: {:?}",
+            replayed.effects()
+        );
+        assert_eq!(
+            authority.state(),
+            &before,
+            "the stale marker records nothing"
+        );
+    }
+
+    /// The abandonment recorded while the old member was still Retiring,
+    /// whose retirement then finished as an ordinary terminal, replayed
+    /// after the name was spawned again and that later life retired: the
+    /// same no-op.
+    #[test]
+    fn a_retiring_abandonment_replayed_after_a_later_life_retired_is_a_no_op() {
+        let (
+            mut authority,
+            identity,
+            runtime_id,
+            fence_token,
+            session_id,
+            _member_edge,
+            _external_edge,
+            _external_key,
+        ) = seed_preserving_retirement_with_topology();
+        let abandonment_signal = || MobMachineSignal::ObserveRespawnTopologyAbandoned {
+            agent_identity: identity.clone(),
+            agent_runtime_id: runtime_id.clone(),
+            fence_token,
+            generation: Generation(0),
+        };
+        authority
+            .apply_signal(abandonment_signal())
+            .expect("the abandonment while the old member is Retiring");
+        authority
+            .apply_signal(MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+            })
+            .expect("retire the old runtime");
+        authority
+            .apply_signal(MobMachineSignal::ObserveMemberRetirementArchived {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token,
+                generation: Generation(0),
+                session_id: Some(session_id),
+                disposal: MemberSessionDisposal::Archived,
+                preserve_machine_topology: false,
+            })
+            .expect("the old member's ordinary terminal");
+        recover_retired_later_life(&mut authority, &identity);
+        let before = authority.state().clone();
+
+        let replayed = authority
+            .apply_signal(abandonment_signal())
+            .expect("the stale marker's replay is answered");
+        assert!(
+            replayed.effects().is_empty(),
+            "the stale marker ends nothing: {:?}",
+            replayed.effects()
+        );
+        assert_eq!(
+            authority.state(),
+            &before,
+            "the stale marker records nothing"
+        );
+    }
+
+    /// A marker for a generation the name never reached (its recorded
+    /// generation is below the marker's) is no stale marker: no arm answers
+    /// it, and MobMachine refuses it, as before.
+    #[test]
+    fn an_abandonment_of_a_generation_the_name_never_reached_is_refused() {
+        let mut authority = MobMachineAuthority::new();
+        let identity = AgentIdentity::from("abandoning-member");
+        let runtime_id = AgentRuntimeId::from("abandoning-member:0");
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMember {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id.clone(),
+                fence_token: FenceToken(7),
+                generation: Generation(0),
+                profile_name: "worker".to_string(),
+                runtime_mode: SpawnPolicyRuntimeMode::AutonomousHost,
+                external_addressable: true,
+            })
+            .expect("recover the name's only life");
+        authority
+            .apply_signal(MobMachineSignal::RecoverRosterMemberRetired {
+                agent_identity: identity.clone(),
+                agent_runtime_id: runtime_id,
+                generation: Generation(0),
+                preserve_machine_topology: false,
+                preservation_started: false,
+                session_archived: true,
+                hosted_incarnation: false,
+            })
+            .expect("the only life retires");
+        let before = authority.state().clone();
+
+        let refused = authority.apply_signal(MobMachineSignal::ObserveRespawnTopologyAbandoned {
+            agent_identity: identity,
+            agent_runtime_id: AgentRuntimeId::from("abandoning-member:1"),
+            fence_token: FenceToken(8),
+            generation: Generation(1),
+        });
+        assert!(
+            refused.is_err(),
+            "a marker past the name's history is refused: {refused:?}"
+        );
+        assert_eq!(authority.state(), &before);
+    }
+
     fn seed_autonomous_placed_kickoff()
     -> (MobMachineAuthority, AgentIdentity, PlacedKickoffObligation) {
         let identity = AgentIdentity::from("placed-kickoff-worker");

@@ -699,7 +699,7 @@ When the command ends, the init reports the command's exit status (an exit
 code, or the signal that ended it), which is the launch's, and every other
 process of the launch ends with it; killing the launch's PID ends them all at
 once. A signal to the launch's process group reaches the command and every
-process it started; any other signal than SIGKILL or SIGSTOP sent to the
+process it started; any signal other than SIGKILL or SIGSTOP sent to the
 launch's PID alone reaches only the init, which ignores it. Inside, `$$` and
 `getpid()` are 2, never the PID the host records. Each confined launch
 therefore counts as two processes toward a pids limit.

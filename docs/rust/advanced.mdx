@@ -366,12 +366,14 @@ use meerkat::{create_default_hook_engine, resolve_layered_hooks_config};
 let config = meerkat::Config::load().await?;
 let cwd = std::env::current_dir()?;
 
-// Called internally by AgentFactory::build_agent().
-// Layers user-root hooks under project (context-root) hooks.
+// Layers user-root hooks under project (context-root) hooks, with no host
+// confinement and no HookSourceTrust decision.
 let layered_hooks = resolve_layered_hooks_config(Some(&cwd), None, &config).await;
 // Returns None when no hooks are configured.
 let hook_engine = create_default_hook_engine(layered_hooks);
 ```
+
+A build handed this engine (`AgentBuildConfig::hook_engine_override`) reads no convention file and asks no `HookSourceTrust`: the engine runs the hooks it was made with. A host that gates its hook files by their content leaves their resolution to the build.
 
 ---
 

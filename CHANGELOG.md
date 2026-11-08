@@ -260,6 +260,20 @@ them.
   `SettleRetainedRunNotRetainedStopped` and `SettleRetainedRunInertDestroyed`.
   An exhaustive match needs their arms.
 
+- Behaviour-only (not measured by the gate): `meerkat-sandbox`: on Linux,
+  the process a confined launch's `NativeChild` owns (its `id()`, the
+  launch's process group leader, the PID custody records) is the launch's
+  init, pid 1 of the launch's own pid namespace, no longer the command: the
+  command runs as pid 2 there, and its `$$` and `getpid()` are 2. A signal
+  other than SIGKILL or SIGSTOP sent to `NativeChild::id()` alone reaches
+  only the init, which ignores it; the process group still reaches the
+  command. Every process the command leaves running ends when the command
+  ends, where it ran on until its caller ended the process group. A host
+  without pid or cgroup namespaces in its user namespaces, without network
+  namespaces (for a requirement without IP access), or whose
+  `vm.memfd_noexec` is 2 now refuses (`BackendUnavailable`) the confined
+  launches it ran before. See Changed.
+
 - `meerkat-core`: `AuthError` gains the variant `SourceUnavailable { reason }`
   and `AuthErrorKind` the variant `SourceUnavailable` (wire
   `source_unavailable`): a credential's source (a token exchange, an
@@ -503,6 +517,12 @@ them.
   `thinking_binding_controls`), so their model profiles' `beta_headers`
   show it.
 
+- `meerkat-models`: `ANTHROPIC_THINKING_BINDING_CONTROLS_BETA` (also under
+  `meerkat_models::capabilities`) is the `anthropic-beta` header of
+  Anthropic's thinking-block binding controls, the one the rows that list
+  the beta carry; `meerkat-anthropic` sends it for a model id with no
+  catalog row.
+
 - `meerkat-workgraph`: `WorkGraphService::break_glass_release` with
   `BreakGlassReleaseWorkItemRequest` (both re-exported by `meerkat`): a
   host-plane operator releases a work item's claim it does not own, bound
@@ -542,6 +562,26 @@ them.
   store commit that stopped at its fence token's self-fence deadline with
   its outcome unknown, so a caller classifies it by type. Both enums are
   `#[non_exhaustive]`.
+
+- `meerkat`: `AgentFactory::with_hook_source_trust` installs a
+  `HookSourceTrust`, the host's decision over the convention hook files a
+  build reads (`<context_root>/.rkat/config.toml`, or
+  `<project_root>/.rkat/config.toml` when the factory has no context root,
+  and `<user_config_root>/.rkat/config.toml`). The factory asks it once per
+  build about each such file it read and parsed, with the SHA-256 of the
+  exact bytes (`HookSource`, `HookSourceDigest`), so the decision covers
+  the content the build runs, not a check the host made before the build.
+  Every hook of a file it refuses (`HookSourceDecision::Untrusted`) keeps
+  its slot and is refused at each invocation with
+  `untrusted_configuration_source`, whose text now reads "launch
+  configuration comes from a source the host does not trust". The trust
+  judges those files' bytes only: not the programs their command hooks
+  name, a run's hook overrides or the hooks of the config the host passes
+  to the build. A build handed its own hook engine
+  (`AgentBuildConfig::hook_engine_override`) reads neither file, so the
+  trust is not asked. Without a trust, nothing changes. `HookSource` and
+  `HookSourceDecision` are `#[non_exhaustive]`; none of this is built for
+  wasm32.
 
 - `meerkat-contracts`, `meerkat-mob`, Python, TypeScript and Web SDKs: the
   `store_refused` value of a member's `preview_unavailable`
@@ -612,6 +652,13 @@ them.
   boot's recovery-work predicate for one runtime; its default answers
   through the store-wide scan, and the SQLite and in-memory stores answer it
   for the one runtime.
+- `meerkat-sandbox`: `unmet_host_requirements()` returns the host settings
+  the native confinement backend needs and the host refuses, as far as the
+  backend can tell, each an `UnmetHostRequirement` whose text names the
+  setting: on Linux, `ExecutableMemoryFiles` (executable memory files,
+  `vm.memfd_noexec` below 2). A host's startup report (`meerkat`'s
+  `HostConfinement::startup_report`) names them beside a launch kind's
+  `BackendUnavailable` refusal, so an operator can act on it.
 
 ### Changed
 
@@ -651,12 +698,13 @@ them.
   which Anthropic does not hold to thinking-block binding, a replayed
   thinking block whose system prompt, tools or earlier messages changed is
   now dropped by the API (and logged) instead of reaching the model, since
-  requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 carry
-  the `drop_block` control on every account (see Fixed). A request that
-  forces a tool call with thinking omitted keeps its previous shape, with no
-  thinking and no control: the client refuses a forced tool call beside
-  explicit thinking, and a forced call skips thinking on the models that
-  accept one.
+  requests to Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5, and
+  requests that configure `adaptive` or `enabled` thinking for a model id
+  with no catalog row, carry the `drop_block` control on every account (see
+  Fixed). A request that forces a tool call with thinking omitted keeps its
+  previous shape, with no thinking and no control: the client refuses a
+  forced tool call beside explicit thinking, and a forced call skips
+  thinking on the models that accept one.
 
 - GitHub Copilot inference requests carry `X-Initiator`: `agent` when the
   request continues the agent's own work (after a tool result or the
@@ -738,6 +786,29 @@ them.
   wakes it again. A restore that meets one ends retryable with its boot
   obligation owed, as for a session store that cannot answer. A provider
   authentication failure of any other kind still breaks the member.
+
+- `meerkat-sandbox`: on Linux, every confined launch runs in a pid namespace
+  of its own and sees a read-only `/proc` of it, so a Rust toolchain runs
+  confined: `rustup`'s proxies, `rustc` (which loads its libraries relative
+  to `/proc/self/exe`), `cargo-clippy`, `cargo-fmt` and the linker failed
+  without `/proc`. That procfs holds process entries only (`subset=pid`), no
+  host-wide state such as `/proc/sys` or `/proc/net`, and lists only the
+  launch's own processes. A launch without IP access also gets a network
+  namespace of its own, so `/proc/self/net` shows only its loopback
+  interface; with IP access it shows the host's network namespace. Each
+  launch also gets a cgroup namespace of its own, so `/proc/self/cgroup`
+  shows no host cgroup path. A host that refuses the mount (a masked or
+  overmounted `/proc`, a kernel before 5.8) still launches, without
+  `/proc`, as before. The launch's first process runs the setup, starts the
+  command, then executes a small init that the backend carries in a sealed
+  memory file. The init holds none of the host's memory, the command cannot
+  inspect it, it reaps every orphan, and it reports the command's exit
+  status, which `NativeChild` returns (the exit code, or the signal that
+  ended the command); killing the launch's PID ends the whole launch at
+  once. With IP access, Unix stream and seqpacket socket pairs are allowed,
+  so a confined Rust program can start processes (`cargo`, and `rustc`'s
+  linker call, failed with `EPERM`); datagram pairs stay refused. A
+  confined launch is now two processes. See Breaking.
 
 ### Deprecated
 
@@ -863,11 +934,21 @@ them.
   thinking omitted, beside `{"type": "adaptive"}`, the model's own default,
   which turns nothing on since each of these models thinks by default. The
   control is never sent beside `between_tools` or `disabled`, nor for a
-  model whose default is no thinking or an uncatalogued model id. A
-  non-empty `input_transformations` report (the blocks the API dropped or
-  let through) is logged as a warning that names each block and its reason:
-  the model answered without that reasoning, and the prompt cache restarts
-  at the first dropped block.
+  catalogued model whose row does not list the beta, such as one whose
+  default is no thinking. A non-empty `input_transformations` report (the
+  blocks the API dropped or let through) is logged as a warning that names
+  each block and its reason: the model answered without that reasoning, and
+  the prompt cache restarts at the first dropped block.
+
+- `meerkat-anthropic`: a model id with no catalog row (Claude Mythos 5.1, a
+  dated snapshot, a proxy alias, a `[models.<id>]` entry) whose model checks
+  replayed thinking blocks no longer fails after a mid-session tool change
+  on an account that enforces thinking-block binding, when its requests
+  configure `adaptive` or `enabled` thinking (a legacy budget lowers to
+  `enabled`): they carry the same `drop_block` control and beta header, on
+  every request of the session. With thinking omitted such an id still gets
+  no control, since no catalog row names its default (see Known
+  limitations).
 
 - `meerkat-models`, `meerkat-anthropic`: the Claude Fable 5.1 row no longer
   claims forced tool choice support. Anthropic answers 400 to `tool_choice`
@@ -918,6 +999,14 @@ them.
   writable by neither group nor others unless sticky; any other link is
   still refused. macOS Seatbelt still refuses such a grant. Affects 0.8.52
   through 0.9.10.
+
+- `meerkat-hooks`: a run override that disables a hook entry the host
+  refuses (an entry of a convention file it does not trust) and supplies
+  its own entry under the same id now runs that entry. The refusal followed
+  the hook id, so the replacement, which never came from the refused file,
+  was refused too. The refused entry itself still never runs: disabled, left
+  in place beside an override entry of its id (a duplicate id), or beside
+  any other override. Affects 0.9.1 through 0.9.10.
 
 - `meerkat-openai`: on the GitHub Copilot Responses route, a response no
   longer fails the turn for good when Copilot gives its output items new
@@ -1130,6 +1219,13 @@ them.
   Amazon Bedrock and GitHub Copilot routes, so on an account that enforces
   thinking-block binding a thinking session there still fails after a
   mid-session tool change.
+
+- `meerkat-anthropic`: a model id with no catalog row gets the thinking-block
+  binding control only beside configured `adaptive` or `enabled` thinking.
+  With thinking omitted it gets none, since no catalog row names its
+  default, so on an account that enforces thinking-block binding such a
+  session still fails after a mid-session tool change when its model checks
+  replayed thinking blocks. Configure thinking for such a model.
 
 - `meerkat-runtime`: a takeover acquire that a host store grants after the
   writer gave up on it, and after the writer's next successful acquire,

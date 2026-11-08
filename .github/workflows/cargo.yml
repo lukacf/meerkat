@@ -83,6 +83,9 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   # Cache-service hiccups must degrade to plain compiles, never fail a job.
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Never exit on idle (nightly.yml says why): at the default 600 s the
+  # server exits under a long compile, which then starts again uncached.
+  SCCACHE_IDLE_TIMEOUT: "0"
   # A failed sccache install never fails a job either: each Setup sccache
   # step continues on error (so does the action's post step, which reads
   # the stats), and the step after it then sets an empty RUSTC_WRAPPER,

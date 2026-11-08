@@ -1,11 +1,12 @@
 //! The host's trust decision over the hook sources the factory reads.
 //!
 //! The factory discovers command hooks in the convention files
-//! `<context_root>/.rkat/config.toml` and `<user_config_root>/.rkat/config.toml`
-//! and runs them as the host. A host that gates those files cannot do so by
-//! checking them before a build: the factory reads them again while
-//! building, so content written in between would run with no decision
-//! covering it. A [`HookSourceTrust`] installed with
+//! `<context_root>/.rkat/config.toml` (`<project_root>/.rkat/config.toml`
+//! when the factory has no context root) and
+//! `<user_config_root>/.rkat/config.toml`, and runs them as the host. A host
+//! that gates those files cannot do so by checking them before a build: the
+//! factory reads them again while building, so content written in between
+//! would run with no decision covering it. A [`HookSourceTrust`] installed with
 //! [`crate::AgentFactory::with_hook_source_trust`] is asked instead, by the
 //! factory, about the exact bytes it read and parsed, in the same read: the
 //! decision binds the content consumed. A source it does not trust keeps its
@@ -105,7 +106,11 @@ pub enum HookSourceDecision {
 /// - the hooks of the config the host passes to the build, which
 ///   [`meerkat_core::Config::load`] fills from the project
 ///   `.rkat/config.toml` (or else the user's). A host that gates the project
-///   file by its content does not load its config that way.
+///   file by its content does not load its config that way;
+/// - the hooks of an engine the host hands the build
+///   ([`crate::AgentBuildConfig::hook_engine_override`]): that build reads no
+///   convention file and asks nothing. [`crate::resolve_layered_hooks_config`]
+///   layers those files with no decision and no host confinement.
 ///
 /// `decide` runs on the build's own task, inside the async build, so it
 /// must not block, wait for a person or do I/O: decide from a record kept in

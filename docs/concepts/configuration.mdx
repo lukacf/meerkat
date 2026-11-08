@@ -742,7 +742,10 @@ administration from out of its confined processes' reach:
   hook names (read when the hook runs), not a run's hook overrides (the
   caller's own input), and not the hooks of the config the host passes to
   the build, which `Config::load` fills from the project `.rkat/config.toml`
-  (or else the user's).
+  (or else the user's). A build handed its own hook engine
+  (`AgentBuildConfig::hook_engine_override`) reads neither file, so the
+  trust is not asked, and the `resolve_layered_hooks_config` helper layers
+  both with no decision.
 - Links: an input or a skills directory is judged with the symbolic links in
   it. A start whose realm state or credential store links to a path a
   confined process could change (a target that does not exist yet

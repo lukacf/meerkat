@@ -3374,7 +3374,9 @@ pub struct AgentFactory {
     pub runtime_root: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
     /// Explicit root for project/workspace conventions (skills, hooks, AGENTS, MCP config).
-    /// When unset, convention loading remains disabled unless caller opts in.
+    /// When unset, a build takes `project_root` as that root (its
+    /// `.rkat/config.toml` hooks, `.rkat/skills` and AGENTS.md); with neither
+    /// root set, it reads no project convention.
     pub context_root: Option<PathBuf>,
     /// Optional user-global convention root (typically HOME).
     pub user_config_root: Option<PathBuf>,
@@ -5308,7 +5310,9 @@ impl AgentFactory {
     }
 
     /// Install the host's trust over the convention hook sources
-    /// (`<context_root>/.rkat/config.toml`, `<user_config_root>/.rkat/config.toml`).
+    /// (`<context_root>/.rkat/config.toml`, or `<project_root>/.rkat/config.toml`
+    /// when the factory has no context root, and
+    /// `<user_config_root>/.rkat/config.toml`).
     /// Each build, of this factory or a clone of it, asks it once about every
     /// such file it read and parsed, with the SHA-256 of the exact bytes
     /// ([`crate::HookSource`]), so the decision covers the content consumed
@@ -5319,8 +5323,10 @@ impl AgentFactory {
     /// none of them runs. Without one, every source is trusted (unless the
     /// host confinement says otherwise). The trust judges those files' bytes
     /// only, not the programs their command hooks name, a run's hook
-    /// overrides or the hooks of the config passed to the build, and it must
-    /// not block: see [`crate::HookSourceTrust`].
+    /// overrides or the hooks of the config passed to the build. A build
+    /// handed its own hook engine ([`AgentBuildConfig::hook_engine_override`])
+    /// reads no such file, so the trust is not asked. It must not block: see
+    /// [`crate::HookSourceTrust`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_hook_source_trust(mut self, trust: Arc<dyn crate::HookSourceTrust>) -> Self {
         self.hook_source_trust = Some(trust);

@@ -901,6 +901,19 @@ fn pre_tool_entry(background: bool, id: &str, handler: &str) -> HookEntryConfig 
     }
 }
 
+/// A `RuntimeInputAccepted` observer run by the in-process handler
+/// `handler`. A post-commit point admits observers only, and
+/// `execute_post_commit` runs each of them inline.
+fn post_commit_observer(id: &str, handler: &str) -> HookEntryConfig {
+    HookEntryConfig {
+        id: HookId::new(id),
+        point: HookPoint::RuntimeInputAccepted,
+        capability: HookCapability::Observe,
+        runtime: HookAdapterConfig::in_process(handler),
+        ..Default::default()
+    }
+}
+
 /// What one invocation over a base of a trusted entry and an entry the host
 /// refuses ([`REFUSED`], run by the handler `refused-source`) did.
 struct RefusedBaseRun {
@@ -911,14 +924,15 @@ struct RefusedBaseRun {
 }
 
 impl RefusedBaseRun {
-    async fn invoke(
-        background: bool,
-        overrides: Option<HookRunOverrides>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    /// The engine over that base, each entry made by `entry(id, handler)`,
+    /// with every handler of these rows registered to record its entry.
+    async fn engine(
+        entry: impl Fn(&str, &str) -> HookEntryConfig,
+    ) -> Result<(DefaultHookEngine, Entered), Box<dyn std::error::Error>> {
         let engine = DefaultHookEngine::new(HooksConfig {
             entries: vec![
-                pre_tool_entry(background, "trusted", "trusted"),
-                pre_tool_entry(background, REFUSED, "refused-source"),
+                entry("trusted", "trusted"),
+                entry(REFUSED, "refused-source"),
             ],
             ..Default::default()
         })
@@ -947,6 +961,15 @@ impl RefusedBaseRun {
                 )
                 .await?;
         }
+        Ok((engine, entered))
+    }
+
+    async fn invoke(
+        background: bool,
+        overrides: Option<HookRunOverrides>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (engine, entered) =
+            Self::engine(|id, handler| pre_tool_entry(background, id, handler)).await?;
         let result = engine
             .execute(
                 HookInvocation::new(HookPoint::PreToolExecution, SessionId::new()),
@@ -974,6 +997,36 @@ impl RefusedBaseRun {
             result,
             entered,
             background,
+        })
+    }
+
+    /// The same base as post-commit observers ([`post_commit_observer`]),
+    /// invoked through `execute_post_commit` with a committed accepted input.
+    async fn invoke_post_commit(
+        overrides: Option<HookRunOverrides>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (engine, entered) = Self::engine(post_commit_observer).await?;
+        let invocation = HookInvocation::committed(
+            SessionId::new(),
+            meerkat_core::HookObservation::RuntimeInputAccepted(
+                meerkat_core::HookRuntimeInputAccepted {
+                    input_id: meerkat_core::lifecycle::InputId::new(),
+                    input_kind: meerkat_core::HookRuntimeInputKind::Prompt,
+                    handling_mode: meerkat_core::HandlingMode::Queue,
+                },
+            ),
+        );
+        let result = engine
+            .execute_post_commit(invocation, overrides.as_ref())
+            .await;
+        let entered = entered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(Self {
+            result,
+            entered,
+            background: Vec::new(),
         })
     }
 
@@ -1128,6 +1181,89 @@ async fn a_refused_entry_never_runs_whatever_the_run_overrides()
         );
         assert!(duplicate.entered.is_empty(), "{duplicate:?}");
     }
+    Ok(())
+}
+
+/// The post-commit path keeps a host refusal with the base entry it was set
+/// for, as the foreground and background paths do. The refused observer never
+/// enters and reports its refusal while the observer beside it runs, whatever
+/// the run's overrides do: none, an unrelated entry, the refused entry
+/// disabled, or an override entry of its id left beside it (the typed
+/// duplicate-id configuration error). An override that disables it and
+/// supplies the caller's own entry under the same id runs the caller's entry.
+#[tokio::test]
+async fn post_commit_refusal_stays_with_the_entry_it_was_set_for()
+-> Result<(), Box<dyn std::error::Error>> {
+    let refusals = |run: &RefusedBaseRun| {
+        run.result
+            .as_ref()
+            .map(|report| report.launch_refusals.clone())
+            .map_err(ToString::to_string)
+    };
+    let refused = vec![HookLaunchRefusal {
+        hook_id: HookId::new(REFUSED),
+        point: HookPoint::RuntimeInputAccepted,
+        refusal: ConfinementRefusal::UntrustedConfigurationSource,
+    }];
+
+    let none = RefusedBaseRun::invoke_post_commit(None).await?;
+    assert_eq!(
+        refusals(&none),
+        Ok(refused.clone()),
+        "none: the refused observer reports its refusal: {none:?}"
+    );
+    assert_eq!(none.entered, ["trusted"], "none");
+
+    let unrelated = RefusedBaseRun::invoke_post_commit(Some(HookRunOverrides {
+        entries: vec![post_commit_observer("other", "other")],
+        disable: Vec::new(),
+    }))
+    .await?;
+    assert_eq!(
+        refusals(&unrelated),
+        Ok(refused),
+        "unrelated: an unrelated override does not lift the refusal: {unrelated:?}"
+    );
+    assert_eq!(unrelated.entered, ["trusted", "other"], "unrelated");
+
+    let disabled = RefusedBaseRun::invoke_post_commit(Some(HookRunOverrides {
+        entries: Vec::new(),
+        disable: vec![HookId::new(REFUSED)],
+    }))
+    .await?;
+    assert_eq!(
+        refusals(&disabled),
+        Ok(Vec::new()),
+        "disabled: {disabled:?}"
+    );
+    assert_eq!(disabled.entered, ["trusted"], "disabled");
+
+    let duplicate = RefusedBaseRun::invoke_post_commit(Some(HookRunOverrides {
+        entries: vec![post_commit_observer(REFUSED, "replacement")],
+        disable: Vec::new(),
+    }))
+    .await?;
+    assert!(
+        matches!(
+            &duplicate.result,
+            Err(HookEngineError::InvalidConfiguration(message))
+                if message.contains("duplicate hook id")
+        ),
+        "duplicate: {duplicate:?}"
+    );
+    assert!(duplicate.entered.is_empty(), "duplicate: {duplicate:?}");
+
+    let replaced = RefusedBaseRun::invoke_post_commit(Some(HookRunOverrides {
+        entries: vec![post_commit_observer(REFUSED, "replacement")],
+        disable: vec![HookId::new(REFUSED)],
+    }))
+    .await?;
+    assert_eq!(
+        refusals(&replaced),
+        Ok(Vec::new()),
+        "replacement: the caller's entry is not refused: {replaced:?}"
+    );
+    assert_eq!(replaced.entered, ["trusted", "replacement"], "replacement");
     Ok(())
 }
 

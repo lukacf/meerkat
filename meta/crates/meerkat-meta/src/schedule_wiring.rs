@@ -1254,18 +1254,8 @@ fn attach_schedule_tools_with_store_and_binding(
 ) -> AttachedScheduleTools {
     let service = ScheduleService::new(store);
     let mob_target_registry = ScheduleMobTargetRegistry::default();
-    let dispatcher = MobIdentityScheduleToolDispatcher::new(
-        Arc::new(ScheduleToolDispatcher::new(service.clone())),
-        mob_target_registry.clone(),
-    );
-    // Console schedules are a person's deferred sends: agents' tools leave
-    // them alone (`crate::console_schedules`).
-    let console_gated = crate::console_schedules::ConsoleScheduleToolGate::new(
-        Arc::new(dispatcher),
-        service.clone(),
-    );
     let gated = FiringHostGatedScheduleTools {
-        inner: Arc::new(console_gated),
+        inner: agent_schedule_tool_chain(service.clone(), mob_target_registry.clone()),
         binding: firing_host_binding.clone(),
     };
     meerkat::surface::set_default_schedule_tools(builder, Some(Arc::new(gated)));
@@ -1274,6 +1264,36 @@ fn attach_schedule_tools_with_store_and_binding(
         mob_target_registry,
         firing_host_binding,
     }
+}
+
+/// The agent-facing schedule tools over `service`, below the firing-host
+/// gate: a session target of a mob member is rewritten to that member, and
+/// console schedules are left to the console.
+fn agent_schedule_tool_chain(
+    service: ScheduleService,
+    mob_target_registry: ScheduleMobTargetRegistry,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    let dispatcher = MobIdentityScheduleToolDispatcher::new(
+        Arc::new(ScheduleToolDispatcher::new(service.clone())),
+        mob_target_registry,
+    );
+    // Console schedules are a person's deferred sends: agents' tools leave
+    // them alone (`crate::console_schedules`).
+    Arc::new(crate::console_schedules::ConsoleScheduleToolGate::new(
+        Arc::new(dispatcher),
+        service,
+    ))
+}
+
+/// The agent-facing schedule tools a composition installs, over `service`
+/// and `mob_target_registry`, without the firing-host gate: rows outside
+/// this module drive an agent's schedule tool call through them.
+#[cfg(test)]
+pub(crate) fn agent_schedule_tools_for_test(
+    service: ScheduleService,
+    mob_target_registry: ScheduleMobTargetRegistry,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    agent_schedule_tool_chain(service, mob_target_registry)
 }
 
 /// Spawn the runtime-backed schedule host so authored schedules fire: at due

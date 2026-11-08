@@ -2265,6 +2265,20 @@ pub(crate) fn agent_mob_tool_wrapper_for_test(
     })
 }
 
+/// [`agent_mob_tool_wrapper_for_test`] for the tool surface of the member
+/// of `runtime` whose session is `session`, as the runtime builds one for
+/// that member's agent.
+#[cfg(test)]
+pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    overrides: ImplicitDelegateRetirementOverrides,
+    runtime: &MobRuntime,
+    session: meerkat_core::types::SessionId,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    let _ = (runtime, session);
+    agent_mob_tool_wrapper_for_test(inner, overrides)
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {

@@ -1822,3 +1822,852 @@ async fn a_private_side_chats_stored_session_keeps_the_distiller_out() -> TestRe
     );
     Ok(())
 }
+
+/// The members every dispatch of flow run `run_id` targeted, from the mob's
+/// own per-target dispatch records.
+async fn dispatched_members(
+    handle: &meerkat_mob::MobHandle,
+    run_id: &str,
+) -> Result<BTreeSet<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut members = BTreeSet::new();
+    let mut cursor = 0;
+    loop {
+        let events = handle.poll_events(cursor, 256).await?;
+        let Some(last) = events.last().map(|event| event.cursor) else {
+            break;
+        };
+        for event in events {
+            if let meerkat_mob::MobEventKind::StepDispatched {
+                run_id: dispatched,
+                target,
+                ..
+            } = event.kind
+                && dispatched.to_string() == run_id
+            {
+                members.insert(target.identity.to_string());
+            }
+        }
+        cursor = last;
+    }
+    Ok(members)
+}
+
+/// `meta/run_flow` of the definition's `main` flow as the holder of
+/// `bearer`; the run's id.
+async fn start_main_flow(
+    app: &Router,
+    bearer: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let started = console_rpc_as(
+        app,
+        Some(bearer),
+        "meta/run_flow",
+        json!({ "flow_id": "main" }),
+    )
+    .await;
+    Ok(started["result"]["run_id"]
+        .as_str()
+        .ok_or_else(|| format!("the flow started: {started:#}"))?
+        .to_string())
+}
+
+/// A fork Meerkat makes of a private side chat (as the side chat's own
+/// `fork_off` seats its child: a default seating through the durable fork,
+/// which asks no spawn customizer) takes the side chat's owner and its
+/// exemption from the definition's wiring. It is seated exempt, the
+/// definition wires it to no shared member, and another person's role-wide
+/// flow of its role never dispatches to it.
+#[tokio::test]
+async fn a_fork_of_a_private_side_chat_stays_out_of_the_shared_topology() -> TestResult {
+    let tail = format!("[wiring]\nauto_wire_orchestrator = true\n{WORKER_FLOW_TAIL}");
+    let (_temp_dir, spec) =
+        persistent_console_spec("private-side-chat-fork", "orchestrator = \"lead\"", &tail)?;
+    let runtime = Box::pin(MobRuntime::bootstrap(spec)).await?;
+    seeded_member(&runtime, "lead", "lead", &[]).await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let alice_scope = caller_scope(&app, &alice).await;
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let side = AgentIdentity::from("alpha-side");
+    runtime.handle().ensure_member_live(&side).await?;
+    runtime
+        .handle()
+        .member(&side)
+        .await?
+        .start_turn(
+            meerkat_core::types::ContentInput::Text("My salary is private.".to_string()),
+            meerkat_core::types::HandlingMode::Queue,
+            meerkat_mob::MemberTurnOptions::new(),
+            None,
+        )
+        .await?
+        .wait()
+        .await?;
+
+    let child = AgentIdentity::from("alpha-side-child");
+    let mut seated = false;
+    for _ in 0..50 {
+        match runtime
+            .handle()
+            .fork_member(&side, SpawnMemberSpec::new("worker", child.clone()), None)
+            .await
+        {
+            Ok(_) => {
+                seated = true;
+                break;
+            }
+            Err(meerkat_mob::MobError::ForkSourceUnavailable { .. }) => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert!(seated, "the side chat settles for its fork");
+    let entry = runtime
+        .handle()
+        .get_member(&child)
+        .await?
+        .ok_or("the fork is seated")?;
+    assert_eq!(
+        entry.labels.get(PRIVATE_TO),
+        Some(&alice_scope),
+        "the fork is private to the side chat's owner"
+    );
+    assert_eq!(
+        entry.definition_wiring,
+        meerkat_mob::DefinitionWiring::Exempt,
+        "the fork is seated outside the shared topology"
+    );
+    for shared in ["lead", "alpha"] {
+        assert!(
+            !entry.wired_to.iter().any(|peer| peer.as_str() == shared),
+            "the fork is wired to no shared member: {:?}",
+            entry.wired_to
+        );
+        let shared_entry = runtime
+            .handle()
+            .get_member(&AgentIdentity::from(shared))
+            .await?
+            .ok_or("the shared member is seated")?;
+        assert!(
+            !shared_entry
+                .wired_to
+                .iter()
+                .any(|peer| peer.as_str() == "alpha-side-child"),
+            "{shared} is not wired to the fork: {:?}",
+            shared_entry.wired_to
+        );
+    }
+
+    let run_id = start_main_flow(&app, &bob).await?;
+    let status = settled_flow_status(&app, &bob, &run_id).await;
+    assert_eq!(status["result"]["status"], json!("completed"), "{status:#}");
+    assert_eq!(
+        dispatched_members(&runtime.handle(), &run_id).await?,
+        BTreeSet::from(["alpha".to_string()]),
+        "another person's role-wide step dispatched to the shared worker only"
+    );
+    Ok(())
+}
+
+/// A run's members are every member it dispatched to, as the mob's
+/// per-target dispatch records name them. A member a host seated private to
+/// Alice and left under the definition's wiring is a target of Bob's
+/// role-wide flow, so that run reached a member hidden from Bob: Bob reads it
+/// as a run that does not exist (no status, a cancel answered as for an
+/// absent run, no listing), and Alice reads it whole.
+#[tokio::test]
+async fn a_role_wide_run_that_reached_a_private_member_is_absent_to_another_person() -> TestResult {
+    let (_temp_dir, spec) = persistent_console_spec("private-run-targets", "", WORKER_FLOW_TAIL)?;
+    let runtime = Box::pin(MobRuntime::bootstrap(spec)).await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let alice_scope = caller_scope(&app, &alice).await;
+    seeded_member(
+        &runtime,
+        "worker",
+        "alpha-secret",
+        &[(PRIVATE_TO, alice_scope.as_str())],
+    )
+    .await?;
+    let secret = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-secret"))
+        .await?
+        .ok_or("the private member is seated")?;
+    assert_eq!(
+        secret.definition_wiring,
+        meerkat_mob::DefinitionWiring::Applies,
+        "the host left the private member under the definition's wiring"
+    );
+
+    let run_id = start_main_flow(&app, &bob).await?;
+    let alices = settled_flow_status(&app, &alice, &run_id).await;
+    assert_eq!(alices["result"]["status"], json!("completed"), "{alices:#}");
+    assert!(
+        dispatched_members(&runtime.handle(), &run_id)
+            .await?
+            .contains("alpha-secret"),
+        "the role-wide run reached the private member"
+    );
+    assert!(
+        alices.to_string().contains("alpha-secret"),
+        "its owner reads the run whole: {alices:#}"
+    );
+
+    const ABSENT_RUN: &str = "00000000-0000-4000-8000-000000000000";
+    for method in ["meta/flow_status", "meta/cancel_flow"] {
+        let bobs = console_rpc_as(&app, Some(&bob), method, json!({ "run_id": run_id })).await;
+        let absent =
+            console_rpc_as(&app, Some(&bob), method, json!({ "run_id": ABSENT_RUN })).await;
+        assert_eq!(
+            masked(&bobs, &run_id),
+            masked(&absent, ABSENT_RUN),
+            "{method}: another person reads the run as a run that does not exist: \
+             {bobs:#}, absent {absent:#}"
+        );
+    }
+    let listed = console_rpc_as(&app, Some(&bob), "meta/list_runs", json!({})).await;
+    assert!(
+        !listed.to_string().contains(&run_id) && !listed.to_string().contains("alpha-secret"),
+        "another person's run listing names neither the run nor the private member: {listed:#}"
+    );
+    Ok(())
+}
+
+/// The owner key a WorkGraph target names a member of mob `mob` by.
+fn agent_owner_key(mob: &str, member: &str) -> Value {
+    json!({ "kind": "agent", "id": format!("mob/{mob}/agent/{member}") })
+}
+
+/// A WorkGraph target names a member in any of its forms: its identity, its
+/// owner key (as `owner` or `lowered_owner`), an owner key of kind
+/// `session`, and its session. In every form a member hidden from the caller
+/// is refused as the identity form is, as an unknown member, in a goal, a
+/// reassignment and a supervisor's key; an attention list filtered by it
+/// lists what a name no member holds lists; nothing is bound to it. A shared
+/// member is a target in the owner-key form.
+#[tokio::test]
+async fn workgraph_targets_naming_a_hidden_member_are_refused_in_every_form() -> TestResult {
+    const MOB: &str = "private-workgraph-forms";
+    let (_state, runtime, app) = signed_in_unified_runtime(MOB).await?;
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let side = AgentIdentity::from("alpha-side");
+    runtime.mob_handle().ensure_member_live(&side).await?;
+    let session = runtime
+        .mob_handle()
+        .get_member(&side)
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or("the side chat has a session")?
+        .to_string();
+    let hidden_forms = [
+        json!({ "kind": "owner", "owner_key": agent_owner_key(MOB, "alpha-side") }),
+        json!({ "kind": "lowered_owner", "owner_key": agent_owner_key(MOB, "alpha-side") }),
+        json!({ "kind": "owner", "owner_key": { "kind": "session", "id": session } }),
+        json!({ "kind": "session", "session_id": session }),
+    ];
+
+    let shared = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "Bob's goal",
+            "target": { "kind": "owner", "owner_key": agent_owner_key(MOB, "alpha") },
+        }),
+    )
+    .await;
+    assert!(
+        shared["error"].is_null(),
+        "a shared member is a target in the owner-key form: {shared:#}"
+    );
+    let binding_id = shared["result"]["attention"]["binding_id"].clone();
+    let revision = shared["result"]["item"]["revision"].clone();
+
+    for target in &hidden_forms {
+        let created = console_rpc_as(
+            &app,
+            Some(&bob),
+            "meta/workgraph/goal/create",
+            json!({ "title": "Bob's other goal", "target": target }),
+        )
+        .await;
+        assert_eq!(
+            created["error"]["code"],
+            json!(-32001),
+            "a goal aimed at the hidden member as {target} is refused as an unknown member's: \
+             {created:#}"
+        );
+        let reassigned = console_rpc_as(
+            &app,
+            Some(&bob),
+            "meta/workgraph/attention/reassign",
+            json!({ "binding_id": binding_id, "expected_revision": revision, "target": target }),
+        )
+        .await;
+        assert_eq!(
+            reassigned["error"]["code"],
+            json!(-32001),
+            "a reassignment onto the hidden member as {target} is refused as an unknown \
+             member's: {reassigned:#}"
+        );
+    }
+    let supervised = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "Bob's supervised goal",
+            "target": { "kind": "identity", "identity": "nobody-here" },
+            "completion_policy": {
+                "kind": "supervisor",
+                "owner_key": agent_owner_key(MOB, "alpha-side"),
+            },
+        }),
+    )
+    .await;
+    assert_eq!(
+        supervised["error"]["code"],
+        json!(-32001),
+        "a supervisor key naming the hidden member is refused as an unknown member's: \
+         {supervised:#}"
+    );
+    let list = |member: &str| json!({ "target": { "kind": "lowered_owner", "owner_key": agent_owner_key(MOB, member) } });
+    let hidden = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/workgraph/attention/list",
+        list("alpha-side"),
+    )
+    .await;
+    let absent = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/workgraph/attention/list",
+        list("alpha-gone"),
+    )
+    .await;
+    assert_eq!(
+        masked(&hidden, "alpha-side"),
+        masked(&absent, "alpha-gone"),
+        "a list filtered by the hidden member lists what an absent one lists"
+    );
+    let alices = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/attention/list",
+        json!({}),
+    )
+    .await;
+    assert!(
+        alices["error"].is_null()
+            && !alices.to_string().contains("agent/alpha-side")
+            && !alices.to_string().contains(&session),
+        "nothing is bound to the hidden member: {alices:#}"
+    );
+    Ok(())
+}
+
+/// A goal another person aims at a private side chat by its owner key is
+/// refused, and the side chat keeps taking turns: no binding of another
+/// person's ever reaches it (a binding's tools would be ones a private
+/// member is built without, which ends its turns).
+#[tokio::test]
+async fn another_persons_goal_by_owner_key_leaves_a_private_side_chat_taking_turns() -> TestResult {
+    const MOB: &str = "private-workgraph-turns";
+    let (_state, runtime, app) = signed_in_unified_runtime(MOB).await?;
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let side = AgentIdentity::from("alpha-side");
+    runtime.mob_handle().ensure_member_live(&side).await?;
+    let turn = |text: &'static str| {
+        let runtime = Arc::clone(&runtime);
+        let side = side.clone();
+        async move {
+            runtime
+                .mob_handle()
+                .member(&side)
+                .await
+                .map_err(|error| error.to_string())?
+                .start_turn(
+                    meerkat_core::types::ContentInput::Text(text.to_string()),
+                    meerkat_core::types::HandlingMode::Queue,
+                    meerkat_mob::MemberTurnOptions::new(),
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .wait()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    };
+    assert_eq!(
+        turn("A first turn.").await,
+        Ok(()),
+        "the side chat takes a turn"
+    );
+    let created = console_rpc_as(
+        &app,
+        Some(&bob),
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "Bob's goal",
+            "target": { "kind": "owner", "owner_key": agent_owner_key(MOB, "alpha-side") },
+        }),
+    )
+    .await;
+    assert_eq!(
+        turn("A second turn.").await,
+        Ok(()),
+        "the side chat still takes turns after another person's goal: {created:#}"
+    );
+    assert_eq!(
+        created["error"]["code"],
+        json!(-32001),
+        "the goal is refused as aimed at an unknown member: {created:#}"
+    );
+    Ok(())
+}
+
+/// The runtime administration reads (the routing table, the delivery
+/// history with its payloads, the edge reconcile and the storage doctor)
+/// name no member hidden from their caller on a console with sign-in and no
+/// access configuration: every row that names one is left out. The member's
+/// owner reads them whole.
+#[tokio::test]
+async fn runtime_administration_reads_name_no_member_hidden_from_their_caller() -> TestResult {
+    let (_temp_dir, spec) = persistent_console_spec(
+        "private-admin-reads",
+        "orchestrator = \"lead\"",
+        "[wiring]\nauto_wire_orchestrator = true\n",
+    )?;
+    let runtime = Box::pin(MobRuntime::bootstrap(spec)).await?;
+    seeded_member(&runtime, "lead", "lead", &[]).await?;
+    let owner = crate::start_meta_runtime(
+        crate::MetaConfig {
+            modules: vec![],
+            discovery: crate::DiscoverySpec {
+                namespace: "private-admin-reads".to_string(),
+                modules: vec![],
+            },
+            pre_spawn: vec![],
+        },
+        vec![],
+        std::time::Duration::from_secs(1),
+    )?;
+    let owner = Arc::new(tokio::sync::Mutex::new(owner));
+    let mut state = enforced_console(&runtime, None);
+    state.module_runtime = Some(Arc::clone(&owner));
+    let app = console_json_router_with_state(state);
+    let alice = bearer(alice_claims());
+    let bob = bearer(bob_claims());
+    let alice_scope = caller_scope(&app, &alice).await;
+    seeded_member(
+        &runtime,
+        "worker",
+        "alpha-secret",
+        &[(PRIVATE_TO, alice_scope.as_str())],
+    )
+    .await?;
+    {
+        let mut owner = owner.lock().await;
+        owner.add_runtime_route(crate::RuntimeRoute {
+            route_key: "mob.member.alpha-secret".to_string(),
+            recipient: "alpha-secret".to_string(),
+            channel: Some("notification".to_string()),
+            sink: "mob_member".to_string(),
+            target_module: "delivery".to_string(),
+            retry_max: None,
+            backoff_ms: None,
+            rate_limit_per_minute: None,
+        })?;
+        owner.record_delivery_for_test(crate::runtime::DeliveryRecord {
+            delivery_id: "delivery-1".to_string(),
+            route_id: "route-1".to_string(),
+            recipient: "alpha-secret".to_string(),
+            sink: "mob_member".to_string(),
+            target_module: "delivery".to_string(),
+            payload: json!({ "text": "The salary review is due." }),
+            status: "delivered".to_string(),
+            attempts: Vec::new(),
+            first_attempt_ms: 1,
+            final_attempt_ms: 1,
+            idempotency_key: None,
+            sink_adapter: None,
+        });
+    }
+    let doctored = tempfile::tempdir()?;
+    crate::identity_first::FirstBootManifest::write_new(
+        doctored.path(),
+        vec![crate::identity_first::FirstBootRow::Resume {
+            identity: crate::identity_first::AgentIdentity::parse("alpha-secret")?,
+            session: meerkat_core::types::SessionId::new(),
+        }],
+    )?;
+
+    for (method, params) in [
+        ("meta/routing/routes/list", json!({})),
+        ("meta/delivery/history", json!({ "limit": 50 })),
+        ("meta/reconcile_edges", json!({})),
+        (
+            "meta/storage/doctor",
+            json!({ "state_dir": doctored.path() }),
+        ),
+    ] {
+        let alices = console_rpc_as(&app, Some(&alice), method, params.clone()).await;
+        assert!(
+            alices["error"].is_null() && alices.to_string().contains("alpha-secret"),
+            "{method} names the private member to its owner: {alices:#}"
+        );
+        let bobs = console_rpc_as(&app, Some(&bob), method, params).await;
+        assert!(
+            bobs["error"].is_null(),
+            "{method} answers another person: {bobs:#}"
+        );
+        assert!(
+            !bobs.to_string().contains("alpha-secret"),
+            "{method} names the private member to another person nowhere: {bobs:#}"
+        );
+    }
+    Ok(())
+}
+
+/// Stands in for meerkat's agent mob tools: records each call's tool, and
+/// answers `mob_check_member` through Core's admission of an owned member
+/// target for `caller` without manage scope, as meerkat's tool does (a name
+/// no member holds is absent; a member the caller does not own is refused).
+struct OwnedMemberTools {
+    handle: meerkat_mob::MobHandle,
+    caller: AgentIdentity,
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl OwnedMemberTools {
+    fn new(handle: meerkat_mob::MobHandle, caller: &str) -> Arc<Self> {
+        Arc::new(Self {
+            handle,
+            caller: AgentIdentity::from(caller),
+            calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_core::AgentToolDispatcher for OwnedMemberTools {
+    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
+        Arc::from(Vec::new())
+    }
+
+    async fn dispatch(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(call.name.to_string());
+        let done = || {
+            Ok(meerkat_core::ToolDispatchOutcome::sync_result(
+                meerkat_core::types::ToolResult::new(call.id.to_string(), "{}".to_string(), false),
+            ))
+        };
+        if call.name != "mob_check_member" {
+            return done();
+        }
+        let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
+            meerkat_core::ToolError::invalid_arguments(call.name, error.to_string())
+        })?;
+        let mob_id = meerkat_mob::MobId::from(args["mob_id"].as_str().unwrap_or_default());
+        let member = AgentIdentity::from(args["member_id"].as_str().unwrap_or_default());
+        match self
+            .handle
+            .resolve_owned_member_target_admission(false, Some(&self.caller), &member)
+            .await
+            .map_err(|error| meerkat_core::ToolError::execution_failed(error.to_string()))?
+        {
+            meerkat_mob::OwnedMemberTargetAdmission::Allowed => done(),
+            meerkat_mob::OwnedMemberTargetAdmission::Denied => {
+                Err(meerkat_core::ToolError::access_denied(call.name))
+            }
+            meerkat_mob::OwnedMemberTargetAdmission::Absent(absence) => {
+                Err(absence.to_tool_error(call.name, &mob_id, &member))
+            }
+        }
+    }
+}
+
+/// One agent mob tool call `name` with `args`, through `tools`.
+async fn agent_tool_call(
+    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+    name: &str,
+    args: Value,
+) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+    let args = serde_json::value::RawValue::from_string(args.to_string())
+        .map_err(|error| meerkat_core::ToolError::invalid_arguments(name, error.to_string()))?;
+    tools
+        .dispatch_with_context(
+            meerkat_core::types::ToolCallView {
+                id: "agent-tool-call",
+                name,
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default(),
+        )
+        .await
+}
+
+/// The session of `member` of `runtime`.
+async fn member_session(
+    runtime: &MobRuntime,
+    member: &str,
+) -> Result<meerkat_core::types::SessionId, Box<dyn std::error::Error + Send + Sync>> {
+    let identity = AgentIdentity::from(member);
+    runtime.handle().ensure_member_live(&identity).await?;
+    Ok(runtime
+        .handle()
+        .get_member(&identity)
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or_else(|| format!("{member} has a session"))?)
+}
+
+/// A member private to a person does not convene a council: its agent's
+/// `council` call is refused typed before meerkat's tool runs (the council's
+/// participants would be forks of shared members carrying that person's
+/// question). A shared member's call reaches the tool.
+#[tokio::test]
+async fn a_private_member_cannot_convene_a_council() -> TestResult {
+    const MOB: &str = "private-council";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let overrides = runtime
+        .implicit_delegate_retirement_overrides()
+        .ok_or("the runtime installs the agent mob tools")?;
+    let council = json!({
+        "question": "Which of us remembers the code word?",
+        "participants": ["alpha"],
+    });
+
+    let tools = OwnedMemberTools::new(runtime.handle(), "alpha-side");
+    let side_chat = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
+        tools.clone(),
+        overrides.clone(),
+        &runtime,
+        member_session(&runtime, "alpha-side").await?,
+    );
+    match agent_tool_call(&side_chat, "council", council.clone()).await {
+        Err(meerkat_core::ToolError::PolicyDenied { denial }) => {
+            assert_eq!(denial.code, "private_member_council", "{}", denial.message);
+        }
+        other => panic!("a private member's council is refused as a policy denial: {other:?}"),
+    }
+    assert!(
+        tools.calls().is_empty(),
+        "meerkat's council tool never ran for the private member"
+    );
+
+    let tools = OwnedMemberTools::new(runtime.handle(), "alpha");
+    let shared = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
+        tools.clone(),
+        overrides,
+        &runtime,
+        member_session(&runtime, "alpha").await?,
+    );
+    assert!(
+        agent_tool_call(&shared, "council", council).await.is_ok(),
+        "a shared member's council reaches the tool"
+    );
+    assert_eq!(tools.calls(), vec!["council".to_string()]);
+    Ok(())
+}
+
+/// An agent's `mob_check_member` naming a member private to a person the
+/// agent does not act for answers exactly as a name no member holds does:
+/// nothing tells the agent the member exists. Its owner's private member
+/// checks it as before.
+#[tokio::test]
+async fn mob_check_member_answers_a_hidden_member_as_an_absent_one() -> TestResult {
+    const MOB: &str = "private-check-member";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let overrides = runtime
+        .implicit_delegate_retirement_overrides()
+        .ok_or("the runtime installs the agent mob tools")?;
+    let check = |member: &str| json!({ "mob_id": MOB, "member_id": member });
+    let answer = |outcome: Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>,
+                  name: &str| {
+        let text = match outcome {
+            Ok(outcome) => format!("ok: {outcome:?}"),
+            Err(error) => format!("error: {}", error.to_transcript_content()),
+        };
+        text.replace(name, "<member>")
+    };
+
+    let shared = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
+        OwnedMemberTools::new(runtime.handle(), "alpha"),
+        overrides.clone(),
+        &runtime,
+        member_session(&runtime, "alpha").await?,
+    );
+    let hidden = answer(
+        agent_tool_call(&shared, "mob_check_member", check("alpha-side")).await,
+        "alpha-side",
+    );
+    let absent = answer(
+        agent_tool_call(&shared, "mob_check_member", check("alpha-gone")).await,
+        "alpha-gone",
+    );
+    assert_eq!(
+        hidden, absent,
+        "a shared agent's check of a private member answers as for an absent member"
+    );
+
+    let private = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
+        OwnedMemberTools::new(runtime.handle(), "alpha-side"),
+        overrides,
+        &runtime,
+        member_session(&runtime, "alpha-side").await?,
+    );
+    let own = answer(
+        agent_tool_call(&private, "mob_check_member", check("alpha-side")).await,
+        "alpha-side",
+    );
+    assert_ne!(
+        own, absent,
+        "the owner's own private member checks it as an existing member"
+    );
+    Ok(())
+}
+
+/// An agent's schedule tools refuse a target that names a member private to
+/// a person the agent does not act for, as an act on a member outside the
+/// agent's reach (`access_denied`), in every target form that names one: the
+/// member, a fork helper of it, and its session. A member private to the
+/// same person schedules into it, and a shared target stays open.
+#[tokio::test]
+async fn schedule_tools_refuse_a_private_target_unless_the_caller_shares_its_owner() -> TestResult {
+    const MOB: &str = "private-schedule-targets";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    for side_chat in ["alpha-side", "alpha-note"] {
+        let forked = fork_on_console(&app, Some(&alice), "alpha", side_chat).await;
+        assert!(forked["error"].is_null(), "{forked:#}");
+    }
+    let service = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
+    let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
+    registry.set_mob_state(runtime.agent_mob_mcp_state());
+    let tools = crate::schedule_wiring::agent_schedule_tools_for_test(service, registry);
+    let side_session = member_session(&runtime, "alpha-side").await?.to_string();
+    let create = |target: Value| {
+        json!({
+            "name": "a reminder",
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": "2026-07-01T05:00:00Z",
+                "every_seconds": 86400,
+            },
+            "target": target,
+        })
+    };
+    let member_target = |member: &str| {
+        json!({
+            "target_kind": "mob",
+            "type": "member",
+            "mob_id": MOB,
+            "member_id": member,
+            "action": { "type": "send", "content": "Look at the salary review." },
+        })
+    };
+    let schedule_as = |caller: meerkat_core::types::SessionId, target: Value| {
+        let tools = Arc::clone(&tools);
+        let args = create(target);
+        async move {
+            let args = serde_json::value::RawValue::from_string(args.to_string())
+                .map_err(|error| error.to_string())?;
+            tools
+                .dispatch_with_context(
+                    meerkat_core::types::ToolCallView {
+                        id: "schedule-create",
+                        name: "meerkat_schedule_create",
+                        args: &args,
+                    },
+                    &meerkat_core::ToolDispatchContext::default()
+                        .with_runtime_identity(caller, None),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}"))
+        }
+    };
+
+    let shared_agent = member_session(&runtime, "alpha").await?;
+    for target in [
+        member_target("alpha-side"),
+        json!({
+            "target_kind": "mob",
+            "type": "fork_helper",
+            "mob_id": MOB,
+            "source_member_id": "alpha-side",
+            "action": { "type": "send", "content": "Look at the salary review." },
+        }),
+        json!({
+            "target_kind": "session",
+            "type": "resumable_session",
+            "session_id": side_session,
+            "action": { "type": "prompt", "prompt": "Look at the salary review." },
+        }),
+    ] {
+        let refused = schedule_as(shared_agent.clone(), target.clone()).await;
+        assert!(
+            matches!(&refused, Err(error) if error.contains("AccessDenied")),
+            "a shared agent's schedule into a private member as {target} is refused as an \
+             act outside its reach: {refused:?}"
+        );
+    }
+    assert_eq!(
+        schedule_as(shared_agent, member_target("alpha")).await,
+        Ok(()),
+        "a shared target stays open"
+    );
+    assert_eq!(
+        schedule_as(
+            member_session(&runtime, "alpha-note").await?,
+            member_target("alpha-side"),
+        )
+        .await,
+        Ok(()),
+        "a member private to the same person schedules into it"
+    );
+    Ok(())
+}

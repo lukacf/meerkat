@@ -560,13 +560,7 @@ mod tests {
             assert_eq!(owner.state().revision, retained.revision);
             let after_release = owner.state().clone();
             for refused in [
-                GrantAuthorityInput::IssueChild {
-                    actor: child.issuer.clone(),
-                    record: child.clone(),
-                    derived: attenuation(),
-                    chain: vec![root.clone()],
-                    now_ms: 1,
-                },
+                issue_child(&child.issuer, &child, vec![root.clone()]),
                 GrantAuthorityInput::Revoke {
                     actor: root.issuer.clone(),
                     record: root.clone(),
@@ -625,6 +619,56 @@ mod tests {
             assert_eq!(owner.state().revision, revision + 1);
             assert!(owner.apply(resolve(&child, chain.clone(), 1)).is_err());
             assert!(owner.apply(consume(&child, chain, true)).is_err());
+        }
+    }
+    /// The custody end, reached from Active by the close or by an uncertain
+    /// append, refuses the spend of an unspent approval child that the same
+    /// owner accepts in custody, either answer of its approver: nothing is
+    /// spent.
+    #[test]
+    fn custody_end_refuses_a_spend_accepted_in_custody() {
+        let (rule_row, child_row) = approval_rows(&rows(false));
+        let root = actual(&rule_row);
+        let child = actual(&child_row);
+        let chain = vec![root.clone(), child.clone()];
+        let issued = || {
+            let mut owner = configured(&rule_row);
+            owner
+                .apply(GrantAuthorityInput::IssueRoot {
+                    actor: root.issuer.clone(),
+                    record: root.clone(),
+                })
+                .expect("IssueRoot with a child rule");
+            owner
+                .apply(issue_child(&child.issuer, &child, vec![root.clone()]))
+                .expect("IssueChild of an approval child");
+            owner
+        };
+        issued()
+            .apply(consume(&child, chain.clone(), true))
+            .expect("ConsumeUse in custody");
+        for (end, phase) in [
+            (
+                GrantAuthorityInput::ReleaseCustody,
+                GrantAuthorityPhase::Released,
+            ),
+            (
+                GrantAuthorityInput::RecordUncertainAppend,
+                GrantAuthorityPhase::Uncertain,
+            ),
+        ] {
+            let mut owner = issued();
+            owner.apply(end).expect("the custody ends");
+            assert_eq!(owner.state().lifecycle_phase, phase);
+            let ended = owner.state().clone();
+            for approver_current in [true, false] {
+                assert!(
+                    owner
+                        .apply(consume(&child, chain.clone(), approver_current))
+                        .is_err()
+                );
+            }
+            assert_eq!(owner.state(), &ended, "nothing is spent");
         }
     }
     #[test]

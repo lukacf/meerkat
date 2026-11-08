@@ -727,6 +727,39 @@ if run_part audits-r; then
   TLC_WORKERS="${tlc_workers}" "${grant_custody_end_audit}" "${GRANT_CUSTODY_END_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
+# The requester batch rule (inputs of different requesters never share a
+# run: each run stages one batch key, which includes an ungoverned input's
+# requester, and a live-boundary join must carry the key the run staged) and
+# the Steer lane's order across requesters (no Steer input is staged or
+# joined while a Steer input admitted before it waits with another key) are
+# structural in the MeerkatMachine ci sweep, which takes one step. A
+# hand-written audit over the same generated model runs one runtime-loop run
+# whose batch input carries one key and a late Steer input of another key
+# (or none), through admission, the durable join and its resolutions,
+# normalization, receipts, staging into the running run or a follow-up run,
+# every run-ending arm, and a fence gap's suspension and resume, under every
+# generated invariant plus two safety invariants (a run's bound inputs share
+# one key; the late input never joins the batch input's run), once per pair
+# of different keys. It then runs an earlier Steer input of another key ahead
+# of a late one of the batch input's key under the order property, once per
+# such pair. It requires four witnesses reached (a late input of the same key
+# joins; one of another key runs in a run of its own; an earlier input of
+# another key runs first; the late input joins once that one left the lane)
+# and refuses five seeded defects (--mutants): the join without its
+# live_join_same_requester guard, admission that records a batch key only
+# for a governed binding, ResumeRun staging no key, and the join and
+# StageForRun without the order guard. 14 steps reach every witness and
+# mutant; deeper bounds run by hand.
+requester_batch_audit="${workspace_root}/specs/machines/meerkat_machine/requester_batch_audit.sh"
+if [[ ! -x "${requester_batch_audit}" ]]; then
+  echo "error: requester batch audit runner is missing from workspace runfiles: ${requester_batch_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded requester batch TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${requester_batch_audit}" "${REQUESTER_BATCH_AUDIT_MAX_STEPS:-14}" --mutants
+fi
+
 # The AuthMachine source-credential publication (a publisher that re-reads
 # its credential value from a source asks ResolveSourceCredentialPublication
 # with the value's fingerprint and fires Acquire naming it only on Publish)
@@ -1494,9 +1527,11 @@ run_machine_verify() {
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
 # 248-375 s, plus the retained-run settle audit with --mutants (0.9.11, not
-# yet measured on a hosted runner), and the GrantAuthorityMachine custody end
+# yet measured on a hosted runner), the GrantAuthorityMachine custody end
 # audit with --mutants (sixteen runs, not yet measured hosted; 17 s locally
-# with 4 TLC workers, about 40 s at 2.3x): about 290-415 s before the settle audit;
+# with 4 TLC workers, about 40 s at 2.3x) and the requester batch audit with
+# --mutants (90 s locally with 4 workers at 14 steps, about 210 s at 2.3x):
+# about 380-625 s before the settle audit;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;

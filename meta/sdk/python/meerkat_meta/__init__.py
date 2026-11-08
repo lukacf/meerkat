@@ -392,6 +392,9 @@ from .tool_content import (
     tool_content,
 )
 
+# The original requester a callback names.
+from .tool_requester import RequesterPrincipal, ToolCallRequester
+
 __all__ = [
     # Builder + Runtime
     "Meta",
@@ -451,6 +454,9 @@ __all__ = [
     "image_blob_block",
     "tool_content",
     "ToolResultContent",
+    # The original requester a callback names
+    "RequesterPrincipal",
+    "ToolCallRequester",
     # Data models
     "DiscoverySpec",
     "PreSpawnData",

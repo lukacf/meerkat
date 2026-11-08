@@ -1388,6 +1388,11 @@ meerkat_machine_runtime_internal_inputs!(
     LiveExecutionLifecycle => [
         CloseLiveDelegationIntake,
     ],
+    // A recovered ungoverned row's requester batch key, rehydrated as
+    // BindInputAuthority rehydrates a governed row's binding.
+    InputQueueLifecycle => [
+        BindInputRequesterBatchKey,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

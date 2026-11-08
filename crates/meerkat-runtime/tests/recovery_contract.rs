@@ -453,6 +453,7 @@ fn make_prompt_admitted_at(text: &str, admitted_at: chrono::DateTime<Utc>) -> In
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content: text.into(),
         typed_turn_appends: Vec::new(),
@@ -6097,6 +6098,7 @@ fn make_directed_peer(
             correlation_id: Some(meerkat_runtime::identifiers::CorrelationId::from_uuid(
                 interaction.0,
             )),
+            requester: None,
         },
         directed_interaction_id: Some(interaction),
         convention: Some(meerkat_runtime::input::PeerConvention::Message),

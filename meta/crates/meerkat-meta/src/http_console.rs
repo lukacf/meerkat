@@ -50,8 +50,8 @@ use crate::access::{AccessGroup, AccessRule};
 
 use crate::blob_store::{BinaryBlobPayload, BinaryBlobStore, is_valid_blob_id_value};
 use crate::console_aggregator::{
-    ConsoleCursor, ConsoleFrame, ConsoleFrameSourceKind, ConsoleIdentityRecord, ConsoleLogError,
-    ConsoleLogResult, ConsoleLogStore, ConsoleReplayUnavailable, ConsoleSendError,
+    ConsoleActorKind, ConsoleCursor, ConsoleFrame, ConsoleFrameSourceKind, ConsoleIdentityRecord,
+    ConsoleLogError, ConsoleLogResult, ConsoleLogStore, ConsoleReplayUnavailable, ConsoleSendError,
     ConsoleSendRequest, ConsoleTimelineEvent, ConsoleTimelineMode, ConsoleTimelineQuery,
     ConsoleTimelineQueryError, ConsoleTimelineQueryResult, ConsoleTimelineWindowQuery,
     ConsoleVisibility, ConsoleVisibilityPolicy, HideImplicitDelegateMembersConsoleVisibilityPolicy,
@@ -171,42 +171,6 @@ struct ConsoleHttpAuthContext {
     verification: Option<crate::runtime::ConsoleCallerVerification>,
 }
 
-/// Who the Console acts as for one request, derived from the connection
-/// alone: the token the Console verified, or none on an open Console. No
-/// request field names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConsoleActorKind {
-    /// A verified human token: an OIDC issuer and `sub`.
-    Person,
-    /// A verified service token (`svc:` principal or service actor).
-    Service,
-    /// A verified token that names no human (no `sub`).
-    TokenPrincipal,
-    /// A caller of an open Console without a verified token.
-    Anonymous,
-}
-
-impl ConsoleActorKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Person => "person",
-            Self::Service => "service",
-            Self::TokenPrincipal => "token_principal",
-            Self::Anonymous => "anonymous",
-        }
-    }
-
-    /// The authentication assurance the Console established for this kind
-    /// of caller; a token that names no human claims none.
-    fn assurance(self) -> Option<meerkat_core::ApprovalAssurance> {
-        match self {
-            Self::Person => Some(meerkat_core::ApprovalAssurance::PersonAuthenticated),
-            Self::Service => Some(meerkat_core::ApprovalAssurance::ServiceCredential),
-            Self::TokenPrincipal | Self::Anonymous => None,
-        }
-    }
-}
-
 impl ConsoleHttpAuthContext {
     /// Who the Console acts as for this request.
     fn actor_kind(&self) -> ConsoleActorKind {
@@ -230,6 +194,36 @@ impl ConsoleHttpAuthContext {
     /// caller.
     fn caller_scope(&self) -> String {
         console_caller_scope(&self.send_scope)
+    }
+
+    /// Who this caller is as the sender of a console message, as
+    /// `meta/console/whoami` reports the caller: its kind, assurance, name
+    /// and caller scope. Only a verified person on a console that requires
+    /// sign-in also names the qualified principal its sends carry to the
+    /// agent's run as their requester: a service or a token principal is no
+    /// person, and on an Open console no send names one, a volunteered token
+    /// included.
+    fn sender(&self, decisions: &RuntimeDecisionState) -> crate::console_aggregator::ConsoleSender {
+        let kind = self.actor_kind();
+        let requester = self
+            .human
+            .as_ref()
+            .filter(|_| console_sends_name_requesters(decisions))
+            .and_then(|human| human.principal().ok());
+        // The model reads a person's message with its sender label exactly
+        // where the send names the person as requester.
+        let model_label = requester
+            .as_ref()
+            .and(self.principal.as_deref())
+            .map(|name| format!("Message from {name}"));
+        crate::console_aggregator::ConsoleSender {
+            kind,
+            assurance: kind.assurance(),
+            display_name: self.principal.clone(),
+            caller_scope: self.caller_scope(),
+            requester,
+            model_label,
+        }
     }
 
     /// Refuse a change made for another caller: `expected` is the
@@ -1525,6 +1519,7 @@ pub async fn console_rpc_handler(
             state.access.as_ref(),
             auth_context.access_view.as_ref(),
             &auth_context.send_scope(),
+            Some(&auth_context.sender(&state.decisions)),
         ))
         .await;
         return (StatusCode::OK, Json::<Value>(response_value));
@@ -2258,6 +2253,9 @@ async fn console_send_handler(
         return refusal.into_response();
     }
     let request = body.request;
+    if let Some(refusal) = reserved_origin_kind_refusal(&request) {
+        return console_json_error(StatusCode::BAD_REQUEST, "reserved_origin_kind", &refusal);
+    }
     let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
     match Box::pin(send_as_admitted_console_caller(
         &ConsoleSendPath::of_state(&state),
@@ -2292,6 +2290,30 @@ async fn console_send_handler(
         }
         Err(AdmittedConsoleSendError::Send(err)) => console_send_error_response(err),
     }
+}
+
+/// Whether this console's sends name a requester at all: only a console that
+/// requires sign-in does. Runs started from an Open console have no
+/// requester, a person's who volunteered a verified token included, since
+/// the person could as well have left the token out.
+pub(crate) fn console_sends_name_requesters(decisions: &RuntimeDecisionState) -> bool {
+    decisions.console.require_app_auth
+}
+
+/// Why a console send over HTTP may not claim its declared `origin_kind`: the
+/// kinds of Meerkat's own internal emitters (a schedule, a connector, a flow,
+/// a policy, the host) are theirs alone, so a client's send that names one is
+/// refused before anything is recorded. `None` for an operator's or an
+/// operator probe's kind, or no kind.
+fn reserved_origin_kind_refusal(request: &ConsoleSendRequest) -> Option<String> {
+    let kind = request.origin_kind?;
+    kind.reserved_for_internal_senders().then(|| {
+        format!(
+            "origin_kind `{}` is reserved for Meerkat's internal emitters; a console send \
+             declares `operator`, `operator_probe` or no kind",
+            kind.as_str()
+        )
+    })
 }
 
 /// Why a candidate launch refuses a Console send.
@@ -2912,6 +2934,10 @@ pub(crate) struct ConsoleSendGovernance {
     /// The verification the caller's token passed, when a token identified
     /// the caller: a change checks it again before it commits.
     pub(crate) verification: Option<crate::runtime::ConsoleCallerVerification>,
+    /// Who sends: recorded on the send's `user_input` frame, and its
+    /// requester carried to the agent's run. `None` only for a caller the
+    /// Console did not authenticate (the unscoped Rust send API).
+    pub(crate) sender: Option<crate::console_aggregator::ConsoleSender>,
 }
 
 impl ConsoleSendGovernance {
@@ -2926,6 +2952,7 @@ impl ConsoleSendGovernance {
                 .is_some_and(MobRuntime::native_work_governed),
             access: state.access.clone(),
             verification: auth_context.verification.clone(),
+            sender: Some(auth_context.sender(&state.decisions)),
         }
     }
 
@@ -3153,7 +3180,10 @@ async fn console_send_member_lane(
     governance
         .refuse_unless_caller_current()
         .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
-    Ok(Box::pin(aggregator.send_scoped(request, &governance.scope)).await?)
+    Ok(
+        Box::pin(aggregator.send_scoped(request, &governance.scope, governance.sender.as_ref()))
+            .await?,
+    )
 }
 
 #[cfg(test)]
@@ -3304,6 +3334,12 @@ async fn console_send_identity_first_governed(
         &identity,
         &crate::console_governed_ingress::ConsoleSendContext::for_request(&request),
     )?;
+    // What the send carries for its person: the original requester of the
+    // agent's run (a governed send's requester is its association's) and the
+    // sender label its model reads. A redispatch carries what the send's own
+    // frame recorded instead (below).
+    let mut attribution =
+        crate::console_aggregator::ConsoleHumanAttribution::of_sender(governance.sender.as_ref());
     if governed.is_some() && !request.skill_refs.is_empty() {
         return Err(ConsoleSendError::InvalidRequest(
             "a governed Console send carries no skill selection".to_string(),
@@ -3340,6 +3376,7 @@ async fn console_send_identity_first_governed(
         request.clone(),
         session_id.as_deref(),
         &governance.scope,
+        governance.sender.as_ref(),
     ))
     .await?
     {
@@ -3378,6 +3415,14 @@ async fn console_send_identity_first_governed(
                             .await =>
                 {
                     aggregator.begin_send_redispatch(&frame, &claim)?;
+                    // The requester and the label the send's frame recorded
+                    // when it was accepted, as the member lane's redispatch
+                    // reads them: never the live caller's, whose console may
+                    // name a requester the send never had, or none.
+                    attribution = crate::console_aggregator::ConsoleHumanAttribution::of_sender(
+                        crate::console_aggregator::ConsoleSender::of_frame_payload(&frame.payload)
+                            .as_ref(),
+                    );
                     (accepted, Some(claim))
                 }
                 NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {
@@ -3417,6 +3462,7 @@ async fn console_send_identity_first_governed(
                 handling_mode,
                 &request.selected_skill_keys(),
                 &accepted,
+                &attribution,
                 governed,
             )
             .await;
@@ -3474,6 +3520,7 @@ async fn console_send_identity_first_governed(
     let dispatch_skill_references = request.selected_skill_keys();
     let dispatch_origin = request.origin.clone();
     let dispatch_accepted = accepted.clone();
+    let dispatch_attribution = attribution;
     let dispatch_expected_alias =
         if crate::member_comms_id::is_reserved_generated_alias(&requested_identity) {
             Some(requested_identity)
@@ -3498,6 +3545,7 @@ async fn console_send_identity_first_governed(
                 handling_mode,
                 &dispatch_skill_references,
                 &dispatch_accepted,
+                &dispatch_attribution,
                 governed,
             )
             .await;
@@ -7970,6 +8018,7 @@ pub async fn console_rpc_multipart_handler(
             state.access.as_ref(),
             auth_context.access_view.as_ref(),
             &auth_context.send_scope(),
+            Some(&auth_context.sender(&state.decisions)),
         ))
         .await
     } else {
@@ -10295,6 +10344,7 @@ async fn handle_console_aggregator_rpc(
     access: Option<&AccessController>,
     access_view: Option<&AccessView>,
     send_scope: &ConsoleSendScope,
+    sender: Option<&crate::console_aggregator::ConsoleSender>,
 ) -> Value {
     let response_id = request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
@@ -10493,10 +10543,13 @@ async fn handle_console_aggregator_rpc(
                         return invalid_params(response_id, format!("invalid send params: {err}"));
                     }
                 };
+            if let Some(refusal) = reserved_origin_kind_refusal(&send_request) {
+                return invalid_params(response_id, refusal);
+            }
             let Some(aggregator) = &console_aggregator else {
                 return console_aggregator_unavailable(response_id);
             };
-            match Box::pin(aggregator.send_scoped(send_request, send_scope)).await {
+            match Box::pin(aggregator.send_scoped(send_request, send_scope, sender)).await {
                 Ok(accepted) => response_value(
                     response_id,
                     Some(serde_json::to_value(accepted).unwrap_or(Value::Null)),
@@ -11862,6 +11915,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                         return invalid_params(response_id, format!("invalid send params: {err}"));
                     }
                 };
+            if let Some(refusal) = reserved_origin_kind_refusal(&send_request) {
+                return invalid_params(response_id, refusal);
+            }
             let Some(aggregator) = &console_aggregator else {
                 return response_value(
                     response_id,
@@ -19088,6 +19144,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         assert_eq!(served["error"]["code"], json!(-32601), "{served:#?}");
@@ -19100,6 +19157,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         let methods = capabilities["result"]["methods"]
@@ -19177,6 +19235,7 @@ comms = true
                 None,
                 None,
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
         };
         let caps = call("meta/capabilities", json!({})).await;
@@ -19211,6 +19270,7 @@ comms = true
                 Some(&restricted),
                 Some(&restricted_view),
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
             .await;
             assert_eq!(denied["error"]["data"]["kind"], "access_denied", "{denied}");
@@ -19735,6 +19795,7 @@ comms = true
             Some(controller),
             Some(&view),
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await
     }
@@ -20121,6 +20182,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -20160,7 +20222,7 @@ comms = true
             skill_refs: Vec::new(),
         };
         let accepted = match aggregator
-            .reserve_identity_first_interaction_scoped(request, None, &owner)
+            .reserve_identity_first_interaction_scoped(request, None, &owner, None)
             .await
             .expect("reservation")
         {
@@ -20179,6 +20241,7 @@ comms = true
                     None,
                     None,
                     &scope,
+                    None,
                 )
                 .await
             }
@@ -20251,6 +20314,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         let methods = response["result"]["methods"]
@@ -20295,6 +20359,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -20410,6 +20475,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -20443,6 +20509,7 @@ comms = true
                 None,
                 None,
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
             .await;
             assert_eq!(
@@ -20662,6 +20729,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         assert_eq!(
@@ -24710,6 +24778,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
 
@@ -24732,6 +24801,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
         assert_eq!(
@@ -28138,6 +28208,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
 
@@ -34456,6 +34527,7 @@ comms = true
                         Some(&self.controller),
                         Some(&view),
                         &ConsoleSendScope::Anonymous,
+                        None,
                     ))
                     .await;
                     (answer, "/result/identities", "identity")

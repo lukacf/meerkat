@@ -586,6 +586,13 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     "CloseLiveDelegationIntakeRunning",
     "CloseLiveDelegationIntakeRetired",
     "CloseLiveDelegationIntakeStopped",
+    // The recovered ungoverned row's requester batch key (0.9.11), declared
+    // beside BindInputAuthority in the catalog.
+    "BindInputRequesterBatchKeyIdle",
+    "BindInputRequesterBatchKeyAttached",
+    "BindInputRequesterBatchKeyRunning",
+    "BindInputRequesterBatchKeyRetired",
+    "BindInputRequesterBatchKeyStopped",
 ];
 
 // Append-only emission tails for the other machines, whose public

@@ -211,6 +211,7 @@ fn owed_kickoff_input(
             idempotency_key: Some(local_kickoff_idempotency_key(agent_runtime_id)),
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         content,
         typed_turn_appends: Vec::new(),

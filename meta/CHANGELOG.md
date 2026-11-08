@@ -136,6 +136,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   as any declared identity is. 0.9.10 kept the add's owed state across a
   restart, read back from its durable mark.
 
+- The console send routes refuse the `origin_kind` values reserved for
+  Meerkat's internal emitters (`scheduler`, `connector`, `flow`, `policy`,
+  `system`): `POST /console/send` answers `400` `reserved_origin_kind`, and
+  `meta/console/send` (JSON and multipart RPC) answers invalid params
+  (`-32602`). Nothing is recorded for a refused send. `operator` and
+  `operator_probe` are accepted as before.
+
+- Rust: `BridgeDelivery` gains the public fields `requester` and
+  `sender_label`, so code that builds it literally sets them (`None` keeps
+  the previous behaviour).
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -308,6 +319,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A host that added a member held and wants it held again after a restart
   holds it through its held bootstrap or a re-add (see Breaking).
 
+- A detached callback job the gateway submits stores its requester as one
+  more optional field. A gateway rolled back to 0.9.10 while such a job runs
+  removes the field for good on the job's next write: after upgrading again,
+  the job's attempts name no requester (a person-scoped tool refuses them),
+  and a replay of the submitting call is refused as a submission conflict.
+  A host store's own `job_store` (`HostStoreMetaStores::job_store`) persists
+  the requester, compares it when it deduplicates a submission and keeps it
+  through compare-and-swap, as Core's notes describe.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -408,6 +428,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   bridge without run-start holds holds none (the one-member read answers
   from the list read), and one without build preparation records no
   cause.
+
+- Console messages record their sender: each `user_input` frame a console
+  send makes names its `sender` (`kind`, `assurance`, `display_name` and
+  `caller_scope`, as `meta/console/whoami` reports the caller), set from the
+  caller the Console authenticated. A scheduled fire names the schedule's
+  sender. The senders survive a restart. Rust: the frame's sender is
+  `ConsoleSender`, its kind `ConsoleActorKind`.
+
+- On a console that requires sign-in, a person's console send, and a
+  schedule's fire for a person, carries the person's qualified principal
+  (the verified `sub` in its issuer's trust domain) to the agent's run as
+  its original requester, which Meerkat stores with the admitted input and
+  hands to tool dispatch. The stored frame keeps it, and a send replayed
+  after a restart carries the requester and the label its frame recorded.
+  No view returns it: Meta leaves it out of every transcript identity it
+  shows too, on the frames of the session history and of the run's events,
+  on `/agents/{id}/events`, the mob-wide stream, `meta/events/subscribe` and
+  the event log (`console_agent_event_payload` drops it). A schedule's fire
+  names its sender as that sender's live sends are named at the fire: a
+  person whose issuer's tokens are classified as shared accounts by then
+  (`shared_account_tokens`) is named as a token principal, and the fire
+  names no requester. A service's, a token principal's and an anonymous
+  caller's sends carry none, no ungoverned send on an Open console does (a
+  governed send carries its host-bound association's requester, which may
+  be a person who volunteered a verified token), and neither does a send to
+  an external member.
+
+- On a console that requires sign-in, the agent's model reads each person's
+  message with a sender label, "Message from" and the person's display name,
+  on an injected-context row of its own right before the message, a steer
+  included. A service's, a token principal's and an anonymous caller's
+  messages, a schedule's fire, every message on an Open console and a send
+  to an external member carry none.
 
 ### Changed
 
@@ -580,6 +633,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gateway's session builder carries the host's error answer to its build
   callback as structured data, and nothing matches the error's text. A
   callback that never completed stays the retryable failure it was.
+
+- The stock console names each message's sender from the frame's recorded
+  sender: "You asked" for the caller's own messages in every tab (the
+  sender's `caller_scope` equals the one `meta/console/whoami` reports),
+  and the sender's display name for anyone else's. A frame from an older
+  gateway, which names no sender, keeps the earlier words. Every anonymous
+  caller of an Open console shares one caller scope, so an anonymous
+  message reads "You asked" only in the tab that sent it.
+
+- The SDK host's tool callbacks carry the original requester of the run
+  they serve, typed, so a host can refuse a person-scoped tool (one
+  person's mail, documents or accounts) for anyone but its owner:
+  `callback/call_tool` names it as `requester` (the principal, and
+  `carried` when the run's work reached its agent through another actor),
+  and a detached callback job's `callback/job/start` names the requester of
+  the run that submitted it, recorded with the job. A run without a
+  requester names none. Only the runtime sets it; a `requester` inside a
+  call's arguments is just an argument. The Python and TypeScript SDKs pass
+  it to a tool handler (`ToolCallRequester`, with `RequesterPrincipal`): in
+  Python to a handler that declares a `requester` parameter, in TypeScript
+  as the handler's optional second argument (`parseToolCallRequester` reads
+  one). A detached job's runner reads it as `DetachedJobContext.requester`.
+  A malformed requester reads as none, so a person-scoped tool fails
+  closed.
+
+- An MCP App's action from the console runs for its caller: on a console
+  that requires sign-in, a person's action carries that person as its
+  original requester; on an open console, and for a service or a token
+  principal, it carries none. It never borrows the requester of the model
+  run whose result the app shows.
 
 ### Fixed
 

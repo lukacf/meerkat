@@ -423,6 +423,13 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # custody_end_audit.sh (grant_authority) requires its four witnesses
 # violated, and with --mutants each seeded defect's target invariant or
 # action property violated.
+# requester_batch_audit.sh requires the success line for its three requester
+# safety runs and its three order safety runs, its four witnesses
+# (AuditLateNeverJoins twice, AuditLateNeverRunsAlone,
+# AuditEarlyNeverRunsAlone) violated, and with --mutants
+# AuditLateNeverInBatchRun or AuditRunsShareOneKey violated for each seeded
+# requester defect and the action property AuditSteerLaneFifo violated for
+# each seeded order defect.
 printf '%s\n' \
   '#!/bin/sh' \
   'printf "%s\n" "$JAVA_TOOL_OPTIONS" > "$TLC_JAVA_OPTIONS_CAPTURE"' \
@@ -432,6 +439,10 @@ printf '%s\n' \
   'echo "Error: Action property AuditNeverRecoveryEndsCarriedRows is violated."' \
   'echo "Error: Invariant AuditReplacementNeverReceivesALaterRow is violated."' \
   'echo "Error: Invariant AuditLateNeverJoins is violated."' \
+  'echo "Error: Invariant AuditLateNeverRunsAlone is violated."' \
+  'echo "Error: Invariant AuditLateNeverInBatchRun is violated."' \
+  'echo "Error: Invariant AuditEarlyNeverRunsAlone is violated."' \
+  'echo "Error: Action property AuditSteerLaneFifo is violated."' \
   'echo "Error: Invariant AuditCapacityRefusalNeverReached is violated."' \
   'echo "Error: Invariant AuditNeverReopensAfterFailedRealization is violated."' \
   'echo "Error: Invariant NotGoalDeliveredConfirmed is violated."' \

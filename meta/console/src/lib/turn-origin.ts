@@ -1,12 +1,19 @@
 // Who sent a user turn, in words people use. A console send carries a typed
 // caller kind (`origin_kind`: operator, operator_probe, connector,
-// scheduler, policy, flow, system) and a free-form `origin`; neither names
-// the operator, so "You" means a send this console made in this browser
-// session, and any other operator send reads "An operator". Pure module:
-// panels whose test bundles cannot resolve React use it too.
+// scheduler, policy, flow, system), a free-form `origin`, and the sender the
+// gateway recorded from the caller it authenticated (`sender`: kind,
+// display name and the caller scope `meta/console/whoami` reports). "You"
+// means a send whose sender is this console's caller, in any tab; another
+// caller's send reads with its sender's display name. Every anonymous caller
+// of an Open console shares one caller scope, so an anonymous sender is
+// "You" only for the sends this tab made. A frame that names no
+// sender (an older gateway) falls back to the sends this console made in
+// this browser session. Pure module: panels whose test bundles cannot
+// resolve React use it too.
 
 export type TurnSender =
   | "you"
+  | "named"
   | "operator"
   | "scheduler"
   | "connector"
@@ -18,6 +25,8 @@ export type TurnSender =
 
 const OWN_SEND_LIMIT = 500;
 const ownSendKeys = new Set<string>();
+// The caller scope `meta/console/whoami` reports for this console's caller.
+let ownCallerScope: string | undefined;
 
 /** Remember the idempotency key of a send this console made. */
 export function rememberOwnSend(key: string | null | undefined): void {
@@ -31,10 +40,20 @@ export function rememberOwnSend(key: string | null | undefined): void {
   }
 }
 
-/** Forget every remembered send. After an account switch in the same tab
- * the earlier sends belong to the previous account, not to "You". */
+/** Forget every remembered send and the caller scope. After an account
+ * switch in the same tab the earlier sends belong to the previous account,
+ * not to "You". */
 export function forgetOwnSends(): void {
   ownSendKeys.clear();
+  ownCallerScope = undefined;
+}
+
+/** Remember the caller scope `meta/console/whoami` reports for this
+ * console's caller: a frame whose sender names it is the caller's own, in
+ * any tab. */
+export function rememberOwnCallerScope(scope: string | null | undefined): void {
+  const trimmed = typeof scope === "string" ? scope.trim() : "";
+  ownCallerScope = trimmed || undefined;
 }
 
 export function isOwnSend(key: unknown): boolean {
@@ -43,6 +62,18 @@ export function isOwnSend(key: unknown): boolean {
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function senderOf(data: Record<string, unknown> | null | undefined): Record<string, unknown> | undefined {
+  const sender = data?.sender;
+  return sender && typeof sender === "object" && !Array.isArray(sender)
+    ? sender as Record<string, unknown>
+    : undefined;
+}
+
+/** The display name of the sender a `user_input` frame records, if any. */
+export function turnSenderName(data: Record<string, unknown> | null | undefined): string {
+  return text(senderOf(data)?.display_name);
 }
 
 /** The sender of a `user_input` frame from its payload. */
@@ -56,17 +87,38 @@ export function turnSender(data: Record<string, unknown> | null | undefined): Tu
   if (kind === "policy") return "policy";
   if (kind === "system") return "system";
   if (kind === "operator" || origin.startsWith("console:")) {
+    const sender = senderOf(data);
+    const senderScope = text(sender?.caller_scope);
+    // Every anonymous caller of an Open console shares one caller scope, so
+    // the scope cannot tell this tab's caller from another anonymous one:
+    // an anonymous message is "You" only when this tab sent it.
+    if (text(sender?.kind) === "anonymous") {
+      if (isOwnSend(data?.idempotency_key)) return "you";
+      return text(sender?.display_name) ? "named" : "operator";
+    }
+    if (senderScope) {
+      if (ownCallerScope) {
+        if (senderScope === ownCallerScope) return "you";
+      } else if (isOwnSend(data?.idempotency_key)) {
+        // whoami has not answered yet: this tab's own send is still "You".
+        return "you";
+      }
+      return text(sender?.display_name) ? "named" : "operator";
+    }
     return isOwnSend(data?.idempotency_key) ? "you" : "operator";
   }
   return "unknown";
 }
 
 /** The words around the agent's name: "You asked {agent}", "Scheduled run
- * for {agent}", "A connector sent {agent} a message". */
-export function turnSenderWords(sender: TurnSender): { before: string; after: string } {
+ * for {agent}", "A connector sent {agent} a message". `name` is the
+ * sender's display name, for a `named` sender. */
+export function turnSenderWords(sender: TurnSender, name?: string): { before: string; after: string } {
   switch (sender) {
     case "you":
       return { before: "You asked ", after: "" };
+    case "named":
+      return name ? { before: `${name} asked `, after: "" } : { before: "An operator asked ", after: "" };
     case "operator":
       return { before: "An operator asked ", after: "" };
     case "scheduler":
@@ -88,6 +140,6 @@ export function turnSenderWords(sender: TurnSender): { before: string; after: st
 
 /** The whole line for a known agent name. */
 export function turnSenderLine(data: Record<string, unknown> | null | undefined, agentName: string): string {
-  const words = turnSenderWords(turnSender(data));
+  const words = turnSenderWords(turnSender(data), turnSenderName(data));
   return `${words.before}${agentName}${words.after}`;
 }

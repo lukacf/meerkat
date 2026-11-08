@@ -1188,11 +1188,33 @@ Submit an identity-addressed console interaction through the console aggregator.
 }
 ```
 
-`origin_kind` is optional. When present it must be one of `operator`,
-`operator_probe`, `connector`, `scheduler`, `policy`, `flow` or `system`
-(`ConsoleTurnOrigin`); other values are refused with invalid params. It is
-persisted on the `user_input` frame so the console transcript labels the
-turn from typed data.
+`origin_kind` is optional. The kinds are `operator`, `operator_probe`,
+`connector`, `scheduler`, `policy`, `flow` and `system` (`ConsoleTurnOrigin`);
+other values are refused with invalid params. `scheduler`, `connector`,
+`flow`, `policy` and `system` belong to Meerkat's own internal emitters (a
+scheduled fire is `scheduler`), so a console send over HTTP that declares one
+is refused with invalid params (`POST /console/send` answers 400
+`reserved_origin_kind`) and records nothing. A send declares `operator`,
+`operator_probe` or no kind. The kind is persisted on the `user_input` frame
+so the console transcript labels the turn from typed data.
+
+The `user_input` frame also names its `sender`, which the Console sets from
+the caller it authenticated, never from the request: `kind` (`person`,
+`service`, `token_principal` or `anonymous`, as `meta/console/whoami` reports
+the caller), `assurance` when the Console established one, `display_name`
+(the authenticated principal) and `caller_scope` (the opaque scope
+`meta/console/whoami` reports, so a client can tell its own messages from
+another caller's; every anonymous caller of an open console shares one, so
+it does not tell anonymous callers apart). On a console that requires
+sign-in, a person's send also
+carries the person's qualified principal to the agent's run as its original
+requester; the frame keeps it in storage and no view returns it, neither on
+the frame nor on the run's transcript identities (the `identity` of the
+session history's messages and of the run's events). A
+service's, a token principal's and an anonymous caller's sends carry none,
+and on an Open console no ungoverned send does. The agent's model reads a
+person's message on a console that requires sign-in with a sender label, an
+injected-context row "Message from" and the display name right before it.
 
 The response includes `interaction_id` and `identity`. The multipart JSON-RPC endpoint also accepts this method when `content` contains `image_upload` placeholders.
 
@@ -2916,7 +2938,12 @@ policy at that time, an addressable agent, and governance. The send is
 deduplicated under its occurrence's delivery key in the sender's send scope,
 as a live send by the sender is, so a redelivered occurrence sends once. It
 reaches the agent with origin `console:schedule` and the scheduler turn
-origin.
+origin. Its `user_input` frame names the sender as the sender's live sends
+are named at the fire: on a console that requires sign-in, a person's fire
+carries the person to the agent's run as its requester. A person whose
+issuer's tokens are classified as shared accounts by then
+(`shared_account_tokens`) is named as the token principal a live token of
+theirs would be, and the fire names no requester.
 
 **Changes made meanwhile.** `expected_revision` is optional, on an update
 and a resume only. One that names it is refused when the schedule moved

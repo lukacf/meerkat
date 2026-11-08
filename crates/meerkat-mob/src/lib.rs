@@ -198,7 +198,7 @@ pub use identity::{
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MobId, PlacedSpawnId, ProfileName, RespawnTopologyPeerId, RunId,
-    StepId, WorkOrigin, WorkRef, WorkSpec,
+    SenderLabel, StepId, WorkOrigin, WorkRef, WorkSpec,
 };
 pub use launch::{ForkContext, MemberLaunchMode};
 #[doc(hidden)]

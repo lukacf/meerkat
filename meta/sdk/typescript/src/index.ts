@@ -116,6 +116,8 @@ export type {
 // Rich tool-result content blocks for callback tool handlers.
 export { textBlock, imageBlock, imageBlobBlock, toolContent, ToolResultContent } from "./tool-content.js";
 export type { ContentBlock } from "./tool-content.js";
+export { parseToolCallRequester } from "./tool-requester.js";
+export type { RequesterPrincipal, ToolCallRequester } from "./tool-requester.js";
 
 export {
   parseForkBuildSource,

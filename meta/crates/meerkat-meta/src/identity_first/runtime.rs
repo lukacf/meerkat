@@ -445,6 +445,12 @@ struct ConsoleHumanSend<'a> {
     /// Selected skills for this exact console turn; carried only on the
     /// local host-human lane.
     skill_references: &'a [meerkat_core::skills::SkillKey],
+    /// The sender's person principal, carried to the agent's run as its
+    /// original requester (only on the local host-human lane).
+    requester: Option<&'a meerkat_core::PrincipalRef>,
+    /// The sender label the agent's model reads right before the message
+    /// (only on the local host-human lane).
+    sender_label: Option<&'a meerkat_mob::SenderLabel>,
 }
 
 enum DeliveryPreparation {
@@ -11201,6 +11207,7 @@ impl IdentityRuntime {
         handling_mode: HandlingMode,
         skill_references: &[meerkat_core::skills::SkillKey],
         accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
+        attribution: &crate::console_aggregator::ConsoleHumanAttribution,
         governed: Option<Arc<dyn super::bridge::GovernedInputBinder>>,
     ) -> Result<FencingToken, IdentityRuntimeError> {
         if let Some(binder) = governed {
@@ -11212,6 +11219,7 @@ impl IdentityRuntime {
                     handling_mode,
                     skill_references,
                     accepted,
+                    attribution.sender_label.as_ref(),
                     binder,
                 )
                 .await;
@@ -11232,6 +11240,7 @@ impl IdentityRuntime {
         let skill_references = skill_references.to_vec();
         let interaction_id = accepted.interaction_id.clone();
         let expected_session = accepted.session_id.clone();
+        let attribution = attribution.clone();
         self.run_tracked_foreground(async move {
             runtime
                 .send_core(
@@ -11247,6 +11256,8 @@ impl IdentityRuntime {
                             delivery_identity: &delivery_identity,
                             expected_session: expected_session.as_deref(),
                             skill_references: &skill_references,
+                            requester: attribution.requester.as_ref(),
+                            sender_label: attribution.sender_label.as_ref(),
                         }),
                         expected_spec_digest: None,
                         sender: None,
@@ -11272,6 +11283,7 @@ impl IdentityRuntime {
         handling_mode: HandlingMode,
         skill_references: &[meerkat_core::skills::SkillKey],
         accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
+        sender_label: Option<&meerkat_mob::SenderLabel>,
         binder: Arc<dyn super::bridge::GovernedInputBinder>,
     ) -> Result<FencingToken, IdentityRuntimeError> {
         if !skill_references.is_empty() {
@@ -11290,6 +11302,12 @@ impl IdentityRuntime {
                 },
             ),
         );
+        // The sender label is the message's own injected-context row, right
+        // before it, as on the ungoverned lanes.
+        if let Some(label) = sender_label {
+            prompt.injected_context =
+                vec![meerkat_core::ContentInput::Text(label.as_str().to_string())];
+        }
         prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(format!(
             "console:{}:{}",
             accepted.interaction_id, accepted.input_frame_id
@@ -11671,6 +11689,12 @@ impl IdentityRuntime {
                                 .as_ref()
                                 .map(|human| human.skill_references.to_vec())
                                 .unwrap_or_default();
+                            delivery.requester = console_human
+                                .as_ref()
+                                .and_then(|human| human.requester.cloned());
+                            delivery.sender_label = console_human
+                                .as_ref()
+                                .and_then(|human| human.sender_label.cloned());
                             bridge
                                 .deliver_host_human_input(rid, session, delivery)
                                 .await

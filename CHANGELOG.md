@@ -415,6 +415,60 @@ them.
   uncertain append reconstructed and stayed unavailable; it is unusable
   either way.
 
+- `meerkat-core`, `meerkat-runtime`: an admitted input can carry its original
+  requester (see Added), so three public structs gain a public field, and
+  code that builds them literally must set it (`None` keeps the previous
+  behaviour): `types::TranscriptMessageIdentity.requester:
+  Option<TurnRequester>`, `service::StartTurnRuntimeSemantics.requester:
+  Option<PrincipalRef>` (meerkat-core) and `input::InputHeader.requester:
+  Option<PrincipalRef>` (meerkat-runtime).
+
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`: the
+  MeerkatMachine gains the input `BindInputRequesterBatchKey`.
+  `MeerkatMachineInput` (meerkat-machine-schema
+  `catalog::dsl::meerkat_machine` and meerkat-runtime `meerkat_machine::dsl`)
+  gains the variant `BindInputRequesterBatchKey { input_id,
+  authority_batch_key }`, `MeerkatMachineInputVariant` (meerkat-machine-schema
+  and meerkat-runtime) and `MeerkatMachineRuntimeInternalInput`
+  (meerkat-runtime) gain `BindInputRequesterBatchKey`, the kernel
+  `generated::meerkat::Input` and `InputKind` gain `BindInputRequesterBatchKey`
+  (with the struct `inputs::BindInputRequesterBatchKey`), and the kernel
+  `generated::meerkat::TransitionId` gains `BindInputRequesterBatchKeyIdle`,
+  `BindInputRequesterBatchKeyAttached`, `BindInputRequesterBatchKeyRunning`,
+  `BindInputRequesterBatchKeyRetired` and `BindInputRequesterBatchKeyStopped`,
+  all appended last, so an exhaustive match needs their arms.
+
+- Behaviour-only (not measured by the gate): `meerkat-runtime`: a steer from
+  another requester no longer joins a running turn; it keeps its place in
+  the Steer lane and waits for a turn of its own, and a later steer of the
+  running turn's requester waits behind it (see Changed). An input is
+  refused when its host-supplied requester is not a qualified principal or
+  differs from its governed association's requester, a keyed retry for
+  another requester than the input it would replay is an
+  `InputIdempotencyConflict`, and an input whose supersession key names a
+  queued input of another requester is refused, as one of another governed
+  binding already is.
+
+- Behaviour-only (not measured by the gate): `meerkat-mob`: work that
+  carries a requester (`WorkSpec::with_requester`) is refused with
+  `MobError::UnsupportedForMode` unless it is host human input to a local
+  runtime-backed member, so the requester is never dropped on the way.
+
+- `meerkat-jobs`, `meerkat-contracts`: host tool callbacks carry the run's
+  original requester (see Added), so two public structs gain a public field,
+  and code that builds them literally must set it (`requester: None` keeps
+  the previous behaviour): `JobSpec.requester: Option<TurnRequester>`
+  (meerkat-jobs, also reached as `meerkat::JobSpec`) and
+  `CallbackJobStartParams.requester: Option<TurnRequester>`
+  (meerkat-contracts).
+
+- Behaviour-only (not measured by the gate): `meerkat-jobs`: a detached
+  job's requester is part of its submission's replay identity. A submission
+  under an admitted job's submission key that names another requester, or
+  none where the admitted job names one (or the reverse), is refused with
+  `DetachedJobError::SubmissionConflict`, and a compare-and-swap that would
+  change a stored job's requester is refused.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -831,6 +885,59 @@ them.
   `PersistentSessionService::try_shutdown` and `shutdown` call it once the
   shutdown completes.
 
+- `meerkat-core`, `meerkat-runtime`, `meerkat-mob`: an admitted input can
+  carry its original requester, an opaque, qualified principal that the host
+  supplies from the caller it authenticated, never from a request body, a
+  tool argument or model output. Core never interprets it. A host sets it
+  with `StartTurnRuntimeSemantics::with_requester` or `InputHeader.requester`
+  (for a mob member's host human input, `WorkSpec::with_requester`). It is
+  stored with the admitted input and returned on the input's receipt
+  (`InputState::requester`, after a restart too, and after the input's
+  payload retired), on the turn's transcript rows
+  (`TranscriptMessageIdentity.requester`, a `TurnRequester` that is direct
+  or carried) and to tool dispatch (`ToolDispatchContext::requester`, and
+  `ToolDispatchContext::direct_requester` for a requester that asked
+  directly, never one carried across a peer hop). `Input::requester` is the
+  one accessor: a governed input's requester is its work association's, any
+  other input's is the one its host supplied. The run's lifecycle events
+  (`run_started`, `run_completed` and `run_failed`) carry it in their
+  transcript identity too, so a host that shows an agent's events or
+  transcript to other viewers leaves it out there.
+
+- `meerkat-mob`: a host labels the person who sent host human input for the
+  member's model with `SenderLabel` (`WorkSpec::with_sender_label`), such as
+  "Message from" and the person's name. The member's turn receives it as an
+  injected-context row of its own right before the message, on a steer too,
+  whether the steer joins the running turn or runs as its own; ordinary
+  injected context on a steer is still refused. Work that is not host human
+  input refuses a label (`MobError::UnsupportedForMode`). The label is
+  attribution the model reads, never control data.
+
+- `meerkat-rpc`, `meerkat-jobs`, `meerkat-contracts`: host tool callbacks
+  carry the original requester of the run they serve, typed, so a host can
+  refuse a person-scoped tool (one person's mail, documents or accounts) for
+  anyone but its owner. The JSON-RPC `tool/execute` request carries
+  `requester`, the run's `TurnRequester` (its principal, and `carried` when
+  the run's work reached its agent through another actor), when the run has
+  one. A detached callback job records the requester of the run that
+  submitted it (`JobSpec::requester`, set with `JobSpec::with_requester`),
+  and every `callback/job/start` for the job names it
+  (`CallbackJobStartParams.requester`), also after a restart. Only the
+  runtime sets it, from the run's tool dispatch context; a `requester`
+  inside a call's arguments is just an argument. The Python and TypeScript
+  SDKs pass it to a tool handler (`ToolCallRequester`, its
+  `RequesterPrincipal`, and `carried`): in Python to a handler that declares
+  a `requester` parameter, in TypeScript as the handler's optional third
+  argument (`MeerkatClient.parseToolCallRequester` reads one). A malformed
+  requester reads as none, so a person-scoped tool fails closed.
+
+- `meerkat-core`: a trusted tool application ingress can name the original
+  requester of its operation (`ToolApplicationIngress::requester`, none by
+  default; `ToolApplicationControlRequest::requester` reads what it named at
+  submission). An MCP App's action then runs for that requester as a direct
+  requester, never for the requester of the model run whose result the app
+  shows, and an ingress that names an unqualified principal is refused.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -988,6 +1095,35 @@ them.
   cap; when it fires, work the member still owes wakes it, which asks the
   host again, and a member that owes none stays Dormant until its next
   delivery.
+
+- `meerkat-runtime`: inputs of different requesters never share a run. The
+  requester joins the batch key the MeerkatMachine keeps for each input: an
+  ungoverned input with a requester is keyed by it (a governed input keeps
+  its binding's key, which already names its requester), so coalescing and
+  staging keep one requester per run, and a live-boundary join takes an
+  input only of the key its run staged. A steer from another requester, or
+  without a requester while the run has one (or the reverse), keeps its
+  place in the Steer lane and runs in a turn of its own. The Steer lane
+  stays first in, first out across requesters: a later steer of the running
+  turn's requester waits behind it too, rather than join the turn, so an
+  earlier steer of another requester is never overtaken. The MeerkatMachine
+  owns that order: `StageForRun`, `JoinLiveBoundaryDurableAppend` and the
+  request-only receipt `ResolveLiveBoundaryContextReceipt` refuse a
+  Steer-lane input while a Steer-lane input admitted before it waits with
+  another key, and the receipt, as the durable join does, takes only an
+  input of the key its run staged, so an input with a requester never
+  enters a run that staged nothing (a direct service turn). A recovered row
+  keeps its requester's key, and a run resumed after a restart stages its
+  batch under it. The TLC lane runs a new audit of the rule and the order
+  (`specs/machines/meerkat_machine/requester_batch_audit.sh`).
+  So content from another party never enters a person's run: a
+  requester-less input (a peer message, request or response, a flow step,
+  an external event, a runtime continuation such as a detached job's
+  completion) that arrives while a person's run is going is handled in a
+  follow-up run of its own. The transcript keeps it, so the model still
+  sees it in context; only the per-person mechanics are absent in that run.
+  Operation inputs, which carry no content and are consumed on admission,
+  are unchanged.
 
 ### Deprecated
 
@@ -1488,6 +1624,31 @@ them.
   the timing as the host store SPI reference describes (Core's Timeouts And
   The Safety Condition).
 
+- Stored input rows and transcript rows write the requester as one more
+  optional field. An older Core that reads them drops it, which leaves the
+  input and its turn without a requester, so nothing then acts for that
+  person. A keyed retry, under an older Core, of an input this release
+  admitted with a requester is refused as an idempotency conflict
+  (`InputIdempotencyConflict`), not deduplicated: the input's replay
+  identity includes the requester, and an older Core computes it without
+  one.
+
+- A stored detached job writes its requester as one more optional field. An
+  older Core that reads the job drops it, so the job's later attempts start
+  with no requester and a person-scoped tool refuses them. An older Core that
+  writes the job (its claim, a heartbeat, its completion) removes the field
+  for good: after upgrading again, the job's attempts still name no
+  requester, and a replay of the submitting call (the same submission key,
+  now with its requester) is refused with
+  `DetachedJobError::SubmissionConflict` instead of deduplicating.
+
+- A host that supplies its own `DetachedJobStore` persists
+  `JobSpec::requester`, treats a submission under an admitted key with
+  another requester (or none where the job has one, or the reverse) as a
+  conflict, and keeps the field unchanged through compare-and-swap, as the
+  bundled stores do; `requester: None` keeps a struct literal compiling, not
+  a store correct.
+
 ### Known limitations
 
 - Peers keep the original requester in process only. A delivery over a
@@ -1529,6 +1690,11 @@ them.
   delegation's worker did not start, the start is retired without a
   narration. The machine refuses that report only when the session or the
   channel is gone or its binding is stale.
+
+- The original requester does not cross the supervisor bridge: a console
+  send to a member hosted on another runtime acts for no person there (its
+  runs have no requester). The mob refuses a requester on any delivery that
+  cannot carry it, so none is dropped silently.
 
 ## [0.9.10] - 2026-11-04
 

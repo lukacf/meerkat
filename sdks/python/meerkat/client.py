@@ -878,6 +878,17 @@ class MeerkatClient:
         A handler that declares a ``dedupe_key`` parameter also receives the
         call's :class:`ToolCallDedupeKey` (``None`` when the call has none). A
         resumed run that dispatches the same call again sends the same key.
+
+        A handler that declares a ``requester`` parameter receives the
+        :class:`ToolCallRequester` of the run the call serves (``None`` when
+        the run has none). The runtime sets it, never the arguments, so a tool
+        that acts in one person's name can refuse every other requester::
+
+            @client.tool("read_mail", description="Read the owner's mail")
+            async def read_mail(arguments: dict, requester=None) -> str:
+                if requester is None or requester.direct_principal != OWNER:
+                    raise PermissionError("this mailbox serves its owner only")
+                ...
         """
 
         def decorator(fn: Any) -> Any:

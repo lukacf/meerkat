@@ -3,6 +3,7 @@
  */
 
 import { DetachedJobExecution } from "./jobs.js";
+import type { ToolCallRequester } from "./tool-requester.js";
 
 // -- DiscoverySpec --------------------------------------------------------
 
@@ -351,8 +352,14 @@ export function parseNativeRealm(raw: unknown): NativeRealm {
   });
 }
 
+/**
+ * A callback tool handler. Its optional second argument is the original
+ * requester of the run the call serves, when the run has one (see
+ * {@link ToolCallRequester}); the runtime sets it, never the arguments.
+ */
 export type ToolHandler = (
   args: Record<string, unknown>,
+  requester?: ToolCallRequester,
 ) => unknown | Promise<unknown>;
 
 /**

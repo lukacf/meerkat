@@ -920,6 +920,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AbortUntilChangedSwitchTurnReconfigure`(request_id: String)
 - `SettleRetainedRun`(run_id: Option<RunId>)
 - `CloseLiveDelegationIntake`(channel_id: String, runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation)
+- `BindInputRequesterBatchKey`(input_id: String, authority_batch_key: String)
 
 ## Signals
 - `Initialize`
@@ -1312,11 +1313,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Source Inputs: `StageForRun`
 - Transitions: `StageForRunIdle`, `StageForRunAttached`, `StageForRunRunning`, `StageForRunRetired`, `StageForRunStopped`
 - Guard Expansion:
-  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
-  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`
+  - `StageForRunIdle`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunAttached`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunRunning`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
+  - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`, `input_controller_not_held`, `steer_lane_fifo_across_requesters`
 - Emitted By Transitions: `RecordRunAssociation`
 
 ### `AuthorizedResumedRun`
@@ -10023,6 +10024,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `immutable_batch_key`
 - To: `Stopped`
 
+### `BindInputRequesterBatchKeyIdle`
+- From: `Idle`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Idle`
+
+### `BindInputRequesterBatchKeyAttached`
+- From: `Attached`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Attached`
+
+### `BindInputRequesterBatchKeyRunning`
+- From: `Running`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Running`
+
+### `BindInputRequesterBatchKeyRetired`
+- From: `Retired`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Retired`
+
+### `BindInputRequesterBatchKeyStopped`
+- From: `Stopped`
+- On: `BindInputRequesterBatchKey`(input_id, authority_batch_key)
+- Guards:
+  - `tracked_input`
+  - `nonempty_batch_key`
+  - `ungoverned_input`
+  - `immutable_batch_key`
+- To: `Stopped`
+
 ### `BindScopedContextIdle`
 - From: `Idle`
 - On: `BindScopedContext`(binding, scope, generation)
@@ -12949,6 +13000,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Idle`
 
@@ -12964,6 +13016,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Attached`
 
@@ -12979,6 +13032,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Running`
 
@@ -12994,6 +13048,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Retired`
 
@@ -13009,6 +13064,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `homogeneous_run_authority`
   - `scoped_context_attached`
   - `input_controller_not_held`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `RecordRunAssociation`
 - To: `Stopped`
 
@@ -13583,6 +13639,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `current_run_matches`
   - `input_tracked`
+  - `live_join_same_requester`
+  - `steer_lane_fifo_across_requesters`
 - Emits: `LiveBoundaryContextReceiptResolved`
 - To: `Running`
 
@@ -13629,6 +13687,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `current_run_matches`
   - `live_join_input_is_ungoverned`
   - `live_join_run_is_ungoverned`
+  - `live_join_same_requester`
+  - `steer_lane_fifo_across_requesters`
   - `turn_at_model_boundary`
   - `no_cancel_after_boundary`
   - `run_not_stopped`

@@ -3181,6 +3181,7 @@ runtime_internal_inputs!(
         BeginUnregisterUnservedAttachment,
         BindInputAuthority,
         BindInputContextTarget,
+        BindInputRequesterBatchKey,
         BindScopedContext,
         BindSupervisor,
         BoundaryComplete,

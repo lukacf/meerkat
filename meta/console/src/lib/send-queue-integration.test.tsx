@@ -9,7 +9,7 @@ import { consoleSendStorageKey, saveConsoleSendAttempts } from "./send-attempt-s
 import { createConsoleContextRecord } from "../../../packages/console-core/src/context-record";
 import { ACCEPTANCE_NOTICE_GRACE_MS, PendingStack, type PendingItem } from "../panels/PendingStack";
 import { idleSettleClock } from "./idle-reconcile";
-import { turnSender } from "./turn-origin";
+import { forgetOwnSends, turnSender } from "./turn-origin";
 
 const identity = "identity:queue-agent";
 function seed(twoPanes = false) {
@@ -261,6 +261,32 @@ describe("stock durable queue integration", () => {
     await act(async () => { receive?.({ id: "scope-refresh", event: "interaction_started", identity, interactionId: "refresh", timestampMs: 2, data: {} } as never); });
     await waitFor(() => expect(vi.mocked(fake.loadExperience).mock.calls.length).toBeGreaterThan(loads + 1));
     expect(turnSender(ownFrame)).toBe("operator");
+  });
+
+  it("reads a message whose sender carries the caller scope whoami names as \"You asked\", from any tab", async () => {
+    // Nothing remembered from an earlier row: the frame below reads "You"
+    // only through this console's own whoami answer.
+    forgetOwnSends();
+    const fake = transport(vi.fn());
+    const whoami = vi.fn(async () => ({
+      actorKind: "person", principal: "alice@example.test", approverIds: [], canAdminister: false,
+      callerScope: "console-caller:v1:alice",
+    }));
+    fake.whoami = whoami;
+    // Sent from another tab of the same caller: this tab never made the send.
+    const fromAnotherTab = {
+      origin: "console:pane", origin_kind: "operator", idempotency_key: "sent-in-another-tab",
+      sender: { kind: "person", display_name: "alice@example.test", caller_scope: "console-caller:v1:alice" },
+    };
+    const fromAnotherCaller = {
+      ...fromAnotherTab, idempotency_key: "bobs-send",
+      sender: { kind: "person", display_name: "bob@example.test", caller_scope: "console-caller:v1:bob" },
+    };
+    expect(turnSender(fromAnotherTab)).toBe("named");
+    render(<ConsoleApp baseUrl="" transport={fake} storageNamespace="runtime/realm/principal" />);
+    await waitFor(() => expect(whoami).toHaveBeenCalled());
+    await waitFor(() => expect(turnSender(fromAnotherTab)).toBe("you"));
+    expect(turnSender(fromAnotherCaller)).toBe("named");
   });
 
   it("names an agent without a display name the way the sidebar does in the chat header and pane title", async () => {

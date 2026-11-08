@@ -31,7 +31,7 @@ import {
 } from "@console-components";
 import type { ConversationBlobReader, MarkdownUrlPolicy, WorkGraphCardActions } from "@console-components";
 import { AgentDirectoryProvider, EmptyState, LoadingState, PanelDensityDefaultProvider, PanelHeader, PanelShell, SelectField, createAgentDirectory } from "@console-components";
-import { forgetOwnSends, rememberOwnSend } from "./lib/turn-origin";
+import { forgetOwnSends, rememberOwnCallerScope, rememberOwnSend } from "./lib/turn-origin";
 import type {
   ConsoleDockState,
   ConsoleTransportState,
@@ -1262,6 +1262,10 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [caller, setCaller] = React.useState<ConsoleWhoami | null>();
   const adoptCaller = React.useCallback((whoami: ConsoleWhoami | null) => {
     setCaller(whoami);
+    // The same answer names this console's caller for the transcript: a
+    // message whose recorded sender carries this caller scope reads "You
+    // asked", in every tab.
+    rememberOwnCallerScope(whoami?.callerScope);
     // A queued message the drain kept while no caller was known drains now:
     // its finished requests are forgotten, so the next render tries again.
     for (const [key, request] of autoDrainRequestedRef.current) {

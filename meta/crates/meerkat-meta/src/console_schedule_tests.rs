@@ -1550,6 +1550,201 @@ async fn a_fire_sends_as_its_sender_through_the_console_send_gate() -> TestResul
     Ok(())
 }
 
+/// The requester of the agent's turn that committed the user row `content`
+/// of `identity`, once the turn committed it.
+async fn turn_requester(
+    fixture: &Fixture,
+    identity: &str,
+    content: &str,
+) -> Option<meerkat_core::TurnRequester> {
+    let member = fixture
+        .runtime
+        .handle()
+        .get_member(&meerkat_mob::ids::AgentIdentity::from(identity))
+        .await
+        .expect("roster read")
+        .expect("the agent is listed");
+    let session = member
+        .bridge_session_id()
+        .expect("the agent has a session")
+        .to_string();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let page = fixture
+                .runtime
+                .read_session_history(&session, 0, None)
+                .await
+                .expect("history read");
+            if let Some(requester) = page.messages.iter().find_map(|message| match message {
+                meerkat_core::Message::User(user) if user.text_content() == content => {
+                    Some(user.identity.requester.clone())
+                }
+                _ => None,
+            }) {
+                return requester;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the agent committed the scheduled send")
+}
+
+/// Whether the row right before the agent's committed user row `content` of
+/// `identity` is an injected-context row (a sender label), once the agent
+/// committed that row.
+async fn labelled_before(fixture: &Fixture, identity: &str, content: &str) -> bool {
+    let member = fixture
+        .runtime
+        .handle()
+        .get_member(&meerkat_mob::ids::AgentIdentity::from(identity))
+        .await
+        .expect("roster read")
+        .expect("the agent is listed");
+    let session = member
+        .bridge_session_id()
+        .expect("the agent has a session")
+        .to_string();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let messages = fixture
+                .runtime
+                .read_session_history(&session, 0, None)
+                .await
+                .expect("history read")
+                .messages;
+            if let Some(index) = messages.iter().position(|message| {
+                matches!(message, meerkat_core::Message::User(user)
+                    if user.transcript_role == meerkat_core::types::TranscriptUserRole::Conversational
+                        && user.text_content() == content)
+            }) {
+                return index.checked_sub(1).is_some_and(|previous| {
+                    matches!(&messages[previous], meerkat_core::Message::User(user)
+                        if user.transcript_role
+                            == meerkat_core::types::TranscriptUserRole::InjectedContext)
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the agent committed the scheduled send")
+}
+
+/// A fire's input carries the schedule's sender as its requester on a
+/// console that requires sign-in: the person who last defined the schedule
+/// is the direct requester of the agent's turn, as of a live send of
+/// theirs, and the fire's frame names that sender.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_fire_requester_is_schedule_sender() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-requester").await?;
+    let controller = enforced(vec![grant(
+        "erin-drives-alpha",
+        ERIN,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+        "alpha",
+    )])?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN).under(&controller)).await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let signed_in = doors(
+        &fixture,
+        console_decisions(true, false, &[ERIN]),
+        Some(controller),
+        fences,
+        ungoverned(),
+    );
+
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &signed_in, &schedule_id, &key).await?;
+    let sent = sends_under(&fixture, "alpha", &key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert_eq!(
+        sent[0].payload["sender"]["kind"],
+        json!("person"),
+        "{sent:#?}"
+    );
+    assert_eq!(
+        sent[0].payload["sender"]["display_name"],
+        json!(ERIN),
+        "{sent:#?}"
+    );
+    assert!(
+        delivered(&fixture, "alpha", &key).await,
+        "the agent admitted the scheduled send"
+    );
+    let erin = meerkat_core::PrincipalRef::in_domain(
+        meerkat_core::PrincipalKind::Human,
+        subject_of(ERIN),
+        meerkat_core::TrustDomainId::new(format!("oidc-issuer:{ISSUER}"))?,
+    )?;
+    assert_eq!(
+        turn_requester(&fixture, "alpha", "Post the morning summary.").await,
+        Some(meerkat_core::TurnRequester::direct(erin)),
+        "the fired turn's requester is the schedule's sender"
+    );
+    // A schedule's fire is no human message: its turn carries no sender
+    // label, although the console labels a person's own sends.
+    assert!(
+        !labelled_before(&fixture, "alpha", "Post the morning summary.").await,
+        "a schedule's fire carries no human sender label"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A fire names its sender as that caller's live sends are named at fire
+/// time. A person defined the schedule, and their issuer's tokens are then
+/// classified as shared accounts (`shared_account_tokens`): a live token of
+/// that issuer names an account many people may hold, not one person. So
+/// the fire names no person: its sender is a token principal and its turn
+/// has no requester.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fire_after_its_issuer_turned_shared_names_no_person() -> TestResult {
+    let fixture = delivering_fixture("console-schedules-shared-issuer").await?;
+    let controller = enforced(vec![grant(
+        "erin-drives-alpha",
+        ERIN,
+        &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+        "alpha",
+    )])?;
+    let schedule_id = create_as(&fixture, Caller::human(ERIN).under(&controller)).await?;
+    let state_dir = tempfile::tempdir()?;
+    let fences =
+        crate::auth::session_fence::ConsoleSessionFences::open_in_state_dir(state_dir.path())?;
+    let mut shared_issuer = console_decisions(true, false, &[ERIN]);
+    shared_issuer.trusted_oidc.shared_account_tokens = true;
+    let signed_in = doors(
+        &fixture,
+        shared_issuer,
+        Some(controller),
+        fences,
+        ungoverned(),
+    );
+
+    let key = format!("schedule:{schedule_id}:occurrence:1");
+    fire(&fixture, &signed_in, &schedule_id, &key).await?;
+    let sent = sends_under(&fixture, "alpha", &key).await;
+    assert_eq!(sent.len(), 1, "{sent:#?}");
+    assert_eq!(
+        sent[0].payload["sender"]["kind"],
+        json!("token_principal"),
+        "a shared account's fire names no person: {sent:#?}"
+    );
+    assert!(
+        delivered(&fixture, "alpha", &key).await,
+        "the agent admitted the scheduled send"
+    );
+    assert_eq!(
+        turn_requester(&fixture, "alpha", "Post the morning summary.").await,
+        None,
+        "the fired turn has no requester"
+    );
+    fixture.stop().await;
+    Ok(())
+}
+
 /// On a console without sign-in, a fire sends as the console's shared
 /// account, deduplicated in that account's scope, as its live sends are.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1752,6 +1752,7 @@ fn host_outcome(source: InputOrigin) -> ExternalEventInput {
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         event_type: "connector_finalization".to_owned(),
         payload: json!({"outcome": "persisted", "generation": 2}),

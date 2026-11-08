@@ -19,6 +19,7 @@ from .jobs import (
 )
 from .models import SessionBuildOptions
 from .live import LiveAssistantOutputAddress
+from .tool_requester import ToolCallRequester, _accepts_requester
 from .types import ErrorEvent
 
 _log = logging.getLogger("meerkat_meta")
@@ -268,7 +269,15 @@ class CallbackDispatcher:
                 raise ValueError(
                     f"no handler registered for tool: {tool_name} (scope: {scope_id})"
                 )
-            result = handler(arguments)
+            if _accepts_requester(handler):
+                # The gateway names the run's requester here, never in the
+                # arguments; absent or malformed is no requester.
+                result = handler(
+                    arguments,
+                    requester=ToolCallRequester.from_wire(params.get("requester")),
+                )
+            else:
+                result = handler(arguments)
             if asyncio.iscoroutine(result):
                 result = await result
             # Rich content is opt-in: only an explicit ToolResultContent is
@@ -451,6 +460,7 @@ class CallbackDispatcher:
             ),
             cancellation=cancellation,
             reporter=reporter,
+            requester=ToolCallRequester.from_wire(params.get("requester")),
         )
         attempt = _ActiveJobAttempt(
             authority=authority,

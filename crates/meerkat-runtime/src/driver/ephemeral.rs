@@ -573,6 +573,7 @@ impl EphemeralRuntimeDriver {
         input: &Input,
         resolved: Option<crate::input_authority::NativeReplayLookup>,
     ) -> Result<(), RuntimeDriverError> {
+        crate::input_authority::verify_single_requester(input)?;
         if let Some(row) = self.ledger.get(input.id()) {
             crate::input_authority::verify_retained_replay(row, input)?;
         }
@@ -824,6 +825,24 @@ impl EphemeralRuntimeDriver {
         let run = mm_dsl::RunId::from_domain(run_id);
         self.with_dsl_state(|state| {
             !mm_dsl::command_capabilities::resumed_run_destination_attached(state, &run)
+        })
+    }
+
+    /// Whether `input_id` may join the current run `run_id` at a live
+    /// boundary: without mixing requesters (its batch key, its governed
+    /// binding's, its requester's, or none, is the key of the batch the run
+    /// staged), and without overtaking a steer of another requester (no
+    /// stageable Steer-lane input admitted before it waits with another
+    /// key). The machine decides (`live_boundary_joins_run_batch`, which
+    /// mirrors the `JoinLiveBoundaryDurableAppend` and
+    /// `ResolveLiveBoundaryContextReceipt` guards `live_join_same_requester`
+    /// and `steer_lane_fifo_across_requesters`); an input it refuses keeps
+    /// its place in the Steer lane and waits for a run of its own.
+    pub(crate) fn live_boundary_joins_run_batch(&self, input_id: &InputId, run_id: &RunId) -> bool {
+        let input = Self::dsl_key(input_id);
+        let run = mm_dsl::RunId::from_domain(run_id);
+        self.with_dsl_state(|state| {
+            mm_dsl::command_capabilities::live_boundary_joins_run_batch(state, &input, &run)
         })
     }
 
@@ -1217,10 +1236,18 @@ impl EphemeralRuntimeDriver {
                     .iter()
                     .find(|item| item.input_id() == input_id)
             };
-            let expected = own
-                .map(|item| crate::input_authority::association_binding(item.association()))
-                .transpose()?
-                .unwrap_or((None, None));
+            let expected = match own {
+                Some(item) => crate::input_authority::association_binding(item.association())?,
+                // An ungoverned row has no binding; its batch key is its
+                // requester's, when its host supplied one.
+                None => (
+                    None,
+                    row.requester
+                        .as_ref()
+                        .map(crate::input_authority::requester_batch_key)
+                        .transpose()?,
+                ),
+            };
             let key = Self::dsl_key(input_id);
             if !self.with_dsl_state(|state| {
                 state.input_authority_bindings.get(&key) == expected.0.as_ref()
@@ -2810,7 +2837,26 @@ impl EphemeralRuntimeDriver {
                     &recovered_state.scoped_destination,
                 )?;
             }
-            (None, None) if recovered_state.authority_contributors.is_empty() => {}
+            (None, None) if recovered_state.authority_contributors.is_empty() => {
+                // An ungoverned row whose host supplied a requester keeps its
+                // requester's batch key, so a recovered input still never
+                // shares a run with another requester's.
+                let requester = persisted_input.header().requester.as_ref();
+                if requester != recovered_state.requester.as_ref() {
+                    return Err(crate::input_authority::unavailable());
+                }
+                if let Some(requester) = requester {
+                    self.dsl_apply(
+                        mm_dsl::MeerkatMachineInput::BindInputRequesterBatchKey {
+                            input_id: Self::dsl_key(&work_id),
+                            authority_batch_key: crate::input_authority::requester_batch_key(
+                                requester,
+                            )?,
+                        },
+                        "BindInputRequesterBatchKey(recovered row)",
+                    )?;
+                }
+            }
             // A recovered resume of retained work is bound under its canonical
             // original contributor, as at admission.
             (None, None)
@@ -6346,6 +6392,9 @@ impl EphemeralRuntimeDriver {
         state.authority_contributors = admitted.contributors;
         state.controller_client = admitted.controller_client;
         state.retained_resume = admitted.retained_resume;
+        // The host-supplied requester is a row fact: it outlives the
+        // retired payload (see `InputState::requester`).
+        state.requester = input.header().requester.clone();
         state.prompt_replay_identity =
             crate::input_state::PromptReplayIdentity::from_input(&input)?;
         state.external_event_replay_identity =
@@ -6624,6 +6673,9 @@ impl EphemeralRuntimeDriver {
         state.authority_contributors = admitted.contributors;
         state.controller_client = admitted.controller_client;
         state.retained_resume = admitted.retained_resume;
+        // The host-supplied requester is a row fact: it outlives the
+        // retired payload (see `InputState::requester`).
+        state.requester = input.header().requester.clone();
         state.policy = Some(PolicySnapshot {
             version: resolved.policy().policy_version,
             decision: resolved.policy().clone(),
@@ -7547,6 +7599,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::Message),
             content: "peer body".into(),
@@ -7651,6 +7704,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             operation_id: operation_id.clone(),
             event: OpEvent::Cancelled { id: operation_id },
@@ -7680,6 +7734,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: Some(SupersessionKey::new(supersession_key)),
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseProgress {
                 request_id: format!("request-{label}"),
@@ -8468,6 +8523,7 @@ mod tests {
                     ingress_context: None,
                     retained_resume: None,
                     authority_association: None,
+                    requester: None,
                 },
                 event_type: "build".into(),
                 payload: serde_json::json!({ "status": status }),
@@ -9022,6 +9078,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_uuid.to_string(),
@@ -9075,6 +9132,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(PeerConvention::ResponseTerminal {
                 request_id: request_uuid.to_string(),
@@ -9350,6 +9408,7 @@ mod tests {
                 ingress_context: None,
                 retained_resume: None,
                 authority_association: None,
+                requester: None,
             },
             event_type: "build".into(),
             payload: serde_json::json!({ "status": "queued" }),

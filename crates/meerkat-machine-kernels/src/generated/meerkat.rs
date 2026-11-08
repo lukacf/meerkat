@@ -19175,6 +19175,19 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub generation: Generation,
     }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindInputRequesterBatchKey {
+        pub input_id: String,
+        pub authority_batch_key: String,
+    }
+    impl std::fmt::Debug for BindInputRequesterBatchKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("BindInputRequesterBatchKey")
+                .field("input_id", &self.input_id)
+                .field("authority_batch_key", &"<redacted>")
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19611,6 +19624,7 @@ pub enum Input {
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
     SettleRetainedRun(inputs::SettleRetainedRun),
     CloseLiveDelegationIntake(inputs::CloseLiveDelegationIntake),
+    BindInputRequesterBatchKey(inputs::BindInputRequesterBatchKey),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20213,6 +20227,7 @@ impl Input {
             }
             Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
             Self::CloseLiveDelegationIntake(_) => InputKind::CloseLiveDelegationIntake,
+            Self::BindInputRequesterBatchKey(_) => InputKind::BindInputRequesterBatchKey,
         }
     }
 }
@@ -20638,6 +20653,7 @@ pub enum InputKind {
     AbortUntilChangedSwitchTurnReconfigure,
     SettleRetainedRun,
     CloseLiveDelegationIntake,
+    BindInputRequesterBatchKey,
 }
 
 pub mod signals {
@@ -26216,6 +26232,11 @@ pub enum TransitionId {
     CloseLiveDelegationIntakeRunning,
     CloseLiveDelegationIntakeRetired,
     CloseLiveDelegationIntakeStopped,
+    BindInputRequesterBatchKeyIdle,
+    BindInputRequesterBatchKeyAttached,
+    BindInputRequesterBatchKeyRunning,
+    BindInputRequesterBatchKeyRetired,
+    BindInputRequesterBatchKeyStopped,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

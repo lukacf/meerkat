@@ -792,7 +792,7 @@ them.
   that has one gets its implicit mob replaced at its next `delegate`. The
   current identity is read from the session's retained metadata; a session
   on `EphemeralSessionService`, which keeps none, still delegates on the
-  route it was built with.
+  route it was built with. (#2102, thanks @zond)
 - `meerkat-mcp`: a `tools/call` or `resources/read` request the host stops
   waiting for is now cancelled at the server. A tool call whose future is
   dropped (its caller's deadline expired, or the call was cancelled) sends

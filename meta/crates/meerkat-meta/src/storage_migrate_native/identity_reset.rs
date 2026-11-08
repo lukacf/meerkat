@@ -272,14 +272,17 @@ async fn reset(
         }
     }
     let marks = HeldCompletionMarks::in_state_dir(state_dir)
-        .read()
+        .read_rollback_marks()
         .map_err(|error| Refusal::HeldMarksUnreadable {
             detail: error.to_string(),
         })?;
     let marked = marks.contains(&identity);
-    // The runtime's rule (the marks read at the first wake): a mark is owed
-    // only while Core binds the identity to nothing since the latest mob
-    // reset; beside a binding it is stale, and the next start drops it.
+    // The marks are the mirror for a rollback to 0.9.10, read here as an
+    // offline diagnostic until 0.9.12: the reset refuses on a mark and
+    // never acts on it. 0.9.10's rule (it reads them at its first wake): a
+    // mark is owed only while Core binds the identity to nothing since the
+    // latest mob reset; beside a binding it is stale, and that start drops
+    // it.
     let Some(binding) = history.last_binding(&core_identity) else {
         return Err(if marked {
             Refusal::HeldCompletionOwed

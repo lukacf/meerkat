@@ -1987,29 +1987,48 @@ impl DelegatedExecutorDiagnostic {
     }
 }
 
+/// The member that executes a channel's delegated turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DelegatedWorker<'a> {
+    /// A durable fork per delegation, named `live-delegation-<operation>`.
+    Fork,
+    /// The channel's own member executes each delegated turn in its session.
+    ExistingMember(&'a str),
+}
+
 pub async fn delegated_executor_diagnostic(
     rpc: &mut JsonlRpcClient,
     mob_id: &str,
+    worker: DelegatedWorker<'_>,
 ) -> DelegatedExecutorDiagnostic {
-    let roster = match rpc.call("mob/members", json!({"mob_id":mob_id}), 30).await {
-        Ok(roster) => roster,
-        Err(error) => {
-            return DelegatedExecutorDiagnostic::absent(format!("roster_error={error}"));
+    let (identity, ownership) = match worker {
+        DelegatedWorker::ExistingMember(identity) => (identity.to_string(), " (existing member)"),
+        DelegatedWorker::Fork => {
+            let roster = match rpc.call("mob/members", json!({"mob_id":mob_id}), 30).await {
+                Ok(roster) => roster,
+                Err(error) => {
+                    return DelegatedExecutorDiagnostic::absent(format!("roster_error={error}"));
+                }
+            };
+            let Some(worker) = roster["members"].as_array().and_then(|members| {
+                members.iter().find(|member| {
+                    member["agent_identity"]
+                        .as_str()
+                        .is_some_and(|id| id.starts_with("live-delegation-"))
+                })
+            }) else {
+                return DelegatedExecutorDiagnostic::absent(
+                    "fork worker=absent (no live-delegation-* member in the roster)".to_string(),
+                );
+            };
+            let Some(identity) = worker["agent_identity"].as_str() else {
+                return DelegatedExecutorDiagnostic::absent(
+                    "fork worker=present identity=invalid".to_string(),
+                );
+            };
+            (identity.to_string(), " (fork)")
         }
     };
-    let Some(worker) = roster["members"].as_array().and_then(|members| {
-        members.iter().find(|member| {
-            member["agent_identity"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("live-delegation-"))
-        })
-    }) else {
-        return DelegatedExecutorDiagnostic::absent("worker=absent".to_string());
-    };
-    let Some(identity) = worker["agent_identity"].as_str() else {
-        return DelegatedExecutorDiagnostic::absent("worker=present identity=invalid".to_string());
-    };
-    let identity = identity.to_string();
     let status = match rpc
         .call(
             "mob/member_status",
@@ -2021,7 +2040,7 @@ pub async fn delegated_executor_diagnostic(
         Ok(status) => status,
         Err(error) => {
             return DelegatedExecutorDiagnostic {
-                summary: format!("worker={identity} status_error={error}"),
+                summary: format!("worker={identity}{ownership} status_error={error}"),
                 worker_identity: Some(identity),
                 has_tool_result: false,
                 has_assistant_final: false,
@@ -2039,7 +2058,7 @@ pub async fn delegated_executor_diagnostic(
         Ok(history) => history,
         Err(error) => {
             return DelegatedExecutorDiagnostic {
-                summary: format!("worker={identity} history_error={error}"),
+                summary: format!("worker={identity}{ownership} history_error={error}"),
                 worker_identity: Some(identity),
                 has_tool_result: false,
                 has_assistant_final: false,
@@ -2061,7 +2080,7 @@ pub async fn delegated_executor_diagnostic(
         }
     }
     let summary = format!(
-        "worker={identity} status={} is_final={} run_state={} in_flight={} last_progress={} health={} role_counts={role_counts:?} has_tool_result={has_tool_result} has_assistant_final={has_assistant_final}",
+        "worker={identity}{ownership} status={} is_final={} run_state={} in_flight={} last_progress={} health={} role_counts={role_counts:?} has_tool_result={has_tool_result} has_assistant_final={has_assistant_final}",
         status["status"].as_str().unwrap_or("<unknown>"),
         status["is_final"].as_bool().unwrap_or(false),
         status["progress"]["run_state"]

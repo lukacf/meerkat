@@ -55,6 +55,19 @@ async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
             .is_err()
     );
     assert!(!marker.exists(), "target ran before host release");
+    // On Linux custody holds the launch's init: pid 1 of the launch's own
+    // pid namespace (NSpid lists the host's pid, then the namespace's).
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let namespaced: Vec<&str> = status
+            .lines()
+            .find_map(|line| line.strip_prefix("NSpid:"))
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert_eq!(namespaced, [pid.to_string().as_str(), "1"]);
+    }
     writer.write_all(b"host-release\n").unwrap();
     drop(writer);
     let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
@@ -62,6 +75,12 @@ async fn confined_custody_gate_waits_for_release_and_preserves_pid() {
         .unwrap()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+    // The gate execs the target in place, so the target keeps the gate's
+    // PID. On Linux that is pid 2 of the launch's own pid namespace, under
+    // the init that custody holds (pid 1 there); on macOS it is custody's.
+    #[cfg(target_os = "linux")]
+    assert_eq!(output.stdout, b"2");
+    #[cfg(not(target_os = "linux"))]
     assert_eq!(output.stdout, pid.to_string().as_bytes());
     assert_eq!(std::fs::read(marker).unwrap(), b"ran");
 }

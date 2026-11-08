@@ -1,5 +1,6 @@
 //! HTTP routes for the admin console REST API.
 
+pub(crate) mod audit;
 mod mcp_apps;
 pub(crate) mod schedules;
 mod shared_panels;
@@ -38,16 +39,20 @@ use std::time::{Duration, Instant};
 use crate::access::{
     ACCESS_ACTIONS, ACTION_AGENT_MEMORY_DELETE, ACTION_AGENT_MEMORY_READ,
     ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN, ACTION_AGENT_RETIRE,
-    ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW, ACTION_GATING_DECIDE,
-    ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW, ACTION_MOB_MEMORY_READ,
-    ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN, ACTION_WORKGRAPH_MANAGE,
-    ACTION_WORKGRAPH_VIEW, AccessController, AccessGroup, AccessResource, AccessRule, AccessView,
-    AgentResourceAttributes, LiveAccessView,
+    ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW, ACTION_AUDIT_VIEW,
+    ACTION_GATING_DECIDE, ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW,
+    ACTION_MOB_MEMORY_READ, ACTION_MOB_OBSERVE, ACTION_OPERATOR_MEMORY_READ, ACTION_RUNTIME_ADMIN,
+    ACTION_SCHEDULE_MANAGE, ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessController,
+    AccessResource, AccessView, AgentResourceAttributes, LiveAccessView,
 };
+// The test modules build access rules and groups through `use super::*`.
+#[cfg(test)]
+use crate::access::{AccessGroup, AccessRule};
+
 use crate::blob_store::{BinaryBlobPayload, BinaryBlobStore, is_valid_blob_id_value};
 use crate::console_aggregator::{
-    ConsoleCursor, ConsoleFrame, ConsoleFrameSourceKind, ConsoleIdentityRecord, ConsoleLogError,
-    ConsoleLogResult, ConsoleLogStore, ConsoleReplayUnavailable, ConsoleSendError,
+    ConsoleActorKind, ConsoleCursor, ConsoleFrame, ConsoleFrameSourceKind, ConsoleIdentityRecord,
+    ConsoleLogError, ConsoleLogResult, ConsoleLogStore, ConsoleReplayUnavailable, ConsoleSendError,
     ConsoleSendRequest, ConsoleTimelineEvent, ConsoleTimelineMode, ConsoleTimelineQuery,
     ConsoleTimelineQueryError, ConsoleTimelineQueryResult, ConsoleTimelineWindowQuery,
     ConsoleVisibility, ConsoleVisibilityPolicy, HideImplicitDelegateMembersConsoleVisibilityPolicy,
@@ -146,10 +151,19 @@ pub struct ConsoleJsonState {
     /// read it at each request: the owner attaches after the console router
     /// may be built. Empty when announcements are off.
     pub(crate) mob_announcements: crate::mob_announcements::AnnouncementSlot,
+    /// The runtime's durable decisions, which `meta/decisions/*` read
+    /// (`crate::durable_decisions::console`). A Console without a runtime,
+    /// or over a runtime that keeps none, answers `no_decision_store`.
+    pub(crate) durable_decisions: crate::durable_decisions::RuntimeDecisions,
+    /// The console audit log (`crate::console_audit`): each console change
+    /// writes a row, and `meta/console/audit` reads them. `None` on a router
+    /// built without a runtime, or over a metadata store that keeps no realm
+    /// documents.
+    pub(crate) console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
 }
 
 #[derive(Debug, Clone)]
-struct ConsoleHttpAuthContext {
+pub(crate) struct ConsoleHttpAuthContext {
     principal: Option<String>,
     /// Whether the verified token classified the principal as a service
     /// identity rather than a human.
@@ -174,43 +188,17 @@ struct ConsoleHttpAuthContext {
     verification: Option<crate::runtime::ConsoleCallerVerification>,
 }
 
-/// Who the Console acts as for one request, derived from the connection
-/// alone: the token the Console verified, or none on an open Console. No
-/// request field names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConsoleActorKind {
-    /// A verified human token: an OIDC issuer and `sub`.
-    Person,
-    /// A verified service token (`svc:` principal or service actor).
-    Service,
-    /// A verified token that names no human (no `sub`).
-    TokenPrincipal,
-    /// A caller of an open Console without a verified token.
-    Anonymous,
-}
-
-impl ConsoleActorKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Person => "person",
-            Self::Service => "service",
-            Self::TokenPrincipal => "token_principal",
-            Self::Anonymous => "anonymous",
-        }
-    }
-
-    /// The authentication assurance the Console established for this kind
-    /// of caller; a token that names no human claims none.
-    fn assurance(self) -> Option<meerkat_core::ApprovalAssurance> {
-        match self {
-            Self::Person => Some(meerkat_core::ApprovalAssurance::PersonAuthenticated),
-            Self::Service => Some(meerkat_core::ApprovalAssurance::ServiceCredential),
-            Self::TokenPrincipal | Self::Anonymous => None,
-        }
-    }
-}
-
 impl ConsoleHttpAuthContext {
+    /// Who this caller is to a side chat's creator label, which the console
+    /// shows only to its creator and to access admins
+    /// ([`crate::side_chat::clear_unseen_side_chat_creators`]).
+    fn side_chat_creator_viewer(&self) -> crate::side_chat::SideChatCreatorViewer<'_> {
+        crate::side_chat::SideChatCreatorViewer::new(
+            self.principal.as_deref(),
+            self.access_view.as_ref(),
+        )
+    }
+
     /// Who the Console acts as for this request.
     fn actor_kind(&self) -> ConsoleActorKind {
         match (&self.human, &self.principal) {
@@ -233,6 +221,36 @@ impl ConsoleHttpAuthContext {
     /// caller.
     fn caller_scope(&self) -> String {
         console_caller_scope(&self.send_scope)
+    }
+
+    /// Who this caller is as the sender of a console message, as
+    /// `meta/console/whoami` reports the caller: its kind, assurance, name
+    /// and caller scope. Only a verified person on a console that requires
+    /// sign-in also names the qualified principal its sends carry to the
+    /// agent's run as their requester: a service or a token principal is no
+    /// person, and on an Open console no send names one, a volunteered token
+    /// included.
+    fn sender(&self, decisions: &RuntimeDecisionState) -> crate::console_aggregator::ConsoleSender {
+        let kind = self.actor_kind();
+        let requester = self
+            .human
+            .as_ref()
+            .filter(|_| console_sends_name_requesters(decisions))
+            .and_then(|human| human.principal().ok());
+        // The model reads a person's message with its sender label exactly
+        // where the send names the person as requester.
+        let model_label = requester
+            .as_ref()
+            .and(self.principal.as_deref())
+            .map(|name| format!("Message from {name}"));
+        crate::console_aggregator::ConsoleSender {
+            kind,
+            assurance: kind.assurance(),
+            display_name: self.principal.clone(),
+            caller_scope: self.caller_scope(),
+            requester,
+            model_label,
+        }
     }
 
     /// Refuse a change made for another caller: `expected` is the
@@ -654,6 +672,8 @@ pub fn console_json_router(decisions: RuntimeDecisionState) -> Router {
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        durable_decisions: Default::default(),
+        console_audit: None,
     })
 }
 
@@ -699,6 +719,8 @@ pub fn console_json_router_with_aggregator_and_access(
         job_health_projection: None,
         governed_ingress: Default::default(),
         mob_announcements: Default::default(),
+        durable_decisions: Default::default(),
+        console_audit: None,
     })
 }
 
@@ -764,6 +786,8 @@ pub(crate) fn console_json_router_with_runtime_and_events(
         Default::default(),
         crate::auth::session_fence::ConsoleSessionFences::detached(),
         Default::default(),
+        Default::default(),
+        None,
     )
 }
 
@@ -792,6 +816,8 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
     governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
     session_fences: crate::auth::session_fence::ConsoleSessionFences,
     mob_announcements: crate::mob_announcements::AnnouncementSlot,
+    durable_decisions: crate::durable_decisions::RuntimeDecisions,
+    console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
 ) -> Router {
     let console_aggregator = shared_aggregator.or_else(|| {
         console_events.clone().map(|events| {
@@ -854,6 +880,8 @@ pub(crate) fn console_json_router_with_runtime_events_and_policy(
         job_health_projection,
         governed_ingress,
         mob_announcements,
+        durable_decisions,
+        console_audit,
     })
 }
 
@@ -1402,7 +1430,7 @@ pub async fn console_rpc_handler(
     Json(request): Json<Value>,
 ) -> impl IntoResponse {
     // Parse the request early so we can check the method for auth gating.
-    let mut parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
+    let parsed_request = match serde_json::from_value::<JsonRpcRequest>(request) {
         Ok(req) => req,
         Err(_) => {
             return (
@@ -1415,7 +1443,6 @@ pub async fn console_rpc_handler(
             );
         }
     };
-    let request_method = parsed_request.method.clone();
 
     // Auth enforcement:
     // - When require_app_auth is true: validate bearer token (OIDC + allowlist)
@@ -1428,15 +1455,80 @@ pub async fn console_rpc_handler(
             return console_rpc_unauthenticated_response(parsed_request.id.unwrap_or(Value::Null));
         }
     };
+    let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let method = parsed_request.method.clone();
+    let viewer_principal = auth_context.principal.clone();
+    let viewer = crate::side_chat::SideChatCreatorViewer::new(
+        viewer_principal.as_deref(),
+        auth_context.access_view.as_ref(),
+    );
+    let audit_offered = audit::audit_read_offered(&state, &auth_context);
+    // A console change and its row in the console audit log run on the
+    // server, a refusal included (`crate::console_audit`): a caller that
+    // goes away cuts neither short.
+    let (status, mut response) =
+        match audit::ConsoleAuditIntent::of_console_rpc(&state, &auth_context, &parsed_request) {
+            None => console_rpc_answer(&state, voice, &auth_context, parsed_request).await,
+            Some(intent) => intent
+                .run(
+                    async move {
+                        console_rpc_answer(&state, voice, &auth_context, parsed_request).await
+                    },
+                    (StatusCode::OK, console_change_lost(response_id.clone())),
+                    audit::status_json_rpc_row,
+                )
+                .await
+                .unwrap_or_else(|| (StatusCode::OK, console_change_lost(response_id))),
+        };
+    if method == "meta/capabilities" && audit_offered {
+        advertise_console_audit(&mut response);
+    }
+    crate::side_chat::clear_unseen_side_chat_creators(&mut response, viewer);
+    (status, Json::<Value>(response))
+}
+
+/// The answer to a console change whose task ended without one.
+fn console_change_lost(response_id: Value) -> Value {
+    response_value(
+        response_id,
+        None,
+        Some(JsonRpcError {
+            code: -32603,
+            message: "the console change ended without an answer".to_string(),
+            data: None,
+        }),
+    )
+}
+
+/// Add the console audit read to a `meta/capabilities` answer's methods.
+fn advertise_console_audit(response: &mut Value) {
+    if let Some(methods) = response
+        .pointer_mut("/result/methods")
+        .and_then(Value::as_array_mut)
+        && !methods
+            .iter()
+            .any(|method| method.as_str() == Some(crate::rpc::CONSOLE_AUDIT_METHOD))
+    {
+        methods.push(json!(crate::rpc::CONSOLE_AUDIT_METHOD));
+    }
+}
+
+/// The answer of one authenticated `POST /console/rpc` request, with its HTTP
+/// status: 200, but for a sign-out by a caller without a login, which
+/// [`console_sign_out_rpc`] answers 401.
+async fn console_rpc_answer(
+    state: &ConsoleJsonState,
+    voice: Option<axum::Extension<crate::console_voice::ConsoleVoiceController>>,
+    auth_context: &ConsoleHttpAuthContext,
+    mut parsed_request: JsonRpcRequest,
+) -> (StatusCode, Value) {
+    let request_method = parsed_request.method.clone();
     let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
         Ok(scope) => scope,
         Err(message) => {
             return (
                 StatusCode::OK,
-                Json::<Value>(invalid_params(
-                    parsed_request.id.clone().unwrap_or(Value::Null),
-                    message,
-                )),
+                invalid_params(parsed_request.id.clone().unwrap_or(Value::Null), message),
             );
         }
     };
@@ -1445,11 +1537,11 @@ pub async fn console_rpc_handler(
     {
         return (
             StatusCode::OK,
-            Json::<Value>(response_value(
+            response_value(
                 parsed_request.id.clone().unwrap_or(Value::Null),
                 None,
                 Some(refusal.json_rpc_error()),
-            )),
+            ),
         );
     }
     // By this point the request is always authorized:
@@ -1471,17 +1563,30 @@ pub async fn console_rpc_handler(
     {
         return (
             StatusCode::OK,
-            Json::<Value>(response_value(refusal.id, refusal.result, refusal.error)),
+            response_value(refusal.id, refusal.result, refusal.error),
         );
     }
     if request_method == crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD {
-        let response =
-            console_revoke_sessions_rpc(&state, &auth_context, read_only, &parsed_request);
-        return (StatusCode::OK, Json::<Value>(response));
+        return (
+            StatusCode::OK,
+            console_revoke_sessions_rpc(state, auth_context, read_only, &parsed_request),
+        );
+    }
+    if request_method == crate::rpc::CONSOLE_SIGN_OUT_METHOD {
+        let (status, Json(answer)) = console_sign_out_rpc(auth_context, &parsed_request);
+        return (status, answer);
     }
     if request_method == crate::rpc::CONSOLE_WHOAMI_METHOD {
-        let response = console_whoami_rpc(&state.decisions, &auth_context, &parsed_request);
-        return (StatusCode::OK, Json::<Value>(response));
+        return (
+            StatusCode::OK,
+            console_whoami_rpc(&state.decisions, auth_context, &parsed_request),
+        );
+    }
+    if request_method == crate::rpc::CONSOLE_AUDIT_METHOD {
+        return (
+            StatusCode::OK,
+            audit::console_audit_rpc(state, auth_context, &parsed_request).await,
+        );
     }
     if matches!(
         request_method.as_str(),
@@ -1495,32 +1600,54 @@ pub async fn console_rpc_handler(
             | crate::console_voice::VOICE_CAPTIONS_METHOD
     ) || crate::console_voice::is_channel_method(&request_method)
     {
-        let response = handle_console_voice_rpc(
-            &state,
+        let answer = handle_console_voice_rpc(
+            state,
             voice.as_ref().map(|extension| &extension.0),
-            &auth_context,
+            auth_context,
             parsed_request,
         )
         .await;
-        return (StatusCode::OK, Json::<Value>(response));
+        return (StatusCode::OK, answer);
+    }
+    // Test hook: a durable decision request that names a decision waits
+    // here, accepted and before its caller is checked again.
+    #[cfg(test)]
+    if request_method.starts_with(crate::durable_decisions::DECISIONS_METHOD_PREFIX)
+        && let Some(decision_id) = parsed_request
+            .params
+            .get("decision_id")
+            .and_then(Value::as_str)
+    {
+        console_decide_holds::pass(decision_id).await;
+    }
+    if request_method.starts_with(crate::durable_decisions::DECISIONS_METHOD_PREFIX)
+        && let Some(response) = console_decision_rpc(
+            state,
+            auth_context,
+            read_only,
+            &parsed_request,
+            expected_caller_scope.as_deref(),
+        )
+    {
+        return (StatusCode::OK, response);
     }
     let Some(runtime) = &state.runtime else {
         // A change checks its caller again right before its handler runs,
         // as the runtime dispatch does.
         if is_console_mutating_rpc_method(&request_method)
-            && let Err(refusal) = ConsoleSendGovernance::for_request(&state, &auth_context)
+            && let Err(refusal) = ConsoleSendGovernance::for_request(state, auth_context)
                 .refuse_unless_caller_current()
         {
             return (
                 StatusCode::OK,
-                Json::<Value>(response_value(
+                response_value(
                     parsed_request.id.clone().unwrap_or(Value::Null),
                     None,
                     Some(refusal.json_rpc_error()),
-                )),
+                ),
             );
         }
-        let response_value = Box::pin(handle_console_aggregator_rpc(
+        let answer = Box::pin(handle_console_aggregator_rpc(
             state.console_aggregator.clone(),
             parsed_request,
             is_authenticated,
@@ -1528,9 +1655,10 @@ pub async fn console_rpc_handler(
             state.access.as_ref(),
             Some(&auth_context.audience),
             &auth_context.send_scope(),
+            Some(&auth_context.sender(&state.decisions)),
         ))
         .await;
-        return (StatusCode::OK, Json::<Value>(response_value));
+        return (StatusCode::OK, answer);
     };
 
     let response_value = Box::pin(handle_console_runtime_rpc_with_visibility(
@@ -1558,8 +1686,8 @@ pub async fn console_rpc_handler(
         state.workgraph.as_ref(),
         state.topology.as_ref(),
         state.mob_announcements.get(),
-        &ConsoleSendGovernance::for_request(&state, &auth_context),
-        &console_topology_apply_scope(&auth_context),
+        &ConsoleSendGovernance::for_request(state, auth_context),
+        &console_topology_apply_scope(auth_context),
     ))
     .await;
     let response_value = decorate_console_job_projection(
@@ -1567,7 +1695,14 @@ pub async fn console_rpc_handler(
         &request_method,
         state.job_health_projection.as_ref(),
     );
-    (StatusCode::OK, Json::<Value>(response_value))
+    let response_value = decorate_console_decision_capabilities(
+        response_value,
+        &request_method,
+        state,
+        auth_context,
+        read_only,
+    );
+    (StatusCode::OK, response_value)
 }
 
 /// Server-side bound on one readiness answer. It sits below the console's
@@ -1575,6 +1710,83 @@ pub async fn console_rpc_handler(
 /// `voice_readiness_timed_out` answer (retry, keep what was known) instead
 /// of a transport timeout. Exceeding it is logged with the active stage.
 const VOICE_READINESS_SERVER_BUDGET: Duration = Duration::from_secs(4);
+
+/// `meta/decisions/*` on the Console: the reads and the administrator's
+/// withdraw ([`crate::durable_decisions::console`]), for the caller this
+/// request authenticated. The withdraw is a console change: it passes the
+/// caller checks every console change passes, against the
+/// `expected_caller_scope` the request carried. `None` for a decision
+/// method the Console does not serve, which it then answers as any other
+/// unknown method.
+fn console_decision_rpc(
+    state: &ConsoleJsonState,
+    auth_context: &ConsoleHttpAuthContext,
+    read_only: bool,
+    request: &JsonRpcRequest,
+    expected_caller_scope: Option<&str>,
+) -> Option<Value> {
+    let id = request.id.clone().unwrap_or(Value::Null);
+    let caller_current = || refuse_unless_current(auth_context.verification.as_ref());
+    crate::durable_decisions::console::handle_console_decision_rpc(
+        &state.durable_decisions,
+        &console_decision_caller(auth_context),
+        &crate::durable_decisions::console::ConsoleChangeChecks {
+            other_caller: auth_context
+                .refuse_other_caller(expected_caller_scope)
+                .err(),
+            caller_current: &caller_current,
+        },
+        read_only,
+        &request.method,
+        &id,
+        request.params.clone(),
+    )
+}
+
+/// The Console caller of a decision request: its access snapshot, and the
+/// verified human's principal as a requester key.
+fn console_decision_caller(
+    auth_context: &ConsoleHttpAuthContext,
+) -> crate::durable_decisions::console::ConsoleDecisionCaller<'_> {
+    crate::durable_decisions::console::ConsoleDecisionCaller {
+        access_view: auth_context.access_view.as_ref(),
+        requester: auth_context
+            .human
+            .as_ref()
+            .and_then(|human| human.principal().ok())
+            .and_then(|principal| {
+                meerkat_core::approval::decision::DecisionPrincipalKey::of(&principal).ok()
+            }),
+    }
+}
+
+/// `meta/capabilities` lists the Console's decision methods while the
+/// runtime keeps a decision store, as far as the caller may call them.
+fn decorate_console_decision_capabilities(
+    mut response: Value,
+    method: &str,
+    state: &ConsoleJsonState,
+    auth_context: &ConsoleHttpAuthContext,
+    read_only: bool,
+) -> Value {
+    if method != "meta/capabilities" || !state.durable_decisions.is_available() {
+        return response;
+    }
+    if let Some(methods) = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("methods"))
+        .and_then(Value::as_array_mut)
+    {
+        let caller = console_decision_caller(auth_context);
+        methods.extend(
+            crate::durable_decisions::console::advertised_methods(&caller, read_only)
+                .into_iter()
+                .map(Value::from),
+        );
+    }
+    response
+}
+
 /// A readiness answer slower than this is logged at warn even when positive:
 /// the client's own bound is 5 s and it gates the voice button on the answer.
 const VOICE_READINESS_SLOW_BUDGET: Duration = Duration::from_secs(1);
@@ -2192,11 +2404,14 @@ async fn console_identities_handler(
     ))
     .await
     {
-        Ok(identities) => (
-            StatusCode::OK,
-            Json::<Value>(json!({ "identities": identities })),
-        )
-            .into_response(),
+        Ok(identities) => {
+            let mut body = json!({ "identities": identities });
+            crate::side_chat::clear_unseen_side_chat_creators(
+                &mut body,
+                auth_context.side_chat_creator_viewer(),
+            );
+            (StatusCode::OK, Json::<Value>(body)).into_response()
+        }
         Err(err) => {
             tracing::warn!(target: "meta::console", error = %err, "console identities request failed");
             console_json_error(
@@ -2278,6 +2493,9 @@ async fn console_send_handler(
         return refusal.into_response();
     }
     let request = body.request;
+    if let Some(refusal) = reserved_origin_kind_refusal(&request) {
+        return console_json_error(StatusCode::BAD_REQUEST, "reserved_origin_kind", &refusal);
+    }
     let governance = ConsoleSendGovernance::for_request(&state, &auth_context);
     match Box::pin(send_as_admitted_console_caller(
         &ConsoleSendPath::of_state(&state),
@@ -2312,6 +2530,30 @@ async fn console_send_handler(
         }
         Err(AdmittedConsoleSendError::Send(err)) => console_send_error_response(err),
     }
+}
+
+/// Whether this console's sends name a requester at all: only a console that
+/// requires sign-in does. Runs started from an Open console have no
+/// requester, a person's who volunteered a verified token included, since
+/// the person could as well have left the token out.
+pub(crate) fn console_sends_name_requesters(decisions: &RuntimeDecisionState) -> bool {
+    decisions.console.require_app_auth
+}
+
+/// Why a console send over HTTP may not claim its declared `origin_kind`: the
+/// kinds of Meerkat's own internal emitters (a schedule, a connector, a flow,
+/// a policy, the host) are theirs alone, so a client's send that names one is
+/// refused before anything is recorded. `None` for an operator's or an
+/// operator probe's kind, or no kind.
+fn reserved_origin_kind_refusal(request: &ConsoleSendRequest) -> Option<String> {
+    let kind = request.origin_kind?;
+    kind.reserved_for_internal_senders().then(|| {
+        format!(
+            "origin_kind `{}` is reserved for Meerkat's internal emitters; a console send \
+             declares `operator`, `operator_probe` or no kind",
+            kind.as_str()
+        )
+    })
 }
 
 /// Why a candidate launch refuses a Console send.
@@ -2664,7 +2906,7 @@ async fn console_send_identity_candidates(
         return candidates;
     };
     let addressed_directly = match crate::identity_first::AgentIdentity::parse(identity) {
-        Ok(parsed) => identity_runtime.status(&parsed).await.is_ok(),
+        Ok(parsed) => identity_runtime.contains(&parsed).await,
         Err(_) => false,
     };
     if !addressed_directly
@@ -2951,6 +3193,10 @@ pub(crate) struct ConsoleSendGovernance {
     /// The verification the caller's token passed, when a token identified
     /// the caller: a change checks it again before it commits.
     pub(crate) verification: Option<crate::runtime::ConsoleCallerVerification>,
+    /// Who sends: recorded on the send's `user_input` frame, and its
+    /// requester carried to the agent's run. `None` only for a caller the
+    /// Console did not authenticate (the unscoped Rust send API).
+    pub(crate) sender: Option<crate::console_aggregator::ConsoleSender>,
     /// The private owner a console side chat this caller forks records
     /// ([`crate::access::PRIVATE_TO_LABEL`]): the caller's private-owner key
     /// when the caller is a verified person on a console with sign-in, else
@@ -2971,6 +3217,7 @@ impl ConsoleSendGovernance {
                 .is_some_and(MobRuntime::native_work_governed),
             access: state.access.clone(),
             verification: auth_context.verification.clone(),
+            sender: Some(auth_context.sender(&state.decisions)),
             side_chat_owner: state
                 .decisions
                 .console
@@ -2986,20 +3233,9 @@ impl ConsoleSendGovernance {
     }
 
     /// Refuse a change whose caller's login ended since the request was
-    /// accepted: the token must still pass the Console's acceptance now,
-    /// its principal's session fence included. The open Console's caller
-    /// without a token has no login to end.
+    /// accepted, by the rule of [`refuse_unless_current`].
     pub(crate) fn refuse_unless_caller_current(&self) -> Result<(), ConsoleCallerRefusal> {
-        match &self.verification {
-            Some(verification)
-                if verification
-                    .current_at(std::time::SystemTime::now())
-                    .is_none() =>
-            {
-                Err(ConsoleCallerRefusal::NotCurrent)
-            }
-            _ => Ok(()),
-        }
+        refuse_unless_current(self.verification.as_ref())
     }
 
     /// Whether a send to `identity` must be governed: the runtime's canonical
@@ -3224,7 +3460,10 @@ async fn console_send_member_lane(
     governance
         .refuse_unless_caller_current()
         .map_err(|_| CheckedConsoleSendError::CallerNotCurrent)?;
-    Ok(Box::pin(aggregator.send_scoped(request, &governance.scope)).await?)
+    Ok(
+        Box::pin(aggregator.send_scoped(request, &governance.scope, governance.sender.as_ref()))
+            .await?,
+    )
 }
 
 #[cfg(test)]
@@ -3252,8 +3491,36 @@ mod console_private_side_chat_tests;
 mod console_schedule_tests;
 
 #[cfg(test)]
+#[path = "console_shared_object_tests.rs"]
+mod console_shared_object_tests;
+
+#[cfg(test)]
 #[path = "console_actor_tests.rs"]
 mod console_actor_tests;
+
+#[cfg(test)]
+#[path = "console_audit_tests.rs"]
+mod console_audit_tests;
+
+#[cfg(test)]
+#[path = "console_attribution_tests.rs"]
+mod console_attribution_tests;
+
+#[cfg(test)]
+#[path = "console_sign_out_tests.rs"]
+mod console_sign_out_tests;
+
+#[cfg(test)]
+#[path = "console_flow_editor_caller_tests.rs"]
+mod console_flow_editor_caller_tests;
+
+#[cfg(test)]
+#[path = "console_decision_caller_tests.rs"]
+mod console_decision_caller_tests;
+
+#[cfg(test)]
+#[path = "console_approver_tests.rs"]
+mod console_approver_tests;
 
 #[cfg(test)]
 async fn console_send_identity_first(
@@ -3363,6 +3630,12 @@ async fn console_send_identity_first_governed(
         &identity,
         &crate::console_governed_ingress::ConsoleSendContext::for_request(&request),
     )?;
+    // What the send carries for its person: the original requester of the
+    // agent's run (a governed send's requester is its association's) and the
+    // sender label its model reads. A redispatch carries what the send's own
+    // frame recorded instead (below).
+    let mut attribution =
+        crate::console_aggregator::ConsoleHumanAttribution::of_sender(governance.sender.as_ref());
     if governed.is_some() && !request.skill_refs.is_empty() {
         return Err(ConsoleSendError::InvalidRequest(
             "a governed Console send carries no skill selection".to_string(),
@@ -3399,6 +3672,7 @@ async fn console_send_identity_first_governed(
         request.clone(),
         session_id.as_deref(),
         &governance.scope,
+        governance.sender.as_ref(),
     ))
     .await?
     {
@@ -3437,6 +3711,14 @@ async fn console_send_identity_first_governed(
                             .await =>
                 {
                     aggregator.begin_send_redispatch(&frame, &claim)?;
+                    // The requester and the label the send's frame recorded
+                    // when it was accepted, as the member lane's redispatch
+                    // reads them: never the live caller's, whose console may
+                    // name a requester the send never had, or none.
+                    attribution = crate::console_aggregator::ConsoleHumanAttribution::of_sender(
+                        crate::console_aggregator::ConsoleSender::of_frame_payload(&frame.payload)
+                            .as_ref(),
+                    );
                     (accepted, Some(claim))
                 }
                 NativeSendObservation::Absent | NativeSendObservation::Unknown { .. } => {
@@ -3476,6 +3758,7 @@ async fn console_send_identity_first_governed(
                 handling_mode,
                 &request.selected_skill_keys(),
                 &accepted,
+                &attribution,
                 governed,
             )
             .await;
@@ -3533,6 +3816,7 @@ async fn console_send_identity_first_governed(
     let dispatch_skill_references = request.selected_skill_keys();
     let dispatch_origin = request.origin.clone();
     let dispatch_accepted = accepted.clone();
+    let dispatch_attribution = attribution;
     let dispatch_expected_alias =
         if crate::member_comms_id::is_reserved_generated_alias(&requested_identity) {
             Some(requested_identity)
@@ -3557,6 +3841,7 @@ async fn console_send_identity_first_governed(
                 handling_mode,
                 &dispatch_skill_references,
                 &dispatch_accepted,
+                &dispatch_attribution,
                 governed,
             )
             .await;
@@ -4298,6 +4583,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/access/groups/set"
             | "meta/access/groups/delete"
             | crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD
+            | crate::rpc::CONSOLE_SIGN_OUT_METHOD
             | "meta/live/open"
             | "meta/live/replacement_required"
             | "meta/live/playback_owner/register"
@@ -4313,7 +4599,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
     )
 }
 
-fn console_read_only_rpc_error(response_id: Value) -> Value {
+pub(crate) fn console_read_only_rpc_error(response_id: Value) -> Value {
     response_value(
         response_id,
         None,
@@ -4520,6 +4806,53 @@ pub(crate) const CONSOLE_UNAUTHENTICATED_KIND: &str = "unauthenticated";
 /// JSON-RPC code of a console change refused for its caller.
 pub(crate) const CONSOLE_CALLER_REFUSED_CODE: i64 = -32056;
 
+/// JSON-RPC code of a console operation refused because its caller is not
+/// the one it needs. An approval decision (`approver_unauthenticated`)
+/// needs a verified, current person and refuses an open Console's caller
+/// without a token, a service token, a token that names no human, a
+/// shared-account token, or a person whose login ended before the
+/// decision was applied. A WorkGraph claim
+/// (`person_authentication_required`) needs a caller that can own it and
+/// refuses an open Console's caller without a token.
+pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_CODE: i64 = -32057;
+
+/// `data.kind` of [`CONSOLE_APPROVER_UNAUTHENTICATED_CODE`], shared by every
+/// console approval decision: a gating decision, a memory quarantine
+/// review and a WorkGraph goal confirmation.
+pub(crate) const CONSOLE_APPROVER_UNAUTHENTICATED_KIND: &str = "approver_unauthenticated";
+
+/// `data.kind` of [`CONSOLE_APPROVER_UNAUTHENTICATED_CODE`] for a console
+/// operation that needs a caller who can own its result (a WorkGraph
+/// claim), made by an open Console's caller without a token.
+pub(crate) const CONSOLE_PERSON_AUTHENTICATION_REQUIRED_KIND: &str =
+    "person_authentication_required";
+
+/// The refusal of a console approval decision whose caller is not a
+/// verified, current person. Nothing was decided.
+pub(crate) fn approver_unauthenticated_error() -> JsonRpcError {
+    JsonRpcError {
+        code: CONSOLE_APPROVER_UNAUTHENTICATED_CODE,
+        message: "console approvals are decided only by a signed-in person; nothing was decided"
+            .to_string(),
+        data: Some(json!({ "kind": CONSOLE_APPROVER_UNAUTHENTICATED_KIND })),
+    }
+}
+
+fn approver_unauthenticated_rpc_error(response_id: Value) -> Value {
+    response_value(response_id, None, Some(approver_unauthenticated_error()))
+}
+
+/// The refusal of a console operation that needs a caller who can own its
+/// result, made by an open Console's caller without a token. Nothing was
+/// changed.
+pub(crate) fn person_authentication_required_error() -> JsonRpcError {
+    JsonRpcError {
+        code: CONSOLE_APPROVER_UNAUTHENTICATED_CODE,
+        message: "this console operation needs a signed-in caller; nothing was changed".to_string(),
+        data: Some(json!({ "kind": CONSOLE_PERSON_AUTHENTICATION_REQUIRED_KIND })),
+    }
+}
+
 /// The request field naming the caller a console change was made for: the
 /// `caller_scope` its client read from `meta/console/whoami`.
 pub(crate) const EXPECTED_CALLER_SCOPE_FIELD: &str = "expected_caller_scope";
@@ -4575,7 +4908,7 @@ impl ConsoleCallerRefusal {
 /// Take the `expected_caller_scope` field out of a console RPC's params, so
 /// no method's own params see it. A field that is not a string is invalid
 /// params.
-fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
+pub(crate) fn take_expected_caller_scope(params: &mut Value) -> Result<Option<String>, String> {
     let Some(object) = params.as_object_mut() else {
         return Ok(None);
     };
@@ -4629,6 +4962,17 @@ pub(crate) fn served_hosts_only(router: Router, open: bool) -> Router {
 /// The 401 body for the JSON and multipart console RPC doors. The JSON-RPC
 /// code stays `-32600` for existing clients; `data.kind` is the typed reason.
 fn console_rpc_unauthenticated_response(response_id: Value) -> (StatusCode, Json<Value>) {
+    console_rpc_unauthenticated_response_with(
+        response_id,
+        "unauthorized: console rpc requires a valid auth token",
+    )
+}
+
+/// [`console_rpc_unauthenticated_response`] with its own `message`.
+fn console_rpc_unauthenticated_response_with(
+    response_id: Value,
+    message: &str,
+) -> (StatusCode, Json<Value>) {
     (
         StatusCode::UNAUTHORIZED,
         Json::<Value>(serde_json::json!({
@@ -4636,7 +4980,7 @@ fn console_rpc_unauthenticated_response(response_id: Value) -> (StatusCode, Json
             "id": response_id,
             "error": {
                 "code": -32600,
-                "message": "unauthorized: console rpc requires a valid auth token",
+                "message": message,
                 "data": {
                     "kind": CONSOLE_UNAUTHENTICATED_KIND,
                     "http_status": StatusCode::UNAUTHORIZED.as_u16(),
@@ -4914,14 +5258,19 @@ fn console_rpc_access_requirements(
         "meta/console/send" | "meta/console/recover_send" => one(ACTION_AGENT_SEND, identity),
         // A console schedule is a deferred send to its agent, named by
         // `identity`: listing them needs what viewing the agent needs, and
-        // every write what sending to it needs. That the schedule is that
-        // agent's is judged in the handler.
+        // every write what sending to it needs and `schedule.manage`, which
+        // lets a deployment keep some who message the agent from changing
+        // its schedules. That the schedule is that agent's is judged in the
+        // handler.
         "meta/schedule/list" => one(ACTION_AGENT_VIEW, identity),
         "meta/schedule/create"
         | "meta/schedule/update"
         | "meta/schedule/pause"
         | "meta/schedule/resume"
-        | "meta/schedule/delete" => one(ACTION_AGENT_SEND, identity),
+        | "meta/schedule/delete" => Some(vec![
+            (ACTION_AGENT_SEND, identity.clone()),
+            (ACTION_SCHEDULE_MANAGE, identity),
+        ]),
         crate::console_voice::VOICE_CONTEXT_STATUS_METHOD
         | crate::console_voice::VOICE_CAPTIONS_METHOD => one(ACTION_AGENT_VIEW, identity),
         crate::console_voice::VOICE_OPEN_METHOD
@@ -5034,6 +5383,7 @@ fn console_rpc_access_requirements(
         }
         "meta/gating/decide" => one(ACTION_GATING_DECIDE, None),
         "meta/gating/pending" | "meta/gating/audit" => one(ACTION_GATING_VIEW, None),
+        crate::rpc::CONSOLE_AUDIT_METHOD => one(ACTION_AUDIT_VIEW, None),
         "meta/mob_events/query" | "meta/mob_events/subscribe" => one(ACTION_MOB_OBSERVE, None),
         "meta/reconcile_edges"
         | "meta/cross_mob/wire_local"
@@ -5125,8 +5475,9 @@ fn normalized_console_rpc_string_param(params: &Value, key: &str) -> Option<Stri
 
 /// The member target fields a console RPC may carry, in the order the access
 /// requirements pick one. Every present field is judged, and they must all
-/// name one member.
-const CONSOLE_RPC_MEMBER_TARGET_FIELDS: [&str; 4] =
+/// name one member. The console audit log keeps them before any other field
+/// of a change's target.
+pub(crate) const CONSOLE_RPC_MEMBER_TARGET_FIELDS: [&str; 4] =
     ["identity", "member_id", "agent_id", "agent_identity"];
 
 /// The present, non-empty member target fields of a request.
@@ -5193,6 +5544,20 @@ fn console_announcement_member_refusal(method: &str, params: &Value) -> Option<J
     })
 }
 
+/// [`console_rpc_access_violation`] under the access configuration committed
+/// now: a change that waited after the request's own access check re-reads
+/// its caller's grants right before it is handed to its owner, so a grant
+/// withdrawn meanwhile is honored. Without a controller there is nothing to
+/// re-read.
+pub(crate) fn live_access_violation(
+    view: Option<&AccessView>,
+    method: &str,
+    params: &Value,
+) -> Option<JsonRpcError> {
+    let live = view.map(AccessView::refreshed)?;
+    console_rpc_access_violation(Some(&live), method, params)
+}
+
 /// Returns the denial error when the caller's view forbids the method.
 /// Every mapped requirement must pass; the first failing one is reported.
 ///
@@ -5201,7 +5566,7 @@ fn console_announcement_member_refusal(method: &str, params: &Value) -> Option<J
 /// ([`AccessView::hides_agent`]: it is private to another person), in a
 /// member target field or as a member a requirement targets (a flow's bound
 /// members), is answered as a request naming an unknown member.
-fn console_rpc_access_violation(
+pub(crate) fn console_rpc_access_violation(
     view: Option<&AccessView>,
     method: &str,
     params: &Value,
@@ -5252,11 +5617,13 @@ fn console_rpc_access_violation(
 }
 
 /// `meta/console/revoke_sessions` on the console route. With an access
-/// controller, enforced or not, only an access admin may revoke, as for the
-/// `meta/access/*` edits ([`handle_access_admin_rpc`]); on a console without
-/// one, any caller a token identified may, as it may every other console
-/// edit, and an anonymous caller may not. A read-only console refuses it,
-/// and so does a console whose session fence record has no file.
+/// controller, enforced or not, only an access admin may revoke, anyone's
+/// sessions, as for the `meta/access/*` edits ([`handle_access_admin_rpc`]).
+/// On a console without one, a caller its token identified revokes only
+/// their own sessions, and an anonymous caller none. Either way a request
+/// that leaves `principal` out names the caller (the target comes from the
+/// connection). A read-only console refuses it, and so does a console whose
+/// session fence record has no file.
 fn console_revoke_sessions_rpc(
     state: &ConsoleJsonState,
     auth: &ConsoleHttpAuthContext,
@@ -5268,20 +5635,33 @@ fn console_revoke_sessions_rpc(
     if read_only && is_console_mutating_rpc_method(&request.method) {
         return console_read_only_rpc_error(response_id);
     }
+    let caller = auth.principal.as_deref();
+    let principal = match request.params.get("principal") {
+        None | Some(Value::Null) => caller,
+        Some(Value::String(principal)) => Some(principal.as_str()),
+        Some(_) => return invalid_params(response_id, "principal must be a string"),
+    };
     let permitted = match auth.access_view.as_ref() {
         Some(view) => view.can_administer(),
-        None => auth.principal.is_some(),
+        None => caller.is_some() && principal == caller,
     };
     if !permitted {
-        return access_denied_rpc_error(response_id, "access denied: access.admin");
+        let message = match (auth.access_view.as_ref(), caller) {
+            (None, Some(_)) => {
+                "access denied: without access control a caller revokes only their own sessions"
+            }
+            _ => "access denied: access.admin",
+        };
+        return access_denied_rpc_error(response_id, message);
     }
-    let Some(principal) = request.params.get("principal").and_then(Value::as_str) else {
+    let Some(principal) = principal else {
         return invalid_params(response_id, "principal must be a string");
     };
-    match state
-        .session_fences
-        .revoke_sessions(principal, std::time::SystemTime::now())
-    {
+    match state.session_fences.revoke_sessions_by(
+        principal,
+        std::time::SystemTime::now(),
+        auth.principal.as_deref(),
+    ) {
         Ok(fence) => response_value(
             response_id,
             Some(crate::rpc::console_session_fence_json(&fence)),
@@ -5332,6 +5712,74 @@ fn access_denied_rpc_error(response_id: Value, message: impl Into<String>) -> Va
             data: Some(json!({ "kind": "access_denied" })),
         }),
     )
+}
+
+/// `meta/console/sign_out` on the console route: sign the caller out of the
+/// login its token belongs to (the issuer's `sid`, or the token alone
+/// without one), as of now. Every caller a token identified may sign itself
+/// out, under an access controller or not and on a read-only console too:
+/// ending one's own login changes nothing else. A caller the console did not
+/// identify by a token has no login to sign out and is answered 401. A
+/// console whose session fence record has no file refuses it, as it refuses
+/// a revocation: a restart would forget the sign-out.
+fn console_sign_out_rpc(
+    auth: &ConsoleHttpAuthContext,
+    request: &JsonRpcRequest,
+) -> (StatusCode, Json<Value>) {
+    use crate::auth::session_fence::ConsoleSessionFencesError;
+    use crate::runtime::ConsoleSignOutError;
+    let response_id = request.id.clone().unwrap_or(Value::Null);
+    let Some(verification) = auth.verification.as_ref() else {
+        return console_rpc_unauthenticated_response_with(
+            response_id,
+            "unauthorized: signing out needs the token of the login to end, in the \
+             Authorization header",
+        );
+    };
+    let error = |code: i64, message: String| {
+        response_value(
+            response_id.clone(),
+            None,
+            Some(JsonRpcError {
+                code,
+                message,
+                data: None,
+            }),
+        )
+    };
+    let response = match verification.sign_out_at(std::time::SystemTime::now()) {
+        Ok(signed_out) => response_value(
+            response_id.clone(),
+            Some(crate::rpc::console_sign_out_json(&signed_out)),
+            None,
+        ),
+        Err(ConsoleSignOutError::NotCurrent) => response_value(
+            response_id.clone(),
+            None,
+            Some(ConsoleCallerRefusal::NotCurrent.json_rpc_error()),
+        ),
+        Err(ConsoleSignOutError::Fences(ConsoleSessionFencesError::NotDurable)) => error(
+            crate::rpc::CAPABILITY_UNAVAILABLE_CODE,
+            "this console has no durable session fence record, so a sign-out would not \
+             survive a restart; configure the gateway's state directory"
+                .to_string(),
+        ),
+        // The sign-out took effect; only its durability is not confirmed.
+        Err(ConsoleSignOutError::Fences(ConsoleSessionFencesError::DurabilityUnconfirmed {
+            error: sync_error,
+            ..
+        })) => error(
+            -32603,
+            format!(
+                "signed out, but the session fence record's directory could not be synced \
+                 ({sync_error}), so the sign-out may not survive a power loss"
+            ),
+        ),
+        Err(ConsoleSignOutError::Fences(fence_error)) => {
+            error(-32603, format!("console sign-out failed: {fence_error}"))
+        }
+    };
+    (StatusCode::OK, Json::<Value>(response))
 }
 
 fn access_unavailable_rpc_error(response_id: Value) -> Value {
@@ -6044,7 +6492,7 @@ mod memory_panel_records_paging_tests {
         let token = store
             .stage(crate::StagedMutationBatch {
                 realm: realm.to_string(),
-                author: MemoryAuthor::Operator,
+                author: MemoryAuthor::Operator { principal: None },
                 kind: StagedBatchKind::FreshWrite,
                 ops,
             })
@@ -6628,16 +7076,14 @@ fn memory_quarantine_decide_requirements(
     requirements
 }
 
-/// The reviewer recorded on a quarantine decision: the authenticated console
-/// principal only, never a name the caller asserts. This is attribution, not
-/// authorization: grants were already enforced for whoever called, an
-/// anonymous caller included, whenever access control is on. Only a host
-/// that runs without app auth reaches here with no principal, and the
-/// decision then records that none was known.
-fn memory_quarantine_reviewer(
+/// The author recorded on a memory written from the console: the operator,
+/// named by the authenticated console principal only, never a name the
+/// caller asserts. A console that runs without app auth may know no
+/// principal, and the record then names none.
+fn console_memory_author(
     authenticated_principal: Option<&str>,
-) -> crate::memory::review::QuarantineReviewer {
-    crate::memory::review::QuarantineReviewer::Operator {
+) -> crate::memory::records::MemoryAuthor {
+    crate::memory::records::MemoryAuthor::Operator {
         principal: authenticated_principal
             .map(str::trim)
             .filter(|principal| !principal.is_empty())
@@ -6648,10 +7094,13 @@ fn memory_quarantine_reviewer(
 /// The operator half of quarantine review (§10.1 "until steward/operator
 /// review"): one decision over a quarantined record in the identity's scope.
 /// Access was enforced up front; the store binds the decision to that scope
-/// and to the reviewed content, and refuses anything it cannot decide.
+/// and to the reviewed content, and refuses anything it cannot decide. The
+/// reviewer is the signed-in person the connection names, never a name the
+/// caller asserts: any other caller decides nothing
+/// (`approver_unauthenticated`).
 async fn handle_memory_quarantine_decide(
     store: Option<&dyn crate::memory::capabilities::MemoryPanelStore>,
-    authenticated_principal: Option<&str>,
+    decider: Option<ConsoleApprovalDecider>,
     params: &Value,
     response_id: Value,
 ) -> Value {
@@ -6664,8 +7113,26 @@ async fn handle_memory_quarantine_decide(
             return invalid_params(response_id, format!("Invalid params: {}", err.message()));
         }
     };
+    #[cfg(test)]
+    console_decide_holds::pass(
+        params
+            .get("memory_id")
+            .and_then(Value::as_str)
+            .map_or("", str::trim),
+    )
+    .await;
+    // Right before the decision is handed to the store: a person, still
+    // current, under the grants the access configuration holds now.
+    let Some(decider) = decider else {
+        return approver_unauthenticated_rpc_error(response_id);
+    };
+    if let Err(error) = decider.recheck("meta/memory/quarantine/decide", params) {
+        return response_value(response_id, None, Some(error));
+    }
     let realm = request.realm.clone();
-    let reviewer = memory_quarantine_reviewer(authenticated_principal);
+    let reviewer = crate::memory::review::QuarantineReviewer::Operator {
+        principal: Some(decider.principal.clone()),
+    };
     let outcome = store
         .review_quarantined(crate::memory::review::QuarantineReviewRequest {
             scope: crate::memory::records::MemoryScope::Identity {
@@ -7234,6 +7701,12 @@ fn invalid_access_config_detail(error: &crate::access::AccessConfigError) -> Str
         | AccessConfigError::ApproverWithoutHolders(_)
         | AccessConfigError::UnknownApproverGroup { .. }
         | AccessConfigError::UnknownRule(_)
+        | AccessConfigError::InvalidIngressName { .. }
+        | AccessConfigError::OperatorIngressWithSubject { .. }
+        | AccessConfigError::InvalidIngressSubject { .. }
+        | AccessConfigError::ApproverPersonWithoutIdentity { .. }
+        | AccessConfigError::DuplicatePersonIdentity { .. }
+        | AccessConfigError::UnknownIngress { .. }
         | AccessConfigError::RevisionExhausted => error.to_string(),
         AccessConfigError::Parse(_) => {
             "access configuration could not be written as TOML".to_string()
@@ -7242,8 +7715,37 @@ fn invalid_access_config_detail(error: &crate::access::AccessConfigError) -> Str
     }
 }
 
-/// Returns None only for a legacy payload with no checked-version key. Any
-/// malformed, mixed or unknown checked envelope is terminal invalid params.
+/// The `meta/access/*` methods that change the configuration. On the
+/// console each one needs `checked_v1`.
+const ACCESS_WRITE_METHODS: &[&str] = &[
+    "meta/access/set",
+    "meta/access/enable",
+    "meta/access/rules/upsert",
+    "meta/access/rules/delete",
+    "meta/access/groups/set",
+    "meta/access/groups/delete",
+];
+
+/// A console access write without `checked_v1` (the owner instance and the
+/// revision it was made against): refused, so no write lands over an edit
+/// its client did not see.
+fn access_revision_required_rpc_error(response_id: Value) -> Value {
+    response_value(
+        response_id,
+        None,
+        Some(JsonRpcError {
+            code: -32602,
+            message: "Access changes need checked_v1 with the owner_instance and the \
+                      expected_revision read from meta/access/get."
+                .to_string(),
+            data: Some(json!({ "kind": "revision_required" })),
+        }),
+    )
+}
+
+/// `None` for a request with no checked-version key: a read, or a write the
+/// caller refuses as `revision_required`. Any malformed, mixed or unknown
+/// checked envelope is terminal invalid params.
 fn checked_access_mutation(
     method: &str,
     params: &Value,
@@ -7391,13 +7893,16 @@ fn handle_access_admin_rpc(
         }
     };
     // Only the authenticated view's subject is forwarded. Its captured admin
-    // decision is not the final authority at either serialized write boundary.
+    // decision is not the final authority at the serialized write boundary.
+    // Every write names the owner instance and the revision it was made
+    // against (`checked_v1`); a write without them is refused, never applied
+    // over an edit its client did not see.
     match checked_access_mutation(&request.method, &request.params) {
         Ok(Some((expected, mutation))) => {
             return Some(
                 match controller.mutate_admin(
                     view.and_then(AccessView::subject),
-                    Some(expected),
+                    expected,
                     mutation,
                 ) {
                     Ok(revision) => {
@@ -7413,78 +7918,27 @@ fn handle_access_admin_rpc(
                 "Invalid checked access request.",
             ));
         }
+        Ok(None) if ACCESS_WRITE_METHODS.contains(&request.method.as_str()) => {
+            return Some(access_revision_required_rpc_error(response_id));
+        }
         Ok(None) => {}
     }
-    let legacy_write = |mutation| {
-        controller
-            .mutate_admin(view.and_then(AccessView::subject), None, mutation)
-            .map(|revision| json!({ "revision": revision }))
-    };
     let result = match request.method.as_str() {
         "meta/access/get" => {
-            let (config, revision) =
-                match controller.admin_config(view.and_then(AccessView::subject)) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => return Some(access_edit_rpc_error(response_id, error)),
-                };
-            let mut result = json!({ "config": &*config, "revision": revision });
+            let read = match controller.admin_read(view.and_then(AccessView::subject)) {
+                Ok(read) => read,
+                Err(error) => return Some(access_edit_rpc_error(response_id, error)),
+            };
+            let mut result = json!({ "config": &*read.config, "revision": read.revision });
             add_access_edit_metadata(controller, &mut result);
+            if let Some(edit) = read.last_edit {
+                result["last_edit"] = json!({
+                    "principal": edit.principal,
+                    "at_ms": edit.at_ms,
+                    "revision": edit.revision,
+                });
+            }
             Ok(result)
-        }
-        "meta/access/set" => {
-            match serde_json::from_value(request.params.get("config").cloned().unwrap_or_default())
-            {
-                Ok(config) => legacy_write(crate::access::AccessMutation::Replace(config)),
-                Err(_) => {
-                    return Some(invalid_params(response_id, "Invalid access config."));
-                }
-            }
-        }
-        "meta/access/rules/upsert" => {
-            match serde_json::from_value::<AccessRule>(
-                request.params.get("rule").cloned().unwrap_or_default(),
-            ) {
-                Ok(rule) => legacy_write(crate::access::AccessMutation::UpsertRule(rule)),
-                Err(_) => {
-                    return Some(invalid_params(response_id, "Invalid access rule."));
-                }
-            }
-        }
-        "meta/access/rules/delete" => {
-            let Some(rule_id) = request.params.get("id").and_then(Value::as_str) else {
-                return Some(invalid_params(response_id, "id required"));
-            };
-            legacy_write(crate::access::AccessMutation::DeleteRule(
-                rule_id.to_string(),
-            ))
-        }
-        "meta/access/groups/set" => {
-            let Some(name) = request.params.get("name").and_then(Value::as_str) else {
-                return Some(invalid_params(response_id, "name required"));
-            };
-            match serde_json::from_value::<AccessGroup>(
-                request.params.get("group").cloned().unwrap_or_default(),
-            ) {
-                Ok(group) => legacy_write(crate::access::AccessMutation::SetGroup(
-                    name.to_string(),
-                    group,
-                )),
-                Err(_) => {
-                    return Some(invalid_params(response_id, "Invalid access group."));
-                }
-            }
-        }
-        "meta/access/groups/delete" => {
-            let Some(name) = request.params.get("name").and_then(Value::as_str) else {
-                return Some(invalid_params(response_id, "name required"));
-            };
-            legacy_write(crate::access::AccessMutation::DeleteGroup(name.to_string()))
-        }
-        "meta/access/enable" => {
-            let Some(enabled) = request.params.get("enabled").and_then(Value::as_bool) else {
-                return Some(invalid_params(response_id, "enabled (bool) required"));
-            };
-            legacy_write(crate::access::AccessMutation::SetEnabled(enabled))
         }
         "meta/access/preview" => {
             let subject = request.params.get("subject").and_then(Value::as_str);
@@ -7740,7 +8194,7 @@ pub async fn console_rpc_multipart_handler(
             );
         }
     };
-    let mut parsed_request = match serde_json::from_str::<JsonRpcRequest>(&payload) {
+    let parsed_request = match serde_json::from_str::<JsonRpcRequest>(&payload) {
         Ok(req) => req,
         Err(err) => {
             return (
@@ -7753,22 +8207,54 @@ pub async fn console_rpc_multipart_handler(
             );
         }
     };
+    // A blob upload and its row in the console audit log run on the server,
+    // a refusal included (`crate::console_audit`): a caller that goes away
+    // cuts neither short.
+    let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
+    let viewer_principal = auth_context.principal.clone();
+    let viewer = crate::side_chat::SideChatCreatorViewer::new(
+        viewer_principal.as_deref(),
+        auth_context.access_view.as_ref(),
+    );
+    let (status, mut response) =
+        match audit::ConsoleAuditIntent::of(&state, &auth_context, &parsed_request) {
+            None => {
+                console_rpc_multipart_answer(&state, &auth_context, parsed_request, files).await
+            }
+            Some(intent) => intent
+                .run(
+                    async move {
+                        console_rpc_multipart_answer(&state, &auth_context, parsed_request, files)
+                            .await
+                    },
+                    (StatusCode::OK, console_change_lost(response_id.clone())),
+                    audit::status_json_rpc_row,
+                )
+                .await
+                .unwrap_or_else(|| (StatusCode::OK, console_change_lost(response_id))),
+        };
+    crate::side_chat::clear_unseen_side_chat_creators(&mut response, viewer);
+    (status, Json::<Value>(response))
+}
+
+/// The answer of one authenticated `POST /console/rpc/multipart` request
+/// whose payload part is `parsed_request` and whose file parts are `files`.
+async fn console_rpc_multipart_answer(
+    state: &ConsoleJsonState,
+    auth_context: &ConsoleHttpAuthContext,
+    mut parsed_request: JsonRpcRequest,
+    files: std::collections::BTreeMap<String, MultipartImageUpload>,
+) -> (StatusCode, Value) {
     let response_id = parsed_request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
         crate::member_comms_id::validate_public_rpc_member_aliases(&parsed_request.params)
     {
-        return (
-            StatusCode::OK,
-            Json::<Value>(invalid_params(response_id, message)),
-        );
+        return (StatusCode::OK, invalid_params(response_id, message));
     }
     let expected_caller_scope = match take_expected_caller_scope(&mut parsed_request.params) {
         Ok(scope) => scope,
         Err(message) => {
-            return (
-                StatusCode::OK,
-                Json::<Value>(invalid_params(response_id, message)),
-            );
+            return (StatusCode::OK, invalid_params(response_id, message));
         }
     };
     if is_console_mutating_rpc_method(&parsed_request.method)
@@ -7776,18 +8262,11 @@ pub async fn console_rpc_multipart_handler(
     {
         return (
             StatusCode::OK,
-            Json::<Value>(response_value(
-                response_id,
-                None,
-                Some(refusal.json_rpc_error()),
-            )),
+            response_value(response_id, None, Some(refusal.json_rpc_error())),
         );
     }
     if state.decisions.console.read_only && is_console_mutating_rpc_method(&parsed_request.method) {
-        return (
-            StatusCode::OK,
-            Json::<Value>(console_read_only_rpc_error(response_id)),
-        );
+        return (StatusCode::OK, console_read_only_rpc_error(response_id));
     }
     // A candidate launch admits no member input, attachments included.
     if let Some(runtime) = state.runtime.as_ref()
@@ -7801,7 +8280,7 @@ pub async fn console_rpc_multipart_handler(
     {
         return (
             StatusCode::OK,
-            Json::<Value>(response_value(response_id, refusal.result, refusal.error)),
+            response_value(response_id, refusal.result, refusal.error),
         );
     }
     match parsed_request.method.as_str() {
@@ -7809,10 +8288,10 @@ pub async fn console_rpc_multipart_handler(
             let Some(aggregator) = &state.console_aggregator else {
                 return (
                     StatusCode::OK,
-                    Json::<Value>(invalid_params(
+                    invalid_params(
                         response_id,
                         "meta/console/send multipart requires a console aggregator",
-                    )),
+                    ),
                 );
             };
             let Some(identity) = parsed_request
@@ -7822,14 +8301,14 @@ pub async fn console_rpc_multipart_handler(
             else {
                 return (
                     StatusCode::OK,
-                    Json::<Value>(invalid_params(response_id, "identity required")),
+                    invalid_params(response_id, "identity required"),
                 );
             };
             // Gate BEFORE externalizing/persisting uploads, mirroring the JSON
             // /console/send gate-first ordering. Without this, a caller denied
             // `agent.send` on this identity could still write attacker-supplied
             // image bytes into the target identity's blob store (a pre-auth
-            // side effect / storage-amplification vector) — the send is denied
+            // side effect / storage-amplification vector): the send is denied
             // later, but the blob write already happened. Prime the attribute
             // cache first so role/label-scoped deny rules resolve fail-closed.
             if let Some(runtime) = &state.runtime {
@@ -7842,7 +8321,7 @@ pub async fn console_rpc_multipart_handler(
             ) {
                 return (
                     StatusCode::OK,
-                    Json::<Value>(response_value(response_id, None, Some(violation))),
+                    response_value(response_id, None, Some(violation)),
                 );
             }
             let binary_blob_store =
@@ -7851,17 +8330,14 @@ pub async fn console_rpc_multipart_handler(
                     Ok(None) => {
                         return (
                             StatusCode::OK,
-                            Json::<Value>(invalid_params(
+                            invalid_params(
                                 response_id,
                                 "binary blob store unavailable for identity",
-                            )),
+                            ),
                         );
                     }
                     Err(err) => {
-                        return (
-                            StatusCode::OK,
-                            Json::<Value>(console_send_rpc_error(response_id, err)),
-                        );
+                        return (StatusCode::OK, console_send_rpc_error(response_id, err));
                     }
                 };
             if let Err(message) = externalize_image_upload_placeholders(
@@ -7871,31 +8347,24 @@ pub async fn console_rpc_multipart_handler(
             )
             .await
             {
-                return (
-                    StatusCode::OK,
-                    Json::<Value>(invalid_params(response_id, message)),
-                );
+                return (StatusCode::OK, invalid_params(response_id, message));
             }
         }
         "meta/blob/upload" => {
             let Some(runtime) = &state.runtime else {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json::<Value>(json_rpc_error_value(
+                    json_rpc_error_value(
                         response_id,
                         -32600,
                         "meta/blob/upload multipart requires a unified runtime",
-                    )),
+                    ),
                 );
             };
             let Some(binary_blob_store) = runtime.binary_blob_store() else {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json::<Value>(json_rpc_error_value(
-                        response_id,
-                        -32000,
-                        "binary blob store unavailable",
-                    )),
+                    json_rpc_error_value(response_id, -32000, "binary blob store unavailable"),
                 );
             };
             let result = match externalize_single_image_upload(
@@ -7907,24 +8376,21 @@ pub async fn console_rpc_multipart_handler(
             {
                 Ok(result) => result,
                 Err(message) => {
-                    return (
-                        StatusCode::OK,
-                        Json::<Value>(invalid_params(response_id, message)),
-                    );
+                    return (StatusCode::OK, invalid_params(response_id, message));
                 }
             };
             return (
                 StatusCode::OK,
-                Json::<Value>(response_value(response_id, Some(result), None)),
+                response_value(response_id, Some(result), None),
             );
         }
         _ => {
             return (
                 StatusCode::OK,
-                Json::<Value>(invalid_params(
+                invalid_params(
                     response_id,
                     "multipart RPC supports meta/console/send and meta/blob/upload only",
-                )),
+                ),
             );
         }
     }
@@ -7933,15 +8399,11 @@ pub async fn console_rpc_multipart_handler(
         // The send checks its caller again right before it is handed to the
         // aggregator, as the runtime dispatch does.
         if let Err(refusal) =
-            ConsoleSendGovernance::for_request(&state, &auth_context).refuse_unless_caller_current()
+            ConsoleSendGovernance::for_request(state, auth_context).refuse_unless_caller_current()
         {
             return (
                 StatusCode::OK,
-                Json::<Value>(response_value(
-                    response_id,
-                    None,
-                    Some(refusal.json_rpc_error()),
-                )),
+                response_value(response_id, None, Some(refusal.json_rpc_error())),
             );
         }
         Box::pin(handle_console_aggregator_rpc(
@@ -7952,17 +8414,18 @@ pub async fn console_rpc_multipart_handler(
             state.access.as_ref(),
             Some(&auth_context.audience),
             &auth_context.send_scope(),
+            Some(&auth_context.sender(&state.decisions)),
         ))
         .await
     } else {
         let Some(runtime) = &state.runtime else {
             return (
                 StatusCode::NOT_FOUND,
-                Json::<Value>(json_rpc_error_value(
+                json_rpc_error_value(
                     response_id,
                     -32600,
                     "console rpc multipart requires a unified runtime",
-                )),
+                ),
             );
         };
         Box::pin(handle_console_runtime_rpc_with_visibility(
@@ -7990,12 +8453,12 @@ pub async fn console_rpc_multipart_handler(
             state.workgraph.as_ref(),
             state.topology.as_ref(),
             state.mob_announcements.get(),
-            &ConsoleSendGovernance::for_request(&state, &auth_context),
-            &console_topology_apply_scope(&auth_context),
+            &ConsoleSendGovernance::for_request(state, auth_context),
+            &console_topology_apply_scope(auth_context),
         ))
         .await
     };
-    (StatusCode::OK, Json::<Value>(response_value))
+    (StatusCode::OK, response_value)
 }
 
 pub async fn blob_get_handler(
@@ -8120,7 +8583,7 @@ fn console_request_auth_context(
 /// The Console's request authentication, shared by the Console's own routes
 /// and [`ConsoleViewerResolver`]. A token is checked against the Console's
 /// session fence record `fences` as it is now.
-fn console_request_auth_context_for(
+pub(crate) fn console_request_auth_context_for(
     decisions: &RuntimeDecisionState,
     fences: &crate::auth::session_fence::ConsoleSessionFences,
     access: Option<&AccessController>,
@@ -8427,6 +8890,96 @@ fn console_write_auth_context(
 /// too.
 pub(crate) fn token_only_in_query(headers: &HeaderMap, uri: &Uri) -> bool {
     header_bearer_token(headers).is_none() && query_auth_token(uri).is_some()
+}
+
+/// The caller of a change on the Console's listener that a route outside
+/// the console's own router serves (the Flow Editor RPC), resolved as a
+/// console write's caller is ([`console_write_auth_context`]): the same
+/// decisions, session fence record and access controller, and a token only
+/// in the query string refused.
+pub(crate) struct ConsoleChangeCaller {
+    auth: ConsoleHttpAuthContext,
+}
+
+impl ConsoleChangeCaller {
+    /// The request's caller; `None` when the Console refuses the request as
+    /// unauthenticated (answered 401).
+    pub(crate) fn resolve(
+        decisions: &RuntimeDecisionState,
+        fences: &crate::auth::session_fence::ConsoleSessionFences,
+        access: Option<&AccessController>,
+        headers: &HeaderMap,
+        uri: &Uri,
+    ) -> Option<Self> {
+        if token_only_in_query(headers, uri) {
+            return None;
+        }
+        console_request_auth_context_for(decisions, fences, access, headers, uri)
+            .map(|auth| Self { auth })
+    }
+
+    /// The caller's access snapshot, when an access controller is
+    /// installed (an anonymous view on an open Console).
+    pub(crate) fn access_view(&self) -> Option<&AccessView> {
+        self.auth.access_view.as_ref()
+    }
+
+    /// The opaque caller scope `meta/console/whoami` reports for this
+    /// caller.
+    pub(crate) fn caller_scope(&self) -> String {
+        self.auth.caller_scope()
+    }
+
+    /// Refuse a change made for another caller: `expected` is the
+    /// request's `expected_caller_scope`, if any.
+    pub(crate) fn refuse_other_caller(
+        &self,
+        expected: Option<&str>,
+    ) -> Result<(), ConsoleCallerRefusal> {
+        self.auth.refuse_other_caller(expected)
+    }
+
+    /// The check this caller passes again right before its change is made,
+    /// after the change's awaits and reads, wherever it runs.
+    pub(crate) fn current_check(&self) -> ConsoleCallerCurrentCheck {
+        ConsoleCallerCurrentCheck {
+            verification: self.auth.verification.clone(),
+        }
+    }
+}
+
+/// Whether a console caller is still current, checked right before its
+/// change is made ([`ConsoleChangeCaller::current_check`]).
+#[derive(Clone)]
+pub(crate) struct ConsoleCallerCurrentCheck {
+    verification: Option<crate::runtime::ConsoleCallerVerification>,
+}
+
+impl ConsoleCallerCurrentCheck {
+    /// Refuse when the caller's login ended since the request was accepted,
+    /// by the rule of [`refuse_unless_current`].
+    pub(crate) fn refuse_unless_current(&self) -> Result<(), ConsoleCallerRefusal> {
+        refuse_unless_current(self.verification.as_ref())
+    }
+}
+
+/// Refuse a change whose caller's login ended since the request was
+/// accepted: the token must still pass the Console's acceptance now, its
+/// principal's and its login's session fences included. The open Console's
+/// caller without a token (no `verification`) has no login to end.
+fn refuse_unless_current(
+    verification: Option<&crate::runtime::ConsoleCallerVerification>,
+) -> Result<(), ConsoleCallerRefusal> {
+    match verification {
+        Some(verification)
+            if verification
+                .current_at(std::time::SystemTime::now())
+                .is_none() =>
+        {
+            Err(ConsoleCallerRefusal::NotCurrent)
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug)]
@@ -10229,6 +10782,32 @@ async fn retire_console_member_ids(
     Ok(())
 }
 
+/// The durable identity a console member operation by `member_id` acts on
+/// ([`crate::identity_first::IdentityRuntime::identity_for_member_mutation`]):
+/// `Ok(None)` for a member of the mob's raw plane, and without an identity
+/// runtime. `Err` is the response to answer: the identity runtime's typed
+/// refusal of a name it has not registered that Core holds for an identity,
+/// or whose Core entry could not be read.
+async fn console_member_operation_identity(
+    identity_runtime: Option<&Arc<crate::identity_first::IdentityRuntime>>,
+    response_id: &Value,
+    member_id: &str,
+) -> Result<Option<crate::identity_first::AgentIdentity>, Value> {
+    let Some(identity_runtime) = identity_runtime else {
+        return Ok(None);
+    };
+    identity_runtime
+        .identity_for_member_mutation(member_id)
+        .await
+        .map_err(|error| {
+            response_value(
+                response_id.clone(),
+                None,
+                Some(crate::rpc::identity_json_rpc_error(&error)),
+            )
+        })
+}
+
 fn console_identity_error_response(
     response_id: Value,
     operation: &str,
@@ -10262,6 +10841,7 @@ async fn handle_console_aggregator_rpc(
     access: Option<&AccessController>,
     access_view: Option<&AccessView>,
     send_scope: &ConsoleSendScope,
+    sender: Option<&crate::console_aggregator::ConsoleSender>,
 ) -> Value {
     let response_id = request.id.clone().unwrap_or(Value::Null);
     if let Err(message) =
@@ -10327,6 +10907,7 @@ async fn handle_console_aggregator_rpc(
             let mut methods = vec![
                 "meta/capabilities",
                 crate::rpc::CONSOLE_WHOAMI_METHOD,
+                crate::rpc::CONSOLE_SIGN_OUT_METHOD,
                 "meta/console/list_identities",
                 "meta/console/inspect_identity",
                 "meta/console/query_timeline",
@@ -10471,10 +11052,13 @@ async fn handle_console_aggregator_rpc(
                         return invalid_params(response_id, format!("invalid send params: {err}"));
                     }
                 };
+            if let Some(refusal) = reserved_origin_kind_refusal(&send_request) {
+                return invalid_params(response_id, refusal);
+            }
             let Some(aggregator) = &console_aggregator else {
                 return console_aggregator_unavailable(response_id);
             };
-            match Box::pin(aggregator.send_scoped(send_request, send_scope)).await {
+            match Box::pin(aggregator.send_scoped(send_request, send_scope, sender)).await {
                 Ok(accepted) => response_value(
                     response_id,
                     Some(serde_json::to_value(accepted).unwrap_or(Value::Null)),
@@ -10565,43 +11149,162 @@ fn console_aggregator_unavailable(response_id: Value) -> Value {
     )
 }
 
-/// Who a console gating decision is made as.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ConsoleGatingDecider {
-    /// An authenticated principal and the approver ids it holds.
-    Principal(crate::runtime::GatingDecider),
-    /// An unauthenticated local console names the approver explicitly.
-    Explicit(String),
+/// The person who decides a console approval: the verified human the
+/// connection's token names, as the access principal the Console resolved
+/// it to. Every other caller decides nothing (`approver_unauthenticated`),
+/// and no request field names an approver.
+pub(crate) struct ConsoleApprovalDecider {
+    human: crate::runtime::AuthenticatedConsoleHuman,
+    principal: String,
+    /// The request's access view: its configuration is the one the request
+    /// started under, re-read when the decision is handed to its owner.
+    access: Option<AccessView>,
 }
 
-fn resolve_gating_decider(
-    params: &Value,
-    authenticated_principal: Option<&str>,
-    access_view: Option<&AccessView>,
-) -> Result<ConsoleGatingDecider, &'static str> {
-    if let Some(principal) = authenticated_principal.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then_some(trimmed)
-    }) {
-        // Identity comes only from authentication and the live access
-        // bindings; request fields are never identity evidence here.
-        return Ok(ConsoleGatingDecider::Principal(
-            crate::runtime::GatingDecider {
-                principal: principal.to_string(),
-                held_approver_ids: access_view
-                    .map(AccessView::held_approver_ids)
-                    .unwrap_or_default(),
-            },
-        ));
+impl std::fmt::Debug for ConsoleApprovalDecider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsoleApprovalDecider")
+            .finish_non_exhaustive()
     }
-    let Some(approver_id) = params.get("approver_id").and_then(Value::as_str) else {
-        return Err("approver_id required");
-    };
-    let trimmed = approver_id.trim();
-    if trimmed.is_empty() {
-        return Err("approver_id required");
+}
+
+impl ConsoleApprovalDecider {
+    /// The decider of a request, or `None` when its caller is not a verified
+    /// person.
+    fn of(
+        governance: &ConsoleSendGovernance,
+        authenticated_principal: Option<&str>,
+        access: Option<&AccessView>,
+    ) -> Option<Self> {
+        let human = governance.human.clone()?;
+        let principal = authenticated_principal
+            .map(str::trim)
+            .filter(|principal| !principal.is_empty())?;
+        Some(Self {
+            human,
+            principal: principal.to_string(),
+            access: access.cloned(),
+        })
     }
-    Ok(ConsoleGatingDecider::Explicit(trimmed.to_string()))
+
+    /// The access principal the person decides as.
+    pub(crate) fn principal(&self) -> &str {
+        &self.principal
+    }
+
+    /// The person is still current, right before the decision is applied:
+    /// its retained token still verifies (its session fence included) as
+    /// the same access principal.
+    pub(crate) fn still_current(&self) -> bool {
+        self.human
+            .current()
+            .is_ok_and(|principal| principal == self.principal)
+    }
+
+    /// After the route's last await, right before the decision of `method`
+    /// is handed to its owner: the person is still current
+    /// (`approver_unauthenticated` otherwise), and the access configuration
+    /// committed now still grants the route's requirements (`access_denied`
+    /// otherwise), so a grant withdrawn while the request waited is honored.
+    pub(crate) fn recheck(&self, method: &str, params: &Value) -> Result<(), JsonRpcError> {
+        if !self.still_current() {
+            return Err(approver_unauthenticated_error());
+        }
+        match live_access_violation(self.access.as_ref(), method, params) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// What the decision's audit records of the person's authentication.
+    fn evidence(&self) -> crate::runtime::GatingDecisionEvidence {
+        crate::runtime::GatingDecisionEvidence {
+            assurance: meerkat_core::ApprovalAssurance::PersonAuthenticated,
+            login_scope_digest: self.human.login_scope_digest(),
+        }
+    }
+}
+
+/// Why a console approval decision was refused under the gating owner.
+enum ConsoleDecideRefusal {
+    /// The person's login ended before the decision was applied.
+    NotCurrent,
+    /// The live access policy refuses the decision.
+    AccessDenied(&'static str),
+}
+
+impl ConsoleDecideRefusal {
+    fn into_rpc_error(self, response_id: Value) -> Value {
+        match self {
+            Self::NotCurrent => approver_unauthenticated_rpc_error(response_id),
+            Self::AccessDenied(message) => access_denied_rpc_error(response_id, message),
+        }
+    }
+}
+
+/// Test hook: holds a Console decision right before its last step, until the
+/// test releases it: a gating decide once it holds the gating owner, a
+/// WorkGraph goal confirmation, a memory quarantine review or a durable
+/// decision request right before its caller is checked again, and a WorkGraph
+/// release once it has read the item. Keyed by the pending id, the binding id,
+/// the memory id, the decision id or the item id.
+#[cfg(test)]
+pub(crate) mod console_decide_holds {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use tokio::sync::Semaphore;
+
+    static HOLDS: Mutex<BTreeMap<String, ConsoleDecideHold>> = Mutex::new(BTreeMap::new());
+
+    /// A hold on the next decide of one pending id.
+    #[derive(Clone)]
+    pub(crate) struct ConsoleDecideHold {
+        reached: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+
+    impl ConsoleDecideHold {
+        /// Hold the next decide of `pending_id`.
+        pub(crate) fn install(pending_id: &str) -> Self {
+            let hold = Self {
+                reached: Arc::new(Semaphore::new(0)),
+                release: Arc::new(Semaphore::new(0)),
+            };
+            HOLDS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(pending_id.to_string(), hold.clone());
+            hold
+        }
+
+        /// Wait until a decide reached the hold.
+        pub(crate) async fn reached(&self) {
+            if let Ok(permit) = self.reached.acquire().await {
+                permit.forget();
+            }
+        }
+
+        /// Let the held decide go on.
+        pub(crate) fn release(&self) {
+            self.release.add_permits(1);
+        }
+    }
+
+    /// Wait at the hold on `pending_id`, when one is installed. A hold
+    /// holds one decide.
+    pub(crate) async fn pass(pending_id: &str) {
+        let hold = HOLDS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(pending_id);
+        if let Some(hold) = hold {
+            hold.reached.add_permits(1);
+            if let Ok(permit) = hold.release.acquire().await {
+                permit.forget();
+            }
+        }
+    }
 }
 
 #[allow(clippy::large_futures, clippy::too_many_arguments)]
@@ -10751,10 +11454,21 @@ async fn handle_console_runtime_rpc_with_visibility(
 
     match request.method.as_str() {
         "meta/capabilities" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            // A decision (a gate, a quarantine review, a goal confirmation)
+            // is listed only to a signed-in person, as `whoami` reports one,
+            // and a claim, its release and the break-glass reassignment
+            // (which records its caller) only to a caller with a principal:
+            // every other caller is always refused them.
+            let decides = governance.human.is_some();
+            let owns = crate::rpc::workgraph_methods::console_trusted_principal(
+                authenticated_principal,
+            )
+            .is_some();
             let mut methods = vec![
                 "meta/status",
                 "meta/capabilities",
                 crate::rpc::CONSOLE_WHOAMI_METHOD,
+                crate::rpc::CONSOLE_SIGN_OUT_METHOD,
                 "meta/list_members",
                 "meta/get_member",
                 "meta/find_members",
@@ -10829,7 +11543,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/gating/pending",
                     "meta/gating/audit",
                 ]);
-                if can_mutate {
+                if can_mutate && decides {
                     methods.push("meta/gating/decide");
                 }
             }
@@ -10904,7 +11618,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/memory/panel/harvests",
                     "meta/memory/panel/quarantine",
                 ]);
-                if can_mutate {
+                if can_mutate && decides {
                     // The operator half of quarantine review; the probe below
                     // strips it for callers without the reviewer grant.
                     methods.push("meta/memory/quarantine/decide");
@@ -10928,11 +11642,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             if workgraph.is_some() {
                 methods.extend_from_slice(crate::rpc::workgraph_methods::WORKGRAPH_READ_METHODS);
                 if can_mutate {
-                    methods
-                        .extend_from_slice(crate::rpc::workgraph_methods::WORKGRAPH_MUTATE_METHODS);
-                    methods.extend_from_slice(
-                        crate::rpc::workgraph_methods::WORKGRAPH_CONSOLE_MUTATE_METHODS,
+                    methods.extend(
+                        crate::rpc::workgraph_methods::WORKGRAPH_MUTATE_METHODS
+                            .iter()
+                            .copied()
+                            .filter(|method| match *method {
+                                "meta/workgraph/goal/confirm" => decides,
+                                "meta/workgraph/claim" | "meta/workgraph/release" => owns,
+                                _ => true,
+                            }),
                     );
+                    if owns {
+                        methods.extend_from_slice(
+                            crate::rpc::workgraph_methods::WORKGRAPH_CONSOLE_MUTATE_METHODS,
+                        );
+                    }
                 }
             }
             if access.is_some() {
@@ -11171,10 +11895,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             match parse_agent_memory_remember_params(&request.params) {
                 Ok(remember_request) => match identity_runtime
-                    .remember_agent_memory(
+                    .remember_agent_memory_by(
                         &remember_request.realm,
                         &remember_request.identity,
                         remember_request.memory,
+                        console_memory_author(authenticated_principal),
                     )
                     .await
                 {
@@ -11209,10 +11934,11 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             match parse_agent_memory_forget_params(&request.params) {
                 Ok(forget_request) => match identity_runtime
-                    .forget_agent_memory(
+                    .forget_agent_memory_by(
                         &forget_request.realm,
                         &forget_request.identity,
                         &forget_request.memory_id,
+                        console_memory_author(authenticated_principal),
                     )
                     .await
                 {
@@ -11279,11 +12005,12 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             match parse_agent_memory_update_params(&request.params) {
                 Ok(update_request) => match identity_runtime
-                    .update_agent_memory(
+                    .update_agent_memory_by(
                         &update_request.realm,
                         &update_request.identity,
                         &update_request.memory_id,
                         update_request.memory,
+                        console_memory_author(authenticated_principal),
                     )
                     .await
                 {
@@ -11452,7 +12179,7 @@ async fn handle_console_runtime_rpc_with_visibility(
         "meta/memory/quarantine/decide" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             handle_memory_quarantine_decide(
                 memory_panel,
-                authenticated_principal,
+                ConsoleApprovalDecider::of(governance, authenticated_principal, access_view),
                 &request.params,
                 response_id,
             )
@@ -11704,6 +12431,9 @@ async fn handle_console_runtime_rpc_with_visibility(
                         return invalid_params(response_id, format!("invalid send params: {err}"));
                     }
                 };
+            if let Some(refusal) = reserved_origin_kind_refusal(&send_request) {
+                return invalid_params(response_id, refusal);
+            }
             let Some(aggregator) = &console_aggregator else {
                 return response_value(
                     response_id,
@@ -13068,15 +13798,16 @@ async fn handle_console_runtime_rpc_with_visibility(
             // With a cursor, the gap is computed on the owner's full audit;
             // the caller then sees only entries whose origin it may view, and
             // the next cursor never names an entry it cannot see.
-            let (entries, gap) = {
+            let (entries, gap, retention) = {
                 let mut owner = module_runtime.lock().await;
-                match after_audit_id {
+                let (entries, gap) = match after_audit_id {
                     Some(cursor) => {
                         let page = owner.gating_audit_after(Some(cursor));
                         (page.entries, page.gap)
                     }
                     None => (owner.gating_audit_entries(limit), false),
-                }
+                };
+                (entries, gap, owner.gating_retention())
             };
             let entries = entries
                 .into_iter()
@@ -13093,7 +13824,12 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .or_else(|| (!gap).then(|| after_audit_id.map(ToString::to_string)).flatten());
             response_value(
                 response_id,
-                Some(json!({ "entries": entries, "next_cursor": next_cursor, "gap": gap })),
+                Some(json!({
+                    "entries": entries,
+                    "next_cursor": next_cursor,
+                    "gap": gap,
+                    "retention": retention,
+                })),
                 None,
             )
         })
@@ -13115,6 +13851,14 @@ async fn handle_console_runtime_rpc_with_visibility(
             };
             // The gating owner trims IDs. Authorize that same canonical value.
             let pending_id = pending_id.trim();
+            // The approver comes from the connection alone: a request that
+            // names one is refused rather than decided as someone else.
+            if request.params.get("approver_id").is_some() {
+                return invalid_params(
+                    response_id,
+                    "approver_id is not accepted: the console decides as the signed-in person",
+                );
+            }
             if let Some(view) = access_view {
                 let pending = module_runtime.lock().await.list_gating_pending();
                 if pending.iter().any(|entry| {
@@ -13130,11 +13874,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                     );
                 }
             }
-            let decider =
-                match resolve_gating_decider(&request.params, authenticated_principal, access_view) {
-                    Ok(decider) => decider,
-                    Err(message) => return invalid_params(response_id, message),
-                };
+            let Some(decider) =
+                ConsoleApprovalDecider::of(governance, authenticated_principal, access_view)
+            else {
+                return approver_unauthenticated_rpc_error(response_id);
+            };
             let Some(raw_decision) = request.params.get("decision").and_then(Value::as_str) else {
                 return invalid_params(response_id, "decision required");
             };
@@ -13155,76 +13899,67 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
             let mut owner = module_runtime.lock().await;
-            let (decided, notices) = match decider {
-                ConsoleGatingDecider::Principal(decider) => {
-                    let request = GatingDecideRequest {
-                        pending_id: pending_id.to_string(),
-                        approver_id: decider.principal.clone(),
-                        decision,
-                        reason,
-                    };
-                    match access {
-                        // Re-check the current grant, origin and held ids
-                        // under the access fence, through the mutation, so a
-                        // revocation published while this request waited for
-                        // the owner is honored.
-                        Some(controller) => {
-                            let fence = controller.decision_fence(
-                                Some(&decider.principal),
-                                access_view.and_then(AccessView::private_owner_key),
-                            );
-                            let outcome = owner.decide_gating_action_authorized(request, |entry| {
-                                if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
-                                    return Err("access denied to gating decisions");
-                                }
-                                if entry
-                                    .and_then(|entry| entry.origin.as_ref())
-                                    .is_some_and(|origin| !fence.can_view_agent(&origin.identity))
-                                {
-                                    return Err("access denied to approval origin");
-                                }
-                                Ok(crate::runtime::GatingDecider {
-                                    principal: decider.principal.clone(),
-                                    held_approver_ids: fence.held_approver_ids(),
-                                })
-                            });
-                            drop(fence);
-                            (outcome.0, Some(outcome.1))
-                        }
-                        None => {
-                            let (decided, notices) =
-                                owner.decide_gating_action_authorized(request, |_| {
-                                    Ok::<_, &'static str>(decider.clone())
-                                });
-                            (decided, Some(notices))
-                        }
+            // Test hook: the decide waits here while it holds the gating
+            // owner, after the route's last await and before the apply.
+            #[cfg(test)]
+            console_decide_holds::pass(pending_id).await;
+            let request = GatingDecideRequest {
+                pending_id: pending_id.to_string(),
+                approver_id: decider.principal.clone(),
+                decision,
+                reason,
+            };
+            // After the route's last await, right before the decision is
+            // applied: the person must still be current, and the access
+            // fence, held through the mutation so a revocation published
+            // while this request waited is honored, re-reads the grant, the
+            // origin and the approver ids the person holds now.
+            let fence = access.map(|controller| {
+                controller.decision_fence(
+                    Some(&decider.principal),
+                    access_view.and_then(AccessView::private_owner_key),
+                )
+            });
+            let (decided, notices) =
+                owner.decide_gating_action_attested(request, &decider.evidence(), |entry| {
+                    if !decider.still_current() {
+                        return Err(ConsoleDecideRefusal::NotCurrent);
                     }
-                }
-                ConsoleGatingDecider::Explicit(approver_id) => (
-                    Ok(owner.decide_gating_action(GatingDecideRequest {
-                        pending_id: pending_id.to_string(),
-                        approver_id,
-                        decision,
-                        reason,
-                    })),
-                    None,
-                ),
-            };
+                    let Some(fence) = &fence else {
+                        return Ok(crate::runtime::GatingDecider {
+                            principal: decider.principal.clone(),
+                            held_approver_ids: BTreeSet::new(),
+                        });
+                    };
+                    if fence.enforced() && !fence.allows(ACTION_GATING_DECIDE) {
+                        return Err(ConsoleDecideRefusal::AccessDenied(
+                            "access denied to gating decisions",
+                        ));
+                    }
+                    if entry
+                        .and_then(|entry| entry.origin.as_ref())
+                        .is_some_and(|origin| !fence.can_view_agent(&origin.identity))
+                    {
+                        return Err(ConsoleDecideRefusal::AccessDenied(
+                            "access denied to approval origin",
+                        ));
+                    }
+                    Ok(crate::runtime::GatingDecider {
+                        principal: decider.principal.clone(),
+                        held_approver_ids: fence.held_approver_ids(),
+                    })
+                });
+            drop(fence);
             drop(owner);
-            if let Some(notices) = notices {
-                notices.deliver();
-            }
-            let decided = match decided {
-                Ok(decided) => decided,
-                Err(message) => return access_denied_rpc_error(response_id, message),
-            };
+            notices.deliver();
             match decided {
-                Ok(result) => response_value(
+                Err(refusal) => refusal.into_rpc_error(response_id),
+                Ok(Ok(result)) => response_value(
                     response_id,
                     Some(serde_json::to_value(result).unwrap_or(Value::Null)),
                     None,
                 ),
-                Err(err) => gating_decide_error_response(response_id, err),
+                Ok(Err(err)) => gating_decide_error_response(response_id, err),
             }
         })
         .await,
@@ -13512,11 +14247,19 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return response_value(response_id, None, Some(error));
             }
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             if let (Some(identity_runtime_ref), Some(roster)) =
                 (identity_runtime.as_ref(), identity_roster.as_ref())
-                && let Some(identity) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(identity) = mutation_identity.clone()
             {
                 return match identity_runtime_ref
                     .retire_member_alias_tracked(&identity, &member_id)
@@ -13555,9 +14298,7 @@ async fn handle_console_runtime_rpc_with_visibility(
             // authority even when this console has no roster slot (builder-
             // constructed identity runtimes serve these arms too).
             if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(durable) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(durable) = mutation_identity
             {
                 return match identity_runtime_ref
                     .retire_member_alias_tracked(&durable, &member_id)
@@ -13634,11 +14375,19 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return response_value(response_id, None, Some(error));
             }
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             if identity_roster.is_some()
                 && let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(identity) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(identity) = mutation_identity.clone()
             {
                 // Identity-first respawn = reset: retire the live session and
                 // rebuild from the current roster spec under the same durable
@@ -13674,9 +14423,7 @@ async fn handle_console_runtime_rpc_with_visibility(
                 };
             }
             if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(durable) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(durable) = mutation_identity
             {
                 return match identity_runtime_ref
                     .reset_member_alias_tracked(&durable, &member_id)
@@ -13764,19 +14511,29 @@ async fn handle_console_runtime_rpc_with_visibility(
                      has no non-destructive reload (respawn_member is a destructive reset)",
                 );
             };
-            let Some(identity) = identity_runtime_ref
+            let identity = match identity_runtime_ref
                 .identity_for_member_mutation(&member_id)
                 .await
-            else {
-                return response_value(
-                    response_id,
-                    None,
-                    Some(JsonRpcError {
-                        code: -32001,
-                        message: format!("unknown identity: {member_id}"),
-                        data: None,
-                    }),
-                );
+            {
+                Ok(Some(identity)) => identity,
+                Ok(None) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(JsonRpcError {
+                            code: -32001,
+                            message: format!("unknown identity: {member_id}"),
+                            data: None,
+                        }),
+                    );
+                }
+                Err(error) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(crate::rpc::identity_json_rpc_error(&error)),
+                    );
+                }
             };
             let expected_alias = crate::member_comms_id::is_reserved_generated_alias(&member_id)
                 .then_some(member_id.as_str());
@@ -13834,8 +14591,8 @@ async fn handle_console_runtime_rpc_with_visibility(
                 .identity_for_member_mutation(&member_id)
                 .await
             {
-                Some(identity) => identity,
-                None => match crate::identity_first::AgentIdentity::parse(&member_id) {
+                Ok(Some(identity)) => identity,
+                Ok(None) => match crate::identity_first::AgentIdentity::parse(&member_id) {
                     Ok(identity) => identity,
                     Err(_) => {
                         return response_value(
@@ -13849,6 +14606,13 @@ async fn handle_console_runtime_rpc_with_visibility(
                         );
                     }
                 },
+                Err(error) => {
+                    return response_value(
+                        response_id,
+                        None,
+                        Some(crate::rpc::identity_json_rpc_error(&error)),
+                    );
+                }
             };
             match identity_runtime_ref.member_health(&identity).await {
                 Ok(report) => response_value(
@@ -14041,10 +14805,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             }
             // A registered identity answers from its live session, or, when
             // Core holds it Dormant, from its tool record: the read never
-            // wakes it (`tools_source` says which).
+            // wakes it (`tools_source` says which). A status read Core could
+            // not serve refuses typed, never answering from the member plane.
             if let Some(identity_runtime) = identity_runtime.as_ref()
                 && let Ok(parsed) = crate::identity_first::AgentIdentity::parse(&identity)
-                && let Ok(status) = identity_runtime.status(&parsed).await
+                && let Some(status) = match identity_runtime.status(&parsed).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    Err(err) => {
+                        return response_value(
+                            response_id,
+                            None,
+                            Some(crate::rpc::identity_json_rpc_error(&err)),
+                        );
+                    }
+                }
                 && let Some(session_id) = status.session_id
             {
                 match identity_runtime
@@ -14193,9 +14968,21 @@ async fn handle_console_runtime_rpc_with_visibility(
             {
                 return response_value(response_id, None, Some(error));
             }
+            // A status read Core could not serve refuses typed, never
+            // answering from the member plane.
             if let Some(identity_runtime) = identity_runtime.as_ref()
                 && let Ok(parsed) = crate::identity_first::AgentIdentity::parse(&identity)
-                && let Ok(status) = identity_runtime.status(&parsed).await
+                && let Some(status) = match identity_runtime.status(&parsed).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    Err(err) => {
+                        return response_value(
+                            response_id,
+                            None,
+                            Some(crate::rpc::identity_json_rpc_error(&err)),
+                        );
+                    }
+                }
                 && let Some(session_id) = status.session_id
             {
                 return match model_routing_status_for_session(
@@ -14247,11 +15034,19 @@ async fn handle_console_runtime_rpc_with_visibility(
             // identity operation intact, as `meta/stop_member_run` carries it:
             // a member that needs a runtime reload, an unknown member and
             // every other mob refusal keep meerkat's typed code and data.
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             let result: Result<Result<(), meerkat_mob::MobError>, String> =
                 if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                    && let Some(identity) = identity_runtime_ref
-                        .identity_for_member_mutation(&member_id)
-                        .await
+                    && let Some(identity) = mutation_identity
                 {
                     let handle = runtime.handle();
                     // Decode before encoding. This branch has ALREADY resolved an
@@ -14335,13 +15130,21 @@ async fn handle_console_runtime_rpc_with_visibility(
                 Err(_) => return invalid_params(response_id, "run_id must be a UUID"),
             };
             let reason = reason.to_string();
+            let mutation_identity = match console_member_operation_identity(
+                identity_runtime.as_ref(),
+                &response_id,
+                &member_id,
+            )
+            .await
+            {
+                Ok(identity) => identity,
+                Err(response) => return response,
+            };
             let result: Result<
                 Result<meerkat_contracts::WireRunStopReceipt, meerkat_mob::MobError>,
                 String,
             > = if let Some(identity_runtime_ref) = identity_runtime.as_ref()
-                && let Some(identity) = identity_runtime_ref
-                    .identity_for_member_mutation(&member_id)
-                    .await
+                && let Some(identity) = mutation_identity
             {
                 let handle = runtime.handle();
                 let member_id_value =
@@ -15128,18 +15931,25 @@ async fn handle_console_runtime_rpc_with_visibility(
         method if crate::rpc::workgraph_methods::is_workgraph_method(method) => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             // The read-only gate and the workgraph.view/manage ABAC checks
             // already ran above; the surface carries the authenticated
-            // console principal, which goal/confirm promotes into the
-            // trusted confirmation seam and break_glass_reassign records as
-            // the audited operator. The admission always comes from the
-            // runtime (never a parameter): whatever constructed the service,
-            // the unified stdin surface acquires the runtime's admission, so
-            // the console must acquire that same one.
+            // console principal, which owns the caller's claims and which
+            // break_glass_reassign records as the audited operator, the
+            // signed-in person, the only caller goal/confirm accepts, and
+            // the request's access view, which a confirmation and a release
+            // re-read after their last await. The
+            // admission always comes from the runtime (never a parameter):
+            // whatever constructed the service, the unified stdin surface
+            // acquires the runtime's admission, so the console must acquire
+            // that same one.
             let admission = runtime.workgraph_admission();
+            let person =
+                ConsoleApprovalDecider::of(governance, authenticated_principal, access_view);
             match crate::rpc::workgraph_methods::handle_workgraph_method(
                 workgraph,
                 &admission,
                 crate::rpc::workgraph_methods::WorkgraphSurface::Console {
                     authenticated_principal,
+                    person: person.as_ref(),
+                    access: access_view,
                 },
                 method,
                 &request.params,
@@ -17887,6 +18697,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -17904,6 +18722,16 @@ mod tests {
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
             self.core.retire(runtime_id);
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -18006,6 +18834,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -18023,6 +18859,16 @@ mod tests {
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
             self.core.retire(runtime_id);
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -18138,6 +18984,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -18155,6 +19009,16 @@ mod tests {
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
             self.core.retire(runtime_id);
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -18262,6 +19126,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -18279,6 +19151,16 @@ mod tests {
         async fn retire_member(&self, runtime_id: &AgentRuntimeId) -> Result<(), BridgeError> {
             self.core.retire(runtime_id);
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -18889,6 +19771,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         assert_eq!(served["error"]["code"], json!(-32601), "{served:#?}");
@@ -18901,6 +19784,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         let methods = capabilities["result"]["methods"]
@@ -18978,6 +19862,7 @@ comms = true
                 None,
                 None,
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
         };
         let caps = call("meta/capabilities", json!({})).await;
@@ -19012,6 +19897,7 @@ comms = true
                 Some(&restricted),
                 Some(&restricted_view),
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
             .await;
             assert_eq!(denied["error"]["data"]["kind"], "access_denied", "{denied}");
@@ -19158,7 +20044,7 @@ comms = true
                 .remember_authored(
                     &scope(identity),
                     fact(&format!("{identity} fact")),
-                    MemoryAuthor::Operator,
+                    MemoryAuthor::Operator { principal: None },
                 )
                 .await?;
             store
@@ -19168,7 +20054,7 @@ comms = true
                 .propose(
                     &scope(identity),
                     fact(&format!("{identity} proposal")),
-                    MemoryAuthor::Operator,
+                    MemoryAuthor::Operator { principal: None },
                 )
                 .await?;
             records.insert(identity, receipt.memory_id);
@@ -19432,7 +20318,7 @@ comms = true
                     operator: "op-owner".to_string(),
                 },
                 fact("operator preference"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         let stage = shared
@@ -19536,6 +20422,7 @@ comms = true
             Some(controller),
             Some(&view),
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await
     }
@@ -19922,6 +20809,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -19961,7 +20849,7 @@ comms = true
             skill_refs: Vec::new(),
         };
         let accepted = match aggregator
-            .reserve_identity_first_interaction_scoped(request, None, &owner)
+            .reserve_identity_first_interaction_scoped(request, None, &owner, None)
             .await
             .expect("reservation")
         {
@@ -19980,6 +20868,7 @@ comms = true
                     None,
                     None,
                     &scope,
+                    None,
                 )
                 .await
             }
@@ -20052,6 +20941,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         let methods = response["result"]["methods"]
@@ -20096,6 +20986,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -20141,25 +21032,6 @@ comms = true
         assert!(super::is_console_mutating_rpc_method(
             "meta/memory/quarantine/decide"
         ));
-    }
-
-    #[test]
-    fn memory_quarantine_reviewer_is_only_the_authenticated_principal() {
-        use crate::memory::review::QuarantineReviewer;
-        assert_eq!(
-            super::memory_quarantine_reviewer(Some(" alice@example.test ")),
-            QuarantineReviewer::Operator {
-                principal: Some("alice@example.test".to_string())
-            }
-        );
-        assert_eq!(
-            super::memory_quarantine_reviewer(Some("  ")),
-            QuarantineReviewer::Operator { principal: None }
-        );
-        assert_eq!(
-            super::memory_quarantine_reviewer(None),
-            QuarantineReviewer::Operator { principal: None }
-        );
     }
 
     #[test]
@@ -20230,6 +21102,7 @@ comms = true
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
 
@@ -20263,6 +21136,7 @@ comms = true
                 None,
                 None,
                 &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                None,
             )
             .await;
             assert_eq!(
@@ -20482,6 +21356,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         )
         .await;
         assert_eq!(
@@ -20691,85 +21566,6 @@ message = "review"
         Ok(())
     }
 
-    #[test]
-    fn authenticated_gating_decider_comes_from_principal_and_live_bindings() {
-        use super::ConsoleGatingDecider;
-        let forged_params = json!({
-            "approver_id": "person:alice",
-            "deciding_principal": "alice@example.com",
-            "held_approver_ids": ["person:alice"],
-        });
-        let controller = crate::access::AccessController::new(crate::access::AccessControlConfig {
-            groups: [(
-                "release".to_string(),
-                crate::access::AccessGroup {
-                    members: vec!["bob@example.com".to_string()],
-                    ..crate::access::AccessGroup::default()
-                },
-            )]
-            .into(),
-            approvers: [
-                (
-                    "person:bob".to_string(),
-                    crate::access::AccessApprover {
-                        subjects: vec!["bob@example.com".to_string()],
-                        ..crate::access::AccessApprover::default()
-                    },
-                ),
-                (
-                    "role:release-manager".to_string(),
-                    crate::access::AccessApprover {
-                        groups: vec!["release".to_string()],
-                        ..crate::access::AccessApprover::default()
-                    },
-                ),
-            ]
-            .into(),
-            ..crate::access::AccessControlConfig::default()
-        })
-        .expect("controller");
-        let view = controller.view_for_subject(Some("bob@example.com"));
-        assert_eq!(
-            super::resolve_gating_decider(&forged_params, Some("bob@example.com"), Some(&view)),
-            Ok(ConsoleGatingDecider::Principal(
-                crate::runtime::GatingDecider {
-                    principal: "bob@example.com".to_string(),
-                    held_approver_ids: [
-                        "person:bob".to_string(),
-                        "role:release-manager".to_string()
-                    ]
-                    .into(),
-                }
-            ))
-        );
-        assert_eq!(
-            super::resolve_gating_decider(&forged_params, Some("carol@example.com"), None),
-            Ok(ConsoleGatingDecider::Principal(
-                crate::runtime::GatingDecider {
-                    principal: "carol@example.com".to_string(),
-                    held_approver_ids: Default::default(),
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn unauthenticated_local_gating_approver_requires_request_param() {
-        use super::ConsoleGatingDecider;
-        assert_eq!(
-            super::resolve_gating_decider(
-                &json!({ "approver_id": " local-operator " }),
-                None,
-                None
-            ),
-            Ok(ConsoleGatingDecider::Explicit("local-operator".to_string())),
-        );
-        assert_eq!(
-            super::resolve_gating_decider(&json!({}), None, None),
-            Err("approver_id required"),
-        );
-    }
-
     #[tokio::test]
     async fn authenticated_gating_request_rechecks_revoked_role_before_decision()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -20795,6 +21591,7 @@ message = "review"
             module: &Arc<tokio::sync::Mutex<crate::MetaRuntimeHandle>>,
             access: &AccessController,
             auth: &super::ConsoleHttpAuthContext,
+            governance: &super::ConsoleSendGovernance,
             pending: &str,
         ) -> Value {
             Box::pin(handle_console_runtime_rpc_with_visibility(
@@ -20812,7 +21609,6 @@ message = "review"
                     "meta/gating/decide",
                     json!({
                         "pending_id": pending,
-                        "approver_id": CAROL,
                         "held_approver_ids": [ROLE],
                         "decision": "approve",
                     }),
@@ -20827,7 +21623,7 @@ message = "review"
                 None,
                 None,
                 None,
-                &crate::http_console::ConsoleSendGovernance::default(),
+                governance,
                 &crate::topology_control::TopologyApplyScope::Anonymous,
             ))
             .await
@@ -20913,6 +21709,8 @@ message = "review"
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            durable_decisions: Default::default(),
+            console_audit: None,
         };
         let authenticate = |subject: &str| {
             let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
@@ -21000,12 +21798,32 @@ message = "review"
 
         let (_temp_dir, runtime) =
             build_empty_console_test_runtime("gating-in-flight-revocation").await?;
-        let refused = decide(&runtime, &module, &access, &bob, &pending).await;
+        // Each decide carries the governance of its own request: the
+        // verified person its token names.
+        let bob_governance = super::ConsoleSendGovernance::for_request(&state, &bob);
+        let carol_governance = super::ConsoleSendGovernance::for_request(&state, &carol);
+        let refused = decide(&runtime, &module, &access, &bob, &bob_governance, &pending).await;
         let after_refusal = module.lock().await.gating_state_snapshot();
         let notices_after_refusal = collector.0.lock().expect("observer").clone();
-        let permitted = decide(&runtime, &module, &access, &carol, &pending).await;
+        let permitted = decide(
+            &runtime,
+            &module,
+            &access,
+            &carol,
+            &carol_governance,
+            &pending,
+        )
+        .await;
         let after_permitted = module.lock().await.gating_state_snapshot();
-        let repeated = decide(&runtime, &module, &access, &carol, &pending).await;
+        let repeated = decide(
+            &runtime,
+            &module,
+            &access,
+            &carol,
+            &carol_governance,
+            &pending,
+        )
+        .await;
         let after_repeat = module.lock().await.gating_state_snapshot();
         let final_notices = collector.0.lock().expect("observer").clone();
         // Expected RED must still stop the real empty runtime before an
@@ -21668,45 +22486,60 @@ message = "review"
             "{stale:?}"
         );
 
-        // Every read of Core's member history from here on fails.
-        identity_runtime.bridge.fail_history_reads(0, u64::MAX);
+        // Every read of Core's entry of the identity fails, then (the entry
+        // reading again) every read of Core's member history: either fault
+        // refuses the id, typed and retryable.
         let unreadable = Some(json!({
             "kind": "identity_history_unavailable",
             "identity": "review:guard",
             "retryable": true,
         }));
-        for alias in ["rt:review:guard:1", "rt:review:guard:0"] {
-            let generated = super::stale_generated_alias_error(
-                "inspect_identity",
-                &identity_runtime,
-                &visibility,
-                alias,
-            )
-            .await
-            .ok_or_else(|| {
-                format!("{alias} must be refused when its binding cannot be read, not let through")
-            })?;
-            assert_eq!(
-                (generated.code, &generated.data),
-                (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
-                "{alias}: {generated:?}"
-            );
-            assert!(
-                generated.message.starts_with("inspect_identity failed: "),
-                "{generated:?}"
-            );
-            let member = super::stale_runtime_alias_json_rpc_error(
-                "get_member",
-                Some(&identity_runtime.runtime),
-                alias,
-            )
-            .await
-            .ok_or_else(|| format!("{alias} must be refused when its binding cannot be read"))?;
-            assert_eq!(
-                (member.code, &member.data),
-                (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
-                "{alias}: {member:?}"
-            );
+        for fault in ["entry", "history"] {
+            match fault {
+                "entry" => identity_runtime.bridge.fail_entry_reads(0, u64::MAX),
+                _ => {
+                    identity_runtime.bridge.fail_entry_reads(0, 0);
+                    identity_runtime.bridge.fail_history_reads(0, u64::MAX);
+                }
+            }
+            for alias in ["rt:review:guard:1", "rt:review:guard:0"] {
+                let generated = super::stale_generated_alias_error(
+                    "inspect_identity",
+                    &identity_runtime,
+                    &visibility,
+                    alias,
+                )
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "{fault}: {alias} must be refused when its binding cannot be read, not \
+                         let through"
+                    )
+                })?;
+                assert_eq!(
+                    (generated.code, &generated.data),
+                    (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
+                    "{fault}: {alias}: {generated:?}"
+                );
+                assert!(
+                    generated.message.starts_with("inspect_identity failed: "),
+                    "{fault}: {generated:?}"
+                );
+                let member = super::stale_runtime_alias_json_rpc_error(
+                    "get_member",
+                    Some(&identity_runtime.runtime),
+                    alias,
+                )
+                .await
+                .ok_or_else(|| {
+                    format!("{fault}: {alias} must be refused when its binding cannot be read")
+                })?;
+                assert_eq!(
+                    (member.code, &member.data),
+                    (crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE, &unreadable),
+                    "{fault}: {alias}: {member:?}"
+                );
+            }
         }
         Ok(())
     }
@@ -22178,7 +23011,8 @@ message = "review"
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let before = identity_runtime.status(&identity).await?;
 
         let console_events = ConsoleEventStore::new();
@@ -23475,7 +24309,10 @@ message = "review"
         register_active_identity(&identity_runtime, &core, &active).await?;
         // Registered, but Core holds no member for it: Dormant.
         let lazy = AgentIdentity::parse("review:lazy")?;
-        identity_runtime.register(reset_all_test_spec(&lazy)).await;
+        identity_runtime
+            .register(reset_all_test_spec(&lazy))
+            .await
+            .expect("the identity registers");
         assert_eq!(
             identity_runtime.status(&lazy).await?.state,
             IdentityLifecycleState::Dormant
@@ -23852,7 +24689,8 @@ message = "review"
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let session_id = identity_runtime
             .status(&identity)
             .await?
@@ -24025,7 +24863,8 @@ message = "review"
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let memory_dir = tempfile::tempdir()?;
         let memory_store = Arc::new(SqliteAgentMemoryStore::open(memory_dir.path())?);
         identity_runtime
@@ -24583,6 +25422,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
 
@@ -24605,6 +25445,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
         assert_eq!(
@@ -24741,6 +25582,118 @@ message = "review"
         // reload; it must be refused, never routed to the destructive respawn.
         let response = call("meta/reload_member", json!({ "member_id": "plain-worker" })).await;
         assert_eq!(response["error"]["code"], json!(-32001), "{response:#?}");
+        Ok(())
+    }
+
+    /// A console member mutation of a name no roster pass of this runtime
+    /// will ever register is refused for good, typed, and nothing is
+    /// retired: an identity created at runtime (Core holds it as a created
+    /// entry, whose record the mob's identity store owns) and a removed
+    /// identity are unknown to this runtime (`-32001`), and a name whose
+    /// record Core cannot read needs a repair or an upgrade (`-32014`,
+    /// `identity_name_unreadable`). A read of Core's entry that Core could
+    /// not serve refuses the mutation retryable (`-32052`,
+    /// `identity_history_unavailable`), never as an unknown identity.
+    ///
+    /// RED before the door told them apart: `meta/retire_member` answered
+    /// each of them with an untyped `-32000`.
+    #[tokio::test]
+    async fn console_member_mutation_of_a_name_no_roster_pass_registers_is_refused_typed()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (_temp_dir, runtime) =
+            build_empty_console_test_runtime("console-mutation-unregistrable-names").await?;
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let identity_runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "console-mutation-unregistrable-names".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let created = AgentIdentity::parse("console-created")?;
+        crate::identity_first::core_test_bridge::bind_live(
+            &core_bridge.core,
+            &created,
+            &ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )?;
+        core_bridge.hold_created(&created);
+        core_bridge.hold_removed(&AgentIdentity::parse("console-removed")?);
+        core_bridge.hold_unreadable(&AgentIdentity::parse("console-unreadable")?);
+        let retire = |member_id: &str| {
+            let runtime = &runtime;
+            let identity_runtime = identity_runtime.clone();
+            let request =
+                rpc_request_with_params("meta/retire_member", json!({ "member_id": member_id }));
+            async move {
+                Box::pin(handle_console_runtime_rpc(
+                    runtime,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(identity_runtime),
+                    None,
+                    None,
+                    request,
+                    true,
+                ))
+                .await
+            }
+        };
+
+        for (name, code, data) in [
+            ("console-created", json!(-32001), Value::Null),
+            ("console-removed", json!(-32001), Value::Null),
+            (
+                "console-unreadable",
+                json!(crate::rpc::STORAGE_RESOLUTION_CODE),
+                json!({
+                    "kind": "identity_name_unreadable",
+                    "identity": "console-unreadable",
+                    "remedy": "repair_or_upgrade",
+                    "retryable": false,
+                }),
+            ),
+        ] {
+            let response = retire(name).await;
+            assert!(response["result"].is_null(), "{name}: {response:#?}");
+            assert_eq!(
+                (&response["error"]["code"], &response["error"]["data"]),
+                (&code, &data),
+                "{name}: the typed, final refusal: {response:#?}"
+            );
+        }
+        assert!(
+            core_bridge.releases().is_empty(),
+            "a refused mutation releases nothing"
+        );
+        assert!(
+            core_bridge.core.live_member(&created)?.is_some(),
+            "Core's member of the created identity is untouched"
+        );
+
+        // Every read of Core's entry fails: the mutation of a plain name is
+        // refused typed and retryable, never as an unknown identity.
+        core_bridge.fail_entry_reads(0, u64::MAX);
+        let response = retire("console-plain").await;
+        assert!(response["result"].is_null(), "{response:#?}");
+        assert_eq!(
+            (&response["error"]["code"], &response["error"]["data"]),
+            (
+                &json!(crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE),
+                &json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": "console-plain",
+                    "retryable": true,
+                })
+            ),
+            "the read fault's typed, retryable refusal: {response:#?}"
+        );
         Ok(())
     }
 
@@ -28011,6 +28964,7 @@ message = "review"
             None,
             None,
             &crate::console_aggregator::ConsoleSendScope::Anonymous,
+            None,
         ))
         .await;
 
@@ -30037,6 +30991,8 @@ mod console_viewer_resolver_tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            durable_decisions: Default::default(),
+            console_audit: None,
         }
     }
 
@@ -30540,6 +31496,8 @@ mod console_human_admission_tests {
             job_health_projection: None,
             governed_ingress: Default::default(),
             mob_announcements: Default::default(),
+            durable_decisions: Default::default(),
+            console_audit: None,
         }
     }
 
@@ -31860,10 +32818,10 @@ mod console_token_lapse_tests {
     }
 
     /// The console route revokes too: on a console without an access
-    /// controller, a caller its token identified may and an anonymous caller
-    /// may not; with an access controller, enforced or not, only an access
-    /// admin may; a console whose record has no file, and a read-only
-    /// console, refuse.
+    /// controller, a caller its token identified revokes their own sessions
+    /// and no one else's, and an anonymous caller none; with an access
+    /// controller, enforced or not, only an access admin may; a console whose
+    /// record has no file, and a read-only console, refuse.
     #[tokio::test]
     async fn the_console_route_revokes_a_principals_sessions() {
         let token = issued_token(Some(now_seconds() - 60), Some(now_seconds() + 3600));
@@ -31878,22 +32836,14 @@ mod console_token_lapse_tests {
             params.clone(),
         )
         .await;
-        assert!(answer["error"].is_null(), "{answer}");
-        assert_eq!(answer["result"]["principal"], "carol@example.test");
-        let not_before = fences
-            .not_before("carol@example.test")
-            .expect("the fence is recorded");
-        assert_eq!(answer["result"]["not_before"], json!(not_before));
-        assert_eq!(
-            answer["result"]["accepts_tokens_issued_from"],
-            json!(not_before + 30)
-        );
+        assert_eq!(answer["error"]["data"]["kind"], "access_denied", "{answer}");
+        assert_eq!(fences.not_before("carol@example.test"), None);
 
         let refused = console_rpc(
             &console_json_router_with_state(state()),
             &token,
             crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
-            params.clone(),
+            json!({ "principal": BOB }),
         )
         .await;
         assert_eq!(
@@ -31991,6 +32941,25 @@ mod console_token_lapse_tests {
             "{denied}"
         );
         assert_eq!(fences.not_before("grace@example.test"), None);
+
+        // No controller: the caller revokes their own sessions.
+        let mut own = state();
+        own.session_fences = fences.clone();
+        let answer = console_rpc(
+            &console_json_router_with_state(own),
+            &token,
+            crate::rpc::CONSOLE_REVOKE_SESSIONS_METHOD,
+            json!({ "principal": BOB }),
+        )
+        .await;
+        assert!(answer["error"].is_null(), "{answer}");
+        assert_eq!(answer["result"]["principal"], BOB);
+        let not_before = fences.not_before(BOB).expect("the fence is recorded");
+        assert_eq!(answer["result"]["not_before"], json!(not_before));
+        assert_eq!(
+            answer["result"]["accepts_tokens_issued_from"],
+            json!(not_before + 30)
+        );
     }
 
     /// Whether the host's session was closed within `wait`.
@@ -34318,6 +35287,7 @@ comms = true
                         Some(&self.controller),
                         Some(&view),
                         &ConsoleSendScope::Anonymous,
+                        None,
                     ))
                     .await;
                     (answer, "/result/identities", "identity")

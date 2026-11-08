@@ -539,6 +539,10 @@ impl UnifiedRuntime {
             self.persistent_metadata.settle_detached_writes(),
         )
         .await;
+        // A runtime that keeps the gating owner's state in its metadata
+        // store writes the last state before the modules stop, within what
+        // is left of the drain window.
+        let _ = tokio::time::timeout_at(drain_deadline, self.stop_gating_persistence()).await;
 
         // The runtime owns the console projector. Detach its live source after
         // draining runtime events so closed runtimes cannot retain discovery tasks.

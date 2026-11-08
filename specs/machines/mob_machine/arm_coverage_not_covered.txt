@@ -161,8 +161,7 @@ RecordOperator* operator action provenance; admission and policy classifiers ove
 GrantOperator* operator grant scopes; no MobMachine audit drives them
 RevokeOperatorScopes* operator grant scopes; no MobMachine audit drives them
 ResolveCancel* work cancellation refusals; no audit drives them
-ResolveSubmit* work submission refusals; no audit drives them
-SubmitWork* work submission; no audit drives it
+ResolveSubmit* work submission refusals of a stopped, completed or destroyed mob, a runtime not live, a retiring member and a stale session binding; created_identity_audit's doors run drives the identity member, addressability, member-not-found and stale-fence refusals
 CancelAll* work cancellation; no audit drives it
 ForceCancel* forced cancellation; no audit drives it
 ResolveRuntime* runtime ingress and retire refusal feedback from MeerkatMachine; member_residency_audit drives the binding refusal and its stale twins
@@ -246,6 +245,7 @@ RemoveIdentityEntryMobNotRunning* a removal in the Completed and Destroyed phase
 ArchiveIdentityEntryMobNotRunning* an archive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
 UnarchiveIdentityEntryMobNotRunning* an unarchive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
 UnlistIdentityEntryMobNotRunning* a one-entry unlist in the Completed and Destroyed phases; created_identity_audit's unlist run drives the Stopped arm
+TakeOverIdentityEntryMobNotRunningCompleted a host adoption's takeover in a completed mob, refused as in every phase but Running; identity_entry_audit's lifecycle run drives the Stopped and Destroyed arms
 BeginPreparationConstructionMobNotRunning* a held construction's start in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
 SettleHostPreparationMobNotRunning* a settle in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
 EndPreparationConstructionEndedCompleted an attempt's end in a completed mob; created_identity_audit's preparation and prepverdicts runs drive its Running and Stopped arms

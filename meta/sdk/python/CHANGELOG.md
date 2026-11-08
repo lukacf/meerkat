@@ -4,6 +4,33 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+- `ToolCallRequester` and `RequesterPrincipal`: the original requester of the
+  run a callback serves, which the gateway names on `callback/call_tool` and
+  `callback/job/start`. A tool handler that declares a `requester` parameter
+  receives it (`None` when the run has none); a handler without the
+  parameter is called as before. `DetachedJobContext.requester` is the
+  requester of the run that submitted the job. `ToolCallRequester.from_wire`
+  reads it as the runtime's grammar does, and a malformed value is `None`, so
+  a person-scoped tool fails closed. A tool that acts in one person's name
+  compares `requester.direct_principal` with its owner's principal (`kind`,
+  `id` and `trust_domain_id`).
+
+- Durable decisions: `MobHandle.decisions_list(kind=, phase=, approver_id=,
+  requester=, after=, limit=)`, `decisions_get(decision_id,
+  include_request=False)`, `decisions_rendering(decision_id,
+  max_part_bytes=None)`, `decisions_present(decision_id, presentation)`,
+  `decisions_withdraw(decision_id)` and `decisions_decide(decision_id, *,
+  approve, presented_digest, reason=None, attestation=None)` call the
+  gateway's `meta/decisions/*` methods. `DecisionAttestation(ingress,
+  subject, scope, event_ref, observed_at_ms, presentation=None)` carries a
+  declared ingress's attestation of the person who decided.
+  `MetaRuntime.on_decision_notice(handler)` receives each
+  `meta/decisions/notice`, and `MetaBuilder.decision_ingresses([...])`
+  declares the ingresses as `runtime_options.decisions`.
+- A decide called while the SDK serves a host tool callback raises
+  `DecideInsideToolCallbackError` (`DECIDE_INSIDE_TOOL_CALLBACK_KIND`,
+  `"decide_inside_tool_callback"`) and sends nothing.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

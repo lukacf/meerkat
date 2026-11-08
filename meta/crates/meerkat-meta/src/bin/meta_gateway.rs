@@ -1,3 +1,13 @@
+//! The conventional Meta gateway: the Console and admin surfaces over one
+//! mob (`config/contacts.toml`, `config/access.toml`).
+//!
+//! It keeps no durable decisions and declares no decision ingresses, so it
+//! does not check the ingress names of the access configuration's approver
+//! map against any declaration (`unknown_ingress` is never its answer). An
+//! access file shared with an `rpc_gateway` is edited through that
+//! `rpc_gateway`, which declares the ingresses (`runtime_options.decisions`)
+//! and refuses an edit that names another.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};

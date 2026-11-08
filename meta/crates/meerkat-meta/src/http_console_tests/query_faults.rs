@@ -232,6 +232,7 @@ async fn timeline_faults_preserve_class_across_rest_sse_and_both_rpc_paths()
                     None,
                     None,
                     &crate::console_aggregator::ConsoleSendScope::Anonymous,
+                    None,
                 )
                 .await
             };
@@ -354,7 +355,7 @@ async fn approval_origin_access_cannot_be_bypassed_by_whitespace_ids()
                         .header("content-type", "application/json")
                         .body(Body::from(
                             json!({ "jsonrpc":"2.0", "id":1, "method":method,
-                    "params": {"pending_id":id, "approver_id":"operator", "decision":"approve"} })
+                    "params": {"pending_id":id, "decision":"approve"} })
                             .to_string(),
                         ))?,
                 )

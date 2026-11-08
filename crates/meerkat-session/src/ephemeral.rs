@@ -3629,6 +3629,31 @@ pub trait SessionAgentBuilder: Send + Sync {
             "session builder cannot reconcile durable compaction stages before session {session_id} is materialized"
         )))
     }
+
+    /// Finalize the durable compaction stages of `projections`, committed
+    /// rewrites of the exact session `session_id` that no live
+    /// [`SessionAgent`] hosts, and answer the records each one published,
+    /// in `projections` order.
+    ///
+    /// The persistent service calls this seam for a cold settle of the
+    /// session's owed projections
+    /// (`PersistentSessionService::settle_owed_compaction_projections`).
+    /// Every projection names a row the runtime's compaction outbox holds
+    /// pending, so each stage is committed authority and its finalization is
+    /// idempotent. The builder owns this boundary because it owns
+    /// construction-time access to the canonical memory backend. Generic
+    /// builders fail closed until they explicitly provide it, and a builder
+    /// that wraps another forwards it.
+    async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        let _ = projections;
+        Err(SessionError::Unsupported(format!(
+            "session builder cannot finalize the durable compaction stages of session {session_id} without its live agent"
+        )))
+    }
 }
 
 /// Trait abstracting over the agent's run/cancel interface.
@@ -4857,6 +4882,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// ([`SessionAgentBuilder::session_comms_identity_root`]).
     pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
         self.builder.session_comms_identity_root()
+    }
+
+    /// Finalize the durable compaction stages of `projections` for a session
+    /// no live actor of this service hosts, through this service's builder
+    /// ([`SessionAgentBuilder::finalize_absent_session_compaction_stages`]).
+    /// The persistent service's cold settle is its only caller.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        self.builder
+            .finalize_absent_session_compaction_stages(session_id, projections)
+            .await
     }
 
     /// The host's MCP attempt guards this service's builder carries, if any.

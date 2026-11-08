@@ -904,32 +904,28 @@ impl MeerkatMachine {
                 ));
             };
             // Inputs of different requesters never share a run, and the
-            // machine decides which may join this one: an input of another
-            // requester than the run's batch (or with a requester while the
-            // run has none, or the reverse) takes the queued fallback and
-            // waits for a run of its own. It never becomes a class head
-            // below, so it holds back no later steer of the run's requester.
+            // Steer lane is first in, first out across requesters: the
+            // machine decides which input may join this run. An input of
+            // another requester than the run's batch (or with a requester
+            // while the run has none, or the reverse), or one behind an
+            // earlier steer of another requester that waits for a run of its
+            // own, keeps its admitted state, Queued in the Steer lane with
+            // its delivery class, and the runtime loop serves it in admission
+            // order after this run: no generated transition runs here, and
+            // the `LiveBoundaryUnavailable` normalization (to the Queue lane)
+            // is never applied, so no later steer overtakes it. Every earlier
+            // steer the predicate lets this one pass has this one's key or is
+            // held (the runtime loop's plan passes a held steer over too).
             if !driver
                 .driver_ingress()
                 .live_boundary_joins_run_batch(input_id, &run_id)
             {
                 drop(driver);
-                held_mutation_gate = self
-                    .normalize_live_boundary_queued_fallback(
-                        session_id,
-                        witness,
-                        completions,
-                        publication_handle.clone(),
-                        held_mutation_gate,
-                        input_id,
-                        fallback_wake,
-                    )
-                    .await?;
                 tracing::debug!(
                     session_id = %session_id,
                     input_id = %input_id,
                     run_id = %run_id,
-                    "live-boundary candidate of another requester waits for a run of its own"
+                    "live-boundary candidate keeps its Steer-lane place for a run of its own"
                 );
                 return Ok((
                     held_mutation_gate,
@@ -940,7 +936,9 @@ impl MeerkatMachine {
             // acquired queue authority, multiple Steer inputs intentionally
             // remain eligible for one generated same-boundary batch.
             //
-            // FIFO is per machine-owned delivery class: a durable delivery
+            // Within one requester, FIFO is per machine-owned delivery class
+            // (across requesters the machine's predicate above keeps every
+            // earlier steer ahead): a durable delivery
             // occupies its own boundary slot (and may wait across a closed
             // window), so it never pushes a later request-only steer to a
             // follow-up turn, and vice versa. Within the request-only class
@@ -1328,14 +1326,40 @@ impl MeerkatMachine {
         });
         let realization = {
             let mut driver = witness.driver.lock().await;
-            driver
-                .machine_realize_live_boundary_context_injected(
-                    &run_id,
-                    std::slice::from_ref(input_id),
-                    session_snapshot,
-                    session_id,
+            // The machine decides again, under M, whether the input may join:
+            // an input admitted ahead of it with another key while its
+            // context was prepared (a prioritized one, or one a run returned
+            // to the Steer lane) keeps it behind, in the Steer lane.
+            if driver
+                .driver_ingress()
+                .live_boundary_joins_run_batch(input_id, &run_id)
+            {
+                Some(
+                    driver
+                        .machine_realize_live_boundary_context_injected(
+                            &run_id,
+                            std::slice::from_ref(input_id),
+                            session_snapshot,
+                            session_id,
+                        )
+                        .await,
                 )
-                .await
+            } else {
+                None
+            }
+        };
+        let Some(realization) = realization else {
+            drop(prepared);
+            tracing::debug!(
+                session_id = %session_id,
+                run_id = %run_id,
+                input_id = %input_id,
+                "live-boundary context keeps its Steer-lane place behind an earlier steer of another requester"
+            );
+            return Ok((
+                held_mutation_gate,
+                LiveBoundaryInputDisposition::QueuedFallback,
+            ));
         };
         if let Err(error) = realization {
             // Driver implementations roll this atomic realization back to the

@@ -7856,12 +7856,23 @@ async fn settle_unresumed_run(
     // the transcript, and the session layer resynchronizes the seeded actor
     // from the repaired boundary at its next step. A tail the repair leaves
     // standing would refuse the next run's first round commit, so then the
-    // session reloads at once, before any run, and the lap exits.
+    // session reloads at once, before any run, and the lap exits. The reload
+    // is required before the gate is released: a host's settle waits for
+    // this gate to read the settlement, and must find the registration
+    // degraded, never the run settled while its tail stands.
     let reload = driver
         .lock()
         .await
         .repair_settled_run_tail(&authority_binding.session_id, run_id)
         .await;
+    if reload {
+        authority_binding
+            .require_session_durability_reload(
+                "settled_resumable_run_tail_repair",
+                format!("settled run {run_id}'s provisional tail still stands"),
+            )
+            .await;
+    }
     drop(queue_authority_guard);
     if let Some(terminal) = settled_terminal.as_ref() {
         crate::control_plane::publish_settled_run_terminal(
@@ -7871,12 +7882,6 @@ async fn settle_unresumed_run(
         .await;
     }
     if reload {
-        authority_binding
-            .require_session_durability_reload(
-                "settled_resumable_run_tail_repair",
-                format!("settled run {run_id}'s provisional tail still stands"),
-            )
-            .await;
         return ResumedRunAdmissionLap::Exit(true);
     }
     if !abandoned.is_empty()
@@ -13120,6 +13125,77 @@ mod tests {
     fn admission_semantics(input: &Input) -> crate::ingress_types::RuntimeInputSemantics {
         crate::ingress_types::RuntimeInputSemantics::try_from_generated_admission(input, true)
             .expect("generated admission semantics")
+    }
+
+    fn requester_principal(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("qualified requester")
+    }
+
+    /// The turn's requester is the admitted input's own. A requester written
+    /// into a prompt's caller-authored turn metadata never reaches the turn:
+    /// the input's own requester replaces it, and an input without one
+    /// stamps none.
+    #[test]
+    fn a_caller_written_turn_requester_is_replaced_by_the_input_s_own() {
+        use meerkat_core::types::TurnRequester;
+        let written = TurnRequester::direct(requester_principal("caller-written"));
+        let prompt = |own: Option<meerkat_core::PrincipalRef>| {
+            let mut metadata = crate::runtime_stamped_prompt_turn_metadata(None);
+            metadata.transcript_identity.requester = Some(written.clone());
+            let mut input = make_prompt("a prompt whose metadata names a requester");
+            if let Input::Prompt(prompt) = &mut input {
+                prompt.turn_metadata = Some(metadata);
+            }
+            input.header_mut().requester = own;
+            input
+        };
+        for (own, expected) in [
+            (None, None),
+            (
+                Some(requester_principal("own")),
+                Some(TurnRequester::direct(requester_principal("own"))),
+            ),
+        ] {
+            let input = prompt(own);
+            let stamped = for_input(&input, admission_semantics(&input));
+            assert_eq!(
+                stamped.transcript_identity.requester, expected,
+                "the turn names the input's own requester, never the caller-written one"
+            );
+        }
+    }
+
+    /// One principal, carried across a hop by one input of a batch and
+    /// brought directly by another, is carried for the batch, in either
+    /// order: a run is direct only when every one of its inputs is. Two
+    /// direct inputs stay direct.
+    #[test]
+    fn one_principal_direct_and_carried_folds_to_carried() {
+        use meerkat_core::types::TurnRequester;
+        let principal = requester_principal("p");
+        let direct = TurnRequester::direct(principal.clone());
+        let carried = TurnRequester::carried(principal.clone());
+        for (batch, expected) in [
+            ([direct.clone(), carried.clone()], carried.clone()),
+            ([carried.clone(), direct.clone()], carried.clone()),
+            ([direct.clone(), direct.clone()], direct.clone()),
+        ] {
+            let mut consensus = RequesterConsensus::default();
+            for requester in &batch {
+                consensus.observe(Some(requester));
+            }
+            assert_eq!(
+                consensus.finish().expect("one principal agrees"),
+                Some(expected),
+                "batch {batch:?}"
+            );
+        }
     }
 
     fn reply_context_from_overlay(

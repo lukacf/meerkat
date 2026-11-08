@@ -534,6 +534,9 @@ mod tests {
             approver: Some(meerkat_core::ApprovalConsentApprover {
                 principal: approver.principal().clone(),
                 assurance: approver.assurance(),
+                authentication_scope_digest: approver
+                    .authentication_scope()
+                    .map(meerkat_core::approval::consent::HostAuthenticationScope::digest),
             }),
             ..Default::default()
         });

@@ -1,6 +1,9 @@
 //! One canonical local grant owner. Inputs are trusted host observations, not
 //! authentication receipts. No decoded state, audit row or caller claim creates
 //! a production authority. The feature host owns local publication and custody.
+//! The owner's custody of its retained facts ends at its host's close
+//! (`Released`) or after an append whose outcome is unknown (`Uncertain`):
+//! from then on it refuses every change and every use.
 
 /// Canonical data declarations shared by both host instantiations. These types
 /// carry no authority. Decoding supplies checked candidate data, not issuance,
@@ -96,7 +99,7 @@ macro_rules! grant_authority_catalog_machine_dsl {
 
         meerkat_machine_dsl::machine! {
             machine GrantAuthorityMachine {
-                version: 2,
+                version: 3,
                 rust: $rust_crate / $rust_module,
 
                 state {
@@ -118,25 +121,31 @@ macro_rules! grant_authority_catalog_machine_dsl {
                     records = EmptyMap,
                     revoked = EmptySet,
                 }
-                terminal []
-                phase GrantAuthorityPhase { Unconfigured, Active }
+                terminal [Released]
+                phase GrantAuthorityPhase { Unconfigured, Active, Released, Uncertain }
                 input GrantAuthorityInput {
                     Configure { #[redacted] root: GrantPrincipal, #[redacted] namespace: EvidenceId, generation: u64, #[redacted] incarnation: GrantAuthorityIncarnation },
                     IssueRoot { #[redacted] actor: GrantPrincipal, #[redacted] record: GrantRecord },
                     IssueChild { #[redacted] actor: GrantPrincipal, #[redacted] record: GrantRecord, #[redacted] derived: DerivedChildRestrictions, #[redacted] chain: Seq<GrantRecord>, now_ms: u64 },
                     Revoke { #[redacted] actor: GrantPrincipal, #[redacted] record: GrantRecord },
                     ResolveUse { #[redacted] namespace: EvidenceId, generation: u64, #[redacted] incarnation: GrantAuthorityIncarnation, #[redacted] executor: GrantPrincipal, #[redacted] represented_subject: Option<GrantPrincipal>, #[redacted] leaf: GrantRecord, #[redacted] chain: Seq<GrantRecord>, now_ms: u64 },
+                    ReleaseCustody,
+                    RecordUncertainAppend,
                 }
                 effect GrantAuthorityEffect {
                     Configured,
                     Issued { #[redacted] record: GrantRecord },
                     Revoked { #[redacted] grant_id: EvidenceId },
                     UseResolved { #[redacted] leaf: GrantRecord },
+                    CustodyReleased,
+                    CustodyUncertain,
                 }
                 disposition Configured => local seam OwnerRealizationOnly,
                 disposition Issued => local seam OwnerRealizationOnly,
                 disposition Revoked => local seam OwnerRealizationOnly,
                 disposition UseResolved => local seam SurfaceResultAlignment,
+                disposition CustodyReleased => local seam OwnerRealizationOnly,
+                disposition CustodyUncertain => local seam OwnerRealizationOnly,
 
                 helper lifetime_current(restrictions: ExecutionRestrictions, now_ms: u64) -> bool {
                     restrictions.lifetime.unresolved.len() == 0
@@ -265,6 +274,46 @@ macro_rules! grant_authority_catalog_machine_dsl {
                     update {}
                     to Active
                     emit UseResolved { leaf: leaf }
+                }
+                // The host's close ends the owner's custody after its last
+                // legitimate change. Every later change and use is refused,
+                // whoever still holds a reference to the owner. The owner
+                // releases the store's lease as this effect, after any append
+                // in flight, so a successor restores the same facts at once.
+                transition ReleaseCustody {
+                    on input ReleaseCustody
+                    guard { self.lifecycle_phase == Phase::Active }
+                    update {}
+                    to Released
+                    emit CustodyReleased
+                }
+                // An append whose outcome is unknown: memory and store may now
+                // disagree, so every later change and use is refused until a
+                // successor restores what the store retained. The effect
+                // invalidates every earlier observation of the owner.
+                transition RecordUncertainAppend {
+                    on input RecordUncertainAppend
+                    guard { self.lifecycle_phase == Phase::Active }
+                    update {}
+                    to Uncertain
+                    emit CustodyUncertain
+                }
+                // The close of an owner whose append was uncertain still
+                // releases the lease, so a successor restores what the store
+                // retained.
+                transition ReleaseUncertainCustody {
+                    on input ReleaseCustody
+                    guard { self.lifecycle_phase == Phase::Uncertain }
+                    update {}
+                    to Released
+                    emit CustodyReleased
+                }
+                // A second close finds nothing left to release.
+                transition ReleaseCustodyAgain {
+                    on input ReleaseCustody
+                    guard { self.lifecycle_phase == Phase::Released }
+                    update {}
+                    to Released
                 }
             }
         }

@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Check the two-pair source/offer composition and its attributed mutants.
+
+Usage: verify-source-offer-composition GENERATED_DIRECTORY NEW_RESULT_DIRECTORY
+Generate with generate-source-offer-composition first. The base must pass with
+every declared action taken; each mutant must violate exactly its attributed
+invariant (I2, I4, I11) with the intended final state. Generic deadlock
+checking stays on. A bounded composition slice, not all thirteen controls.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+EXPECTED = {
+    'none': None,
+    'stale-snapshot': 'I2_FreshSourceAtCommit',
+    'send-before-owner': 'I4_OwnerBeforeDispatch',
+    'skip-restart-owner': 'I11_RestartEnumeratesOwners',
+}
+SUMMARY = r'^.*states generated, .*distinct states found, .*states left on queue\.$'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def witness(name, fields):
+    if name == 'stale-snapshot':
+        return any(fields.get(f'offer{i}_phase') in ['"Offered"', '"CoreObserved"']
+                   and fields.get(f'offer{i}_source_revision') != fields.get(f'commit_revision{i}')
+                   for i in (1, 2))
+    if name == 'send-before-owner':
+        return any(fields.get(f'inflight{i}') == 'TRUE'
+                   and fields.get(f'offer{i}_phase') not in ['"Offered"', '"CoreObserved"']
+                   for i in (1, 2))
+    if name == 'skip-restart-owner':
+        return (fields.get('alive') == 'TRUE' and fields.get('epoch') == '2'
+                and fields.get('scanned') == 'TRUE'
+                and any(fields.get(f'offer{i}_phase') == '"Offered"'
+                        and (fields.get(f'outbox{i}') != 'TRUE' or fields.get(f'parked{i}') != 'TRUE')
+                        for i in (1, 2)))
+    raise ValueError('unexpected mutant')
+
+
+def main():
+    generated, run = [Path(arg).resolve() for arg in sys.argv[1:]]
+    manifest = json.loads((generated / 'manifest.json').read_text())
+    if manifest['profiles'] != EXPECTED or list(manifest['profiles'])[0] != 'none':
+        raise ValueError('unexpected mutation attribution')
+    generator = Path(__file__).with_name('generate-source-offer-composition')
+    if sha(generator) != manifest['generator_sha256']:
+        raise ValueError('generator changed after export')
+    artifacts = manifest['artifact_hashes']
+    if any(sha(generated / name) != digest for name, digest in artifacts.items()):
+        raise ValueError('export changed')
+    for name in manifest['profiles']:
+        if re.search(r'CHECK_DEADLOCK\s+FALSE', (generated / (name + '.cfg')).read_text()):
+            raise ValueError('generic deadlock checking must stay on')
+    run.mkdir(exist_ok=False)
+    inputs = run / 'inputs'
+    shutil.copytree(generated, inputs)
+    result = {'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'scope': manifest['scope'], 'full_b1_acceptance': False, 'profiles': {},
+              'manifest_sha256': sha(generated / 'manifest.json'), 'verifier_sha256': sha(Path(__file__)),
+              'resources': {'workers': 1, 'heap_mib': 1024, 'timeout_seconds': 1800,
+                            'sequential': True, 'generic_deadlock_checking': 'ON'}}
+    save(run / 'STARTED.json', result)
+    env = os.environ.copy()
+    env['JAVA_TOOL_OPTIONS'] = '-Xmx1024m'
+    passed = True
+    for name, invariant in manifest['profiles'].items():
+        log = run / (name + '.log')
+        command = ['tlc', '-workers', '1', '-seed', '1', '-coverage', '1',
+                   '-metadir', str(run / (name + '-states')),
+                   '-config', str(inputs / (name + '.cfg')), str(inputs / 'source_offer_composition.tla')]
+        row = {'command': command, 'expected_invariant': invariant}
+        try:
+            with log.open('wb') as out:
+                process = subprocess.run(command, cwd=inputs, stdout=out, stderr=subprocess.STDOUT,
+                                         env=env, timeout=1800, check=False)
+            text = log.read_text()
+            row['exit_code'] = process.returncode
+            row['states'] = re.findall(SUMMARY, text, re.MULTILINE)
+            if invariant is None:
+                if process.returncode != 0 or 'Model checking completed. No error has been found.' not in text:
+                    raise ValueError('base model did not pass')
+                counts = {action: {'distinct': int(d), 'total': int(t)} for action, d, t in re.findall(
+                    r'^<(\w+) line \d+, col \d+ to line \d+, col \d+ of module source_offer_composition>: (\d+):(\d+)$',
+                    text, re.MULTILINE) if action in manifest['actions']}
+                if set(counts) != set(manifest['actions']) or any(v['total'] == 0 for v in counts.values()):
+                    raise ValueError('not every declared action was exercised')
+                row['action_coverage'] = counts
+            else:
+                if process.returncode != 12 or f'Invariant {invariant} is violated.' not in text:
+                    raise ValueError('mutant did not violate its intended invariant')
+                parts = re.split(r'^State \d+:.*\n', text, flags=re.MULTILINE)[1:]
+                if not parts:
+                    raise ValueError('missing counterexample')
+                fields = dict(re.findall(r'^/\\ (\w+) = (.*)$', parts[-1].split('\n\n', 1)[0], re.MULTILINE))
+                if not witness(name, fields):
+                    raise ValueError('wrong final trace predicate: ' + name)
+                row['last_state'] = fields
+            row['passed'] = True
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            row.update(passed=False, error=str(error))
+            passed = False
+        row['log_sha256'] = sha(log)
+        result['profiles'][name] = row
+        save(run / 'PROGRESS.json', result)
+        print(json.dumps({'profile': name, 'passed': row['passed'], 'exit': row.get('exit_code'),
+                          'states': row.get('states'), 'error': row.get('error')}), flush=True)
+        if not passed:
+            break
+    result['export_unchanged'] = all(sha(generated / n) == d for n, d in artifacts.items())
+    result['inputs_unchanged'] = all(sha(inputs / n) == d for n, d in artifacts.items())
+    result['generator_unchanged'] = sha(generator) == manifest['generator_sha256']
+    result['verifier_unchanged'] = sha(Path(__file__)) == result['verifier_sha256']
+    passed &= (len(result['profiles']) == len(EXPECTED)
+               and all(value for key, value in result.items() if key.endswith('_unchanged')))
+    result['result'] = 'passed_slice' if passed else 'failed_or_incomplete'
+    result['at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save(run / 'RESULT.json', result)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

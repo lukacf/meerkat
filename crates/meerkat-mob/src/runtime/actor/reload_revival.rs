@@ -870,6 +870,7 @@ impl MobActor {
                     bridge_session_id: Some(work.session_id.clone()),
                     reason,
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             )
@@ -1053,6 +1054,7 @@ impl MobActor {
                     session_id: Some(work.session_id.clone()),
                     reason,
                     hold: None,
+                    cause_data: None,
                 });
             }
             None => {
@@ -1066,6 +1068,7 @@ impl MobActor {
             session_id: Some(work.session_id.clone()),
             reason: "durable profile material is unavailable".to_string(),
             hold: None,
+            cause_data: None,
         })??;
         self.authorize_spawn_profile_material(
             &work.entry.agent_identity,
@@ -1285,12 +1288,14 @@ impl MobActor {
         // `MemberRestoreFailed` minted for this Broken member carries it;
         // this reply keeps meerkat's typed refusal itself.
         let hold = error.durable_resume_hold();
+        let cause_data = error.structured_data();
         self.record_member_restore_failure(
             &work.entry.agent_identity,
             super::super::handle::RestoreFailureDiagnostic {
                 bridge_session_id: Some(work.session_id.clone()),
                 reason: reason.clone(),
                 hold,
+                cause_data: cause_data.clone(),
                 registration_refusal: None,
             },
         )
@@ -1310,6 +1315,7 @@ impl MobActor {
             session_id: Some(work.session_id.clone()),
             reason,
             hold: None,
+            cause_data,
         }
     }
 

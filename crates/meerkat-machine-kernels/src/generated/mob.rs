@@ -2367,6 +2367,72 @@ impl std::fmt::Display for Generation {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum HostAdoptionEntryVerdict {
+    #[default]
+    #[serde(rename = "Adopting")]
+    Adopting,
+    #[serde(rename = "Ended")]
+    Ended,
+    #[serde(rename = "Deferred")]
+    Deferred,
+    #[serde(rename = "NotADeclaredEntry")]
+    NotADeclaredEntry,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl HostAdoptionEntryVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Adopting => "Adopting",
+            Self::Ended => "Ended",
+            Self::Deferred => "Deferred",
+            Self::NotADeclaredEntry => "NotADeclaredEntry",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for HostAdoptionEntryVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Adopting" => Ok(Self::Adopting),
+            "Ended" => Ok(Self::Ended),
+            "Deferred" => Ok(Self::Deferred),
+            "NotADeclaredEntry" => Ok(Self::NotADeclaredEntry),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid HostAdoptionEntryVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for HostAdoptionEntryVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for HostAdoptionEntryVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum HostBindPhase {
     #[default]
     #[serde(rename = "Requested")]
@@ -9190,6 +9256,8 @@ pub enum SubmitWorkRejectReasonKind {
     NotExternallyAddressable,
     #[serde(rename = "StaleSessionBinding")]
     StaleSessionBinding,
+    #[serde(rename = "IdentityMember")]
+    IdentityMember,
 }
 impl SubmitWorkRejectReasonKind {
     pub fn as_str(&self) -> &'static str {
@@ -9199,6 +9267,7 @@ impl SubmitWorkRejectReasonKind {
             Self::StaleFenceToken => "StaleFenceToken",
             Self::NotExternallyAddressable => "NotExternallyAddressable",
             Self::StaleSessionBinding => "StaleSessionBinding",
+            Self::IdentityMember => "IdentityMember",
         }
     }
 }
@@ -9211,6 +9280,7 @@ impl std::convert::TryFrom<&str> for SubmitWorkRejectReasonKind {
             "StaleFenceToken" => Ok(Self::StaleFenceToken),
             "NotExternallyAddressable" => Ok(Self::NotExternallyAddressable),
             "StaleSessionBinding" => Ok(Self::StaleSessionBinding),
+            "IdentityMember" => Ok(Self::IdentityMember),
             other => Err(format!(
                 "invalid SubmitWorkRejectReasonKind value `{other}`"
             )),
@@ -10112,6 +10182,7 @@ pub struct State {
     pub member_rotation_profile_names: std::collections::BTreeMap<AgentIdentity, String>,
     pub identity_entry_unseated: std::collections::BTreeMap<AgentIdentity, UnseatedEntryCause>,
     pub identity_entry_retiring: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_entry_adopting: std::collections::BTreeSet<AgentIdentity>,
     pub identity_entry_archived_sessions: std::collections::BTreeMap<AgentIdentity, SessionId>,
     pub declared_apply_open: bool,
     pub identity_entry_tombstones: std::collections::BTreeSet<AgentIdentity>,
@@ -11633,10 +11704,14 @@ pub mod inputs {
         pub first_boot: FirstBootRequestKind,
         pub created_custody: bool,
         pub preparation_required: bool,
+        pub legacy_marker: bool,
+        pub legacy_label: bool,
+        pub legacy_generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SealDeclaredRoster {
         pub desired: std::collections::BTreeSet<AgentIdentity>,
+        pub intent_named: std::collections::BTreeSet<AgentIdentity>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ForgetArchivedSession {
@@ -11705,6 +11780,14 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnlistIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TakeOverIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberBuildPreparation {
         pub agent_identity: AgentIdentity,
     }
 }
@@ -11965,6 +12048,8 @@ pub enum Input {
     SettleHostPreparation(inputs::SettleHostPreparation),
     EndPreparationConstruction(inputs::EndPreparationConstruction),
     UnlistIdentityEntry(inputs::UnlistIdentityEntry),
+    TakeOverIdentityEntry(inputs::TakeOverIdentityEntry),
+    ResolveMemberBuildPreparation(inputs::ResolveMemberBuildPreparation),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12299,6 +12384,8 @@ impl Input {
             Self::SettleHostPreparation(_) => InputKind::SettleHostPreparation,
             Self::EndPreparationConstruction(_) => InputKind::EndPreparationConstruction,
             Self::UnlistIdentityEntry(_) => InputKind::UnlistIdentityEntry,
+            Self::TakeOverIdentityEntry(_) => InputKind::TakeOverIdentityEntry,
+            Self::ResolveMemberBuildPreparation(_) => InputKind::ResolveMemberBuildPreparation,
         }
     }
 }
@@ -12550,6 +12637,8 @@ pub enum InputKind {
     SettleHostPreparation,
     EndPreparationConstruction,
     UnlistIdentityEntry,
+    TakeOverIdentityEntry,
+    ResolveMemberBuildPreparation,
 }
 
 pub mod signals {
@@ -13126,6 +13215,11 @@ pub mod signals {
     pub struct ResolveMemberCustodyRestored {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverIdentityEntryAdopting {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13235,6 +13329,7 @@ pub enum Signal {
     ResolveMemberInstructionRelease(signals::ResolveMemberInstructionRelease),
     RecordMemberCustodyUnrestored(signals::RecordMemberCustodyUnrestored),
     ResolveMemberCustodyRestored(signals::ResolveMemberCustodyRestored),
+    RecoverIdentityEntryAdopting(signals::RecoverIdentityEntryAdopting),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -13380,6 +13475,7 @@ impl Signal {
             Self::ResolveMemberInstructionRelease(_) => SignalKind::ResolveMemberInstructionRelease,
             Self::RecordMemberCustodyUnrestored(_) => SignalKind::RecordMemberCustodyUnrestored,
             Self::ResolveMemberCustodyRestored(_) => SignalKind::ResolveMemberCustodyRestored,
+            Self::RecoverIdentityEntryAdopting(_) => SignalKind::RecoverIdentityEntryAdopting,
         }
     }
 }
@@ -13486,6 +13582,7 @@ pub enum SignalKind {
     ResolveMemberInstructionRelease,
     RecordMemberCustodyUnrestored,
     ResolveMemberCustodyRestored,
+    RecoverIdentityEntryAdopting,
 }
 
 pub mod effects {
@@ -14458,6 +14555,7 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: IdentityEntryVerdict,
         pub archived_session: Option<SessionId>,
+        pub would_be: Option<IdentityEntryVerdict>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeclaredRosterSealed {
@@ -14568,6 +14666,15 @@ pub mod effects {
     pub struct IdentityEntryUnlisted {
         pub agent_identity: AgentIdentity,
         pub verdict: UnlistEntryVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEntryTakenOver {
+        pub agent_identity: AgentIdentity,
+        pub verdict: HostAdoptionEntryVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberBuildPreparationRetryArmed {
+        pub agent_identity: AgentIdentity,
     }
 }
 
@@ -14769,6 +14876,8 @@ pub enum Effect {
     PreparationSettleResolved(effects::PreparationSettleResolved),
     PreparationConstructionEnded(effects::PreparationConstructionEnded),
     IdentityEntryUnlisted(effects::IdentityEntryUnlisted),
+    IdentityEntryTakenOver(effects::IdentityEntryTakenOver),
+    MemberBuildPreparationRetryArmed(effects::MemberBuildPreparationRetryArmed),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -14964,6 +15073,8 @@ pub enum EffectKind {
     PreparationSettleResolved,
     PreparationConstructionEnded,
     IdentityEntryUnlisted,
+    IdentityEntryTakenOver,
+    MemberBuildPreparationRetryArmed,
 }
 
 pub mod command_capabilities {
@@ -17008,6 +17119,24 @@ pub enum TransitionId {
     UnlistIdentityEntryMobNotRunningDestroyed,
     AdoptLegacyIdentityEntryAdoptedUnlisted,
     AdoptLegacyIdentityEntryRetireUnadopted,
+    ObserveMemberRetirementArchivedLiveHostAdopted,
+    ObserveMemberRetirementArchivedRetiredHostAdopted,
+    TakeOverIdentityEntryAdopting,
+    TakeOverIdentityEntryEnded,
+    TakeOverIdentityEntryDeferred,
+    TakeOverIdentityEntryNotADeclaredEntry,
+    TakeOverIdentityEntryNonAuthoritative,
+    TakeOverIdentityEntryMobNotRunningStopped,
+    TakeOverIdentityEntryMobNotRunningCompleted,
+    TakeOverIdentityEntryMobNotRunningDestroyed,
+    RecoverIdentityEntryAdoptingMarkedRunning,
+    RecoverIdentityEntryAdoptingStaleRunning,
+    ResolveMemberRevivalRetryableBuildPreparationRunning,
+    ResolveMemberBuildPreparationRunning,
+    ResolveMemberBuildPreparationStopped,
+    ResolveMemberBuildPreparationCompleted,
+    ResolveSubmitWorkRejectionIdentityMember,
+    ResolveSubmitWorkRejectionIdentityMemberUnreadableName,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17390,6 +17519,7 @@ pub fn initial_state() -> State {
         member_rotation_profile_names: Default::default(),
         identity_entry_unseated: Default::default(),
         identity_entry_retiring: Default::default(),
+        identity_entry_adopting: Default::default(),
         identity_entry_archived_sessions: Default::default(),
         declared_apply_open: false,
         identity_entry_tombstones: Default::default(),

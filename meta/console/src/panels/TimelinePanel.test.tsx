@@ -1,5 +1,5 @@
 import { fireEvent, render } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TimelinePanel, describeTodayFrame } from "./TimelinePanel";
 import { __chatPaneTest } from "./ChatPane";
@@ -103,7 +103,15 @@ describe("Today rows", () => {
 });
 
 describe("Today v2", () => {
-  const NOW = Date.now();
+  // The lanes, the rows and the glance strip read the day from the clock, and
+  // these frames sit 5 to 20 minutes before NOW: pin Date (only) to a local
+  // midday, or a run just after midnight moves some of them into yesterday.
+  const NOW = new Date("2026-06-10T12:00:00").getTime();
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => { vi.useRealTimers(); });
   const at = (minutesAgo: number) => NOW - minutesAgo * 60_000;
   const frames: ConsoleFrame[] = [
     { id: "ask", event: "user_input", identity: "identity:billing", interactionId: "turn-a", timestampMs: at(20), data: { content: "Refund order 77310.", origin: "console:pane-1", origin_kind: "operator" } },

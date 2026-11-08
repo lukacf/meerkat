@@ -9,6 +9,13 @@ use serde::{Deserialize, Serialize};
 pub const ACTION_AGENT_VIEW: &str = "agent.view";
 /// Send a message to an agent (console send / chat).
 pub const ACTION_AGENT_SEND: &str = "agent.send";
+/// Change an agent's console schedules: create, edit, pause, resume and
+/// delete them. A schedule is a deferred send, so each change also needs
+/// `agent.send`; this action lets a deployment keep some who may message an
+/// agent from changing its schedules. A configuration that names no
+/// schedule action grants it wherever it grants `agent.send`
+/// ([`normalize_access_config_for_schedule_actions`]).
+pub const ACTION_SCHEDULE_MANAGE: &str = "schedule.manage";
 /// Write durable identity-scoped memory records for future agent context.
 pub const ACTION_AGENT_MEMORY_WRITE: &str = "agent.memory.write";
 /// Delete durable identity-scoped memory records.
@@ -47,6 +54,17 @@ pub const ACTION_AGENT_RESET: &str = "agent.reset";
 pub const ACTION_GATING_VIEW: &str = "gating.view";
 /// Decide pending gating approvals.
 pub const ACTION_GATING_DECIDE: &str = "gating.decide";
+/// Read durable decisions on the console: the list, one decision and its
+/// rendering. It never widens what a caller sees of a decision: that is the
+/// decision kind's rule ([`crate::durable_decisions`]), applied whatever the
+/// rules say.
+pub const ACTION_DECISIONS_VIEW: &str = "decisions.view";
+/// Decide durable decisions on the console. Reserved: no console route
+/// decides yet.
+pub const ACTION_DECISIONS_DECIDE: &str = "decisions.decide";
+/// Administer durable decisions on the console: read every decision whole
+/// while access control is enforced, and withdraw a decision as the host.
+pub const ACTION_DECISIONS_ADMIN: &str = "decisions.admin";
 /// Read WorkGraph state: snapshots, items, attention bindings, events.
 pub const ACTION_WORKGRAPH_VIEW: &str = "workgraph.view";
 /// Mutate WorkGraph state: goals, item lifecycle, attention operations.
@@ -80,6 +98,10 @@ pub const ACTION_TOPOLOGY_CROSS_AUTHORITY: &str = "topology.cross_authority";
 pub const ACTION_MOBPACK_AUTHOR: &str = "mobpack.author";
 /// Execute a mobpack deploy on the host (`rkat mob run`).
 pub const ACTION_MOBPACK_DEPLOY: &str = "mobpack.deploy";
+/// Read the console audit log (`meta/console/audit`): who made each console
+/// change, when, and how it ended. Kept apart from `access.admin` so a
+/// reviewer can read the log without editing access.
+pub const ACTION_AUDIT_VIEW: &str = "audit.view";
 /// Read and mutate the access-control configuration itself.
 pub const ACTION_ACCESS_ADMIN: &str = "access.admin";
 
@@ -116,6 +138,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     "extension.manage",
     ACTION_AGENT_VIEW,
     ACTION_AGENT_SEND,
+    ACTION_SCHEDULE_MANAGE,
     ACTION_AGENT_MEMORY_WRITE,
     ACTION_AGENT_MEMORY_DELETE,
     ACTION_AGENT_MEMORY_READ,
@@ -131,6 +154,9 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_AGENT_RESET,
     ACTION_GATING_VIEW,
     ACTION_GATING_DECIDE,
+    ACTION_DECISIONS_VIEW,
+    ACTION_DECISIONS_DECIDE,
+    ACTION_DECISIONS_ADMIN,
     ACTION_WORKGRAPH_VIEW,
     ACTION_WORKGRAPH_MANAGE,
     ACTION_MOB_OBSERVE,
@@ -144,6 +170,7 @@ pub const ACCESS_ACTIONS: &[&str] = &[
     ACTION_TOPOLOGY_CROSS_AUTHORITY,
     ACTION_MOBPACK_AUTHOR,
     ACTION_MOBPACK_DEPLOY,
+    ACTION_AUDIT_VIEW,
     ACTION_ACCESS_ADMIN,
 ];
 
@@ -180,13 +207,118 @@ pub struct AccessControlConfig {
 }
 
 /// Who holds one approver identity: listed subjects and members of listed
-/// groups.
+/// groups, the people a declared decision ingress attests, the stdio
+/// operator, and people whose identities span ingresses.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessApprover {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Holders as a declared decision ingress attests them
+    /// (`{ ingress = "chat", subject = "U123" }`), and the stdio operator,
+    /// the built-in ingress `operator` with no subject.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress_subjects: Vec<AccessIngressSubject>,
+    /// One entry per person, within this binding. The entry links the stdio
+    /// operator and the declared-ingress identities it lists as one person:
+    /// a decision one of them requested is that person's own, and none of
+    /// them may approve it. Its Console `subjects` make the person a holder
+    /// for Console reads and the gating decide; a request made from the
+    /// Console is not matched to the person, since the Console decides no
+    /// durable decision. Linking is per binding: a person is linked only in
+    /// the bindings whose entries list it, so link a person in every binding
+    /// it holds. An identity appears in at most one entry of a binding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<AccessApproverPerson>,
+}
+
+/// The built-in ingress name of the stdio operator in an approver's
+/// `ingress_subjects`.
+pub const OPERATOR_INGRESS: &str = "operator";
+
+/// One identity a decision ingress attests: the ingress's name and the
+/// subject it attests, or the built-in `operator` ingress, which names no
+/// subject (one operator per gateway).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessIngressSubject {
+    pub ingress: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+}
+
+/// One person in an approver's `people`: the Console subjects and the
+/// ingress identities, the stdio operator among them, that are this one
+/// person within the binding.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessApproverPerson {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subjects: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress_subjects: Vec<AccessIngressSubject>,
+}
+
+impl AccessApprover {
+    /// Whether anything holds the approver id.
+    fn has_holders(&self) -> bool {
+        self.subjects
+            .iter()
+            .any(|subject| !subject.trim().is_empty())
+            || !self.groups.is_empty()
+            || !self.ingress_subjects.is_empty()
+            || self.people.iter().any(AccessApproverPerson::names_anyone)
+    }
+
+    /// Every ingress identity the approver id lists, directly or in a
+    /// person.
+    pub(crate) fn all_ingress_subjects(&self) -> impl Iterator<Item = &AccessIngressSubject> {
+        self.ingress_subjects.iter().chain(
+            self.people
+                .iter()
+                .flat_map(|person| person.ingress_subjects.iter()),
+        )
+    }
+}
+
+impl AccessApproverPerson {
+    fn names_anyone(&self) -> bool {
+        !self.subjects.is_empty() || !self.ingress_subjects.is_empty()
+    }
+}
+
+/// Whether `name` is an ingress name: 1 to 64 of `a-z`, `0-9`, `.`, `_`
+/// and `-`.
+pub(crate) fn is_ingress_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+/// Refuse an approver map that names an ingress outside `declared`, the
+/// decision ingresses a launch declares. The built-in `operator` is always
+/// known.
+///
+/// # Errors
+/// [`AccessConfigError::UnknownIngress`] for the first such ingress.
+pub(crate) fn check_declared_ingresses(
+    config: &AccessControlConfig,
+    declared: &std::collections::BTreeSet<String>,
+) -> Result<(), AccessConfigError> {
+    for (approver, holders) in &config.approvers {
+        for identity in holders.all_ingress_subjects() {
+            if identity.ingress != OPERATOR_INGRESS && !declared.contains(&identity.ingress) {
+                return Err(AccessConfigError::UnknownIngress {
+                    approver: approver.clone(),
+                    ingress: identity.ingress.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A named set of subjects.
@@ -257,16 +389,59 @@ pub enum AccessConfigError {
     EmptyRuleId,
     DuplicateRuleId(String),
     EmptyActions(String),
-    UnknownAction { rule: String, action: String },
-    UnknownGroup { rule: String, group: String },
+    UnknownAction {
+        rule: String,
+        action: String,
+    },
+    UnknownGroup {
+        rule: String,
+        group: String,
+    },
     EmptyApproverId,
     ApproverWithoutHolders(String),
-    UnknownApproverGroup { approver: String, group: String },
+    UnknownApproverGroup {
+        approver: String,
+        group: String,
+    },
     UnknownRule(String),
     Parse(String),
     Io(String),
     RevisionExhausted,
     PaddedApproverId(String),
+    /// An approver's ingress identity names something that is not an
+    /// ingress name.
+    InvalidIngressName {
+        approver: String,
+        ingress: String,
+    },
+    /// An approver lists the stdio operator with a subject: one operator per
+    /// gateway, so it names none.
+    OperatorIngressWithSubject {
+        approver: String,
+    },
+    /// An approver's ingress identity names no subject, or an empty or
+    /// padded one.
+    InvalidIngressSubject {
+        approver: String,
+        ingress: String,
+    },
+    /// An approver's `people` entry names no identity.
+    ApproverPersonWithoutIdentity {
+        approver: String,
+    },
+    /// An approver's ingress identity names an ingress the launch does not
+    /// declare (`runtime_options.decisions`).
+    UnknownIngress {
+        approver: String,
+        ingress: String,
+    },
+    /// One identity (a Console subject, the stdio operator or an ingress
+    /// subject) is listed in two `people` entries of one approver: each
+    /// entry is one person.
+    DuplicatePersonIdentity {
+        approver: String,
+        identity: String,
+    },
 }
 
 impl AccessConfigError {
@@ -289,6 +464,12 @@ impl AccessConfigError {
             Self::Parse(_) => "invalid_toml",
             Self::Io(_) => "io",
             Self::RevisionExhausted => "revision_exhausted",
+            Self::InvalidIngressName { .. } => "invalid_ingress_name",
+            Self::OperatorIngressWithSubject { .. } => "operator_ingress_with_subject",
+            Self::InvalidIngressSubject { .. } => "invalid_ingress_subject",
+            Self::ApproverPersonWithoutIdentity { .. } => "approver_person_without_identity",
+            Self::UnknownIngress { .. } => "unknown_ingress",
+            Self::DuplicatePersonIdentity { .. } => "duplicate_person_identity",
         }
     }
 }
@@ -327,6 +508,34 @@ impl std::fmt::Display for AccessConfigError {
             Self::Parse(message) => write!(f, "access config could not be parsed: {message}"),
             Self::Io(message) => write!(f, "access config io error: {message}"),
             Self::RevisionExhausted => write!(f, "access configuration revision exhausted"),
+            Self::InvalidIngressName { approver, ingress } => write!(
+                f,
+                "approver {approver:?}: {ingress:?} is not an ingress name (1 to 64 of a-z, \
+                 0-9, '.', '_' and '-')"
+            ),
+            Self::OperatorIngressWithSubject { approver } => write!(
+                f,
+                "approver {approver:?}: the operator ingress names no subject (one operator \
+                 per gateway)"
+            ),
+            Self::InvalidIngressSubject { approver, ingress } => write!(
+                f,
+                "approver {approver:?}: ingress {ingress:?} needs a subject that is not empty \
+                 and has no leading or trailing whitespace"
+            ),
+            Self::ApproverPersonWithoutIdentity { approver } => {
+                write!(f, "approver {approver:?}: a people entry names no identity")
+            }
+            Self::UnknownIngress { approver, ingress } => write!(
+                f,
+                "approver {approver:?}: unknown ingress {ingress:?} (declare it in \
+                 runtime_options.decisions)"
+            ),
+            Self::DuplicatePersonIdentity { approver, identity } => write!(
+                f,
+                "approver {approver:?}: {identity} is listed in two people entries (each entry \
+                 is one person)"
+            ),
         }
     }
 }
@@ -391,29 +600,12 @@ fn pattern_mentions_memory(pattern: &str) -> bool {
 /// never rewritten again. Returns `true` when anything changed; callers log
 /// the recommendation to write explicit memory rules.
 pub fn normalize_access_config_for_memory_actions(config: &mut AccessControlConfig) -> bool {
-    let mentions_memory = config
-        .rules
-        .iter()
-        .flat_map(|rule| rule.actions.iter())
-        .any(|pattern| pattern_mentions_memory(pattern));
-    if mentions_memory {
-        return false;
-    }
-    let mut changed = false;
-    for rule in &mut config.rules {
-        let matches_view = rule
-            .actions
-            .iter()
-            .any(|pattern| action_pattern_matches(pattern, ACTION_AGENT_VIEW));
-        let matches_read = rule
-            .actions
-            .iter()
-            .any(|pattern| action_pattern_matches(pattern, ACTION_AGENT_MEMORY_READ));
-        if matches_view && !matches_read {
-            rule.actions.push(ACTION_AGENT_MEMORY_READ.to_string());
-            changed = true;
-        }
-    }
+    let changed = extend_rules_unless_family_named(
+        config,
+        pattern_mentions_memory,
+        ACTION_AGENT_VIEW,
+        ACTION_AGENT_MEMORY_READ,
+    );
     if changed {
         tracing::warn!(
             target: "meta::access",
@@ -421,6 +613,82 @@ pub fn normalize_access_config_for_memory_actions(config: &mut AccessControlConf
              agent.view is granted (write explicit agent.memory.read / mob.memory.read / \
              memory.quarantine.review rules to silence this)"
         );
+    }
+    changed
+}
+
+/// True when the pattern explicitly references the schedule action family:
+/// one of its dot-separated segments (with a trailing `.*` stripped) is
+/// `schedule`. Broad wildcards (`*`) already match `schedule.manage` and do
+/// not count.
+fn pattern_mentions_schedule(pattern: &str) -> bool {
+    pattern
+        .strip_suffix(".*")
+        .unwrap_or(pattern)
+        .split('.')
+        .any(|segment| segment == "schedule")
+}
+
+/// Migration compat for [`ACTION_SCHEDULE_MANAGE`]: configurations written
+/// before it existed keep working.
+///
+/// Console schedule writes used to need only `agent.send`. A configuration
+/// that mentions **no** schedule action in any rule gets `schedule.manage`
+/// on every rule matching `agent.send`, allow and deny rules alike, so
+/// "manage rides send" reproduces what its rules allowed before. A
+/// configuration that mentions a schedule action anywhere is taken
+/// literally. Like [`normalize_access_config_for_memory_actions`], the
+/// extension is materialized into the rule list, reaches the persisted TOML
+/// on the next admin save, and never rewrites a normalized configuration
+/// again. Returns `true` when anything changed.
+pub fn normalize_access_config_for_schedule_actions(config: &mut AccessControlConfig) -> bool {
+    let changed = extend_rules_unless_family_named(
+        config,
+        pattern_mentions_schedule,
+        ACTION_AGENT_SEND,
+        ACTION_SCHEDULE_MANAGE,
+    );
+    if changed {
+        tracing::warn!(
+            target: "meta::access",
+            "access config predates schedule.manage; granting it wherever agent.send is granted \
+             (write explicit schedule.manage rules to silence this)"
+        );
+    }
+    changed
+}
+
+/// Extend every rule that matches `carrier` to also cover `action`, allow and
+/// deny rules alike, unless some rule already names an action of the family
+/// `names_family` recognizes. Returns `true` when anything changed.
+fn extend_rules_unless_family_named(
+    config: &mut AccessControlConfig,
+    names_family: fn(&str) -> bool,
+    carrier: &str,
+    action: &str,
+) -> bool {
+    let named = config
+        .rules
+        .iter()
+        .flat_map(|rule| rule.actions.iter())
+        .any(|pattern| names_family(pattern));
+    if named {
+        return false;
+    }
+    let mut changed = false;
+    for rule in &mut config.rules {
+        let carries = rule
+            .actions
+            .iter()
+            .any(|pattern| action_pattern_matches(pattern, carrier));
+        let covers = rule
+            .actions
+            .iter()
+            .any(|pattern| action_pattern_matches(pattern, action));
+        if carries && !covers {
+            rule.actions.push(action.to_string());
+            changed = true;
+        }
     }
     changed
 }
@@ -469,12 +737,14 @@ pub fn validate_access_config(config: &AccessControlConfig) -> Result<(), Access
         if approver.trim() != approver {
             return Err(AccessConfigError::PaddedApproverId(approver.clone()));
         }
-        if holders
-            .subjects
-            .iter()
-            .all(|subject| subject.trim().is_empty())
-            && holders.groups.is_empty()
-        {
+        // An empty person entry is the more precise fault than an approver
+        // without holders, which it may also leave.
+        if holders.people.iter().any(|person| !person.names_anyone()) {
+            return Err(AccessConfigError::ApproverPersonWithoutIdentity {
+                approver: approver.clone(),
+            });
+        }
+        if !holders.has_holders() {
             return Err(AccessConfigError::ApproverWithoutHolders(approver.clone()));
         }
         for group in &holders.groups {
@@ -485,8 +755,74 @@ pub fn validate_access_config(config: &AccessControlConfig) -> Result<(), Access
                 });
             }
         }
+        for identity in holders.all_ingress_subjects() {
+            validate_ingress_subject(approver, identity)?;
+        }
+        validate_people_identities(approver, holders)?;
     }
     Ok(())
+}
+
+/// Each identity of `approver`'s `people` (a Console subject, the stdio
+/// operator or an ingress subject) appears in at most one entry: an entry
+/// is one person. One entry may repeat its own identity.
+fn validate_people_identities(
+    approver: &str,
+    holders: &AccessApprover,
+) -> Result<(), AccessConfigError> {
+    let mut listed = std::collections::BTreeSet::new();
+    for person in &holders.people {
+        let identities: std::collections::BTreeSet<String> = person
+            .subjects
+            .iter()
+            .map(|subject| format!("subject {subject:?}"))
+            .chain(person.ingress_subjects.iter().map(
+                |identity| match identity.subject.as_deref() {
+                    None => "the operator".to_string(),
+                    Some(subject) => {
+                        format!("ingress {:?} subject {subject:?}", identity.ingress)
+                    }
+                },
+            ))
+            .collect();
+        for identity in identities {
+            if listed.contains(&identity) {
+                return Err(AccessConfigError::DuplicatePersonIdentity {
+                    approver: approver.to_string(),
+                    identity,
+                });
+            }
+            listed.insert(identity);
+        }
+    }
+    Ok(())
+}
+
+/// One ingress identity of `approver`: an ingress name, and a subject
+/// exactly when the ingress is not the stdio operator.
+fn validate_ingress_subject(
+    approver: &str,
+    identity: &AccessIngressSubject,
+) -> Result<(), AccessConfigError> {
+    if !is_ingress_name(&identity.ingress) {
+        return Err(AccessConfigError::InvalidIngressName {
+            approver: approver.to_string(),
+            ingress: identity.ingress.clone(),
+        });
+    }
+    match identity.subject.as_deref() {
+        Some(_) if identity.ingress == OPERATOR_INGRESS => {
+            Err(AccessConfigError::OperatorIngressWithSubject {
+                approver: approver.to_string(),
+            })
+        }
+        None if identity.ingress == OPERATOR_INGRESS => Ok(()),
+        Some(subject) if !subject.is_empty() && subject.trim() == subject => Ok(()),
+        _ => Err(AccessConfigError::InvalidIngressSubject {
+            approver: approver.to_string(),
+            ingress: identity.ingress.clone(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +997,71 @@ mod tests {
         assert!(action_pattern_matches("agent.*", "agent.memory.read"));
         assert!(action_pattern_matches("*", "memory.quarantine.review"));
         assert!(!action_pattern_matches("agent.*", "mob.memory.read"));
+    }
+
+    /// A configuration that names no schedule action keeps the schedule
+    /// gate it had: `schedule.manage` rides every rule that matches
+    /// `agent.send`, allow and deny alike, `agent.*` included (it matches
+    /// the send but not the schedule action), and the rewrite runs once.
+    #[test]
+    fn schedule_naive_config_grants_manage_alongside_send() {
+        let mut deny_send = rule("deny-secret", &["agent.send"]);
+        deny_send.effect = AccessEffect::Deny;
+        deny_send.agents = vec!["identity:secret".to_string()];
+        let mut config = AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![
+                rule("send-all", &["agent.send"]),
+                deny_send,
+                rule("agent-verbs", &["agent.*"]),
+                rule("view-one", &["agent.view"]),
+                rule("everything", &["*"]),
+            ],
+            ..AccessControlConfig::default()
+        };
+        assert!(normalize_access_config_for_schedule_actions(&mut config));
+        let actions_of = |id: &str| {
+            config
+                .rules
+                .iter()
+                .find(|rule| rule.id == id)
+                .expect("rule")
+                .actions
+                .clone()
+        };
+        let manage = ACTION_SCHEDULE_MANAGE.to_string();
+        assert!(actions_of("send-all").contains(&manage));
+        assert!(
+            actions_of("deny-secret").contains(&manage),
+            "a send deny denies schedule changes too"
+        );
+        assert!(actions_of("agent-verbs").contains(&manage));
+        assert!(!actions_of("view-one").contains(&manage));
+        assert_eq!(actions_of("everything"), vec!["*".to_string()]);
+        assert!(!normalize_access_config_for_schedule_actions(&mut config));
+        assert_eq!(validate_access_config(&config), Ok(()));
+    }
+
+    /// A configuration that names a schedule action anywhere, exactly or by
+    /// its family's wildcard, is taken literally.
+    #[test]
+    fn config_naming_a_schedule_action_is_taken_literally() {
+        for named in ["schedule.manage", "schedule.*"] {
+            let mut config = AccessControlConfig {
+                rules: vec![
+                    rule("send-all", &["agent.send"]),
+                    rule("schedulers", &[named]),
+                ],
+                ..AccessControlConfig::default()
+            };
+            assert!(
+                !normalize_access_config_for_schedule_actions(&mut config),
+                "{named}"
+            );
+            assert_eq!(config.rules[0].actions, vec!["agent.send".to_string()]);
+            assert_eq!(validate_access_config(&config), Ok(()), "{named}");
+        }
     }
 
     #[test]

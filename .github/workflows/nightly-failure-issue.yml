@@ -1,0 +1,50 @@
+name: Nightly failure issue
+
+# A red nightly on main opens one tracking issue, or comments on it while it
+# stays open (#1673). This runs once a Nightly run has completed and reads
+# that run's jobs once, so it sees every chain's final result and no Nightly
+# job waits for the others on a hosted runner. The job that did, at the end
+# of one chain, reached its own 180-minute limit while the other chains still
+# ran (2026-11-07) and reported nothing.
+on:
+  workflow_run:
+    workflows: [Nightly]
+    types: [completed]
+
+permissions:
+  actions: read
+  issues: write
+
+jobs:
+  failure-issue:
+    name: Nightly failure issue
+    # Main's runs only, scheduled or dispatched: a run of any other event
+    # (a pull request's copy of nightly.yml from a branch named main, say)
+    # could choose the job names this posts.
+    if: ${{ github.event.workflow_run.head_branch == 'main' && (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          jobs_json="${RUNNER_TEMP}/nightly-jobs.json"
+          gh api --paginate "repos/${GH_REPO}/actions/runs/${RUN_ID}/jobs?per_page=100" > "${jobs_json}"
+          # A graph_only dispatch runs only the BuildBuddy graph (nightly.yml's
+          # gcp-buildbuddy job) and skips every chain; like the chains, the
+          # failure issue leaves such a run alone.
+          chains="$(jq -s '[.[].jobs[] | select(.conclusion != "skipped" and (.name | startswith("GCP BuildBuddy (full-fresh)") | not))] | length' "${jobs_json}")"
+          if [[ "${chains}" == 0 ]]; then
+            echo "graph-only run: no chain job ran"
+            exit 0
+          fi
+          failed="$(jq -rs '[.[].jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled") | .name] | join(", ")' "${jobs_json}")"
+          echo "failed jobs: ${failed:-none}"
+          [[ -n "${failed}" ]] || exit 0
+          body="Run ${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${RUN_ID} failed: ${failed}"
+          issue="$(gh issue list --state open --search 'in:title "Nightly failures"' --json number,title --jq '[.[] | select(.title == "Nightly failures")][0].number // empty')"
+          if [[ -n "${issue}" ]]; then gh issue comment "${issue}" --body "${body}"; else gh issue create --title "Nightly failures" --body "${body}"; fi

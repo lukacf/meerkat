@@ -831,6 +831,53 @@ async fn a_declared_omission_never_retires_a_created_owner() {
     assert!(mob.is_member("owner").await);
 }
 
+/// A complete declared roster leaves alone a Declared entry a host's
+/// identity intent row names, a row this build cannot read included: the
+/// roster does not own it (a readable row's adoption takes the entry over,
+/// and an unreadable one is never driven), so the seal neither marks nor
+/// unlists it. Its member keeps its seat and its session, and the entry
+/// stays Declared; the entry the roster still lists is kept.
+///
+/// RED: hand the seal no intent-named entry (the declared apply's
+/// `declared_apply_intent_named_entries` answers none): the seal unlists the
+/// entry and retires its member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_complete_roster_leaves_an_entry_an_unreadable_intent_row_names() {
+    let mob = CreatedMob::new("seal-spares-intent-named").await;
+    let seated = mob
+        .apply(DeclaredRoster::complete([
+            declared("kept"),
+            declared("named"),
+        ]))
+        .await;
+    let session = match seated.entries.get(&id("named")) {
+        Some(DeclaredEntryOutcome::Seated { session_id, .. }) => session_id.clone(),
+        other => panic!("the entry is seated: {other:?}"),
+    };
+    // A host's identity intent row for the entry's name, as a later build
+    // wrote it: this build cannot read it.
+    mob.put_raw("named", br#"{"a_later_intent_field":true}"#.to_vec())
+        .await;
+
+    let sealed = mob
+        .apply(DeclaredRoster::complete([declared("kept")]))
+        .await;
+    assert!(
+        sealed.unlisted.is_empty(),
+        "the seal unlists no intent-named entry: {sealed:?}"
+    );
+    assert!(
+        matches!(
+            sealed.entries.get(&id("kept")),
+            Some(DeclaredEntryOutcome::Kept)
+        ),
+        "{sealed:?}"
+    );
+    assert!(mob.is_member("named").await, "its member keeps its seat");
+    assert_eq!(seated_session(mob.standing("named")), Some(session));
+    assert_eq!(mob.origin("named"), Some(IdentityEntryOrigin::Declared));
+}
+
 /// The identity reconciler never takes up a created entry's row: its
 /// startup discovery reads the host-adopted intents' rows only, so a created
 /// row and a later build's created row get no reconcile status, while an

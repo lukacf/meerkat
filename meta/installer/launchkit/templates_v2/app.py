@@ -23,9 +23,11 @@ import tomllib
 from connectors import ConnectorTools, load_environment
 from mcp_connections import MCPPool, configuration_value
 from application_configuration import application_fields, configuration_issue, validate_application_fields, validate_configuration_values
-from console_configuration import console_authentication, console_credential_issue, validate_console_configuration_values
+from console_configuration import (console_authentication, console_authentication_choice,
+    console_authentication_source, console_credential_issue, validate_console_configuration_values)
 from console_auth import (ConsoleFront, ConsoleConnectLogin, FrontendManagementRequest,
-    FrontendSubmissionDisposition, FrontendSubmissionResult, _frontend_json, console_configuration)
+    FrontendSubmissionDisposition, FrontendSubmissionResult, _frontend_json, console_access_file,
+    console_configuration, console_oidc_settings, load_console_accounts)
 from native_definition_continuity import (continuity_query, registry_role_continuity,
     verify_continuity_runtime)
 
@@ -653,7 +655,7 @@ class Application:
             fields = application_fields(self.context.root)
             authenticated_console = console_configuration(self.context.root, fields)
             if getattr(self.integration, "on_console_input", None) and not authenticated_console:
-                raise ValueError("on_console_input requires local-password Console authentication metadata and private setup fields.")
+                raise ValueError("on_console_input requires local-password, local-accounts or oidc Console authentication metadata and private setup fields.")
             review_factory = getattr(self.integration, "controller_review_factory", None)
             if review_factory is not None and not _synchronous_callable(review_factory):
                 raise ValueError("Application controller_review_factory must be synchronous.")
@@ -664,7 +666,7 @@ class Application:
                 support = "Console login" if login_factory is not None else "Controller review" if review_factory is not None else "Frontend management"
                 if not authenticated_console:
                     hook_name = "console_login_factory" if login_factory is not None else "controller_review_factory" if review_factory is not None else "frontend_management"
-                    raise ValueError(f"{hook_name} requires local-password Console authentication metadata and private setup fields.")
+                    raise ValueError(f"{hook_name} requires local-password, local-accounts or oidc Console authentication metadata and private setup fields.")
                 if "deployment.json" not in loaded_sources or json.loads(loaded_sources["deployment.json"]) != self.context.deployment:
                     raise ValueError(f"{support} requires the exact loaded application deployment source.")
                 setup_sources = {name: loaded_sources[name] for name in
@@ -1104,11 +1106,11 @@ class Application:
         if not current():
             raise ValueError("Console login requires the current application and login.")
         selected = ConsoleConnectLogin(login.principal, login.login_scope_id,
-            login.expires_at_ms, login.origin, current)
+            login.expires_at_ms, login.origin, current, issuer=login.issuer, subject=login.subject)
         if hook is None:
             from console_auth import ISSUER
             from native_console_login import NativeConsoleLogin
-            return NativeConsoleLogin(private_client, selected, issuer=ISSUER, is_current=current)
+            return NativeConsoleLogin(private_client, selected, issuer=login.issuer or ISSUER, is_current=current)
         # Return immediately so the existing Console owner takes custody before
         # checking binding/start. The callback preserves loaded source authority.
         return hook(selected)
@@ -1288,11 +1290,12 @@ def doctor(spec, *, application_startup=None):
                   ("Selected application gateway", gateway_verified)]
     fields = [*spec["environment"], *application_fields(ROOT, (field["key"] for field in spec["environment"]))]
     authenticated_console = console_configuration(ROOT, fields)
+    authentication = console_authentication_choice(ROOT, fields) if authenticated_console else None
     for field in fields:
         value = configuration_value(field)
         issue = configuration_issue(field, value)
         if issue is None and authenticated_console:
-            issue = console_credential_issue(field, value)
+            issue = console_credential_issue(field, value, authentication)
         if field["required"] or value:
             label = field["label"] if issue is None else f"{issue['label']} ({issue['key']}): {issue['message']}"
             checks.append((label, issue is None))
@@ -1592,8 +1595,10 @@ async def run(spec, args, *, application_startup=None):
     authenticated_console = console_configuration(ROOT, fields)
     if authenticated_console and console_setup_source_bytes(ROOT) != console_setup_sources:
         raise ValueError("Console setup source changed during authentication composition.")
+    authentication = console_authentication_choice(ROOT, fields) if authenticated_console else None
     if authenticated_console:
-        validate_console_configuration_values(fields, {field["key"]: configuration_value(field) for field in fields})
+        validate_console_configuration_values(fields, {field["key"]: configuration_value(field) for field in fields},
+                                              authentication)
     try:
         validate_configuration_values(fields, {field["key"]: configuration_value(field) for field in fields})
     except ValueError as error:
@@ -1614,10 +1619,17 @@ async def run(spec, args, *, application_startup=None):
         raise ValueError("Hosted MCP requires the configured authenticated Console.")
     hosted_console = ({} if hosted_origin is None else
         {"public_origin": hosted_origin, "hosted_mcp_targets": hosted_targets})
+    # Named accounts (`local-accounts`) are kept on this computer by setup.py
+    # and read once here: the native console's allowlist is fixed at start.
+    named_accounts = ({"accounts": load_console_accounts(ROOT, os.environ.get("CONSOLE_USER_ID"))}
+        if authentication == "local-accounts" else {})
+    # OIDC sign-in (`oidc`): the provider, the client secret its source
+    # references and the people to admit, read once here.
+    oidc = ({"oidc": console_oidc_settings(ROOT, fields, os.environ)} if authentication == "oidc" else {})
     console_front = (ConsoleFront(ROOT, port, os.environ.get("CONSOLE_USER_ID"),
-        os.environ.get("CONSOLE_LOGIN_PASSWORD"), application.on_console_input,
+        None if oidc else os.environ.get("CONSOLE_LOGIN_PASSWORD"), application.on_console_input,
         runtime_namespace="meta" if meta else "mobkit",
-        **hosted_console) if authenticated_console else None)
+        **named_accounts, **oidc, **hosted_console) if authenticated_console else None)
     application.context.console_url = f"{hosted_origin or f'http://127.0.0.1:{port}'}/console"
     configured_tools = {}
     loop = asyncio.get_running_loop()
@@ -1676,11 +1688,16 @@ async def run(spec, args, *, application_startup=None):
         )
         # Preserve the builder's conventional policy files, rooted in this package.
         for field, relative in (("gating_config_path", "config/gating.toml"),
-                                ("access_config_path", "config/access.toml"),
                                 ("routing_config_path", "deployment/routing.toml")):
             path = ROOT / relative
             if path.is_file():
                 setattr(config, field, str(path))
+        # The console's Access panel writes its live copy in private state,
+        # seeded once from the package's config/access.toml, which stays the
+        # accepted bytes Forge checks.
+        access = console_access_file(ROOT)
+        if access is not None:
+            config.access_config_path = str(access)
         if shell_meta:
             return await connect_application_runtime(config, application, meta=True)
         return await connect_application_runtime(config, application, application_startup=application_startup)

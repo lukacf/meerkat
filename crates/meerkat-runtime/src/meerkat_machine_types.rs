@@ -1378,6 +1378,21 @@ meerkat_machine_runtime_internal_inputs!(
     LiveTopologyReconfiguration => [
         AbortUntilChangedSwitchTurnReconfigure,
     ],
+    // A host's settle of the run its session retained, applied directly by
+    // `MeerkatMachine::settle_retained_run`.
+    RunExecutionLifecycle => [
+        SettleRetainedRun,
+    ],
+    // A channel's close sweep closes its delegation intake, so a delegation
+    // the lifecycle seam carries past the close is refused admission.
+    LiveExecutionLifecycle => [
+        CloseLiveDelegationIntake,
+    ],
+    // A recovered ungoverned row's requester batch key, rehydrated as
+    // BindInputAuthority rehydrates a governed row's binding.
+    InputQueueLifecycle => [
+        BindInputRequesterBatchKey,
+    ],
 );
 
 macro_rules! meerkat_machine_fieldless_runtime_internal_inputs {

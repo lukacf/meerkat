@@ -32,13 +32,44 @@ const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
     header_value: "interleaved-thinking-2025-05-14",
 };
 
+/// Thinking-block binding controls: `thinking.block_binding` and the
+/// `input_transformations` report. The catalog rows that list the beta carry
+/// this header; a client sends the same one for a model id with no catalog
+/// row, so the value is defined here once.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+pub const ANTHROPIC_THINKING_BINDING_CONTROLS_BETA: BetaHeader = BetaHeader {
+    feature: BetaFeature::ThinkingBindingControls,
+    header_name: "anthropic-beta",
+    header_value: "thinking-binding-controls-2026-08-01",
+};
+
 /// Headers advertised for models with adaptive thinking + compaction
-/// (Fable 5.1, Opus 5.5, Opus 5, Fable 5, Opus 4.8, Opus 4.7, Sonnet 5.5,
-/// Sonnet 5, Sonnet 4.6, Haiku 5.5).
+/// (Fable 5, Opus 5, Opus 4.8, Opus 4.7, Sonnet 5, Sonnet 4.6).
 const ADAPTIVE_COMPACTION_BETAS: &[BetaHeader] = &[
     BETA_COMPACTION,
     BETA_STRUCTURED_OUTPUT,
     BETA_INTERLEAVED_THINKING,
+];
+
+/// [`ADAPTIVE_COMPACTION_BETAS`] plus the thinking-binding controls, for the
+/// catalogued models that check replayed thinking blocks against their
+/// request prefix (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5; Mythos 5.1 is
+/// not a catalog row). Each of them thinks by default when `thinking` is
+/// omitted: Fable 5.1 and Opus 5.5 "Always on", Sonnet 5.5 and Haiku 5.5
+/// "On" in the per-model table, and "Omit the `thinking` parameter and the
+/// request runs with adaptive thinking"; the client names that default beside
+/// the control. A model whose default is no thinking never carries this set.
+/// Sources:
+///   https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+///   (featureMetadata.supportedModels)
+///   https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+///   (Thinking support, defaults, and rejected configurations by model)
+///   https://platform.claude.com/docs/en/api/errors (Thinking cannot be disabled)
+const PRESERVED_THINKING_BETAS: &[BetaHeader] = &[
+    BETA_COMPACTION,
+    BETA_STRUCTURED_OUTPUT,
+    BETA_INTERLEAVED_THINKING,
+    ANTHROPIC_THINKING_BINDING_CONTROLS_BETA,
 ];
 
 /// Headers advertised for models with interleaved thinking but no compaction
@@ -113,6 +144,11 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
     //     https://platform.claude.com/docs/en/build-with-claude/compaction
     //   - Structured outputs:
     //     https://platform.claude.com/docs/en/build-with-claude/structured-outputs
+    //   - Forced tool use ("Claude Opus 5.5, Claude Sonnet 5.5, Claude Fable
+    //     5.1, and Claude Mythos 5.1 don't support forced tool use": a
+    //     `tool_choice` of `any` or a named tool returns 400):
+    //     https://platform.claude.com/docs/en/api/errors
+    //     https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools
     //
     // ASSUMED from the claude-fable-5 row (family-conservative defaults):
     //   - image_tool_results
@@ -155,10 +191,13 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(300),
         stream_inactivity_timeout_secs: None,
-        supports_forced_tool_choice: true,
+        // Forced `tool_choice` (`any`/`tool`) returns 400 on Fable 5.1 (see
+        // the forced tool use sources above); refuse it locally, as for
+        // claude-opus-5-5 and claude-sonnet-5-5.
+        supports_forced_tool_choice: false,
     },
     // Claude Fable 5
     //
@@ -300,7 +339,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(300),
         stream_inactivity_timeout_secs: None,
         // Live probe 2026-10-01: tool_choice any/tool answers 400 "not
@@ -551,7 +590,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(120),
         stream_inactivity_timeout_secs: None,
         // Forced `tool_choice` (`any`/`tool`) returns 400 on Sonnet 5.5,
@@ -842,7 +881,7 @@ pub const CAPABILITIES: &[ModelCapabilities] = &[
         supports_structured_output: true,
         supports_legacy_penalties: false,
         supports_thinking_budget_legacy: false,
-        beta_headers: ADAPTIVE_COMPACTION_BETAS,
+        beta_headers: PRESERVED_THINKING_BETAS,
         call_timeout_secs: Some(120),
         stream_inactivity_timeout_secs: None,
         supports_forced_tool_choice: true,

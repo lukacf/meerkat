@@ -294,3 +294,169 @@ async fn notification_sink_preserves_exact_review_refusal_and_permitted_control(
         );
     }
 }
+
+/// The incarnation of the mob `team` the member rows below are bound to.
+fn team_incarnation() -> meerkat_core::service::MobIncarnationId {
+    "6a1d3c58-2f0e-4b7a-9c41-8e5d2b0f7a13"
+        .parse()
+        .expect("canonical mob incarnation id")
+}
+
+/// A mob member resolver double, as a host's mob runtime binds one: every
+/// member address is served by `session`, and the member's mob refuses
+/// external work for it, as a mob refuses it for a member that became an
+/// identity entry.
+struct RefusesExternalWork {
+    session: meerkat::SessionId,
+}
+
+#[async_trait::async_trait]
+impl meerkat::ContinuationAddressResolver for RefusesExternalWork {
+    async fn current_address(
+        &self,
+        owner: &meerkat::ContinuationOwner,
+    ) -> Result<Option<meerkat_runtime::LogicalRuntimeId>, String> {
+        let meerkat::ContinuationOwner::Member { mob_id, identity } = owner else {
+            return Err("a member resolver".into());
+        };
+        meerkat::member_delivery_address(mob_id, team_incarnation(), identity, 1)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn resolve_address(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<meerkat::AddressResolution, String> {
+        Ok(
+            match address
+                .member_address()
+                .map_err(|error| error.to_string())?
+            {
+                Some(_) => meerkat::AddressResolution::Session(self.session.clone()),
+                None => meerkat::default_address_resolution(address),
+            },
+        )
+    }
+
+    async fn external_work_refusal(
+        &self,
+        _address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        Ok(Some(
+            meerkat_runtime::RuntimeDeliveryRefusalReason::AuthorityDenied,
+        ))
+    }
+}
+
+/// A job owner that owns no job.
+struct NoRetainedJobs;
+
+#[async_trait::async_trait]
+impl meerkat::RetainedJobSource for NoRetainedJobs {
+    async fn retained_job(
+        &self,
+        _producer: &meerkat::ContinuationProducer,
+        _job_id: &str,
+    ) -> meerkat::RetainedJobLookup {
+        meerkat::RetainedJobLookup::Absent
+    }
+}
+
+/// External work a caller committed to a mob member (a keyed member send
+/// through a surface's external door) is asked again at its delivery by the
+/// hosted composition's delivery host, which forwards the question to the
+/// continuation services the host's mob runtime binds. A refusal settles the
+/// row refused for good, and nothing is admitted into the member's session.
+#[tokio::test]
+async fn external_work_a_member_resolver_refuses_settles_refused_through_the_hosted_composition() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (service, adapter, observer) = build_service(temp.path()).await;
+    let session = meerkat::Session::new();
+    let session_id = session.id().clone();
+    let service_for_executor = Arc::clone(&service);
+    let adapter_for_executor = Arc::clone(&adapter);
+    Box::pin(meerkat::surface::materialize_session(
+        &service,
+        &adapter,
+        session,
+        create_request(),
+        move |session_id| {
+            default_persistent_executor(service_for_executor, adapter_for_executor, session_id)
+        },
+    ))
+    .await
+    .expect("materialize the member's idle session");
+
+    let resolver = Arc::new(RefusesExternalWork {
+        session: session_id.clone(),
+    });
+    let _binding = observer
+        .continuation_bindings()
+        .bind(resolver.clone(), Arc::new(NoRetainedJobs))
+        .expect("the host binds its continuation services");
+    let continuations = meerkat::ContinuationOwnerService::new(
+        observer.runtime_delivery_inbox(),
+        resolver,
+        Arc::clone(&adapter),
+    );
+    let owner = meerkat::ContinuationOwner::Member {
+        mob_id: "team".into(),
+        identity: "worker".into(),
+    };
+    let key = meerkat::ContinuationKey::new("external-1").expect("key");
+    let receipt = continuations
+        .submit_external_work_for_member_incarnation(
+            &owner,
+            team_incarnation(),
+            meerkat::ContinuationDelivery {
+                key: key.clone(),
+                result: meerkat::ContinuationResultRef {
+                    producer: meerkat::ContinuationProducer::Host {
+                        namespace: "tasks".into(),
+                    },
+                    producer_id: "op-1".into(),
+                    result_digest: "sha256:result".into(),
+                    summary: None,
+                },
+                body: "external work".into(),
+                handling: meerkat::ContinuationHandling::Queue,
+            },
+            1,
+        )
+        .await
+        .expect("the external work commits");
+
+    let settled = tokio::time::timeout(Duration::from_mins(1), async {
+        loop {
+            let status = continuations
+                .continuation_status(&owner, &key)
+                .await
+                .expect("status");
+            if !matches!(status, meerkat::ContinuationStatus::Pending { .. }) {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the row settles");
+    assert!(
+        matches!(
+            &settled,
+            meerkat::ContinuationStatus::Refused {
+                reason: meerkat_runtime::RuntimeDeliveryRefusalReason::AuthorityDenied,
+                ..
+            }
+        ),
+        "the delivery host asks the bound resolver, and its refusal settles the row: {settled:?}"
+    );
+    assert!(
+        adapter
+            .input_state_by_idempotency_key(&session_id, &receipt.delivery_id)
+            .await
+            .expect("idempotency lookup")
+            .is_none(),
+        "nothing was admitted into the member's session"
+    );
+}

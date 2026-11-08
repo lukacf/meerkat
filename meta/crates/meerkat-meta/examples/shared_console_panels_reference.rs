@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     evidence: Vec::new(),
                     verification: None,
                 },
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         runtime.set_memory_panel_store(store);

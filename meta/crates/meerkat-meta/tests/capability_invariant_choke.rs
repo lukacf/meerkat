@@ -293,3 +293,45 @@ fn both_wrappers_forward_the_member_instruction_methods() {
         );
     }
 }
+
+/// Both production `MobSessionService` wrappers forward the cold settle of a
+/// member session's owed compaction projections, and the stdin-RPC gateway's
+/// agent builder forwards the builder seam that settle finalizes through.
+/// The trait defaults refuse both typed for a service that keeps durable
+/// sessions, so a wrapper without the forward compiles and leaves the
+/// compaction a dormant member owes unsettled when its session ends.
+#[test]
+fn every_wrapper_forwards_the_owed_compaction_settle() {
+    const SETTLE: &str = ".settle_owed_compaction_projections(";
+    const FINALIZE: &str = ".finalize_absent_session_compaction_stages(";
+    let production = production_source(RUNTIME_SOURCE);
+    let delegation = production
+        .split("macro_rules! delegate_mob_session_service")
+        .nth(1)
+        .expect("delegation macro")
+        .split("delegate_mob_session_service!(PreBuildMobSessionService)")
+        .next()
+        .expect("delegation implementation");
+    let after_create = production
+        .split("impl MobSessionService for AfterCreateMobSessionService {")
+        .nth(1)
+        .expect("after-create wrapper")
+        .split("\n}\n")
+        .next()
+        .expect("after-create implementation");
+    assert_eq!(
+        occurrences(delegation, SETTLE),
+        1,
+        "the delegation macro forwards the owed compaction settle to its inner service"
+    );
+    assert_eq!(
+        occurrences(after_create, SETTLE),
+        1,
+        "the after-create wrapper forwards the owed compaction settle to its inner service"
+    );
+    assert_eq!(
+        occurrences(&production_source(RPC_GATEWAY_SOURCE), FINALIZE),
+        1,
+        "the stdin-RPC gateway's agent builder forwards the compaction stage finalization"
+    );
+}

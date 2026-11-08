@@ -128,9 +128,10 @@ impl MobActor {
     /// (`ImportIdentityRecord`) on one prepared authority, then restores the
     /// restored records' owned edges as the next start recovers them
     /// (`RestoreOwnedIdentityEdge`); the
-    /// change's store transaction writes the restored rows as exported, the
-    /// binding rows (origin Created) of the members bound in place and the
-    /// receipt, and only then does the machine commit; the roster folds the
+    /// change's store transaction writes the restored rows, each with the
+    /// owned edges MobMachine restored, the binding rows (origin Created) of
+    /// the members bound in place and the receipt, and only then does the
+    /// machine commit; the roster folds the
     /// binding rows as a replay does, which makes each member a host root.
     /// A record another holder keeps is reported in the receipt; a member
     /// step in flight, and any refusal, writes nothing.
@@ -160,7 +161,7 @@ impl MobActor {
         let mob_id = self.definition.id.clone();
         let mut effects = Vec::new();
         let mut entries = Vec::new();
-        let mut rows = Vec::new();
+        let mut restored_records = Vec::new();
         let mut bound_in_place = Vec::new();
         let mut edges = Vec::new();
         for exported in &commit.export.identities {
@@ -266,10 +267,7 @@ impl MobActor {
             }
             entries.push(entry);
             if restored {
-                rows.push(CreatedIdentityRowWrite {
-                    record: record.clone(),
-                    expected: CreatedIdentityRowExpectation::Absent,
-                });
+                restored_records.push(record.clone());
                 if verdict != Verdict::RestoredTombstone {
                     for edge in &record.owned_edges {
                         edges.push((identity.clone(), edge.peer.clone()));
@@ -279,12 +277,15 @@ impl MobActor {
             effects.extend(transition.into_effects());
         }
         // The restored records' owned edges, once every record is: an edge's
-        // other end may be a record restored after its owner's. The rows
-        // keep every edge as exported, and MobMachine restores each as the
-        // next start's recovery of the rows recovers it
+        // other end may be a record restored after its owner's. MobMachine
+        // restores each as the next start's recovery of the rows recovers it
         // (`RestoreOwnedIdentityEdge`): an edge whose other end is no
         // identity now (an unlisted roster-owned identity's) is held, out of
-        // force, as the start holds it.
+        // force, as the start holds it. Each restored row keeps the edges
+        // MobMachine restored: an edge it skipped (another identity's, or one
+        // whose end is removed or retiring) is not the row's, so no two rows
+        // list one edge and each row is what the next start reads back.
+        let mut restored_edges = std::collections::BTreeSet::new();
         for (owner, peer) in edges {
             let dsl_owner = mob_dsl::AgentIdentity::from_domain(&owner);
             let restored = authority
@@ -311,11 +312,41 @@ impl MobActor {
                 .ok_or_else(|| {
                     MobError::Internal("MobMachine restored an owned edge with no verdict".into())
                 })?;
-            if verdict == mob_dsl::OwnedEdgeRestoreVerdict::MobNotRunning {
-                return Err(refused(IdentityChangeRefusal::MobNotRunning));
+            match verdict {
+                mob_dsl::OwnedEdgeRestoreVerdict::MobNotRunning => {
+                    return Err(refused(IdentityChangeRefusal::MobNotRunning));
+                }
+                mob_dsl::OwnedEdgeRestoreVerdict::Restored => {
+                    restored_edges.insert((owner, peer));
+                }
+                mob_dsl::OwnedEdgeRestoreVerdict::Skipped => {}
             }
             effects.extend(restored.into_effects());
         }
+        let rows = restored_records
+            .into_iter()
+            .map(|record| {
+                let kept = record
+                    .owned_edges
+                    .iter()
+                    .filter(|edge| {
+                        restored_edges.contains(&(record.agent_identity.clone(), edge.peer.clone()))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let record = if kept.len() == record.owned_edges.len() {
+                    record
+                } else {
+                    record.with_owned_edges(kept).map_err(|error| {
+                        MobError::Internal(format!("a restored row's owned edges: {error}"))
+                    })?
+                };
+                Ok(CreatedIdentityRowWrite {
+                    record,
+                    expected: CreatedIdentityRowExpectation::Absent,
+                })
+            })
+            .collect::<Result<Vec<_>, MobError>>()?;
         let events = bound_in_place
             .iter()
             .map(|identity| {

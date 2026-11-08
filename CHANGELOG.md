@@ -679,7 +679,8 @@ them.
   archived session (a fresh session, with the history unavailable notice, when
   that session is gone), pending, archived and removed names as recorded, and
   an adopted identity a roster declared again by the adoption's step; it
-  restores the owned edges of the rows it restores as a start recovers them. A
+  restores the owned edges of the rows it restores as a start recovers them,
+  and a restored row keeps only the edges it restored. A
   name another holder keeps (a plain member on another session among them) is
   left as it is and reported (receipt outcome
   `IdentityChangeEntryOutcome::NameTakenMeanwhile`); a record whose row the

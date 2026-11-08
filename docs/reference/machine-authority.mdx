@@ -404,8 +404,10 @@ re-listing brings it back in force. The invariants
 `owned_edge_owner_is_a_store_owned_end` and
 `owned_edge_joins_no_tombstone` hold these facts. An import restores the
 edges of the rows it restores as the boot recovers them, after the boot
-plan's seal too (`RestoreOwnedIdentityEdge`, `OwnedEdgeRestoreVerdict`): the
-custody map an import leaves is the one the next start reads.
+plan's seal too (`RestoreOwnedIdentityEdge`, `OwnedEdgeRestoreVerdict`), and
+writes each restored row with only the edges it restored (an edge another
+identity owns meanwhile is not the row's): the custody map an import leaves
+is the one the next start reads.
 
 `MobMachine` decides an adoption into store custody too (since 0.9.11):
 `AdoptIdentityIntoStore` takes a roster-owned identity (`Roster`: a Declared

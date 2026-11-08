@@ -1,8 +1,14 @@
 //! The identity runtime's side of Meta's member build preparation
 //! ([`super::super::build_preparer::IdentityBuildPreparer`]): the inline
-//! preparation of a registered identity's build, the hold of a build that
-//! comes before the runtime is composed, and the composition that publishes
-//! the held members' tools and releases their holds.
+//! preparation of a registered identity's build, and the composition that
+//! publishes the tools of the members Core holds for unpublished tools and
+//! releases their holds. Which members Core holds is Core's read
+//! ([`super::super::bridge::SessionBridge::members_holding_run_starts_for_published_tools`]),
+//! and a build preparation the host asked to retry is Core's typed cause
+//! (`MemberWakeRefusal::BuildPreparationRetry`); Meta keeps only its
+//! customizer's last failure text, for the status and the typed answer to a
+//! refused delivery. The door's one retry of a wake Core refused for a cause
+//! the host ends ([`IdentityRuntime::door_retries`]) lives here too.
 
 use std::sync::Arc;
 
@@ -10,7 +16,7 @@ use futures::stream::{self, StreamExt};
 use meerkat_mob::{MemberBuildPreparationRefusal, MemberBuildPrepared};
 
 use super::super::bridge::{BridgeAdmissionError, BridgeError};
-use super::super::build_preparer::{IdentityBuildPreparer, PUBLISHED_ONCE_COMPOSED};
+use super::super::build_preparer::IdentityBuildPreparer;
 use super::super::types::{AgentBuildContext, AgentIdentity, CustomizerToolsPending};
 use super::{IdentityRuntime, IdentityRuntimeError};
 
@@ -31,31 +37,19 @@ impl IdentityRuntime {
             .clone()
     }
 
-    /// Record that Core built `identity`'s member held: its customizer tools
-    /// are pending until a publication releases the hold. A reason already
-    /// recorded (an earlier publication that failed) is kept.
-    pub(crate) fn hold_member_build(&self, identity: &AgentIdentity) {
-        self.customizer_tools_pending
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(identity.clone())
-            .or_insert_with(|| CustomizerToolsPending {
-                reason: PUBLISHED_ONCE_COMPOSED.to_string(),
-                artifact_refusal: None,
-            });
-    }
-
     /// Prepare the build of registered `identity`'s member Core is about to
     /// perform: run the host's `customize_build` with the runtime's real
     /// context and publish its tools into the identity's stable dispatcher,
     /// so the member is built with them. Nothing is released: the build
     /// starts with no hold.
     ///
-    /// A failed build is refused retryable: the member stays Dormant, the
-    /// identity's customizer tools are recorded pending with the reason
-    /// (typed when the host's installed artifacts refused them), and a later
-    /// delivery tries again. A candidate launch publishes and holds the
-    /// member: its runs belong to the authoritative launch.
+    /// A failed build is refused retryable: the member stays Dormant, Core
+    /// records the build preparation's retry (its wakes are refused
+    /// `BuildPreparationRetry` until the host retries it, or Core's retry
+    /// timer does), and the customizer's failure is recorded with its reason
+    /// (typed when the host's installed artifacts refused the tools). A
+    /// candidate launch publishes and holds the member: its runs belong to
+    /// the authoritative launch.
     pub(crate) async fn prepare_identity_build(
         &self,
         identity: &AgentIdentity,
@@ -72,7 +66,6 @@ impl IdentityRuntime {
         else {
             // The identity left the roster since the preparer read it: the
             // roster pass retires its member, which holds no run until then.
-            self.hold_member_build(identity);
             return Ok(MemberBuildPrepared::HoldUntilReleased);
         };
         let context = AgentBuildContext {
@@ -123,18 +116,15 @@ impl IdentityRuntime {
                     %identity,
                     %reason,
                     "the member's build was refused: its customizer tools could not be \
-                     published, so it stays dormant until a later delivery publishes them"
+                     published, so it stays dormant until its build preparation is retried"
                 );
-                self.refused_build_preparations
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        identity.clone(),
-                        CustomizerToolsPending {
-                            reason: reason.clone(),
-                            artifact_refusal,
-                        },
-                    );
+                self.record_customizer_failure(
+                    identity,
+                    CustomizerToolsPending {
+                        reason: reason.clone(),
+                        artifact_refusal,
+                    },
+                );
                 Err(MemberBuildPreparationRefusal::Retryable { reason })
             }
         }
@@ -143,36 +133,48 @@ impl IdentityRuntime {
     /// The runtime is composed: its roster is registered, and its customizer,
     /// customizer tool registry and services are installed. From now on the
     /// preparer prepares each registered identity's build inline. Every
-    /// registered identity whose tools are still pending (Core built its
-    /// member held before the composition, or a publication failed) is
-    /// published now, which releases its hold, and the member's live tools
+    /// registered identity whose member Core holds for unpublished tools
+    /// (Core built it held before the composition, or a publication failed)
+    /// is published now, which releases its hold, and the member's live tools
     /// are written to its tool record. Run after each roster registration,
     /// so an identity the roster lists again, or one whose publication failed
-    /// before, is published by the next one.
+    /// before, is published by the next one. A build Core held before the
+    /// composition and reports after it is published at its report
+    /// ([`Self::publish_held_member_build`]).
     ///
     /// The publications run with no lifecycle lock held, at most
     /// [`super::super::orchestrator::identity_restore_concurrency`] at once.
-    /// A failed one keeps the identity pending with its reason: its member
-    /// stays held until a later composition or delivery publishes.
+    /// A failed one records its reason: its member stays held until a later
+    /// composition or delivery publishes.
     pub(crate) async fn compose_member_builds(&self) {
         let Some(preparer) = self.member_build_preparer() else {
             return;
         };
-        let pending = preparer.compose(|| {
-            self.customizer_tools_pending
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        if !preparer.publishes_tools() || pending.is_empty() {
+        preparer.compose();
+        if !preparer.publishes_tools() {
             return;
         }
-        let mut registered = Vec::with_capacity(pending.len());
+        let held = match self.members_core_holds_for_unpublished_tools() {
+            Ok(held) => held,
+            // Nothing is published, so every member Core holds stays held:
+            // a later composition, or the member's wake or delivery, reads
+            // its hold again.
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "Core's members held for unpublished customizer tools did not read; \
+                     they stay held until a later composition or delivery publishes them"
+                );
+                return;
+            }
+        };
+        if held.is_empty() {
+            return;
+        }
+        let mut registered = Vec::with_capacity(held.len());
         {
             let entries = self.entries.read().await;
-            for identity in pending {
+            for identity in held {
                 if entries.contains_key(&identity) {
                     registered.push(identity);
                 }
@@ -194,29 +196,8 @@ impl IdentityRuntime {
                         Ok(Some(live)) => live.session_id,
                         _ => None,
                     };
-                    match self
-                        .publish_pending_customizer_tools(
-                            &identity,
-                            session_id.as_ref(),
-                            "composition",
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            if let Some(session_id) = session_id {
-                                preparer
-                                    .record_live_tools(self, &identity, session_id)
-                                    .await;
-                            }
-                        }
-                        Err(error) => tracing::warn!(
-                            %identity,
-                            %error,
-                            "the customizer tools of a member Core built before the \
-                             composition were not published; it stays held until a later \
-                             composition or delivery publishes them"
-                        ),
-                    }
+                    self.publish_held_member(&preparer, &identity, session_id, "composition")
+                        .await;
                 }
             })
             .buffer_unordered(super::super::orchestrator::identity_restore_concurrency())
@@ -224,17 +205,126 @@ impl IdentityRuntime {
             .await;
     }
 
+    /// The report of a build the preparer held (`HoldUntilReleased`) for
+    /// registered `identity`, on `session_id`, once the runtime is composed:
+    /// Core staged the hold with the build, so a composition that read
+    /// Core's held members before that missed it. Published here, as the
+    /// composition publishes it, when Core still holds it.
+    pub(crate) async fn publish_held_member_build(
+        &self,
+        preparer: &IdentityBuildPreparer,
+        identity: &AgentIdentity,
+        session_id: meerkat_core::types::SessionId,
+    ) {
+        if !preparer.publishes_tools() || !self.entries.read().await.contains_key(identity) {
+            return;
+        }
+        self.publish_held_member(preparer, identity, Some(session_id), "build report")
+            .await;
+    }
+
+    /// Publish the tools of `identity`'s member Core holds for unpublished
+    /// tools, which releases the hold, and write its live tools to its tool
+    /// record. A failed publication is logged; its reason is recorded.
+    async fn publish_held_member(
+        &self,
+        preparer: &IdentityBuildPreparer,
+        identity: &AgentIdentity,
+        session_id: Option<meerkat_core::types::SessionId>,
+        operation: &'static str,
+    ) {
+        match self
+            .publish_pending_customizer_tools(identity, session_id.as_ref(), operation)
+            .await
+        {
+            Ok(()) => {
+                if let Some(session_id) = session_id {
+                    preparer.record_live_tools(self, identity, session_id).await;
+                }
+            }
+            Err(error) => tracing::warn!(
+                %identity,
+                %error,
+                "the customizer tools of a member Core holds for unpublished tools were not \
+                 published; it stays held until a later composition or delivery publishes them"
+            ),
+        }
+    }
+
+    /// The door's one retry of a wake (a delivery's, a materialization's)
+    /// that Core refused for a cause the host ends itself; `refused` names
+    /// the member and Core's refusal:
+    /// - a build preparation the host asked to retry
+    ///   (`BuildPreparationRetry`): the host retries the preparation
+    ///   (`resolve_member_build_preparation`), so Core's next wake of the
+    ///   member asks the preparer again;
+    /// - a host preparation Core keeps for the identity
+    ///   (`HostPreparationPending`): the identity is declared again
+    ///   ([`Self::declare_identity_locked`]; the caller holds its lifecycle
+    ///   lock), the host's answer to that preparation. The door declares
+    ///   first an identity whose row Meta's own first-boot records hold, so
+    ///   this is a preparation those records do not name.
+    ///
+    /// `Ok(true)` when the door took its step: the caller wakes, or delivers,
+    /// once more, and a second refusal surfaces typed (`retried` is then
+    /// set). Any other refusal is not the door's: `Ok(false)`. A healthy wake
+    /// asks Core for nothing.
+    pub(crate) async fn door_retries(
+        &self,
+        identity: &AgentIdentity,
+        retried: &mut bool,
+        refused: Option<(&meerkat_mob::AgentIdentity, meerkat_mob::MemberWakeRefusal)>,
+    ) -> Result<bool, IdentityRuntimeError> {
+        let Some((member, refusal)) = refused else {
+            return Ok(false);
+        };
+        if *retried {
+            return Ok(false);
+        }
+        match refusal {
+            meerkat_mob::MemberWakeRefusal::BuildPreparationRetry => {
+                *retried = true;
+                self.core_bridge(identity)?
+                    .resolve_member_build_preparation(member)
+                    .await
+                    .map_err(|error| IdentityRuntimeError::IdentityWakeRetryable {
+                        identity: identity.clone(),
+                        session_id: None,
+                        detail: format!(
+                            "Core refused the member's wake for the build preparation its host \
+                             asked to retry, and the retry was not asked: {error}"
+                        ),
+                    })?;
+                Ok(true)
+            }
+            meerkat_mob::MemberWakeRefusal::HostPreparationPending => {
+                *retried = true;
+                let spec = self
+                    .entries
+                    .read()
+                    .await
+                    .get(identity)
+                    .map(|entry| entry.spec.clone())
+                    .ok_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))?;
+                self.declare_identity_locked(&spec, None).await?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// The error a delivery to `identity` reports for its admission's bridge
-    /// error: a build Core refused because its preparation failed reports
-    /// the recorded reason, typed ([`Self::pending_customizer_refusal`]).
-    /// Every other error maps as the admission phase maps it.
+    /// error: a wake Core refused for the build preparation the host asked
+    /// to retry reports the customizer's recorded failure, typed
+    /// ([`Self::pending_customizer_refusal`]). Every other error maps as the
+    /// admission phase maps it.
     pub(crate) fn admission_error(
         &self,
         identity: &AgentIdentity,
         error: BridgeAdmissionError,
     ) -> IdentityRuntimeError {
         if let BridgeAdmissionError::MemberWakeRefused {
-            refusal: meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+            refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
             ..
         } = &error
             && let Some(refusal) = self.pending_customizer_refusal(identity)
@@ -251,7 +341,7 @@ impl IdentityRuntime {
         error: BridgeError,
     ) -> IdentityRuntimeError {
         if let BridgeError::MemberWakeRefused {
-            refusal: meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+            refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
             ..
         } = &error
             && let Some(refusal) = self.pending_customizer_refusal(identity)
@@ -270,7 +360,7 @@ impl IdentityRuntime {
         error: BridgeError,
     ) -> IdentityRuntimeError {
         if let BridgeError::MemberWakeRefused {
-            refusal: meerkat_mob::MemberWakeRefusal::HostPreparationPending,
+            refusal: meerkat_mob::MemberWakeRefusal::BuildPreparationRetry,
             ..
         } = &error
             && let Some(refusal) = self.pending_customizer_refusal(identity)
@@ -281,18 +371,16 @@ impl IdentityRuntime {
     }
 
     /// What a delivery reports when Core refused to build `identity`'s
-    /// member because its preparation failed: the recorded reason, typed
-    /// when the host's installed artifacts refused the tools. `None` when no
-    /// failed preparation is recorded for the identity.
+    /// member for the build preparation the host asked to retry: the reason
+    /// the customizer failed with, typed when the host's installed artifacts
+    /// refused the tools. `None` when no failure is recorded for the
+    /// identity (the delivery then reports Core's refusal).
     pub(crate) fn pending_customizer_refusal(
         &self,
         identity: &AgentIdentity,
     ) -> Option<IdentityRuntimeError> {
-        let pending = self.customizer_tools_pending_for(identity)?;
-        if pending.reason == PUBLISHED_ONCE_COMPOSED {
-            return None;
-        }
-        Some(match pending.artifact_refusal {
+        let failure = self.customizer_failure(identity)?;
+        Some(match failure.artifact_refusal {
             Some(refusal) => IdentityRuntimeError::ToolArtifactRefused(Box::new(refusal)),
             None => IdentityRuntimeError::IdentityWakeRetryable {
                 identity: identity.clone(),
@@ -300,9 +388,45 @@ impl IdentityRuntime {
                 detail: format!(
                     "the member's customizer tools are not published ({}); it is not built \
                      until they are, retry",
-                    pending.reason
+                    failure.reason
                 ),
             },
         })
+    }
+}
+
+/// The member and Core's refusal when Core refused a wake for a cause the
+/// door can take a step for ([`IdentityRuntime::door_retries`]): a build
+/// preparation the host asked to retry (`BuildPreparationRetry`), or the
+/// host preparation Core keeps (`HostPreparationPending`). `None` for any
+/// other error.
+pub(crate) fn door_refusal_of(
+    error: &BridgeError,
+) -> Option<(&meerkat_mob::AgentIdentity, meerkat_mob::MemberWakeRefusal)> {
+    match error {
+        BridgeError::MemberWakeRefused {
+            identity,
+            refusal:
+                refusal @ (meerkat_mob::MemberWakeRefusal::BuildPreparationRetry
+                | meerkat_mob::MemberWakeRefusal::HostPreparationPending),
+            ..
+        } => Some((identity, *refusal)),
+        _ => None,
+    }
+}
+
+/// [`door_refusal_of`] for an admission's error.
+pub(crate) fn admission_door_refusal_of(
+    error: &BridgeAdmissionError,
+) -> Option<(&meerkat_mob::AgentIdentity, meerkat_mob::MemberWakeRefusal)> {
+    match error {
+        BridgeAdmissionError::MemberWakeRefused {
+            identity,
+            refusal:
+                refusal @ (meerkat_mob::MemberWakeRefusal::BuildPreparationRetry
+                | meerkat_mob::MemberWakeRefusal::HostPreparationPending),
+            ..
+        } => Some((identity, *refusal)),
+        _ => None,
     }
 }

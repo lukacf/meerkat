@@ -5691,6 +5691,30 @@ pub(super) fn startup_registration_takeovers_for_test(
         .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
         .unwrap_or_default()
 }
+
+/// How many times a start recorded each member's recovery failure (a member
+/// it left out, then could not recover), per mob.
+#[cfg(test)]
+static STARTUP_RECOVERY_FAILURES_FOR_TEST: std::sync::Mutex<BTreeMap<(MobId, AgentIdentity), u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn record_startup_recovery_failure_for_test(mob_id: &MobId, member: &AgentIdentity) {
+    if let Ok(mut counts) = STARTUP_RECOVERY_FAILURES_FOR_TEST.lock() {
+        *counts.entry((mob_id.clone(), member.clone())).or_default() += 1;
+    }
+}
+
+/// Test read: how many times a start of `mob_id` recorded `member`'s
+/// recovery failure.
+#[cfg(test)]
+pub(super) fn startup_recovery_failures_for_test(mob_id: &MobId, member: &AgentIdentity) -> u64 {
+    STARTUP_RECOVERY_FAILURES_FOR_TEST
+        .lock()
+        .ok()
+        .and_then(|counts| counts.get(&(mob_id.clone(), member.clone())).copied())
+        .unwrap_or_default()
+}
 #[cfg(test)]
 static FAIL_AFTER_DESTROY_MEMBER_ARCHIVE_FOR_IDENTITY: std::sync::Mutex<Option<AgentIdentity>> =
     std::sync::Mutex::new(None);
@@ -13180,6 +13204,7 @@ impl MobActor {
                         .error
                         .unwrap_or_else(|| "member restore failed".to_string()),
                     hold: None,
+                    cause_data: None,
                     registration_refusal: None,
                 },
             );
@@ -13195,6 +13220,7 @@ impl MobActor {
                 session_id: diag.bridge_session_id,
                 reason: diag.reason,
                 hold: diag.hold,
+                cause_data: diag.cause_data,
             });
         }
         Ok(())
@@ -14797,6 +14823,7 @@ impl MobActor {
                                 bridge_session_id: Some(closed.session_id.clone()),
                                 reason: format!("{} [{}]", closed.reason, closed.refusal_code),
                                 hold: None,
+                                cause_data: None,
                                 registration_refusal: None,
                             },
                         )
@@ -15612,6 +15639,7 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15685,6 +15713,7 @@ impl MobActor {
                 bridge_session_id: Some(bridge_session_id.clone()),
                 reason: reason.clone(),
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -15822,6 +15851,7 @@ impl MobActor {
                         bridge_session_id: Some(bridge_session_id.clone()),
                         reason: classify_reason.clone(),
                         hold: None,
+                        cause_data: None,
                         registration_refusal: None,
                     },
                 )
@@ -15838,6 +15868,7 @@ impl MobActor {
                     session_id: Some(bridge_session_id),
                     reason: classify_reason,
                     hold: None,
+                    cause_data: None,
                 })
             }
             mob_dsl::MemberRevivalVerdictKind::ReviveAuthorized => {
@@ -15888,6 +15919,7 @@ impl MobActor {
                     }
                     Err(error) => {
                         let hold = error.durable_resume_hold();
+                        let cause_data = error.structured_data();
                         let failure_reason = format!(
                             "machine-authorized placed revival of '{agent_identity}' on host '{}' failed: {error}",
                             host.as_str()
@@ -15906,6 +15938,7 @@ impl MobActor {
                                 bridge_session_id: Some(bridge_session_id.clone()),
                                 reason: failure_reason.clone(),
                                 hold,
+                                cause_data: cause_data.clone(),
                                 registration_refusal: None,
                             },
                         )
@@ -15922,6 +15955,7 @@ impl MobActor {
                             session_id: Some(bridge_session_id),
                             reason: failure_reason,
                             hold,
+                            cause_data,
                         })
                     }
                 }
@@ -23409,6 +23443,7 @@ impl MobActor {
                 bridge_session_id: Some(session_id.clone()),
                 reason,
                 hold: None,
+                cause_data: None,
                 registration_refusal: None,
             },
         )
@@ -28678,6 +28713,35 @@ impl MobActor {
         }
     }
 
+    /// Whether the host's adoption has taken `identity`'s declared entry
+    /// over, so the identity reconciler may act on its member
+    /// (`TakeOverIdentityEntry`): a seated entry is marked adopting, an
+    /// unseated one ended, and a name that is no Declared entry needs
+    /// nothing. An entry with a member step in flight, or one a candidate
+    /// composition holds, is left as it is: the reconcile waits and asks
+    /// again.
+    fn identity_entry_taken_over(
+        &mut self,
+        identity: &AgentIdentity,
+        intent_record: &crate::identity::IdentityIntentRecord,
+    ) -> Result<bool, MobError> {
+        match self.take_over_identity_entry(identity)? {
+            mob_dsl::HostAdoptionEntryVerdict::Adopting
+            | mob_dsl::HostAdoptionEntryVerdict::Ended
+            | mob_dsl::HostAdoptionEntryVerdict::NotADeclaredEntry => Ok(true),
+            mob_dsl::HostAdoptionEntryVerdict::Deferred
+            | mob_dsl::HostAdoptionEntryVerdict::NonAuthoritative
+            | mob_dsl::HostAdoptionEntryVerdict::MobNotRunning => {
+                self.schedule_identity_reconcile_wait(
+                    identity,
+                    IdentityReconcileAuthorityKey::from_intent(intent_record),
+                    Duration::from_millis(100),
+                );
+                Ok(false)
+            }
+        }
+    }
+
     async fn reconcile_identity_pass(
         &mut self,
         identity: &AgentIdentity,
@@ -29281,6 +29345,14 @@ impl MobActor {
                 }
                 IdentityReconcileDecision::RetireMemberMaterialization => {
                     if !self.retirements.contains_key(identity) {
+                        // The host's adoption takes the identity's declared
+                        // entry over first: the end of this retirement ends
+                        // the entry, so the member the reconcile materializes
+                        // is the host's. An entry with a member step in flight
+                        // waits for it.
+                        if !self.identity_entry_taken_over(identity, &intent_record)? {
+                            return Ok(false);
+                        }
                         self.start_retirement(
                             identity.clone(), Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
                             None, retirement_io::RetirementReply::IdentityReconcile(completion_authority.clone()),
@@ -29505,6 +29577,12 @@ impl MobActor {
                         .map_err(MobError::from)?;
                     let completion_authority =
                         IdentityReconcileCompletionAuthority::from_permit(&permit);
+                    // An identity no member holds whose declared entry the
+                    // host's adoption has not taken over yet: the entry ends
+                    // now, so the host's member takes the name as no entry.
+                    if !self.identity_entry_taken_over(identity, &intent_record)? {
+                        return Ok(false);
+                    }
                     let mut spec = super::spec_compiler::spawn_spec_from_desired_member(
                         identity,
                         session,
@@ -29899,6 +29977,17 @@ impl MobActor {
                 MobCommand::RetryOwedMemberWake { agent_identity } => {
                     self.inline_step_watchdog.set_step("retry_owed_member_wake");
                     boxed_arm_future(|| self.retry_owed_member_wake(agent_identity)).await;
+                }
+                MobCommand::RetryMemberBuildPreparation { agent_identity } => {
+                    self.inline_step_watchdog
+                        .set_step("retry_member_build_preparation");
+                    boxed_arm_future(|| self.retry_member_build_preparation(agent_identity)).await;
+                }
+                MobCommand::ResolveMemberBuildPreparation {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(self.resolve_member_build_preparation(&agent_identity));
                 }
                 MobCommand::RepairOwedEdge { edge } => {
                     self.inline_step_watchdog.set_step("repair_owed_edge");
@@ -31817,6 +31906,13 @@ impl MobActor {
                     let _ = reply_tx.send(Ok(()));
                 }
                 #[cfg(test)]
+                MobCommand::OwedMemberWakeRetryArmedForTest {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let _ = reply_tx.send(Ok(self.owed_member_wake_retry_armed(&agent_identity)));
+                }
+                #[cfg(test)]
                 MobCommand::ParkActorForObservationTest {
                     entered_tx,
                     release_rx,
@@ -32106,8 +32202,12 @@ impl MobActor {
                         Box::pin(self.declare_identity_entries(declarations, change)).await;
                     let _ = reply_tx.send(result);
                 }
-                MobCommand::SealDeclaredRoster { desired, reply_tx } => {
-                    let result = self.seal_declared_roster(desired);
+                MobCommand::SealDeclaredRoster {
+                    desired,
+                    intent_named,
+                    reply_tx,
+                } => {
+                    let result = self.seal_declared_roster(desired, intent_named);
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::OpenDeclaredApply { reply_tx } => {
@@ -36055,10 +36155,13 @@ impl MobActor {
                 bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
                 reason,
                 hold: error.durable_resume_hold(),
+                cause_data: error.restore_cause_data(),
                 registration_refusal: None,
             },
         )
         .await;
+        #[cfg(test)]
+        record_startup_recovery_failure_for_test(&self.definition.id, &entry.agent_identity);
     }
 
     /// Whether MobMachine records `agent_identity` Broken: its restore failed.

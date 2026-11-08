@@ -73,21 +73,24 @@
 //! not native activation, not the host's own close, and says nothing about
 //! publication outside this runtime, which a native abort cannot undo.
 //!
-//! # The owed marks survive a restart
+//! # The host's hold, and the marks a rollback reads
 //!
-//! Core keeps nothing for a held member before its activation, so after a
-//! restart its member history says nothing about a member that was held.
-//! The pass therefore marks every roster identity durably in the runtime's
-//! state directory before it creates any member, one file per identity under
-//! [`HELD_COMPLETION_OWED_DIR`] (named by the SHA-256 of the identity it
-//! holds), and removes the mark of each member it publishes. A restart reads the marks back, also those of a process that
-//! stopped while its members were held: an ordinary wake still refuses those
-//! identities until a held pass that covers them publishes them. A mark
-//! whose identity Core's member history binds is dropped when it is read,
-//! since the pass published that member. A runtime without a state directory
-//! keeps the marks in memory only, so a restart forgets them. A runtime over
-//! a host store realm keeps each mark as a document of the realm
-//! (`held/<SHA-256 of the identity>`), so a restart on any host reads them.
+//! The pass holds every roster identity's creation for the rest of its
+//! process (a held add holds its identity's): every declaration of such an
+//! identity tells Core its host holds its creation, and Core, which never
+//! created the member, keeps the identity awaiting its held creation, which
+//! only a held pass carries out. The hold is kept in memory and never
+//! written: after a restart the host holds an identity again through its
+//! held bootstrap or a held add, and an identity its host no longer holds is
+//! created as any other.
+//!
+//! The pass also marks every roster identity durably before it creates any
+//! member, one file per identity under [`HELD_COMPLETION_OWED_DIR`] (named
+//! by the SHA-256 of the identity it holds) or a document of a host store
+//! realm (`held/<SHA-256 of the identity>`), and removes the mark of each
+//! member it publishes. The marks are the mirror written for a rollback to
+//! 0.9.10, whose runtime reads them back after a restart (until 0.9.12);
+//! this runtime never reads them.
 //!
 //! # Unsupported inventory (deferred)
 //!
@@ -774,15 +777,16 @@ pub const HELD_COMPLETION_OWED_DIR: &str = "held-completion-owed";
 /// named by the lowercase hex SHA-256 of the identity and holding the
 /// identity itself, so an identity of any length makes a short file name.
 ///
-/// Core keeps nothing for a held member before its activation, so these
-/// marks are the only record that an identity was held. A held pass marks
-/// every roster identity before it creates any member, so a process that
-/// stops while a member is held keeps the mark, and it removes the mark of
-/// each member it publishes. The identity runtime reads the marks back after
-/// a restart, so an ordinary wake still refuses the member
-/// ([`super::IdentityRuntimeError::HeldCompletionOwed`]) until a held pass
-/// that covers it publishes it. Every writer assumes the caller holds the
-/// state directory exclusively (the realm lock).
+/// The marks are the mirror written for a rollback to 0.9.10, whose
+/// identity runtime reads them back after a restart, kept only while that
+/// rollback is supported (until 0.9.12): a held pass marks every roster
+/// identity before it creates any member, so a process that stops while a
+/// member is held keeps the mark, and it removes the mark of each member it
+/// publishes. This identity runtime never reads them: held creation follows
+/// the host's hold in each process and Core's verdict. Two offline
+/// diagnostics read them until the mirror expires: the gateway's identity
+/// census and the offline `identity-reset`. Every writer assumes the caller
+/// holds the state directory exclusively (the realm lock).
 #[derive(Debug, Clone)]
 pub(crate) struct HeldCompletionMarks {
     dir: PathBuf,
@@ -801,7 +805,7 @@ impl HeldCompletionMarks {
 
     /// Mark `identities` durably. Each mark is written under a dot-name,
     /// synced and renamed into place, so an interrupted write leaves only a
-    /// dot-file, which [`Self::read`] skips. The directory and its entry in
+    /// dot-file, which [`Self::read_rollback_marks`] skips. The directory and its entry in
     /// the state directory are synced before this returns.
     pub(crate) fn mark(&self, identities: &[AgentIdentity]) -> std::io::Result<()> {
         use std::io::Write as _;
@@ -839,12 +843,13 @@ impl HeldCompletionMarks {
         }
     }
 
-    /// The identities marked now; none while the directory is absent.
+    /// The identities marked now, as a rollback reads them; none while the
+    /// directory is absent. Only the offline diagnostics read them here.
     /// Dot-files are skipped: a mark's name is lowercase hex, so they are an
     /// interrupted write's staging file or another program's. Any other entry
     /// that is not a valid identity's mark is refused, naming its remedy:
     /// which identity it would guard is unknown.
-    pub(crate) fn read(&self) -> std::io::Result<BTreeSet<AgentIdentity>> {
+    pub(crate) fn read_rollback_marks(&self) -> std::io::Result<BTreeSet<AgentIdentity>> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -909,10 +914,11 @@ impl HeldCompletionMarksAt {
     }
 }
 
-/// The identities a host store realm marks now. A document under the marks'
-/// prefix that is not a valid identity's mark is refused, naming it: which
-/// identity it would guard is unknown.
-pub(crate) async fn read_host_store_marks(
+/// The identities a host store realm marks now, as a rollback reads them.
+/// A document under the marks' prefix that is not a valid identity's mark is
+/// refused, naming it: which identity it would guard is unknown.
+#[cfg(test)]
+pub(crate) async fn read_host_store_rollback_marks(
     documents: &crate::host_store_documents::MetaDocuments,
 ) -> Result<BTreeSet<AgentIdentity>, String> {
     let mut marked = BTreeSet::new();
@@ -1093,14 +1099,14 @@ mod tests {
         let marks = HeldCompletionMarks::in_state_dir(dir.path());
         let (a, b) = (identity("held-mark-a"), identity("held-mark-b"));
         assert!(
-            marks.read().unwrap().is_empty(),
+            marks.read_rollback_marks().unwrap().is_empty(),
             "an absent directory marks none"
         );
         marks.mark(&[a.clone(), b.clone()]).unwrap();
         marks.mark(std::slice::from_ref(&a)).unwrap();
         assert_eq!(
             HeldCompletionMarks::in_state_dir(dir.path())
-                .read()
+                .read_rollback_marks()
                 .unwrap(),
             BTreeSet::from([a.clone(), b.clone()]),
             "the marks are read back from the state directory"
@@ -1109,7 +1115,7 @@ mod tests {
         marks.clear(&a).unwrap();
         assert_eq!(
             HeldCompletionMarks::in_state_dir(dir.path())
-                .read()
+                .read_rollback_marks()
                 .unwrap(),
             BTreeSet::from([b])
         );
@@ -1132,7 +1138,7 @@ mod tests {
             "the mark holds its identity"
         );
         assert!(
-            marks.read().unwrap().contains(&long),
+            marks.read_rollback_marks().unwrap().contains(&long),
             "an identity of any length is marked"
         );
     }
@@ -1145,7 +1151,7 @@ mod tests {
         marks.mark(std::slice::from_ref(&held)).unwrap();
         std::fs::write(marks.dir().join(".DS_Store"), b"").unwrap();
         assert_eq!(
-            marks.read().unwrap(),
+            marks.read_rollback_marks().unwrap(),
             BTreeSet::from([held]),
             "a dot-file is never a mark"
         );
@@ -1155,13 +1161,13 @@ mod tests {
             b"held-mark-a",
         )
         .unwrap();
-        let refused = marks.read().unwrap_err();
+        let refused = marks.read_rollback_marks().unwrap_err();
         assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
         assert!(refused.to_string().contains("remove it"), "{refused}");
         std::fs::remove_file(marks.dir().join(held_mark_name(&identity("held-mark-b")))).unwrap();
         std::fs::write(marks.dir().join("not-a-mark"), b"").unwrap();
         assert_eq!(
-            marks.read().unwrap_err().kind(),
+            marks.read_rollback_marks().unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
     }

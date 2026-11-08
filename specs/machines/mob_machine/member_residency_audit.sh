@@ -163,8 +163,8 @@ done
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 seed_states=3078
-wake_states=3198
-retire_states=22492
+wake_states=4530
+retire_states=25892
 terminal_states=422
 resume_states=4004
 edge_states=1148
@@ -186,6 +186,9 @@ seed_covered_actions=(
   ResolveMemberHostPreparationRunning
   ResolveMemberHostPreparationStopped
   ResolveMemberHostPreparationCompleted
+  ResolveMemberBuildPreparationRunning
+  ResolveMemberBuildPreparationStopped
+  ResolveMemberBuildPreparationCompleted
   PlanBootMaterializationWake
   PlanBootMaterializationVerify
   PlanBootMaterializationStayDormant
@@ -224,6 +227,9 @@ wake_covered_actions=(
   ResolveMemberRevivalFailedRunning
   ResolveMemberRevivalHostRefusedRunning
   ResolveMemberRevivalRetryableRunning
+  ResolveMemberRevivalRetryableBuildPreparationRunning
+  ResolveMemberBuildPreparationRunning
+  ResolveMemberBuildPreparationStopped
   AbandonMemberWakeDormantRunning
   AbandonMemberWakeBrokenRunning
   ResolveRecreatedMemberSessionSucceededRunningLocal
@@ -266,6 +272,8 @@ wake_covered_actions=(
 )
 
 retire_covered_actions=(
+  ResolveMemberRevivalRetryableBuildPreparationRunning
+  ResolveMemberBuildPreparationRunning
   RetireRunningReleasing
   RetireRunningReleasingArchiveOnly
   RetireRunningPreservingBinding
@@ -531,7 +539,8 @@ write_cfg() {
       run_properties="
   AuditSeedRecoverKeepsPhase
   AuditAttemptEndsClosed
-  AuditPlanLeavesSealable"
+  AuditPlanLeavesSealable
+  AuditBuildPreparationRetryEndsOnlyItsCause"
       run_invariants="
   AuditWakingClosable"
       ;;
@@ -543,6 +552,7 @@ write_cfg() {
   AuditAttemptEndsClosed
   AuditLifecycleNeverWakes
   AuditWakeNeverSkipsWaking
+  AuditBuildPreparationRetryRefusesWakes
   AuditSucceededLeavesEndpoint
   AuditReleaseEpochFence
   AuditBindingRefusalFenced
@@ -821,7 +831,11 @@ for witness in \
   "recover-rotation:Action property:RecoveredFreshRotated" \
   "recover-rotation:Action property:RecoveredSameRotated" \
   "replay-same:Invariant:ReplayedKeptTopology" \
-  "replay-same:Action property:ReplayedSuccessorWokeLive"; do
+  "replay-same:Action property:ReplayedSuccessorWokeLive" \
+  "wake:Action property:BuildPreparationRetryRecorded" \
+  "wake:Action property:BuildPreparationRetryRefusedWake" \
+  "wake:Action property:BuildPreparationRetryResolved" \
+  "retire:Action property:BuildPreparationRetryRetired"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -1320,6 +1334,23 @@ add_guard("ClassifyMemberReleaseRunning", "((scope_agent_runtime_id = None) \\/ 
   mutate replay-same duplicate_kept_row_refused \
     "Error: Invariant AuditKeptRowsReplayable is violated" \
     'add_guard("RecoverRosterWiringAlreadyRecovered", "FALSE")' "$@"
+  # The wake refusal ignores a host preparation cause: a member that owes
+  # its host the build preparation it asked to retry is woken (the wake run
+  # records that cause, so only its property can refuse it).
+  mutate wake build_preparation_retry_wakes \
+    "Error: Action property AuditBuildPreparationRetryRefusesWakes is violated" \
+    'replace_in_operator("member_wake_refusal", "IF (host_pending = TRUE) THEN", "IF (host_pending = TRUE /\\ FALSE) THEN")' "$@"
+  # The build preparation's retry ends any host preparation cause: the seed
+  # run's first-boot preparation goes with it.
+  mutate seed build_preparation_retry_ends_any_cause \
+    "Error: Action property AuditBuildPreparationRetryEndsOnlyItsCause is violated" \
+    'replace_in_update("ResolveMemberBuildPreparationRunning", "member_host_preparation_causes", "= Some(\"BuildPreparationRetry\")) THEN", "# None) THEN")' "$@"
+  # The archive that ends a member's seat keeps its build preparation retry:
+  # the retire run records one before it retires the member, so the
+  # generated invariant refuses it over a real cause.
+  mutate retire archive_keeps_build_preparation_retry \
+    "Error: Invariant build_preparation_retry_belongs_to_a_member is violated" \
+    'keep_var("ObserveMemberRetirementArchivedLive", "member_host_preparation_causes")' "$@"
 fi
 if [[ "${part}" == "witnesses" ]]; then
   echo "member residency audit reached every witness (witness runs)"

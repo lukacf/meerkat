@@ -4593,6 +4593,18 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "MobNotRunning",
                 ],
             ),
+            // A host's adoption over a declared identity entry (0.9.11).
+            NamedTypeBinding::string_enum(
+                "HostAdoptionEntryVerdict",
+                &[
+                    "Adopting",
+                    "Ended",
+                    "Deferred",
+                    "NotADeclaredEntry",
+                    "NonAuthoritative",
+                    "MobNotRunning",
+                ],
+            ),
             NamedTypeBinding::string("RuntimeEpochId"),
             NamedTypeBinding::string("ResumeAttemptId"),
             NamedTypeBinding::u64("MobDefinitionEpoch"),
@@ -5228,6 +5240,7 @@ runtime_internal_inputs!(
         ClassifyPeerNotice,
         CommitDormantSeat,
         ResolveMemberHostPreparation,
+        ResolveMemberBuildPreparation,
         BeginMemberRotation,
         CommitMemberRotation,
         ClassifyMemberRelease,
@@ -5266,6 +5279,10 @@ runtime_internal_inputs!(
         // The one-entry unlist of a roster-owned identity, decided in the
         // actor's step for the handle's unlist. Not a surface command.
         UnlistIdentityEntry,
+        // A host's takeover of a declared entry, decided in the identity
+        // reconciler's step before it retires or materializes the member.
+        // Not a surface command.
+        TakeOverIdentityEntry,
     ]
 );
 

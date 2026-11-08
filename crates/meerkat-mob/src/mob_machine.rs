@@ -1406,6 +1406,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveMemberBuildPreparation,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::BeginMemberRotation,
         reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
     },
@@ -1497,6 +1501,13 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     // the actor's step for the handle's unlist. Not a surface command.
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::UnlistIdentityEntry,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // A host's takeover of a declared entry (0.9.11), decided in the identity
+    // reconciler's step before it retires or materializes the member. Not a
+    // surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::TakeOverIdentityEntry,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
     },
 ];

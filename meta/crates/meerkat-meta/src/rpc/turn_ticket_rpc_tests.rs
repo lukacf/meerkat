@@ -484,6 +484,49 @@ impl SessionBridge for TicketBridge {
             peer_reachable_count: 0,
         })
     }
+
+    /// Core's declared apply through this double's own seat. Core revives a
+    /// seat this double answers archived on that session, Dormant, and
+    /// refuses the revival, as it refuses the resume, while this double
+    /// refuses resumes.
+    async fn apply_declared_roster(
+        &self,
+        roster: crate::identity_first::DeclaredRosterRequest,
+    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+    {
+        let revive = |identity: &AgentIdentity,
+                      spec: &DurableAgentSpec,
+                      session_id: &meerkat_core::types::SessionId| {
+            if self.refuses_resume.load(Ordering::SeqCst) {
+                return Err(BridgeError::ResumeRejected {
+                    kind: ResumeRejectionKind::Unavailable {
+                        reason:
+                            meerkat_mob::error::SessionResumeUnavailableReason::ArchivedNotRevivable,
+                    },
+                    session_id: session_id.clone(),
+                    detail: "the session is archived and cannot be revived".to_string(),
+                });
+            }
+            let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:0"))
+                .map_err(|error| BridgeError::Mob(error.to_string()))?;
+            self.core.bind(
+                identity,
+                &crate::identity_first::MemberRuntimeBinding {
+                    agent_runtime_id,
+                    session_id: Some(session_id.clone()),
+                },
+                &spec.profile,
+            );
+            Ok(())
+        };
+        crate::identity_first::core_test_bridge::apply_through_seats(
+            self,
+            &roster,
+            Some(&revive),
+            None,
+        )
+        .await
+    }
 }
 
 fn make_runtime(bridge: Option<Arc<dyn SessionBridge>>) -> Arc<IdentityRuntime> {
@@ -1012,7 +1055,10 @@ async fn wait_for_completion_rpc_reports_deadline_and_incarnation_change() {
             Some(session.clone()),
         )
         .unwrap();
-        identity_runtime.register(make_spec("watcher")).await;
+        identity_runtime
+            .register(make_spec("watcher"))
+            .await
+            .expect("the identity registers");
     };
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(wait, rotate)

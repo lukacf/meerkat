@@ -1150,7 +1150,10 @@ async fn same_version_twice(
 /// listed per scope: a listing of its kind names it under `conflicts`, with
 /// the version its load names, ascending commit ids without repeats (or
 /// none), and every other scope of the kind as usual, and never fails the
-/// page for it; listing it again reports the same version and ids. A store
+/// page for it; listing it again reports the same version and ids. A read of
+/// its rows answers the same conflict: Core reads a scope's rows against the
+/// head it listed, and a store that served one batch's rows would let it
+/// fold a scope whose conflict arose after the open's listing. A store
 /// that refuses the second batch at commit, or resolves the pair at load by
 /// a fixed rule ([`same_version_twice`]), holds no such scope, and the row
 /// checks nothing more. A store that resolves the pair only when it folds
@@ -1223,6 +1226,18 @@ async fn a_conflicted_scope_is_listed_typed(
         // Resolved at load by a fixed rule: same_version_twice checked it.
         _ => return Ok(()),
     };
+    match writer.store.read_rows(&c, RowIndex::new(0), ALL_ROWS).await {
+        Err(HostStoreError::Conflict {
+            scope,
+            current: Some(current),
+        }) if scope == c && current == version => {}
+        other => {
+            return Err(steps.fail(
+                STEP,
+                format!("a row read of {c} answers its conflict at version {version}, as its load does, got {other:?}"),
+            ));
+        }
+    }
     let mut first: Option<ScopeConflict> = None;
     for _ in 0..2 {
         let listed = list_all(

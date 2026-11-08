@@ -783,11 +783,13 @@ them.
   `a_conflicted_scope_is_listed_typed` row, after `same_version_twice`: a
   scope whose load answers a typed conflict is listed under
   `HeadPage::conflicts` with the version its load names and its commit ids
-  (ascending, without repeats, or none), the other scopes of its kind are
-  listed as usual, and listing it again reports the same version and ids. A
+  (ascending, without repeats, or none), a read of its rows answers the same
+  conflict, the other scopes of its kind are listed as usual, and listing it
+  again reports the same version and ids. A
   store that refuses the second batch at commit, or picks one by a fixed
-  rule, holds no such scope, and the row checks nothing more. A canary store
-  in the crate's tests that fails the page for such a scope fails it.
+  rule, holds no such scope, and the row checks nothing more. Two canary
+  stores in the crate's tests fail it: one that fails the page for such a
+  scope, and one that serves its rows.
   `HostStoreFactory::fold_now` (it does nothing by default) runs the fold of
   a store that decides between such batches only when it folds. Every
   listing of the chapter takes both lists of each page: at most `limit`

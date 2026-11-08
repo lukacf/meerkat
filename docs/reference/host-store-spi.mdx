@@ -237,9 +237,9 @@ updates or transactions.
    Valid ways:
    - refuse the second batch at commit with `Conflict`;
    - fail the load with a typed conflict (`Conflict`, naming the version
-     that holds the two batches), and report the scope in every listing of
-     its kind as a conflict (`HeadPage::conflicts`), never by failing the
-     page;
+     that holds the two batches), answer every `read_rows` of the scope the
+     same, and report the scope in every listing of its kind as a conflict
+     (`HeadPage::conflicts`), never by failing the page;
    - pick one by a fixed rule, such as the lowest commit id, decided per
      batch, so that a batch that loses in one scope is invisible in all of
      them.
@@ -823,7 +823,7 @@ Its rows run in order:
 | Takeover with a commit in flight | The old writer's in-flight commit shows wholly or never, the same to every load |
 | An acquire decides the cut | What a new writer lists and loads right after its acquire returned is what every later load shows once the old writer's commit in flight settled: a batch ordered before the acquire shows from that first listing on, one ordered after it never does. Against a remote store a pass is necessary, not proof: the row cannot make a backend apply a request it accepted late, so the store's acquire must meet the rule of `HostStore::acquire_fence` (see the append-only recipe's fence line) by its own argument |
 | Same version twice | Every load resolves two batches for one version the same way, and the loser is invisible in all its scopes |
-| A conflicted scope is listed typed | A scope whose load answers a typed conflict is listed under `HeadPage::conflicts` with the version its load names and its commit ids (ascending, without repeats, or none), the other scopes of its kind are listed as usual, and listing it again reports the same version and ids. A store that refuses the second batch at commit, or picks one by a fixed rule, holds no such scope, and the row checks nothing more |
+| A conflicted scope is listed typed | A scope whose load answers a typed conflict is listed under `HeadPage::conflicts` with the version its load names and its commit ids (ascending, without repeats, or none), a read of its rows answers the same conflict, the other scopes of its kind are listed as usual, and listing it again reports the same version and ids. A store that refuses the second batch at commit, or picks one by a fixed rule, holds no such scope, and the row checks nothing more |
 | Retry | A commit id sent again acts once, from the same handle or a new one |
 | Rows, removal and listing | Rows keep stable indices through truncation and drops, removal takes effect with its batch, listings page every visible scope once in name order, and a batch at the size limits lands byte-exact |
 | Relisting after a re-acquire | A process that acquires again on its own handle lists every batch another process committed meanwhile (creates, updates and deletes over several kinds, a kind of several pages, the four kinds listed at once), and its next listing shows its own next commit |

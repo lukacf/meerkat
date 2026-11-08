@@ -328,12 +328,14 @@ pub fn hold_tool_grant_request(
 }
 
 /// Hold an agent's grant request as [`hold_tool_grant_request`] holds one,
-/// keeping one request per target: a replayed call (its run and tool call)
-/// answers the decision it held, and a call for a target its subject
-/// already has an open or approved window request for answers that request
-/// instead of holding another. Only otherwise is a decision held. So an
-/// agent that asks again and again leaves one request per target with its
-/// approver.
+/// keeping one request per target. A replayed call (its run and tool call)
+/// answers the request it held. A call for a target its subject already has
+/// an open or approved window request for joins that request: it is answered
+/// with it while the request is still open or approved as it reads now (one
+/// past its deadline reads expired before the host records the expiry, and is
+/// not joined), and holds a new request after it ended. Only otherwise is a
+/// decision held. So an agent that asks again and again leaves one request
+/// per target with its approver.
 ///
 /// # Errors
 /// As [`hold_tool_grant_request`], and the decision owner's read failures.
@@ -355,7 +357,13 @@ pub(crate) fn hold_agent_tool_grant_request(
     }
     let open = tool_grant_requests_of(decisions, &subject, None)?
         .into_iter()
-        .find(|(_, body)| body.target == target && body.run_scope.is_none());
+        .find(|(decision, body)| {
+            matches!(
+                decision.state.phase,
+                DecisionPhase::Open | DecisionPhase::Approved
+            ) && body.target == target
+                && body.run_scope.is_none()
+        });
     if let Some((decision, _)) = open {
         return Ok(decision);
     }

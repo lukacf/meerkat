@@ -1454,11 +1454,7 @@ async fn a_session_replaced_while_a_governed_bind_is_not_ready_never_takes_the_i
     );
     let outcome = sent.expect("the input is admitted onto the member's new session");
     assert_eq!(outcome.admission.session_id, new_session);
-    assert_eq!(
-        binder.admitted(),
-        vec![outcome.admission.clone()],
-        "admitted once"
-    );
+    assert_eq!(binder.admitted(), vec![outcome.admission], "admitted once");
 }
 
 /// The fixture binder's wait budget for its "not now" answers.

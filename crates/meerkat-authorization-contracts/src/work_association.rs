@@ -1839,10 +1839,10 @@ mod tests {
         assert_eq!(base.version(), ASSOCIATION_DIGEST_VERSION);
         let changes: &[(&str, fn(&mut InputAuthorityAssociationCandidate))] = &[
             ("requester", |c| {
-                c.requester = principal("another-requester")
+                c.requester = principal("another-requester");
             }),
             ("ingress actor", |c| {
-                c.ingress_actor = principal("another-actor")
+                c.ingress_actor = principal("another-actor");
             }),
             ("represented subject", |c| {
                 c.represented_subject = Some(principal("represented"));
@@ -1854,11 +1854,11 @@ mod tests {
                 c.logical_executor = principal("another-executor");
             }),
             ("target context", |c| {
-                c.target.context = id("another-context")
+                c.target.context = id("another-context");
             }),
             ("target generation", |c| c.target.context_generation = 1),
             ("original work", |c| {
-                c.original_work.work = id("another-work")
+                c.original_work.work = id("another-work");
             }),
             ("root event", |c| c.root_event = evidence("another-event")),
             ("contributing work", |c| c.contributing_work.clear()),

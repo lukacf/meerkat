@@ -450,6 +450,7 @@ async fn a_requester_less_steer_never_joins_a_person_s_run() {
 /// The receipt names the requester its host supplied: at admission, after a
 /// restart over the same durable store, and after the input completed and its
 /// payload retired.
+#[cfg(feature = "sqlite-store")]
 #[tokio::test]
 async fn host_requester_survives_restart() {
     let dir = tempfile::tempdir().expect("store dir");

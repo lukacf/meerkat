@@ -10475,3 +10475,196 @@ async fn a_failed_refresh_after_adopting_another_login_keeps_its_publication() {
         "the process that published the credential is served"
     );
 }
+
+/// A lease this process released serves a later login from another
+/// process. This process logs in; another process logs the target out, and
+/// this process's next read finds no credential, so its lease is released;
+/// then another process logs in again. This process's next read serves that
+/// login's credential, under a publication the lease never named before.
+#[tokio::test]
+async fn a_released_lease_serves_a_later_login_from_another_process() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let lease = test_auth_lease();
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        lease.clone(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    let key = target.token_key().unwrap();
+    let lease_key = target.lease_key().unwrap();
+    authority
+        .interactive_login(&target, None)
+        .await
+        .expect("this process logs in");
+    let recorded = authority
+        .credential_publication(&target)
+        .expect("the lease holds the login's credential");
+
+    let mut tokens = store.load(&key).await.unwrap().unwrap();
+    store
+        .clear(&meerkat_core::AdmissionGuard::none(), &key)
+        .await
+        .unwrap();
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(None),
+        "after another process's logout this process reads no credential"
+    );
+    assert!(
+        !lease.snapshot(&lease_key).credential_present,
+        "and its lease holds none"
+    );
+
+    // A publication time later than every one before it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokens.primary_secret = Some("credential-of-the-later-login".to_owned());
+    publish_in_process(store.as_ref(), &target, &test_auth_lease(), &tokens).await;
+
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(Some("credential-of-the-later-login".to_owned())),
+        "this process serves the later login's credential"
+    );
+    assert_ne!(
+        authority.credential_publication(&target).as_ref(),
+        Some(&recorded),
+        "the lease never names the earlier publication for another credential"
+    );
+}
+
+/// The same for a lease ahead of the later login: this process logged in
+/// and published once more (generation 2), found no credential after
+/// another process's logout, and then another process logged in (its
+/// generation 1). This process serves that login's credential, and its
+/// lease keeps generation 2.
+#[tokio::test]
+async fn a_released_lease_ahead_serves_a_later_login_from_another_process() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let lease = test_auth_lease();
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        lease.clone(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    let key = target.token_key().unwrap();
+    let lease_key = target.lease_key().unwrap();
+    authority
+        .interactive_login(&target, None)
+        .await
+        .expect("this process logs in");
+    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+        tokens.primary_secret = Some("credential-of-this-process".to_owned());
+    })
+    .await;
+    assert_eq!(lease.snapshot(&lease_key).generation, 2);
+
+    let mut tokens = store.load(&key).await.unwrap().unwrap();
+    store
+        .clear(&meerkat_core::AdmissionGuard::none(), &key)
+        .await
+        .unwrap();
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(None),
+        "after another process's logout this process reads no credential"
+    );
+
+    // A publication time later than every one before it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokens.primary_secret = Some("credential-of-the-later-login".to_owned());
+    publish_in_process(store.as_ref(), &target, &test_auth_lease(), &tokens).await;
+
+    for read in ["first", "second"] {
+        assert_eq!(
+            authority
+                .stored_bearer_token(&target)
+                .await
+                .map_err(|error| error.to_string()),
+            Ok(Some("credential-of-the-later-login".to_owned())),
+            "the {read} read serves the later login's credential"
+        );
+        assert_eq!(
+            lease.snapshot(&lease_key).generation,
+            2,
+            "the lease generation never goes back"
+        );
+    }
+}
+
+/// A release with no credential held keeps the bound the first release
+/// left. This process logs in; another process logs the target out; this
+/// process's read finds no credential (its lease is released), and its
+/// lease is released again with no credential; then another process logs
+/// in. This process serves that login's credential.
+#[tokio::test]
+async fn a_lease_released_twice_serves_a_later_login_from_another_process() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let lease = test_auth_lease();
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        lease.clone(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    let key = target.token_key().unwrap();
+    let lease_key = target.lease_key().unwrap();
+    authority
+        .interactive_login(&target, None)
+        .await
+        .expect("this process logs in");
+
+    let mut tokens = store.load(&key).await.unwrap().unwrap();
+    store
+        .clear(&meerkat_core::AdmissionGuard::none(), &key)
+        .await
+        .unwrap();
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(None),
+        "after another process's logout this process reads no credential"
+    );
+    lease
+        .release_lease(&lease_key)
+        .expect("a release with no credential held");
+    assert!(!lease.snapshot(&lease_key).credential_present);
+
+    // A publication time later than every one before it.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokens.primary_secret = Some("credential-of-the-later-login".to_owned());
+    publish_in_process(store.as_ref(), &target, &test_auth_lease(), &tokens).await;
+
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(Some("credential-of-the-later-login".to_owned())),
+        "this process serves the later login's credential"
+    );
+}

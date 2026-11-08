@@ -4093,6 +4093,61 @@ mod tests {
         assert_eq!(snapshot.phase, Some(AuthLeasePhase::ReauthRequired));
     }
 
+    /// A provider lease released after its own publication takes a later
+    /// publication another process stored for the binding: one published
+    /// after the credential the lease withdrew.
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn managed_store_oauth_released_lease_takes_a_later_publication() {
+        let store = Arc::new(EphemeralTokenStore::new());
+        // Its own realm: the release takes the lease's lifecycle exclusion.
+        let binding = simple_secret_binding_in(
+            "released-later-publication",
+            CredentialSourceSpec::ManagedStore,
+            "managed_chatgpt_oauth",
+        );
+        let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
+        let lease_key = LeaseKey::from_credential_identity(binding.credential_identity());
+        let own = chatgpt_oauth_tokens("released-own-access");
+        let auth_lease = MutableAuthLeaseHandle::unknown();
+        let generated = auth_lease.generated();
+        generated
+            .acquire_lease(
+                &lease_key,
+                meerkat_core::persisted_token_expires_at_epoch_secs(&own),
+            )
+            .expect("this process publishes");
+        generated
+            .release_lease(&lease_key)
+            .expect("and withdraws its credential");
+        // Another process stores a later login.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let later = chatgpt_oauth_tokens("later-login-access");
+        store
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &mark_lease_tokens_lifecycle_published_for_test(&lease_key, &later, 1),
+            )
+            .await
+            .unwrap();
+        let env = ResolverEnvironment::testing()
+            .with_provider_auth_persistence(test_provider_auth_persistence(store))
+            .with_auth_lease_handle(generated);
+
+        let secret = resolve_simple_secret(&binding.auth_profile().source, &env, &binding)
+            .await
+            .expect("the later publication is served");
+        assert_eq!(secret, "later-login-access");
+        let snapshot = auth_lease.snapshot(&lease_key);
+        assert!(snapshot.credential_present);
+        assert_eq!(
+            snapshot.generation, 1,
+            "the lease generation never goes back"
+        );
+    }
+
     #[cfg(feature = "workspace-tests")]
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]

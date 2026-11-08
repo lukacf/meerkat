@@ -8004,6 +8004,92 @@ mod tests {
             assert_eq!(operator.lease().generation, 2);
         }
 
+        /// A refusal of a stored token the lease took from another process's
+        /// later record names the publication by the lease's own generation,
+        /// so it withdraws the token. This lease published twice and withdrew
+        /// its credential (a logout); another process then stored a token at
+        /// its own generation 1, which this lease takes (it keeps generation
+        /// 2 and records the record's 1); GitHub refuses the token.
+        #[tokio::test]
+        async fn a_refusal_of_a_stored_token_from_another_process_withdraws_it() {
+            let harness = Harness::new([Ok(json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            ))]);
+            let store = harness
+                .operator
+                .env
+                .provider_auth_persistence()
+                .expect("provider-auth persistence")
+                .token_store();
+            let identity = account_identity();
+            let key = meerkat_core::auth::TokenKey::from_credential_identity(&identity);
+            let stored = |token: String| PersistedTokens {
+                auth_mode: PersistedAuthMode::StaticBearer,
+                primary_secret: Some(token),
+                refresh_token: None,
+                id_token: None,
+                expires_at: None,
+                last_refresh: Some(Utc::now()),
+                scopes: Vec::new(),
+                account_id: None,
+                metadata: serde_json::Value::Null,
+            };
+            for label in ["stored-first", "stored-second"] {
+                meerkat_core::publish_token_lifecycle_acquired_for_identity(
+                    &harness.operator.auth_lease,
+                    &identity,
+                    &stored(user_token(label)),
+                )
+                .expect("this lease publishes");
+            }
+            harness
+                .operator
+                .auth_lease
+                .release_lease(&lease_key())
+                .expect("and withdraws its credential");
+            // Another process stores a later token under its own lease.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let elsewhere = stored(user_token("stored-elsewhere"));
+            let transition = meerkat_core::handles::AuthLeaseHandle::acquire_lease(
+                &meerkat_runtime::RuntimeAuthLeaseHandle::new(),
+                &lease_key(),
+                meerkat_core::persisted_token_expires_at_epoch_secs(&elsewhere),
+            )
+            .expect("another process publishes");
+            assert_eq!(transition.generation(), 1);
+            let marked = meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                &key,
+                &elsewhere,
+                &transition,
+            )
+            .expect("mark the other process's token");
+            store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+                .await
+                .expect("store the other process's token");
+
+            let refused = harness
+                .resolve_from(
+                    CopilotProviderRoute::OpenAi,
+                    CredentialSourceSpec::ManagedStore,
+                )
+                .await
+                .err();
+            assert!(refused.is_some(), "GitHub refuses the token");
+            let lease = harness.operator.lease();
+            assert_eq!(
+                (lease.generation, lease.adopted_marker_generation),
+                (2, Some(1)),
+                "the lease took the other process's record and kept its generation"
+            );
+            assert_eq!(
+                lease.phase,
+                Some(AuthLeasePhase::ReauthRequired),
+                "the refusal withdraws the token the lease took"
+            );
+        }
+
         /// A refusal of a stored token names the publication the token was
         /// stored under (its record's durable marker), not a lease snapshot
         /// read after the value. A newer token being stored meanwhile (its

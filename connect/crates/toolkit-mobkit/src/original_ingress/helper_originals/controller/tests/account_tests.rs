@@ -2,6 +2,37 @@
 //! These controls do not claim a native dispatch or protected human interaction.
 use super::*;
 
+/// The account check answers a lineage resolution the grant owner cannot
+/// answer now unavailable, never a denial, through the pure check it calls.
+#[tokio::test]
+async fn the_account_check_answers_an_owner_that_cannot_say_now_unavailable() {
+    let fixture = Fixture::with_account().await;
+    let candidate = fixture.candidate();
+    let intent = candidate
+        .account
+        .as_ref()
+        .expect("an account intent")
+        .native_account(&fixture.admitted.facts)
+        .unwrap();
+    assert_lineage_refusals(&intent);
+}
+
+/// The public service request check answers a lineage resolution the grant
+/// owner cannot answer now unavailable, never a denial, through the pure
+/// check it calls.
+#[tokio::test]
+async fn the_public_check_answers_an_owner_that_cannot_say_now_unavailable() {
+    let fixture = Fixture::with_public(false).await;
+    let candidate = fixture.candidate();
+    let intent = candidate
+        .public
+        .as_ref()
+        .expect("a public service request intent")
+        .native_public(&fixture.admitted.facts)
+        .unwrap();
+    assert_lineage_refusals(&intent);
+}
+
 fn issue(
     f: &Fixture,
     intent: &ChildGrantIntent,
@@ -35,7 +66,12 @@ async fn account_and_report_partial_issuance_keep_one_pending_row_until_all_chil
         let candidate = f.candidate();
         let (controller, report, account, public, _catalog) = f
             .owner
-            .retain_helper_operation_intents(&f.store, &f.admitted, candidate.clone())
+            .retain_helper_operation_intents(
+                &f.store,
+                &f.admitted,
+                candidate.clone(),
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
             .await
             .unwrap();
         let report = report.unwrap();
@@ -78,7 +114,12 @@ async fn account_and_report_partial_issuance_keep_one_pending_row_until_all_chil
         assert_eq!(f.row().await.unwrap(), pending);
         let again = f
             .owner
-            .retain_helper_operation_intents(&f.store, &f.admitted, candidate)
+            .retain_helper_operation_intents(
+                &f.store,
+                &f.admitted,
+                candidate,
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -133,7 +174,12 @@ async fn account_selection_refuses_report_parent_and_retains_narrow_target_revoc
     let f = Fixture::with_account().await;
     let (controller, report, account, public, _catalog) = f
         .owner
-        .retain_helper_operation_intents(&f.store, &f.admitted, f.candidate())
+        .retain_helper_operation_intents(
+            &f.store,
+            &f.admitted,
+            f.candidate(),
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
         .await
         .unwrap();
     let report = report.unwrap();
@@ -239,7 +285,12 @@ async fn public_request_child_is_independent_and_partial_settlement_recovers_the
         let candidate = f.candidate();
         let (controller, report, account, public, _catalog) = f
             .owner
-            .retain_helper_operation_intents(&f.store, &f.admitted, candidate.clone())
+            .retain_helper_operation_intents(
+                &f.store,
+                &f.admitted,
+                candidate.clone(),
+                tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+            )
             .await
             .unwrap();
         let report = report.unwrap();
@@ -271,14 +322,26 @@ async fn public_request_child_is_independent_and_partial_settlement_recovers_the
         changed.public = None;
         assert!(
             f.owner
-                .retain_helper_operation_intents(&f.store, &f.admitted, changed)
+                .retain_helper_operation_intents(
+                    &f.store,
+                    &f.admitted,
+                    changed,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND
+                )
                 .await
                 .is_err()
         );
         assert_eq!(f.row().await.unwrap(), pending);
         assert_eq!(
             f.owner
-                .retain_helper_operation_intents(&f.store, &f.admitted, candidate)
+                .retain_helper_operation_intents(
+                    &f.store,
+                    &f.admitted,
+                    candidate,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND
+                )
                 .await
                 .unwrap(),
             (
@@ -418,7 +481,12 @@ async fn public_only_selection_never_infers_account_and_legacy_rows_omit_public(
     let f = Fixture::with_public(false).await;
     let (_, report, account, public, _catalog) = f
         .owner
-        .retain_helper_operation_intents(&f.store, &f.admitted, f.candidate())
+        .retain_helper_operation_intents(
+            &f.store,
+            &f.admitted,
+            f.candidate(),
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
         .await
         .unwrap();
     assert!(account.is_none());

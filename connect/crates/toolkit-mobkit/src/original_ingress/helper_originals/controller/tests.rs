@@ -393,6 +393,38 @@ impl Fixture {
     }
 }
 
+// The helper recovery observation runs outside any owner change of the shared
+// publication: a short hold of the source collection is contention, waited
+// out within the bound, not an unavailable answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_observation_waits_for_a_held_source_collection_instead_of_refusing() {
+    let fixture = Fixture::new().await;
+    fixture
+        .owner
+        .retain_helper_controller_intent(&fixture.store, &fixture.admitted, fixture.candidate())
+        .await
+        .unwrap();
+    let owner = fixture.owner.clone();
+    let (held, holding) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let originals = owner.originals.lock().unwrap();
+        held.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(originals);
+    });
+    holding.recv().unwrap();
+    let observed = fixture
+        .owner
+        .observe_helper_binding(&fixture.store, &fixture.admitted)
+        .await;
+    holder.join().unwrap();
+    assert!(
+        observed.as_ref().is_ok_and(Option::is_none),
+        "a held source collection is waited for, not answered unavailable: {:?}",
+        observed.err()
+    );
+}
+
 #[tokio::test]
 async fn pending_intent_freezes_route_and_complete_intent_without_source_custody() {
     let fixture = Fixture::new().await;
@@ -641,6 +673,61 @@ async fn pending_intent_cannot_outlive_current_contributor_cancellation() {
             .is_none()
     );
     fixture.assert_no_source();
+}
+
+/// A lineage the grant owner resolved, as the pure check of a helper
+/// operation's issued lineage reads it: fixed restrictions, still current.
+struct ResolvedForCheck(ExecutionRestrictions);
+
+impl ResolvedLineage for ResolvedForCheck {
+    fn restrictions(&self) -> &ExecutionRestrictions {
+        &self.0
+    }
+
+    fn check_current(&self) -> Result<(), meerkat_authorization::publication::PublicationError> {
+        Ok(())
+    }
+}
+
+/// The check of one helper operation's issued lineage (`intent`, the
+/// operation's own child grant from the fixture's admitted facts) answers a
+/// resolution the grant owner cannot answer now (an owner change in
+/// progress, or one published during it) unavailable, retryable, at the
+/// parent lineage's resolution and at the issued lineage's; the owner's own
+/// refusal denies at either.
+fn assert_lineage_refusals(intent: &ChildGrantIntent) {
+    use meerkat_authorization::grants::GrantRefusal;
+    let mut lineage = intent.parent_lineage.clone();
+    let mut leaf = lineage
+        .last()
+        .cloned()
+        .expect("the operation's configured parent");
+    leaf.grant_id = intent.id.clone();
+    lineage.push(leaf);
+    for (refusal, answer) in [
+        (GrantRefusal::Unavailable, OriginalWriterError::Unavailable),
+        (GrantRefusal::Denied, OriginalWriterError::OperationDenied),
+    ] {
+        assert_eq!(
+            check_issued_lineage(intent, &lineage, |_, _| Err::<ResolvedForCheck, _>(refusal)),
+            Err(answer),
+            "{refusal:?} at the parent lineage's resolution"
+        );
+        let resolutions = std::cell::Cell::new(0);
+        assert_eq!(
+            check_issued_lineage(intent, &lineage, |_, _| {
+                resolutions.set(resolutions.get() + 1);
+                if resolutions.get() == 1 {
+                    Ok(ResolvedForCheck(ExecutionRestrictions::unrestricted()))
+                } else {
+                    Err(refusal)
+                }
+            }),
+            Err(answer),
+            "{refusal:?} at the issued lineage's resolution"
+        );
+        assert_eq!(resolutions.get(), 2, "the issued lineage was resolved");
+    }
 }
 
 mod origin_tests;

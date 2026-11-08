@@ -560,12 +560,14 @@ pub enum MobEventKind {
         rotation: Option<Box<crate::runtime::MemberRotationRecord>>,
         /// Why the retirement started, when it is recorded: the declared
         /// apply's seal unlisted the member's identity entry
-        /// ([`crate::runtime::MemberRetirementCause::Unlisted`]), so the end
-        /// of the retirement ends the entry. Replay marks the entry again
-        /// (`RecoverIdentityEntryRetiring`). Stored only by the internal event
-        /// codec; a reader that predates it ignores it and replays the
-        /// retirement as one the seal did not start, and journals written
-        /// before it decode it as absent.
+        /// ([`crate::runtime::MemberRetirementCause::Unlisted`]), or a host's
+        /// adoption took the entry over
+        /// ([`crate::runtime::MemberRetirementCause::HostAdopted`]), so the
+        /// end of the retirement ends the entry. Replay marks the entry again
+        /// (`RecoverIdentityEntryRetiring`, `RecoverIdentityEntryAdopting`).
+        /// Stored only by the internal event codec; a reader that predates it
+        /// ignores it and replays the retirement as one the seal did not
+        /// start, and journals written before it decode it as absent.
         #[serde(skip, default)]
         cause: Option<crate::runtime::MemberRetirementCause>,
     },

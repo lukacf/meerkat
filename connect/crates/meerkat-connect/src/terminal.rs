@@ -835,11 +835,9 @@ pub fn committed_text(outcome: &CompletionOutcome) -> Result<&str, &'static str>
         CompletionOutcome::RuntimeTerminated { .. } => {
             Err("The native runtime ended before the setup turn completed.")
         }
-        // A recovered receipt whose run's effect on this input is unknown:
-        // not completed, and never resubmitted (it may have acted).
-        CompletionOutcome::OutcomeUnknown { .. } => {
-            Err("The native setup turn's outcome is unknown. It was not resubmitted.")
-        }
+        CompletionOutcome::OutcomeUnknown { .. } => Err(
+            "The native outcome is unknown. Work may already have run; no completed answer or automatic retry is available.",
+        ),
     }
 }
 
@@ -1295,6 +1293,45 @@ mod tests {
         assert_eq!(
             display_text("safe\x1b]0;fake\x07\r\nnext\tline"),
             "safe[ESC]]0;fake\nnext\tline"
+        );
+    }
+
+    #[test]
+    fn unknown_completion_neither_commits_text_nor_permits_new_input() {
+        use meerkat_runtime::input_state::{InputAbandonReason, InputTerminalOutcome};
+        let outcome = CompletionOutcome::OutcomeUnknown {
+            run_id: meerkat_core::RunId::new(),
+        };
+        let message = committed_text(&outcome).expect_err("unknown outcome is not committed text");
+        assert!(
+            message.contains("outcome is unknown")
+                && message.contains("no completed answer or automatic retry")
+        );
+        for terminal in [
+            None,
+            Some(InputTerminalOutcome::Consumed),
+            Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
+            }),
+        ] {
+            for exit_requested in [false, true] {
+                assert!(
+                    !failed_turn_allows_new_input(&outcome, terminal.as_ref(), exit_requested),
+                    "a terminal row does not turn an unknown effect into retry authority"
+                );
+            }
+        }
+        assert_eq!(
+            committed_text(&CompletionOutcome::CompletedWithoutResult),
+            Ok("")
+        );
+        let failed = CompletionOutcome::AbandonedWithError {
+            reason: "fixture".into(),
+            error: meerkat_core::TurnErrorMetadata::runtime_apply_failure("fixture"),
+        };
+        assert!(
+            failed_turn_allows_new_input(&failed, Some(&InputTerminalOutcome::Consumed), false),
+            "the existing exact known-failure rule is unchanged"
         );
     }
 

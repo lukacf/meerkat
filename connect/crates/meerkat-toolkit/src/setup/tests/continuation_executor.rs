@@ -1270,3 +1270,42 @@ async fn recovery_requires_matching_completed_admission_with_local_observation_t
         assert!(page.had_unavailable_records, "{field}");
     }
 }
+
+#[tokio::test]
+async fn terminal_recovery_keeps_ready_rows_after_continuation_acknowledgment() {
+    let f = Fixture::new();
+    let ended = terminal(&f, AcquisitionPhase::Ready).await;
+    let operation = id(&ended.key().id);
+    let page = f
+        .bridge()
+        .continuation_recovery_page(None, 32)
+        .await
+        .unwrap();
+    let candidate = ended.continuation_recovery_candidate().unwrap();
+    assert_eq!(candidate.operation(), &operation);
+    assert_eq!(
+        candidate.association(),
+        ended.request().evidence().association()
+    );
+    assert_eq!(candidate.correlation(), &ended.request().host().correlation);
+    assert_eq!(page.terminal_operations, vec![candidate.clone()]);
+    assert_eq!(page.operations, vec![operation.clone()]);
+    let owner = Delivery::new(0);
+    assert!(matches!(
+        step(&f, &ended, &owner).await.unwrap(),
+        ContinuationStep::Acknowledged(_)
+    ));
+    let before = f.store.get(ended.key()).await.unwrap();
+    let effect_before = effect(&f, &ended).await;
+    let page = f
+        .bridge()
+        .continuation_recovery_page(None, 32)
+        .await
+        .unwrap();
+    assert!(page.operations.is_empty());
+    assert_eq!(page.terminal_operations, vec![candidate]);
+    assert!(page.expiry_operations.is_empty() && !page.had_unavailable_records);
+    assert_eq!(f.store.get(ended.key()).await.unwrap(), before);
+    assert_eq!(effect(&f, &ended).await, effect_before);
+    assert_eq!(owner.dispatches.load(Ordering::SeqCst), 1);
+}

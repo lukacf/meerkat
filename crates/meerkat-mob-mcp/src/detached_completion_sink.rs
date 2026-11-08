@@ -462,6 +462,16 @@ impl ContinuationAddressResolver for HostContinuationResolver {
         self.mobs.member_address_of_session(session_id).await
     }
 
+    /// External work a caller committed to a member is asked again at its
+    /// delivery through the member's mob
+    /// ([`meerkat_mob::continuation::MobContinuationResolver`]).
+    async fn external_work_refusal(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        self.mobs.external_work_refusal(address).await
+    }
+
     async fn resolve_address(
         &self,
         address: &LogicalRuntimeId,

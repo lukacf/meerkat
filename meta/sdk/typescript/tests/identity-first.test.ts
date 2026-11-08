@@ -942,6 +942,98 @@ describe("Identity-first runtime APIs (REQ-47)", () => {
     });
   });
 
+  it("setInstruction(namespace, key, revision, body, target, options)", async () => {
+    const { rt, calls } = await makeRuntime();
+    const member = { kind: "member" as const, identity: "worker:1" };
+    await rt.setInstruction("host", "persona", 1, "Be brief.", member);
+    assert.equal(calls[0].method, "meta/set_instruction");
+    assert.deepEqual(calls[0].params, {
+      namespace: "host",
+      key: "persona",
+      revision: 1,
+      body: "Be brief.",
+      target: member,
+    });
+    const digest = `sha256:${"0".repeat(64)}`;
+    await rt.setInstruction(
+      "host",
+      "tone",
+      2,
+      "Be formal.",
+      { kind: "profile", profile: "worker" },
+      { contentSha256: digest },
+    );
+    assert.deepEqual(calls[1].params, {
+      namespace: "host",
+      key: "tone",
+      revision: 2,
+      body: "Be formal.",
+      target: { kind: "profile", profile: "worker" },
+      content_sha256: digest,
+    });
+    await rt.setInstruction("host", "tone", 3, "Be formal.", { kind: "mob" });
+    assert.deepEqual(calls[2].params.target, { kind: "mob" });
+  });
+
+  it("revokeInstruction(namespace, key, revision)", async () => {
+    const { rt, calls } = await makeRuntime();
+    await rt.revokeInstruction("host", "persona", 2);
+    assert.equal(calls[0].method, "meta/revoke_instruction");
+    assert.deepEqual(calls[0].params, { namespace: "host", key: "persona", revision: 2 });
+  });
+
+  it("instructionStatus(query)", async () => {
+    const { rt, calls } = await makeRuntime();
+    await rt.instructionStatus();
+    assert.equal(calls[0].method, "meta/instruction_status");
+    assert.deepEqual(calls[0].params, {});
+    await rt.instructionStatus({
+      identity: "worker:1",
+      namespace: "host",
+      key: "persona",
+      offset: 0,
+      limit: 10,
+    });
+    assert.deepEqual(calls[1].params, {
+      identity: "worker:1",
+      namespace: "host",
+      key: "persona",
+      offset: 0,
+      limit: 10,
+    });
+    await rt.instructionStatus({ profile: "worker" });
+    assert.deepEqual(calls[2].params, { profile: "worker" });
+  });
+
+  it("instructionStatus keeps unknown advisory values as the gateway sent them", async () => {
+    const { rt } = await makeRuntime();
+    const status = {
+      mob_id: "gateway",
+      generation: 2,
+      desired: [],
+      members: [
+        {
+          identity: "worker:1",
+          profile: "worker",
+          residency: "a_future_residency",
+          delivery: { state: "current", recorded_generation: 2 },
+          slots: [
+            {
+              namespace: "host",
+              key: "persona",
+              desired: { revision: 1, effect: "active" },
+              state: { state: "pending", reason: "a_future_reason" },
+            },
+          ],
+          effective_read: { status: "ok" },
+          live_channel_open: false,
+        },
+      ],
+    };
+    (rt as unknown as Record<string, unknown>)._rpc = async () => status;
+    assert.deepEqual(await rt.instructionStatus(), status);
+  });
+
   it("pruneMemberSystemRows(identity, remove, options)", async () => {
     const { rt, calls } = await makeRuntime();
     const remove = [{ index: 0, content_sha256: `sha256:${"0".repeat(64)}` }];

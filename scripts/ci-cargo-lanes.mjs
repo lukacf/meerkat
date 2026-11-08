@@ -54,9 +54,9 @@
 // so no pull request fits the 20-minute cap from the start of the pre-push
 // hook to a green CI gate with them. The plan lists what a pull request left
 // to the push (deferred_to_push), and the push plan runs all of it.
-// The workspace rustdoc (`doc --workspace --no-deps` with rustdoc's lints
-// denied) is left to the push the same way: it documents meerkat-mob and
-// every crate built on it.
+// The workspace rustdoc (`doc --no-deps` with rustdoc's lints denied, over
+// Core's members and the products' packages the change reaches) is left to
+// the push the same way: it documents meerkat-mob and every crate built on it.
 //
 // A push runs no unit lane of its own: the rows a pull request's unit lane
 // would run (the same shards, so the same `-p` sets, because Cargo unifies
@@ -374,8 +374,9 @@ export const HOSTED_RUNNER_EXCLUDED_BINARIES = [
   },
 ];
 // Tests no hosted runner can run, in a binary whose other tests run: each
-// needs an environment only its product's own lane provides. Keyed by the
-// binary (package::test-target) and listed by exact name, with the reason.
+// needs an environment no CI lane provides, and its reason says what that is
+// and that no lane runs it. Keyed by the binary (package::test-target) and
+// listed by exact name, with the reason.
 // The closure-tests row that holds the binary runs it without them (the
 // row's `filter`, ci-hook-coverage's excludedTestsFilter), the plan names them with the reason
 // in `hosted_runner_excluded_tests`, and scripts/ci-verify-row-binaries.mjs
@@ -385,8 +386,9 @@ export const HOSTED_RUNNER_EXCLUDED_TESTS = [
   {
     binary: "meerkat-connect::cli_paired_host",
     reason:
-      "needs the assembled pin-built synthetic resource prefix (CONNECT_LAZY_SERVICES_FIXTURE_PREFIX), " +
-      "which only Connect's native lane provides",
+      "needs CONNECT_LAZY_SERVICES_FIXTURE_PREFIX, an assembled synthetic Connect resource prefix with a " +
+      "meerkat-connect built against its resource pin; no workflow of this repository assembles one, so no " +
+      "CI lane runs these tests and their acceptance stays owed",
     tests: [
       "actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval",
       "actual_cli_configured_browser_login_precedes_pairing_and_uses_same_native_session",
@@ -454,25 +456,18 @@ const GPT_LIVE_TEST_STACK = 32 * 1024 * 1024;
 // change. An intermittent one stays out of both runs.
 export const TOOLKIT_MOBKIT_TEST_DEBT = "connect/crates/toolkit-mobkit/NATIVE-HOST-TEST-DEBT.md";
 const COLD_RESTORE = "cold-restore-refusals";
-const TOOL_RESULT = "tool-result-payload";
 const STALE = "stale-expectations";
 const INTERMITTENT = "intermittent-races";
 export const TOOLKIT_MOBKIT_KNOWN_REDS = [
-  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a", COLD_RESTORE],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission", COLD_RESTORE],
-  ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_targeted_selection_restores_its_exact_operation_projection", COLD_RESTORE],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery", COLD_RESTORE],
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_pending_helper_settles_retired_input_without_resubmission", COLD_RESTORE],
   ["private_originals::governed_submit::tests::first_input_tests::approved_fixture::custody_recovery_helper_cold_tests::cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes", COLD_RESTORE],
   ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_restores_actual_admission_and_phase_without_replay_or_new_issuer", COLD_RESTORE],
-  ["private_originals::governed_submit::tests::first_input_tests::acquisition_denial::controller_only_original_denies_enrolled_acquisition_in_its_real_turn", TOOL_RESULT],
-  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper", TOOL_RESULT],
-  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets", TOOL_RESULT],
-  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", TOOL_RESULT],
+  ["private_originals::service_approved_input::attachment::tests::native::batch::admitted_batch_target_independence_and_settled_cold_restore_after_alpha_revoke", COLD_RESTORE],
   ["installed_host::acquisition::enrollment::tests::production_leaves_reach_actual_bound_owner_but_not_missing_native_continuation", "interaction-lineage"],
   ["installed_host::tests::direct_rust_access_is_fenced_by_owner_close_or_selection_replacement", STALE],
   ["installed_host::tests::direct_rust_original_cancellation_is_fenced_and_does_not_revoke_standing_access", STALE],
-  ["installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication", STALE],
   ["installed_host::operator_setup::tests::owner_tests::captured_answer_loss_during_child_admission_prevents_native_child_write", STALE],
   ["private_originals::service_approved_input::admission_tests::live_attachment_preparation_reopens_cancelled_task_and_never_submits_b", STALE],
   ["private_originals::service_approved_input::admission_tests::cold_service_tests::cold_b_requires_complete_reserved_selection_and_retained_input", STALE],
@@ -483,12 +478,35 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["private_originals::service_approved_input::admission_tests::service_recovery_tests::operator_recovery_preserves_new_publication_and_other_approval_child", STALE],
   ["private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source", STALE],
   ["private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper", STALE],
-  ["original_ingress::tests::native_original_disposition_waits_for_held_collection_before_reading_open_row", STALE],
   ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
-  ["installed_host::operator_setup::tests::target_tests::explicit_correlated_targets_use_one_review_source_and_real_first_input", "double-model-request"],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
+].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
+
+// The known reds of the connect[console] suite below, under the same rules:
+// each names its class on meerkat-connect's console test-debt page, which the
+// plan checks against this list both ways. They fail in some runs only, so
+// the row excludes them without requiring them to fail.
+export const CONNECT_CONSOLE_TEST_DEBT = "connect/crates/meerkat-connect/CONSOLE-TEST-DEBT.md";
+const SETUP_CONTENTION = "setup-contention";
+const CONSENT_LEASE_HELD = "consent-lease-held";
+export const CONNECT_CONSOLE_KNOWN_REDS = [
+  ["resources::shared_setup::native_case::two_sdk_children_share_one_preparation_and_cancel_independently", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::observe_controls::owner_change_at_a_finds_helper_observation_is_waited_out_and_observed_again", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::two_sdk_originals_admit_one_fresh_dedicated_planning_input", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::console_consent_case::installed_console_consent_rechecks_human_login_and_selected_policy", CONSENT_LEASE_HELD, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::console_consent_case::entered_operation::registered_r2_find_enters_once_per_call_and_commits_real_context_graphs", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::closed_workflow_refuses_context_replay_after_automatic_admission", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::committed_waiter_context_is_delivered_automatically_once_and_survives_departure", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_survives_a_departure_and_refuses_closed_recipient", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_validates_mutable_payload_without_replaying_find", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::a_fresh_install_pending_at_its_members_cancel_keeps_its_proofs", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_join_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_release_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_install_check_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_check_after_the_join_ends_typed_without_replay", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_install_reservation_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
 ].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
 
 export const FEATURE_UNIT_SUITES = [
@@ -529,8 +547,14 @@ export const FEATURE_UNIT_SUITES = [
   // meerkat-mob through toolkit-mobkit's native host, so like its default
   // unit lane this suite runs on the push only. Its process controls
   // (resources::local_round) run under TOOLKIT_SHARED_TEST_PYTHON, which
-  // the unit jobs export.
-  { package: "meerkat-connect", id: "console", features: ["console"] },
+  // the unit jobs export. It runs without its intermittent known reds
+  // (CONNECT_CONSOLE_KNOWN_REDS).
+  {
+    package: "meerkat-connect",
+    id: "console",
+    features: ["console"],
+    knownReds: { doc: CONNECT_CONSOLE_TEST_DEBT, tests: CONNECT_CONSOLE_KNOWN_REDS },
+  },
   // toolkit-mobkit's native host (its installed host, private originals,
   // private host and original ingress) compiles only under `native-host`,
   // which meerkat-connect turns on, so the package's own unit lane runs a
@@ -3097,12 +3121,62 @@ function plan(args) {
   // Every crate's documentation, with rustdoc's lints denied: the push
   // runs it on a Rust change, like the closure check.
   result.rustdoc = result.rust_changed && !deferToPush;
-  // What the rustdoc lane documents: Core's members (every workspace member
-  // but the products') when the plan reaches Core, the changed products'
-  // packages otherwise. Products keep their own rustdoc rules.
-  result.rustdoc_flags = result.core_changed
-    ? selections.selections.get(CORE).flags
-    : result.packages.map((name) => `-p ${name}`).join(" ");
+  // What the rustdoc lane documents (rustdoc_rows; no row mixes products,
+  // as one cargo invocation unifies features across its packages): Core's
+  // members (every workspace member but the products') when the plan
+  // reaches Core, and each product's packages in the reverse-dependency
+  // closure. A product's docs link into Core's crates, so a Core change that
+  // renames, removes or hides an item they link to breaks the product's
+  // documentation: the product's rows document exactly the packages the
+  // change reaches, and a product it does not reach gets no row. Cargo
+  // documents each bin into a directory named after it and refuses two bins
+  // of one name in one invocation ("document output filename collision"),
+  // and the all-features leg builds every bin (Connect's two
+  // toolkit_gateway bins, in meerkat-connect and toolkit-mobkit), so a
+  // product's packages fill as few rows as hold no bin name twice, in
+  // order. `key` names a row's artifacts and `features` its legs: Core's
+  // members are documented with default features and with --all-features,
+  // a product's rows with --all-features only, which compiles every
+  // feature-gated doc of the product and so every link it makes into Core
+  // (a doc that only a build without some feature compiles is outside it).
+  const binNames = (name) =>
+    byName.get(name).targets.filter((target) => target.kind.includes("bin")).map((target) => target.name);
+  const docGroups = (names) => {
+    const groups = [];
+    for (const name of names) {
+      const bins = binNames(name);
+      const group = groups.find((candidate) => bins.every((bin) => !candidate.bins.has(bin)));
+      if (group) {
+        group.names.push(name);
+        for (const bin of bins) group.bins.add(bin);
+      } else {
+        groups.push({ names: [name], bins: new Set(bins) });
+      }
+    }
+    return groups.map((group) => group.names);
+  };
+  result.rustdoc_rows = !result.rustdoc
+    ? []
+    : [
+      ...(result.core_changed
+        ? [{ name: CORE, key: CORE, product: CORE, flags: selections.selections.get(CORE).flags, features: ["default", "all"] }]
+        : []),
+      ...byProduct(result.closure)
+        .filter(([product]) => product !== CORE)
+        .flatMap(([product, names]) => {
+          const groups = docGroups(names);
+          return groups.map((group, index) => {
+            const part = groups.length > 1 ? ` ${index + 1}/${groups.length}` : "";
+            return {
+              name: `${product}${part}, ${group.length} ${group.length === 1 ? "crate" : "crates"}`,
+              key: groups.length > 1 ? `${product}-${index + 1}` : product,
+              product,
+              flags: group.map((name) => `-p ${name}`).join(" "),
+              features: ["all"],
+            };
+          });
+        }),
+    ];
   result.governed_jsonl = guardRuns("governed_jsonl");
   result.mcp_confinement_positive = guardRuns("mcp_confinement_positive");
   deferred.closure_check = result.rust_changed && deferToPush;
@@ -3254,12 +3328,13 @@ function plan(args) {
 
 // Non-Rust lanes of the products (ported from their own workflows): a
 // changed path under one of `paths` selects the lane. Connect's checks are
-// its packaging unit tests, its docs check and the embedded Console panel's
-// Node test (connect/.github/workflows/checks.yml before the import); every
-// Connect path selects them, since the docs check reads the whole tree.
+// its script, SDK and docs checks (connect/.github/workflows/checks.yml, run
+// by ci.yml's connect-checks job); every Connect path selects them, since
+// the docs check reads the whole tree, and so does a change to Meta's
+// Python SDK, which Connect's installed acceptance controls import.
 // Meta's console, Flow Editor and SDK lanes keep Meta's own classifier
 // (meta/scripts/ci-changes.py) in the transition workflow meta-ci.yml.
-export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/"] }];
+export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/", "meta/sdk/python/"] }];
 
 // The plan's product section (see the header of ci-products.mjs):
 //   changed       the products whose roots hold a changed path (every
@@ -3531,7 +3606,19 @@ function githubOutput(result) {
     }),
   );
   scalar("rustdoc", String(result.rustdoc));
-  scalar("rustdoc_flags", result.rustdoc_flags ?? "");
+  // The rustdoc job's matrix: one entry per row and leg. A placeholder keeps
+  // fromJSON well-formed for a plan without rustdoc, whose job `if:` skips
+  // it.
+  const rustdocLegs = (result.rustdoc_rows ?? []).flatMap(({ features, ...row }) =>
+    features.map((leg) => ({ ...row, features: leg })));
+  scalar(
+    "rustdoc_matrix",
+    JSON.stringify({
+      include: rustdocLegs.length > 0
+        ? rustdocLegs
+        : [{ name: "none", key: "none", product: "none", flags: "", features: "default" }],
+    }),
+  );
   scalar("core_changed", String(result.core_changed));
   scalar("core_paths_changed", String(result.core_paths_changed));
   scalar("governed_jsonl", String(result.governed_jsonl));

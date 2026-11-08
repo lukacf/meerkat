@@ -1,7 +1,7 @@
 """Bounded observation of real Controller jobs, without worker ownership.
 
-The projection-refusal control exercises repeated current-owner checks. It does
-not grant another caller access to a job.
+The projection-refusal control exercises delegation, not a native peer grant.
+The existing shared-host owner remains responsible for each peer's job view.
 """
 import asyncio
 import copy

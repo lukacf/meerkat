@@ -2,6 +2,21 @@
 use super::*;
 use meerkat_authorization_contracts::constraints::DomainRestriction;
 
+/// The catalog check answers a lineage resolution the grant owner cannot
+/// answer now unavailable, never a denial, through the pure check it calls.
+#[tokio::test]
+async fn the_catalog_check_answers_an_owner_that_cannot_say_now_unavailable() {
+    let fixture = Fixture::with_catalog().await;
+    let candidate = fixture.candidate();
+    let intent = candidate
+        .catalog
+        .as_ref()
+        .expect("a catalog intent")
+        .native(&fixture.admitted.facts)
+        .unwrap();
+    assert_lineage_refusals(&intent);
+}
+
 fn issue(f: &Fixture, intent: &ChildGrantIntent) -> Vec<GrantLineageRef> {
     let leaf = f
         .owner
@@ -28,7 +43,12 @@ fn issue(f: &Fixture, intent: &ChildGrantIntent) -> Vec<GrantLineageRef> {
 async fn issued(f: &Fixture) -> (HelperNativeBinding, ChildGrantIntent) {
     let (_, report, account, public, catalog) = f
         .owner
-        .retain_helper_operation_intents(&f.store, &f.admitted, f.candidate())
+        .retain_helper_operation_intents(
+            &f.store,
+            &f.admitted,
+            f.candidate(),
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
         .await
         .unwrap();
     let catalog = catalog.unwrap();
@@ -63,7 +83,12 @@ async fn helper_catalog_child_freezes_current_session_and_preserves_other_operat
     let candidate = f.candidate();
     let (_, _, _, _, catalog) = f
         .owner
-        .retain_helper_operation_intents(&f.store, &f.admitted, candidate.clone())
+        .retain_helper_operation_intents(
+            &f.store,
+            &f.admitted,
+            candidate.clone(),
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
         .await
         .unwrap();
     let catalog = catalog.unwrap();
@@ -104,7 +129,13 @@ async fn helper_catalog_child_freezes_current_session_and_preserves_other_operat
         }
         assert!(
             f.owner
-                .retain_helper_operation_intents(&f.store, &f.admitted, changed)
+                .retain_helper_operation_intents(
+                    &f.store,
+                    &f.admitted,
+                    changed,
+                    tokio::time::Instant::now()
+                        + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND
+                )
                 .await
                 .is_err()
         );

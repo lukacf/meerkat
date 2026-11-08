@@ -14,6 +14,7 @@ use meerkat::{
     WorkItem, WorkItemId, WorkOwner, WorkOwnerKey, WorkStatus,
 };
 use meerkat_core::LiveChannelId;
+use meerkat_core::ops::OperationId;
 use meerkat_runtime::live_execution::LiveDelegationNarrationKind;
 use sha2::{Digest, Sha256};
 
@@ -25,6 +26,10 @@ pub(super) const LIVE_DELEGATION_CHANNEL_WORKER_CAP: usize =
 
 /// Label every voice delegation item carries.
 pub(super) const VOICE_WORK_LABEL: &str = "voice";
+
+/// Evidence kind naming the live delegation operation a voice item belongs
+/// to, so restart recovery finds the item of an operation it settles.
+const OPERATION_EVIDENCE_KIND: &str = "live_delegation_operation";
 
 const WORK_TITLE_CHARS: usize = 200;
 const NARRATION_TITLE_CHARS: usize = 120;
@@ -400,10 +405,18 @@ impl VoiceWorkGraph {
         channel_id: &LiveChannelId,
         session_id: &meerkat_core::SessionId,
         delegation_ref: &str,
+        operation_id: &OperationId,
         transcript: &str,
     ) -> Result<VoiceWorkItem, String> {
-        self.create_item_with_evidence(channel_id, session_id, delegation_ref, transcript, None)
-            .await
+        self.create_item_with_evidence(
+            channel_id,
+            session_id,
+            delegation_ref,
+            operation_id,
+            transcript,
+            None,
+        )
+        .await
     }
 
     /// Replace `item`, whose blockers ended without completing, with a fresh
@@ -411,6 +424,10 @@ impl VoiceWorkGraph {
     /// closes Cancelled with the failed blockers recorded as evidence; the
     /// new item references it. The generated machine operation is unchanged:
     /// only the WorkGraph binding of the delegation moves.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the replacement carries the delegation's channel, session, provider and operation identity"
+    )]
     pub(super) async fn replace_after_failed_blockers(
         &self,
         item: &VoiceWorkItem,
@@ -418,6 +435,7 @@ impl VoiceWorkGraph {
         channel_id: &LiveChannelId,
         session_id: &meerkat_core::SessionId,
         delegation_ref: &str,
+        operation_id: &OperationId,
         transcript: &str,
     ) -> Result<VoiceWorkItem, String> {
         self.close(
@@ -431,6 +449,7 @@ impl VoiceWorkGraph {
             channel_id,
             session_id,
             delegation_ref,
+            operation_id,
             transcript,
             Some(
                 WorkEvidenceRef::new("superseded_voice_item", item.id.to_string())
@@ -446,6 +465,7 @@ impl VoiceWorkGraph {
         channel_id: &LiveChannelId,
         session_id: &meerkat_core::SessionId,
         delegation_ref: &str,
+        operation_id: &OperationId,
         transcript: &str,
         extra_evidence: Option<WorkEvidenceRef>,
     ) -> Result<VoiceWorkItem, String> {
@@ -459,6 +479,8 @@ impl VoiceWorkGraph {
             WorkEvidenceRef::new("live_channel", channel_id.to_string()).with_label("live channel"),
             WorkEvidenceRef::new("live_session", session_id.to_string())
                 .with_label("source session"),
+            WorkEvidenceRef::new(OPERATION_EVIDENCE_KIND, operation_id.to_string())
+                .with_label("live delegation operation"),
         ];
         evidence_refs.extend(extra_evidence);
         let item = self
@@ -580,6 +602,33 @@ impl VoiceWorkGraph {
             ready,
             blockers_failed,
         })
+    }
+
+    /// The open voice item of `channel_id` that names `operation_id`, if any.
+    pub(super) async fn open_item_of_operation(
+        &self,
+        channel_id: &LiveChannelId,
+        operation_id: &OperationId,
+    ) -> Result<Option<WorkItemId>, String> {
+        let snapshot = self
+            .voice_snapshot()
+            .await
+            .map_err(|error| format!("voice work snapshot failed: {error}"))?;
+        let label = channel_work_label(channel_id);
+        let operation = operation_id.to_string();
+        Ok(snapshot
+            .items
+            .into_iter()
+            .find(|item| {
+                !matches!(
+                    item.status,
+                    WorkStatus::Completed | WorkStatus::Failed | WorkStatus::Cancelled
+                ) && item.labels.contains(&label)
+                    && item.evidence_refs.iter().any(|evidence| {
+                        evidence.kind == OPERATION_EVIDENCE_KIND && evidence.id == operation
+                    })
+            })
+            .map(|item| item.id))
     }
 
     /// Claim `item` for the exact worker about to run it.
@@ -780,6 +829,7 @@ mod tests {
                 &LiveChannelId::new("schedule-test-channel"),
                 &meerkat_core::SessionId::new(),
                 &format!("delegation-{transcript}"),
+                &OperationId::new(),
                 transcript,
             )
             .await

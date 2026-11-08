@@ -130,9 +130,81 @@ impl PrivateOriginals {
         }
     }
 
+    /// [`Self::acquisition_original_until`] for a caller with no step
+    /// deadline of its own: its basis reads wait for a held source collection
+    /// within Core's owner-change bound from now.
     pub(crate) async fn acquisition_original(
         &self,
         context: &ToolDispatchContext,
+    ) -> Result<AcquisitionOriginal, PrivateOriginalError> {
+        self.acquisition_original_until(
+            context,
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+        .await
+    }
+
+    /// [`Self::acquisition_original_until`] for a tool's admission, through
+    /// Core's owner-change waiter: a read that finds the source's facts in
+    /// conflict (contention: another writer's change in flight, a
+    /// contributor's binding not settled yet) is a stale read of the owners.
+    /// It is waited out with `churn` on the call's own work authorization
+    /// and made again, afresh, until `deadline`, and never past the
+    /// dispatch's remaining tool time. A conflict that outlasts
+    /// the wait is answered as one, which an admission answers as
+    /// unavailable: retryable, never a denial. Nothing is held across a wait.
+    pub(crate) async fn acquisition_original_through_waiter(
+        &self,
+        context: &ToolDispatchContext,
+        churn: &tokio::sync::Mutex<meerkat_core::authorization::OwnerChangeChurn>,
+        deadline: tokio::time::Instant,
+    ) -> Result<AcquisitionOriginal, PrivateOriginalError> {
+        loop {
+            let read = self
+                .acquisition_original_until(context, deadline.into_std())
+                .await;
+            if !matches!(read, Err(PrivateOriginalError::Conflict)) {
+                return read;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            let _ = crate::source_hold_probe::observe(
+                crate::source_hold_probe::Site::AcquisitionConflict,
+                "",
+            );
+            let Some(work) = context.work_authorization() else {
+                return read;
+            };
+            let remaining = waiter_budget(
+                deadline,
+                tokio::time::Instant::now(),
+                context.remaining_tool_time(),
+            );
+            if remaining.is_zero()
+                || !churn
+                    .lock()
+                    .await
+                    .wait_after_stale_read(
+                        work.authorization().as_ref(),
+                        Some(remaining),
+                        "toolkit.acquisition.original",
+                        None,
+                    )
+                    .await
+                    .settled()
+            {
+                return read;
+            }
+        }
+    }
+
+    /// The call's acquisition original and its complete contributor set. A
+    /// named-only contributor's admitted basis read meets a source collection
+    /// held by another owner's short section as contention and waits for it
+    /// until `deadline`, the caller's step's one deadline, holding nothing.
+    pub(crate) async fn acquisition_original_until(
+        &self,
+        context: &ToolDispatchContext,
+        deadline: std::time::Instant,
     ) -> Result<AcquisitionOriginal, PrivateOriginalError> {
         let authorization = context
             .work_authorization()
@@ -279,11 +351,12 @@ impl PrivateOriginals {
             if record.operation_cancelled {
                 return Err(PrivateOriginalError::Denied);
             }
-            self.require_acquisition_source(
+            self.require_acquisition_source_until(
                 association,
                 own_originals
                     .iter()
                     .any(|own| Arc::ptr_eq(own, &current.original)),
+                deadline,
             )?;
             if Arc::ptr_eq(&current, &held) {
                 source_record = Some(Arc::new(stored));
@@ -326,11 +399,12 @@ impl PrivateOriginals {
         // an atomic permission snapshot: the actual effect/fence must recheck
         // every contributor under native publication when admitting the helper.
         for original in &pending {
-            self.require_acquisition_source(
+            self.require_acquisition_source_until(
                 original.original.association(),
                 own_originals
                     .iter()
                     .any(|own| Arc::ptr_eq(own, &original.original)),
+                deadline,
             )?;
         }
         Ok(AcquisitionOriginal {
@@ -345,10 +419,27 @@ impl PrivateOriginals {
         })
     }
 
+    #[cfg(test)]
     fn require_acquisition_source(
         &self,
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
         own: bool,
+    ) -> Result<(), PrivateOriginalError> {
+        self.require_acquisition_source_until(
+            association,
+            own,
+            std::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        )
+    }
+
+    /// A contributor's current disposition and, for a named-only one, its
+    /// admitted basis, read with a wait for a held source collection until
+    /// `deadline`. Nothing is held while it waits.
+    fn require_acquisition_source_until(
+        &self,
+        association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+        own: bool,
+        deadline: std::time::Instant,
     ) -> Result<(), PrivateOriginalError> {
         let claims = association.candidate();
         match self
@@ -368,9 +459,20 @@ impl PrivateOriginals {
         if own {
             return Ok(());
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::BasisRead,
+            claims.original_work.work.as_str(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         let basis = self
             .owner
-            .admitted_original_basis(&claims.ingress_namespace, &claims.original_work)
+            .admitted_original_basis_until(
+                &claims.ingress_namespace,
+                &claims.original_work,
+                deadline,
+            )
             .map_err(|_| PrivateOriginalError::Unavailable)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         if basis != claims.authority_basis {
@@ -382,6 +484,20 @@ impl PrivateOriginals {
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The budget of one wait of
+/// [`PrivateOriginals::acquisition_original_through_waiter`]: the time left
+/// to the read's `deadline`, cut to the dispatch's remaining tool time
+/// (`tool_time`; `None` without a tool timeout) when less is left, so a wait
+/// never turns a conflict into the dispatch's timeout.
+fn waiter_budget(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+    tool_time: Option<std::time::Duration>,
+) -> std::time::Duration {
+    let remaining = deadline.saturating_duration_since(now);
+    tool_time.map_or(remaining, |tool_time| tool_time.min(remaining))
 }
 
 #[cfg(test)]
@@ -1084,6 +1200,47 @@ mod tests {
         ));
     }
 
+    // A named-only ancestor's admitted basis read (the parent's and the
+    // grandparent's, named by the child's own association) meets the source
+    // collection held by another owner's short section: it waits the hold out
+    // within its deadline, and the acquisition original resolves.
+    #[tokio::test]
+    async fn named_only_ancestor_basis_read_waits_out_a_held_source_collection() {
+        let fixture = Fixture::new(true).await;
+        let (parent, _, _) = fixture.descendant("parent", &fixture.original).await;
+        let (child, _, input) = fixture.descendant("child", &parent).await;
+        let context = fixture.context(
+            fixture.session.clone(),
+            input.clone(),
+            fixture.identity_for(&child, &input, &input),
+        );
+        let hold = std::time::Duration::from_millis(150);
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = hits.clone();
+        crate::source_hold_probe::install(Arc::new(move |site, _key| {
+            (site == crate::source_hold_probe::Site::BasisRead
+                && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+                .then_some(crate::source_hold_probe::Hold {
+                    owner_change: false,
+                    duration: hold,
+                })
+        }));
+        let started = std::time::Instant::now();
+        let resolved = fixture.adapter.acquisition_original(&context).await;
+        let elapsed = started.elapsed();
+        crate::source_hold_probe::clear();
+        let resolved = resolved.expect("a held collection is waited out, not refused");
+        assert_eq!(resolved.contributors.len(), 3);
+        assert!(
+            hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "a named-only basis read was made"
+        );
+        assert!(
+            elapsed >= hold - std::time::Duration::from_millis(50),
+            "the read waited for the hold: {elapsed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_missing_recorded_ancestor_cannot_be_replaced_by_the_child_basis() {
         let fixture = Fixture::new(true).await;
@@ -1130,5 +1287,39 @@ mod tests {
             fixture.adapter.acquisition_original(&context).await,
             Err(PrivateOriginalError::Denied)
         ));
+    }
+
+    // One wait of the acquisition original's waiter never outlasts the
+    // dispatch's remaining tool time: its budget is the time to the read's
+    // deadline (within Core's owner-change bound), cut to the tool time when
+    // less is left, so a conflict that outlasts the wait answers unavailable
+    // within the dispatch, never as its timeout.
+    //
+    // RED before the fix: the budget ignores the tool time.
+    #[test]
+    fn a_conflict_wait_never_outlasts_the_remaining_tool_time() {
+        let now = tokio::time::Instant::now();
+        let bound = meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let little = std::time::Duration::from_millis(300);
+        assert_eq!(
+            waiter_budget(now + bound, now, Some(little)),
+            little,
+            "cut to the tool time left"
+        );
+        assert_eq!(
+            waiter_budget(now + bound, now, None),
+            bound,
+            "a dispatch without a tool timeout"
+        );
+        assert_eq!(
+            waiter_budget(now + bound, now, Some(bound * 2)),
+            bound,
+            "the read's deadline comes first"
+        );
+        assert_eq!(
+            waiter_budget(now, now + little, Some(little)),
+            std::time::Duration::ZERO,
+            "past the read's deadline"
+        );
     }
 }

@@ -809,3 +809,6 @@ mod tests {
         owned_terminal_is_retained_close_on_exec_without_a_second_input_owner();
     }
 }
+
+/// Explicit authenticated installed-application consent route.
+pub mod console_consent;

@@ -33,6 +33,7 @@ from typing import Any as _Any, get_args as _get_args, get_type_hints as _get_ty
 
 from .generated.types import (
     CommsSendErrorData as CommsSendErrorData,
+    InstructionSetErrorCode as InstructionSetErrorCode,
     WireAuthErrorDetail as WireAuthErrorDetail,
     WireAuthErrorReason as WireAuthErrorReason,
     WireMemberReloadRefusal as WireMemberReloadRefusal,
@@ -169,6 +170,29 @@ def comms_send_error(error: BaseException) -> CommsSendErrorData | None:
     code = details.get("code")
     if isinstance(code, str) and code in COMMS_SEND_ERROR_CODES:
         return details  # type: ignore[return-value]
+    return None
+
+
+INSTRUCTION_SET_ERROR_CODES: frozenset[str] = _literal_strings(InstructionSetErrorCode)
+
+
+def instruction_set_code(error: BaseException) -> InstructionSetErrorCode | None:
+    """The closed code of a refused operator-instruction write or read.
+
+    The operator-instruction methods (``session/set_instruction``,
+    ``mob/set_instruction`` and their siblings) carry it in
+    ``error.data.instruction_set_code``, which the SDK keeps as
+    ``MeerkatError.details``: for example ``"stale_revision"``,
+    ``"owned_by_mob"`` or ``"prepared_authorization_required"`` (a governed
+    runtime, which refuses every such write). Branch on it, never on the
+    error text. ``None`` for any other error.
+    """
+    details = getattr(error, "details", None)
+    if not isinstance(details, dict):
+        return None
+    code = details.get("instruction_set_code")
+    if isinstance(code, str) and code in INSTRUCTION_SET_ERROR_CODES:
+        return code  # type: ignore[return-value]
     return None
 
 

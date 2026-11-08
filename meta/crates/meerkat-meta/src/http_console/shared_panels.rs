@@ -107,6 +107,14 @@ pub(super) async fn dispatch(
     let stale_id = id.clone();
     let response = match request.method.as_str() {
         "meta/memory/panel/records" => match identity_listing(&request.method, &params) {
+            // A listing of an identity hidden from the caller takes the path
+            // of an identity that holds nothing: it is asked for a name no
+            // identity holds, and its answer spelled with the caller's.
+            Some(identity) if caller.hides_identity(&identity) => {
+                let absent = ConsoleAbsentNames::fresh();
+                params["identity"] = Value::String(absent.absent_spelling(&identity));
+                absent.restore(handle_memory_panel_records(store, caller, &params, id).await)
+            }
             Some(identity) if !memory_panel_identity_visible(caller, &identity) => {
                 memory_panel_identity_denied(id, caller, &identity)
             }
@@ -143,6 +151,8 @@ pub(super) async fn dispatch(
                 &admission,
                 crate::rpc::workgraph_methods::WorkgraphSurface::Console {
                     authenticated_principal: None,
+                    person: None,
+                    access: None,
                 },
                 method,
                 &params,

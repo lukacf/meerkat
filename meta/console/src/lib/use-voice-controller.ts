@@ -1,5 +1,5 @@
 import React from "react";
-import { createVoiceSession, type VoiceSession, type VoiceSessionSnapshot } from "./voice-session";
+import { createVoiceSession, type VoiceCallerScope, type VoiceSession, type VoiceSessionSnapshot } from "./voice-session";
 
 const IDLE: VoiceSessionSnapshot = {
   phase: "idle",
@@ -12,10 +12,18 @@ const IDLE: VoiceSessionSnapshot = {
 const idleSnapshot = () => IDLE;
 const idleSubscribe = () => () => {};
 
-export function useVoiceController(baseUrl: string) {
+/** The console's voice session for `baseUrl`. `callerScope` names the caller
+ * the console acts as on every voice request (`expected_caller_scope`); a
+ * request waits for it. `reportFailure` hears the requests the gateway
+ * refused, so an ended login or another caller reaches the console. */
+export function useVoiceController(baseUrl: string, callerScope?: VoiceCallerScope, reportFailure?: (error: unknown) => void) {
   const [voice, setVoice] = React.useState<VoiceSession | null>(null);
+  const callerScopeRef = React.useRef(callerScope);
+  callerScopeRef.current = callerScope;
+  const reportFailureRef = React.useRef(reportFailure);
+  reportFailureRef.current = reportFailure;
   React.useEffect(() => {
-    const owned = createVoiceSession(baseUrl);
+    const owned = createVoiceSession(baseUrl, undefined, () => callerScopeRef.current?.(), (error) => reportFailureRef.current?.(error));
     setVoice(owned);
     return () => owned.dispose();
   }, [baseUrl]);

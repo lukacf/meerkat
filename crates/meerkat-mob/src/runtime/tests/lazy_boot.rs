@@ -4246,3 +4246,92 @@ async fn a_mob_whose_last_owner_left_answers_not_owned_for_its_dormant_members_s
     )
     .await;
 }
+
+/// A Dormant member whose wake fails because its build fails with
+/// structured data (a session builder's typed refusal of its own kind, and
+/// a provider-auth refusal): the restore failure the wake answers keeps that
+/// data beside its reason (`MemberRestoreFailed`'s `cause_data`), and so
+/// does a later wake's, answered from the member's record while Core holds
+/// it Broken. The provider-auth data still reads as meerkat's typed
+/// provider-auth failure.
+///
+/// RED before the restore failure kept it: the wake flattened the build's
+/// error into the reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_whose_build_fails_with_structured_data_keeps_it_on_the_restore_failure() {
+    let cases: [(&str, fn() -> SessionError); 2] = [
+        ("wake-host-build-refusal", host_build_refusal),
+        ("wake-provider-auth-refusal", provider_auth_build_refusal),
+    ];
+    for (label, refusal) in cases {
+        let mob = DormantMemberMob::new(label).await;
+        mob.service
+            .set_create_session_failure_error(&mob.session, refusal)
+            .await;
+        let expected = refusal().structured_data();
+        assert!(
+            expected.is_some(),
+            "{label}: the refusal carries structured data"
+        );
+        let mut kept = None;
+        for wake in ["the first wake", "a later wake"] {
+            let woken =
+                tokio::time::timeout(LAZY_STEP, mob.handle.ensure_member_live(&mob.identity))
+                    .await
+                    .expect("the wake answers");
+            let Err(error) = woken else {
+                panic!("{label}: {wake} fails");
+            };
+            assert!(
+                matches!(error, MobError::MemberRestoreFailed { .. }),
+                "{label}: {wake} answers the member's restore failure: {error:?}"
+            );
+            kept = restore_failure_cause_data(&error);
+            assert_eq!(
+                kept, expected,
+                "{label}: {wake}'s restore failure keeps the build's structured data"
+            );
+        }
+        if label == "wake-provider-auth-refusal" {
+            let read = SessionError::FailedWithData {
+                message: String::new(),
+                data: kept.expect("the kept data"),
+            }
+            .provider_auth_failure_data();
+            assert_eq!(
+                read,
+                Some(provider_auth_build_refusal_failure()),
+                "the kept data reads as meerkat's typed provider-auth failure"
+            );
+        }
+    }
+}
+
+/// A Dormant member whose wake fails because its build fails without
+/// structured data (the only form a restore failure had before it kept its
+/// cause's data): the restore failure carries none. A pin, on both sides of
+/// that change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_whose_build_fails_without_structured_data_carries_none() {
+    let mob = DormantMemberMob::new("wake-unstructured-build-failure").await;
+    mob.service
+        .set_create_session_failure_error(&mob.session, || {
+            SessionError::Unsupported("the member's build is not supported here".to_string())
+        })
+        .await;
+    let woken = tokio::time::timeout(LAZY_STEP, mob.handle.ensure_member_live(&mob.identity))
+        .await
+        .expect("the wake answers");
+    let Err(error) = woken else {
+        panic!("the wake fails");
+    };
+    assert!(
+        matches!(error, MobError::MemberRestoreFailed { .. }),
+        "the wake answers the member's restore failure: {error:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&error),
+        None,
+        "a failure without structured data leaves none"
+    );
+}

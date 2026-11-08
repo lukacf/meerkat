@@ -22,6 +22,7 @@ pub(crate) mod generated;
 mod live_durable_source;
 mod live_transcript_authority;
 pub mod maintenance;
+mod owed_compaction;
 #[cfg(feature = "runtime-machine")]
 pub mod predecessor_settlement;
 pub mod staged_registry;
@@ -49,6 +50,7 @@ pub use ephemeral::{
 };
 pub use live_durable_source::LiveDurableSourceObservation;
 pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;
+pub use owed_compaction::{OwedCompactionSettlement, SettledCompactionProjection};
 #[cfg(feature = "runtime-machine")]
 pub use predecessor_settlement::{ColdPredecessorSettleError, ColdPredecessorSettleRefusal};
 pub use staged_registry::{AdmissionOutcome, MaterializationStatus, StagedSessionRegistry};

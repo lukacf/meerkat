@@ -15,7 +15,6 @@
 use std::io::{Read as _, Seek as _, Write as _};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use meerkat_authorization_contracts::evidence::EvidenceId;
@@ -122,7 +121,9 @@ pub enum GrantStoreError {
 /// another opener of the same storage, fails with `Unavailable` or `Occupied`.
 /// `append` must refuse, before writing, without the lease or with any
 /// revision other than the expected one. `release` ends the lease; the owner
-/// calls it when it is dropped or when restore validation fails.
+/// calls it once, when its host's close releases its custody
+/// ([`LocalGrantAuthority::release_custody`]), when it is dropped still
+/// holding the lease, or when restore validation fails.
 ///
 /// `append` returning `Ok` acknowledges the change: it was completely written
 /// and flushed to the store's advertised durability, and a later `load` must
@@ -169,47 +170,71 @@ pub enum GrantDurabilityError {
     Refused,
 }
 
+/// The owner's lease on its store: held until the owner's custody release
+/// hands it back (the effect of the generated `ReleaseCustody`), or until the
+/// owner drops. Whether the owner may still change or use its retained facts
+/// is the generated owner's phase, not this handle.
 pub(super) struct DurableCustody {
-    store: Arc<dyn GrantOwnerStore>,
-    failed: AtomicBool,
+    store: Mutex<Option<Arc<dyn GrantOwnerStore>>>,
 }
 
 impl Drop for DurableCustody {
     fn drop(&mut self) {
-        self.store.release();
+        // A lease handed back already may now belong to a successor that
+        // opened the same store; only a lease still held is released.
+        let held = match self.store.get_mut() {
+            Ok(held) => held.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(store) = held {
+            store.release();
+        }
     }
 }
 
 impl DurableCustody {
     fn new(store: Arc<dyn GrantOwnerStore>) -> Self {
         Self {
-            store,
-            failed: AtomicBool::new(false),
+            store: Mutex::new(Some(store)),
         }
     }
 
-    /// Retained facts are usable only while memory and store are known to
-    /// agree. After an uncertain write, restart is required.
-    pub(super) fn check_available(&self) -> Result<(), GrantRefusal> {
-        if self.failed.load(Ordering::Acquire) {
-            return Err(GrantRefusal::Unavailable);
-        }
-        Ok(())
+    /// The leased store, while the lease is held.
+    fn leased(&self) -> Result<Arc<dyn GrantOwnerStore>, GrantRefusal> {
+        self.store
+            .lock()
+            .map_err(|_| GrantRefusal::Unavailable)?
+            .clone()
+            .ok_or(GrantRefusal::Unavailable)
     }
 
-    /// Validate a recovered candidate, acknowledge, then install. A refused or
-    /// unacknowledged change leaves the retained owner untouched. An uncertain
-    /// write makes this owner unavailable and publishes that availability
-    /// change through the caller's reservation, so every earlier observation
-    /// fails its final currentness check. The candidate itself is never
-    /// installed or published.
+    /// Realize the generated owner's `CustodyReleased`: hand the lease back.
+    /// The store takes its writer lock first, so an append in flight
+    /// completes before the lease ends.
+    pub(super) fn release(&self) {
+        let held = match self.store.lock() {
+            Ok(mut held) => held.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(store) = held {
+            store.release();
+        }
+    }
+
+    /// Validate a recovered candidate, acknowledge, then install. The caller
+    /// requires the owner's custody first. A refused or unacknowledged change
+    /// leaves the retained owner untouched. An uncertain write ends the
+    /// owner's custody (the generated `RecordUncertainAppend`) and publishes
+    /// that change through the caller's reservation, so every earlier
+    /// observation fails its final currentness check. The candidate itself is
+    /// never installed or published.
     pub(super) fn apply(
         &self,
         owner: &mut GrantAuthorityMachineAuthority,
         publication: &mut LocalPublicationGuard<'_>,
         input: GrantAuthorityInput,
     ) -> Result<(), GrantRefusal> {
-        self.check_available()?;
+        let store = self.leased()?;
         let mut candidate =
             GrantAuthorityMachineAuthority::recover_from_state(owner.state().clone())
                 .map_err(|_| GrantRefusal::Unavailable)?;
@@ -229,15 +254,11 @@ impl DurableCustody {
                 revision: candidate.state().revision,
                 kind,
             };
-            match self.store.append(&change) {
+            match store.append(&change) {
                 Ok(()) => {}
                 Err(GrantStoreError::Refused) => return Err(GrantRefusal::Unavailable),
                 Err(_) => {
-                    self.failed.store(true, Ordering::Release);
-                    // Invalidates every observation of the owner. Poisoned,
-                    // the publication is unavailable already, so the result
-                    // changes nothing.
-                    let _ = publication.publish();
+                    record_uncertain_append(owner, publication);
                     return Err(GrantRefusal::Unavailable);
                 }
             }
@@ -245,6 +266,30 @@ impl DurableCustody {
         *owner = candidate;
         Ok(())
     }
+}
+
+/// An append whose outcome is unknown: memory and store may now disagree.
+/// The generated owner leaves `Active`, so every later change and use is
+/// refused until a successor restores what the store retained. Its
+/// `CustodyUncertain` is realized as a publication through the caller's
+/// reservation, which invalidates every earlier observation of the owner.
+/// The caller required `Active` under the same owner lock, so the input is
+/// accepted.
+fn record_uncertain_append(
+    owner: &mut GrantAuthorityMachineAuthority,
+    publication: &mut LocalPublicationGuard<'_>,
+) {
+    let recorded = owner.apply(GrantAuthorityInput::RecordUncertainAppend);
+    debug_assert!(
+        recorded.is_ok_and(|transition| matches!(
+            transition.effects(),
+            [GrantAuthorityEffect::CustodyUncertain]
+        )),
+        "an Active owner records an uncertain append"
+    );
+    // Poisoned, the publication is unavailable already, so the result
+    // changes nothing.
+    let _ = publication.publish();
 }
 
 fn configured(identity: &GrantOwnerIdentity) -> Result<GrantAuthorityMachineAuthority, ()> {

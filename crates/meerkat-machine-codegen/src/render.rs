@@ -556,6 +556,36 @@ const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
     // or a stop (0.9.10).
     "CompleteUntilChangedSwitchTurnReconfigureRetired",
     "CompleteUntilChangedSwitchTurnReconfigureStopped",
+    // A host's settle of the run its session retained (0.9.11).
+    "SettleRetainedRunAcceptedIdle",
+    "SettleRetainedRunAcceptedAttached",
+    "SettleRetainedRunBusyRunCurrentInitializing",
+    "SettleRetainedRunBusyRunCurrentIdle",
+    "SettleRetainedRunBusyRunCurrentAttached",
+    "SettleRetainedRunBusyRunCurrentRunning",
+    "SettleRetainedRunBusyRunCurrentRetired",
+    "SettleRetainedRunBusyRunCurrentStopped",
+    "SettleRetainedRunBusyDrainingIdle",
+    "SettleRetainedRunBusyDrainingAttached",
+    "SettleRetainedRunBusyStaleRunIdle",
+    "SettleRetainedRunBusyStaleRunAttached",
+    "SettleRetainedRunBusyNotServingInitializing",
+    "SettleRetainedRunBusyNotServingRunning",
+    "SettleRetainedRunBusyNotServingRetired",
+    "SettleRetainedRunBusyNotServingStopped",
+    "SettleRetainedRunNotRetainedInitializing",
+    "SettleRetainedRunNotRetainedIdle",
+    "SettleRetainedRunNotRetainedAttached",
+    "SettleRetainedRunNotRetainedRunning",
+    "SettleRetainedRunNotRetainedRetired",
+    "SettleRetainedRunNotRetainedStopped",
+    "SettleRetainedRunInertDestroyed",
+    // A channel's close sweep closes its delegation intake (0.9.11).
+    "CloseLiveDelegationIntakeIdle",
+    "CloseLiveDelegationIntakeAttached",
+    "CloseLiveDelegationIntakeRunning",
+    "CloseLiveDelegationIntakeRetired",
+    "CloseLiveDelegationIntakeStopped",
     // The recovered ungoverned row's requester batch key (0.9.11), declared
     // beside BindInputAuthority in the catalog.
     "BindInputRequesterBatchKeyIdle",
@@ -838,8 +868,6 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "RecoverOperatorInstructionGenerationHighwaterKept",
             "PrepareMemberInstructionDeliveryNotOwedRunning",
             "PrepareMemberInstructionDeliveryNotOwedStopped",
-            "PrepareMemberInstructionDeliveryPlacedRunning",
-            "PrepareMemberInstructionDeliveryPlacedStopped",
             "PrepareMemberInstructionDeliveryUnbornRunning",
             "PrepareMemberInstructionDeliveryUnbornStopped",
             "PrepareMemberInstructionDeliveryUnboundRunning",
@@ -1026,6 +1054,31 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             // (0.9.11).
             "AdoptLegacyIdentityEntryAdoptedUnlisted",
             "AdoptLegacyIdentityEntryRetireUnadopted",
+            // A host's adoption over a declared identity entry (0.9.11): its
+            // archive terminals, the takeover's verdicts and the replay of
+            // its mark.
+            "ObserveMemberRetirementArchivedLiveHostAdopted",
+            "ObserveMemberRetirementArchivedRetiredHostAdopted",
+            "TakeOverIdentityEntryAdopting",
+            "TakeOverIdentityEntryEnded",
+            "TakeOverIdentityEntryDeferred",
+            "TakeOverIdentityEntryNotADeclaredEntry",
+            "TakeOverIdentityEntryNonAuthoritative",
+            "TakeOverIdentityEntryMobNotRunningStopped",
+            "TakeOverIdentityEntryMobNotRunningCompleted",
+            "TakeOverIdentityEntryMobNotRunningDestroyed",
+            "RecoverIdentityEntryAdoptingMarkedRunning",
+            "RecoverIdentityEntryAdoptingStaleRunning",
+            // A build preparation the host asked to retry (0.9.11): the wake
+            // feedback arm that records it, and its resolution.
+            "ResolveMemberRevivalRetryableBuildPreparationRunning",
+            "ResolveMemberBuildPreparationRunning",
+            "ResolveMemberBuildPreparationStopped",
+            "ResolveMemberBuildPreparationCompleted",
+            // External work refused for an identity entry and for a name
+            // reserved unreadable (0.9.11).
+            "ResolveSubmitWorkRejectionIdentityMember",
+            "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

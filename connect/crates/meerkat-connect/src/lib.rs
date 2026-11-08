@@ -9,9 +9,13 @@ pub mod application_acquisition;
 #[cfg(all(feature = "console", unix))]
 pub mod application_bootstrap;
 #[cfg(all(feature = "console", unix))]
+pub mod application_consent;
+#[cfg(all(feature = "console", unix))]
 pub mod application_driver;
 #[cfg(all(unix, feature = "console"))]
 pub mod application_gateway;
+#[cfg(all(feature = "console", unix))]
+pub mod application_installed;
 #[cfg(unix)]
 pub mod application_operator;
 #[cfg(all(feature = "console", unix))]
@@ -38,12 +42,16 @@ mod paired_host_stdio;
 pub mod paired_host_tool;
 pub mod pairing;
 pub mod progress;
+#[cfg(target_os = "linux")]
+pub mod protected_parent;
 pub mod provider_setup;
 mod public_document;
 pub mod realm;
 mod recipe_discovery;
 pub mod research;
 pub mod resources;
+#[cfg(all(unix, any(test, feature = "console")))]
+mod retained_artifact;
 pub mod secret_presenter;
 mod service_install;
 pub mod service_preparation;
@@ -128,3 +136,10 @@ impl ConnectError {
 mod main_connector;
 #[cfg(test)]
 extern crate self as meerkat_connect;
+
+#[cfg(test)]
+mod sqlite_lock_profile_tests;
+
+/// Trusted post-finalization resource checks for the protected setup host.
+pub mod service_collection;
+pub mod service_probe;

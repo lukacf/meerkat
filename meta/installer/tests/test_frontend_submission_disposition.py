@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from launchkit.templates_v2 import console_auth as console_module
-from test_console_auth import DESCRIPTOR_PATH, login
+from test_console_auth import DESCRIPTOR_PATH, login, named
 from test_frontend_management import HOST, PATH, Owner, boundary, prepare, submission
 from test_frontend_private_declarations import _package, _wire
 
@@ -231,8 +231,9 @@ async def application_boundary(tmp_path, monkeypatch):
         wired = _wire(host, application, fields)
         # Use the generated ConsoleFront so both sides share the actual trusted
         # request/result types imported by the generated application host.
+        # Approving needs a person: the installation's own account, named.
         front = host.ConsoleFront(tmp_path, 8855, "owner", "local-password-123",
-            transport=httpx.MockTransport(lambda request: native.append(request) or httpx.Response(200)))
+            **named(lambda request: native.append(request) or httpx.Response(200)))
         front.frontend_management = wired.frontend_management
         front.frontend_host = wired.frontend_host
         front.frontend_private_fields = wired.frontend_private_fields

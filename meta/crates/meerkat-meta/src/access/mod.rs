@@ -26,6 +26,14 @@
 //! 3. Otherwise the matching rules decide: any matching `deny` rule denies,
 //!    else any matching `allow` rule allows, else the check denies.
 //!
+//! One rule holds before all of these and needs no configuration: an agent
+//! private to one person ([`PRIVATE_TO_LABEL`]: a side chat opened on a
+//! console with sign-in, and the members its own turn creates or forks) is
+//! denied for every agent action to everyone but that person and the
+//! `admins`, with the config disabled or enabled, and
+//! [`AccessView::hides_agent`] says so, so the console answers as for an
+//! unknown agent.
+//!
 //! # Live configuration
 //!
 //! [`AccessController`] is the shared handle: it holds the current config
@@ -46,17 +54,22 @@ pub(crate) use controller::{
     MAX_LINEAGE_DEPTH,
 };
 pub use engine::{AccessDecision, AccessPrincipal, AccessResource, evaluate_access};
+pub(crate) use model::is_ingress_name;
 pub use model::{
     ACCESS_ACTIONS, ACTION_ACCESS_ADMIN, ACTION_AGENT_MEMORY_ADMIN, ACTION_AGENT_MEMORY_DELETE,
     ACTION_AGENT_MEMORY_READ, ACTION_AGENT_MEMORY_WRITE, ACTION_AGENT_RESET, ACTION_AGENT_RESPAWN,
     ACTION_AGENT_RETIRE, ACTION_AGENT_SEND, ACTION_AGENT_SPAWN, ACTION_AGENT_VIEW,
+    ACTION_AUDIT_VIEW, ACTION_DECISIONS_ADMIN, ACTION_DECISIONS_DECIDE, ACTION_DECISIONS_VIEW,
     ACTION_GATING_DECIDE, ACTION_GATING_VIEW, ACTION_MEMORY_QUARANTINE_REVIEW,
     ACTION_MOB_MEMORY_COMMIT, ACTION_MOB_MEMORY_PROPOSE, ACTION_MOB_MEMORY_READ,
     ACTION_MOB_OBSERVE, ACTION_MOBPACK_AUTHOR, ACTION_MOBPACK_DEPLOY, ACTION_OPERATOR_MEMORY_READ,
-    ACTION_OPERATOR_MEMORY_READ_ANY, ACTION_RUNTIME_ADMIN, ACTION_TOPOLOGY_AUDIT,
-    ACTION_TOPOLOGY_BULK, ACTION_TOPOLOGY_CONNECT, ACTION_TOPOLOGY_CROSS_AUTHORITY,
-    ACTION_TOPOLOGY_DISCONNECT, ACTION_TOPOLOGY_RECONNECT, ACTION_TOPOLOGY_VIEW,
-    ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessApprover, AccessConfigError,
-    AccessControlConfig, AccessEffect, AccessGroup, AccessRule,
-    normalize_access_config_for_memory_actions, validate_access_config,
+    ACTION_OPERATOR_MEMORY_READ_ANY, ACTION_RUNTIME_ADMIN, ACTION_SCHEDULE_MANAGE,
+    ACTION_TOPOLOGY_AUDIT, ACTION_TOPOLOGY_BULK, ACTION_TOPOLOGY_CONNECT,
+    ACTION_TOPOLOGY_CROSS_AUTHORITY, ACTION_TOPOLOGY_DISCONNECT, ACTION_TOPOLOGY_RECONNECT,
+    ACTION_TOPOLOGY_VIEW, ACTION_WORKGRAPH_MANAGE, ACTION_WORKGRAPH_VIEW, AccessApprover,
+    AccessApproverPerson, AccessConfigError, AccessControlConfig, AccessEffect, AccessGroup,
+    AccessIngressSubject, AccessRule, OPERATOR_INGRESS, PRIVATE_TO_LABEL,
+    normalize_access_config_for_memory_actions, normalize_access_config_for_schedule_actions,
+    validate_access_config,
 };
+pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner};

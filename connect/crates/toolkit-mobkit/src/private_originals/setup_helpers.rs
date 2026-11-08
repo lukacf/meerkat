@@ -12,10 +12,11 @@ use meerkat_authorization_contracts::{
     grant::GrantLineageRef,
     work_association::{NativeWorkTarget, WorkAuthorityBasis},
 };
-use meerkat_core::{ControllerModelClient, SessionId, ToolDispatchContext, types::ToolCallView};
+use meerkat_core::{ControllerModelClient, SessionId, ToolDispatchContext};
 use meerkat_mobkit::identity_first::{
-    BoundGovernedInput, GovernedAdmission, GovernedBindContext, GovernedInputBinder,
-    GovernedInputError, GovernedSettlement, IdentityRuntimeError, TurnTracking,
+    BoundGovernedInput, GovernedAdmission, GovernedBindContext, GovernedBindError,
+    GovernedInputBinder, GovernedInputError, GovernedSettlement, GovernedWaitBudget,
+    IdentityRuntimeError, TurnTracking,
 };
 use meerkat_runtime::{Input, PromptInput};
 use meerkat_workgraph::{CreateWorkItemRequest, WorkAdmissionKey, WorkGraphService};
@@ -319,74 +320,147 @@ impl PrivateOriginals {
             })
     }
 
+    /// Create or replay the helper's work item for a Find's work step, through
+    /// a fresh fence on each attempt. A source collection held by another
+    /// owner's short section is waited out, holding nothing, within the
+    /// step's one deadline, Core's owner-change bound from its start: at the
+    /// acquisition original's basis reads, before the create, and at the
+    /// check after it. A fence
+    /// refused as unavailable while Core names an owner change in progress on
+    /// the work's own publication ran nothing: that change is waited out with
+    /// `churn`, the work step's one churn, and the same admission made again,
+    /// keyed exactly as before, so a create that did commit is only replayed.
+    /// Every other refusal, and one the bounds outlast, stands as it is.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn admit_setup_helper(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
         context: &ToolDispatchContext,
+        entered: &meerkat_core::EnteredDispatchOperation,
         service: &WorkGraphService,
         key: WorkAdmissionKey,
         request: CreateWorkItemRequest,
         operation: HelperOperation,
         selection: HelperAdmissionSelection,
+        review: crate::review_custody::ReviewCustody,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Arc<AdmittedHelperWork>, PrivateOriginalError> {
-        let original = self.acquisition_original(context).await?;
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let original = self
+            .acquisition_original_until(context, contended_until.into_std())
+            .await?;
         self.require_helper_selection(&selection)?;
-        self.owner
-            .admit_fenced_helper(
-                call,
-                context,
-                self.store.as_ref(),
-                &self.scope,
-                service,
-                key,
-                request,
-                operation,
-                original.setup_origin(),
-                &original.original,
-                &original.contributors,
-                &original.own_originals,
-                selection,
-            )
-            .await
-            .map(Arc::new)
-            .map_err(helper_error)
+        loop {
+            let admitted = self
+                .owner
+                .admit_fenced_helper(
+                    entered,
+                    self.store.as_ref(),
+                    &self.scope,
+                    service,
+                    key.clone(),
+                    request.clone(),
+                    operation.clone(),
+                    original.setup_origin(),
+                    &original.original,
+                    &original.contributors,
+                    &original.own_originals,
+                    selection.clone(),
+                    review.clone(),
+                    contended_until,
+                )
+                .await;
+            if matches!(admitted, Err(OriginalWriterError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.find.admit_helper",
+                )
+                .await
+            {
+                continue;
+            }
+            return admitted.map(Arc::new).map_err(helper_error);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
     /// Current M1 replay disclosure for a live invocation only. This is not
     /// independent host-private recovery after originating work is cancelled.
+    ///
+    /// Each observation takes the source writer and its checks afresh and
+    /// reads through a fresh fence of its own, holding nothing between
+    /// attempts. A fence refused while Core names an owner change in progress
+    /// on the work's own publication (another original's first binding, for
+    /// example) ran nothing: that change is waited out with this call's one
+    /// churn and the same observation made again. A refusal with no change in
+    /// progress, and one the churn's bounds outlast, stand as they are.
+    ///
+    /// A source collection held by another owner's short section at the
+    /// observation's source checks (its acquisition original's basis reads,
+    /// and before and after its fenced read) is contention, not an answer:
+    /// it is waited out with bounded pauses until the observation's one
+    /// deadline, Core's owner-change bound from its start, and the check made
+    /// again (the writer released while waiting before the read, kept after
+    /// it). The observation creates nothing.
     pub(crate) async fn observe_setup_helper_for_live_replay(
         self: &Arc<Self>,
-        call: ToolCallView<'_>,
         context: &ToolDispatchContext,
+        entered: &meerkat_core::EnteredDispatchOperation,
         service: &WorkGraphService,
         key: WorkAdmissionKey,
         request: CreateWorkItemRequest,
         operation: HelperOperation,
         selection: HelperAdmissionSelection,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<Option<Arc<AdmittedHelperWork>>, PrivateOriginalError> {
-        let original = self.acquisition_original(context).await?;
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let original = self
+            .acquisition_original_until(context, contended_until.into_std())
+            .await?;
         self.require_helper_selection(&selection)?;
-        self.owner
-            .observe_fenced_helper(
-                call,
-                context,
-                self.store.as_ref(),
-                &self.scope,
-                service,
-                key,
-                request,
-                operation,
-                original.setup_origin(),
-                &original.original,
-                &original.contributors,
-                &original.own_originals,
-                selection,
-            )
-            .await
-            .map(|observed| observed.map(Arc::new))
-            .map_err(helper_error)
+        let mut churn = context.owner_change_churn();
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) =
+            crate::source_hold_probe::observe(crate::source_hold_probe::Site::Observe, key.as_str())
+        {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
+        loop {
+            let observed = self
+                .owner
+                .observe_fenced_helper(
+                    entered,
+                    self.store.as_ref(),
+                    &self.scope,
+                    service,
+                    key.clone(),
+                    request.clone(),
+                    operation.clone(),
+                    original.setup_origin(),
+                    &original.original,
+                    &original.contributors,
+                    &original.own_originals,
+                    selection.clone(),
+                    review.clone(),
+                    Some(contended_until),
+                )
+                .await;
+            if matches!(observed, Err(OriginalWriterError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    &mut churn,
+                    "toolkit.find.observe_helper",
+                )
+                .await
+            {
+                continue;
+            }
+            return observed
+                .map(|observed| observed.map(Arc::new))
+                .map_err(helper_error);
+        }
     }
 
     fn require_helper_selection(
@@ -422,15 +496,30 @@ impl PrivateOriginals {
     }
 
     /// The real native identity lease supplies its client and session. The
-    /// binder returns the typed Bind branch before submitting any native input.
+    /// binder answers its typed `withheld` refusal before submitting any
+    /// native input.
     /// This is called only after fenced work admission, so a cold helper is
     /// never created before acquisition coalescing has selected its one item.
+    ///
+    /// The binder runs inside Core's governed bind, where it never waits. A
+    /// source collection held there by another owner's short section makes
+    /// it answer "not now" before it captures anything; Meta's send then
+    /// waits for the collection outside the bind, within the preparation's
+    /// one deadline (from its start, never past the source deadline), and
+    /// binds the same binder again. Nothing is captured or submitted by such
+    /// a bind: every preparation's own bind refuses (`withheld`, after its
+    /// capture), so Core keeps no input, settlement or custody of one.
     pub(crate) async fn prepare_setup_helper(
         self: &Arc<Self>,
         admitted: Arc<AdmittedHelperWork>,
         content: String,
         source_deadline: tokio::time::Instant,
+        review: crate::review_custody::ReviewCustody,
     ) -> Result<PreparedHelperController, PrivateOriginalError> {
+        let contended_until = std::cmp::min(
+            source_deadline,
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        );
         // The native acceptance callback is independent of this tool's turn.
         // Wait before any Meta identity call, with no mutation/publication
         // guard held. Each observation performs the same strict contributor
@@ -455,39 +544,46 @@ impl PrivateOriginals {
             .ok_or(PrivateOriginalError::Unavailable)?;
         let binder = Arc::new(PrepareHelperBinder {
             source: Arc::downgrade(self),
-            admitted,
+            admitted: admitted.clone(),
             captured: Mutex::new(None),
+            contended_until,
         });
         let outcome = runtime
             .dispatch_governed_with_turn_ticket(
                 &identity,
                 Some(&alias),
                 Input::Prompt(PromptInput::new(content, None)),
-                binder.clone(),
+                review.bind(binder.clone()),
             )
             .await;
+        // The capture's own refusal (`withheld`) is its success. A hold past
+        // the deadline, and every other answer, is unavailable.
         if !matches!(
-            outcome,
-            Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Bind(_)
-            ))
+            &outcome,
+            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                if refusal.kind
+                    == meerkat_mobkit::identity_first::GovernedBindRefusalKind::Withheld
         ) {
             return Err(PrivateOriginalError::Unavailable);
         }
-        let captured = binder
+        binder
             .captured
             .lock()
             .map_err(|_| PrivateOriginalError::Unavailable)?
-            .take();
-        captured.ok_or(PrivateOriginalError::Unavailable)
+            .take()
+            .ok_or(PrivateOriginalError::Unavailable)
     }
 
     /// Recover only a previously retained source for this exact work and
     /// actual native controller/session. A missing source stays missing; this
-    /// method issues no grant and cannot replace the saved destination.
+    /// method issues no grant and cannot replace the saved destination. Its
+    /// retention's lineage resolution waits with `churn`, the step's one churn
+    /// ([`Self::retain_setup_helper_source`]).
     pub(crate) async fn recover_setup_helper_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Option<Arc<HeldSetupHelper>>, PrivateOriginalError> {
         if !prepared
             .source
@@ -514,6 +610,8 @@ impl PrivateOriginals {
             prepared,
             binding.controller_grant_lineage,
             binding.authority_basis,
+            context,
+            churn,
         )
         .await
         .map(Some)
@@ -522,11 +620,30 @@ impl PrivateOriginals {
     /// The actual native child issuer supplies this lineage. This method never
     /// issues a grant or treats its configured parent as a runnable child.
     /// Resolve the issued path with the real owner, then retain the exact source.
+    /// Before the binding write, a source collection held by another owner's
+    /// short section is waited out within Core's owner-change bound, holding
+    /// nothing; the write itself is never made again.
+    ///
+    /// The issued lineage is resolved and checked current as an observation
+    /// of the grant owner's publication. An owner change published during it
+    /// (another helper's first binding, for example) is a stale read, never a
+    /// denial: it is waited out with `churn`, the step's one churn, holding
+    /// nothing, and the resolution made again. Past the churn's bounds it
+    /// stays typed, unavailable. Only the owner's own refusal is a denial.
+    ///
+    /// The first binding write checks the issued lineages again before it
+    /// writes. An owner change in progress there is unavailable, with
+    /// nothing written: Core names that change, so it is waited out with the
+    /// same churn, holding nothing, and the bind made again (a bind whose
+    /// write was done is only replayed). Past the bounds it stays typed,
+    /// unavailable.
     pub(crate) async fn retain_setup_helper_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
         issued_controller_lineage: Vec<GrantLineageRef>,
         operation_basis: WorkAuthorityBasis,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<Arc<HeldSetupHelper>, PrivateOriginalError> {
         if !prepared
             .source
@@ -535,8 +652,11 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
         self.owner
-            .check_admitted_helper(&prepared.admitted)
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         let selected = &prepared.admitted.selection().helper;
@@ -545,19 +665,46 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
-        let controller_ceiling = {
-            let grants = self.owner.grants();
-            let resolved = grants
-                .resolve_controller_lineage(
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::Resolve,
+            &prepared.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
+        let controller_ceiling = loop {
+            // True for a stale read; the owner's own answer otherwise.
+            let stale = {
+                use meerkat_authorization::grants::{GrantRefusal, LineageResolutionRefusal};
+                use meerkat_authorization::publication::PublicationError;
+                let grants = self.owner.grants();
+                match grants.resolve_controller_lineage_observed(
                     &issued_controller_lineage,
                     &selected.logical_executor,
                     selected.represented_subject.as_ref(),
+                ) {
+                    Ok(resolved) => match resolved.check_current() {
+                        Ok(()) => break resolved.restrictions().clone(),
+                        Err(PublicationError::Changed) => true,
+                        Err(PublicationError::Unavailable) => false,
+                    },
+                    Err(LineageResolutionRefusal::Changed) => true,
+                    Err(LineageResolutionRefusal::Refused(GrantRefusal::Unavailable)) => false,
+                    Err(LineageResolutionRefusal::Refused(_)) => {
+                        return Err(PrivateOriginalError::Denied);
+                    }
+                }
+            };
+            if !stale
+                || !crate::current_check::wait_after_refusal(
+                    context,
+                    churn,
+                    "toolkit.helper.retain_lineage",
                 )
-                .map_err(|_| PrivateOriginalError::Denied)?;
-            resolved
-                .check_current()
-                .map_err(|_| PrivateOriginalError::Unavailable)?;
-            resolved.restrictions().clone()
+                .await
+            {
+                return Err(PrivateOriginalError::Unavailable);
+            }
         };
         let binding = HelperNativeBinding {
             ingress_actor: selected.ingress_actor.clone(),
@@ -570,11 +717,33 @@ impl PrivateOriginals {
             controller_ceiling,
             admitted_ceiling: ExecutionRestrictions::unrestricted(),
         };
-        let source = self
-            .owner
-            .bind_admitted_helper(self.store.as_ref(), &prepared.admitted, binding)
-            .await
-            .map_err(helper_error)?;
+        // The bind's one budget, from its start: its waits for a held source
+        // collection before the write, and after it, for the contributors'
+        // check and the publication.
+        let bind_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        let source = loop {
+            let bound = self
+                .owner
+                .bind_admitted_helper_until(
+                    self.store.as_ref(),
+                    &prepared.admitted,
+                    binding.clone(),
+                    Some(bind_until),
+                )
+                .await;
+            if matches!(bound, Err(OriginalWriterError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.helper.first_binding_check",
+                )
+                .await
+            {
+                continue;
+            }
+            break bound.map_err(helper_error)?;
+        };
         let mut held = self
             .helper_sources
             .lock()
@@ -603,15 +772,66 @@ impl PrivateOriginals {
         Ok(source)
     }
 
+    /// Test seam: the owner's originals collection held per `hold`
+    /// ([`crate::source_hold_probe`]), on a thread of its own.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn hold_sources_for_test(
+        &self,
+        hold: crate::source_hold_probe::Hold,
+    ) -> std::thread::JoinHandle<()> {
+        self.owner
+            .hold_sources_for_test(hold.owner_change, hold.duration)
+    }
+
     /// Export only exact source history for the existing preparation owner.
     /// Publication still requires its acquisition/effect claim and native
     /// operation admission; this is not a new permission-bearing token.
+    ///
+    /// A read refused as unavailable while Core names an owner change in
+    /// progress on the work's own publication is waited out with `churn`, the
+    /// work step's one churn, and only the read made again, afresh; the
+    /// grants issued and the source bound before it are never made again.
     pub(crate) async fn setup_helper_publication_source(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
         held: &Arc<HeldSetupHelper>,
         service: &WorkGraphService,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
     ) -> Result<meerkat_toolkit::setup::NativeHelperSource, PrivateOriginalError> {
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        loop {
+            let read = self
+                .read_setup_helper_publication_source(prepared, held, service, contended_until)
+                .await;
+            if matches!(read, Err(PrivateOriginalError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.find.publication_source",
+                )
+                .await
+            {
+                continue;
+            }
+            return read;
+        }
+    }
+
+    /// One read of [`Self::setup_helper_publication_source`], afresh: its
+    /// source checks wait out a held source collection until
+    /// `contended_until`, holding nothing. It writes nothing.
+    async fn read_setup_helper_publication_source(
+        self: &Arc<Self>,
+        prepared: &PreparedHelperController,
+        held: &Arc<HeldSetupHelper>,
+        service: &WorkGraphService,
+        contended_until: tokio::time::Instant,
+    ) -> Result<meerkat_toolkit::setup::NativeHelperSource, PrivateOriginalError> {
+        #[cfg(test)]
+        self.owner
+            .record_helper_admission_event_for_test("publication_source_read");
         if !prepared
             .source
             .upgrade()
@@ -628,11 +848,12 @@ impl PrivateOriginals {
         }
         self.require_helper_selection(prepared.admitted.selection())?;
         self.owner
-            .helper_publication_source(
+            .helper_publication_source_until(
                 self.store.as_ref(),
                 service,
                 &prepared.admitted,
                 &held.source,
+                Some(contended_until),
             )
             .await
             .map_err(helper_error)
@@ -641,12 +862,47 @@ impl PrivateOriginals {
     /// Re-open exactly the contributor rows selected by the native invocation.
     /// The preparation owner uses their versions in its same-store conditional
     /// write. No catalog scan, source copy or new authority is constructed.
+    ///
+    /// A read refused as unavailable while Core names an owner change in
+    /// progress on the work's own publication is waited out with `churn`, the
+    /// work step's one churn, and only the read made again, afresh.
     pub(crate) async fn setup_helper_contributor_conditions(
         self: &Arc<Self>,
         admitted: &AdmittedHelperWork,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+    ) -> Result<Vec<toolkit_store::RecordCondition>, PrivateOriginalError> {
+        let contended_until =
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND;
+        loop {
+            let read = self
+                .read_setup_helper_contributor_conditions(admitted, contended_until)
+                .await;
+            if matches!(read, Err(PrivateOriginalError::Unavailable))
+                && crate::current_check::wait_for_owner_change(
+                    context,
+                    churn,
+                    "toolkit.find.contributor_conditions",
+                )
+                .await
+            {
+                continue;
+            }
+            return read;
+        }
+    }
+
+    /// One read of [`Self::setup_helper_contributor_conditions`], afresh: its
+    /// source checks wait out a held source collection until
+    /// `contended_until`, holding nothing. It writes nothing.
+    async fn read_setup_helper_contributor_conditions(
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+        contended_until: tokio::time::Instant,
     ) -> Result<Vec<toolkit_store::RecordCondition>, PrivateOriginalError> {
         self.owner
-            .check_admitted_helper(admitted)
+            .check_admitted_helper_until(admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(admitted.selection())?;
         let sources = {
@@ -691,13 +947,20 @@ impl PrivateOriginals {
             });
         }
         self.owner
-            .check_admitted_helper(admitted)
+            .check_admitted_helper_until(admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         Ok(conditions)
     }
 
     /// Submit the exact source under the same existing identity owner. Real
     /// native acceptance/dedup/uncertainty controls the custody settlement.
+    ///
+    /// The submission's source checks outside Core's bind (before its first
+    /// native call, and before each rebind once its wait settled) meet a
+    /// source collection held by another owner's short section as contention:
+    /// they wait it out, holding nothing, until the submission's one
+    /// deadline, from its start (never past the source deadline).
     pub(crate) async fn submit_setup_helper(
         self: &Arc<Self>,
         prepared: &PreparedHelperController,
@@ -705,7 +968,14 @@ impl PrivateOriginals {
         snapshot: &meerkat_toolkit::setup::SetupSnapshot,
         content: String,
         source_deadline: tokio::time::Instant,
+        review: crate::review_custody::ReviewCustody,
+        dispatch: Option<&ToolDispatchContext>,
     ) -> Result<SetupHelperSubmission, PrivateOriginalError> {
+        let contended_until = std::cmp::min(
+            source_deadline,
+            tokio::time::Instant::now() + meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND,
+        );
+        self.with_new_work_admission(|| ())?;
         if tokio::time::Instant::now() >= source_deadline {
             return Err(PrivateOriginalError::Denied);
         }
@@ -726,8 +996,16 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Denied);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::Submit,
+            &prepared.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
         self.owner
-            .check_admitted_helper(&prepared.admitted)
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
             .map_err(helper_error)?;
         self.require_helper_selection(prepared.admitted.selection())?;
         held.bind_setup_deadline(snapshot)?;
@@ -753,11 +1031,18 @@ impl PrivateOriginals {
             entry_fence,
             source_deadline,
             pending: Mutex::new(Weak::new()),
+            review_custody: review.clone(),
         });
         // Keep one raw input identity and event content. A definite policy
-        // change may rebuild its current binding once, never its source/key.
+        // change rebuilds only the current binding, never the source/key: on
+        // the Find dispatch after each settled wait of its one churn, without
+        // a dispatch once.
         let input = Input::Prompt(PromptInput::new(content, None));
         let mut reprepared = false;
+        // One churn for this submission's waits, never re-armed: one
+        // deadline within Core's owner-change bound and at most
+        // OWNER_CHANGE_FREE_REBUILDS settled waits.
+        let mut churn = dispatch.map(ToolDispatchContext::owner_change_churn);
         let result = loop {
             // Meta may await the current member/controller before calling the
             // binder. Check here as well as inside that actual binder.
@@ -769,7 +1054,7 @@ impl PrivateOriginals {
                     &identity,
                     Some(alias),
                     input.clone(),
-                    binder.clone(),
+                    review.bind(binder.clone()),
                 )
                 .await;
             if result.as_ref().err().is_some_and(|error| {
@@ -783,10 +1068,37 @@ impl PrivateOriginals {
                 {
                     pending.handoff.record_definite_refusal();
                 }
-                if reprepared {
-                    return Ok(SetupHelperSubmission::ReprepareRequired);
+                // The publication changed under native admission's check. On
+                // the Find dispatch each rebind goes only after that change is
+                // waited out and everything it relies on is current again
+                // (helper_rebind_after_wait); a wait that does not settle, or
+                // a spent budget, stops the dispatch at ReprepareRequired. An
+                // expired source deadline stays the denial checked above, and
+                // without a dispatch the one rebind is immediate, as before.
+                match (dispatch, churn.as_mut()) {
+                    (Some(context), Some(churn)) => {
+                        if tokio::time::Instant::now() < source_deadline
+                            && !self
+                                .helper_rebind_after_wait(
+                                    prepared,
+                                    context,
+                                    churn,
+                                    source_deadline,
+                                    contended_until,
+                                )
+                                .await
+                            && tokio::time::Instant::now() < source_deadline
+                        {
+                            return Ok(SetupHelperSubmission::ReprepareRequired);
+                        }
+                    }
+                    _ => {
+                        if reprepared {
+                            return Ok(SetupHelperSubmission::ReprepareRequired);
+                        }
+                        reprepared = true;
+                    }
                 }
-                reprepared = true;
                 continue;
             }
             break result;
@@ -818,6 +1130,169 @@ impl PrivateOriginals {
                 PrivateOriginalSubmission::NativeOutcomeUnavailable
             }
         }))
+    }
+
+    /// The Find dispatch's wait before each rebind of its helper. True when
+    /// the rebind may go; otherwise the reason it stops ([`HelperRebindStop`]) is
+    /// written as a static diagnostic.
+    async fn helper_rebind_after_wait(
+        &self,
+        prepared: &PreparedHelperController,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        source_deadline: tokio::time::Instant,
+        contended_until: tokio::time::Instant,
+    ) -> bool {
+        let Some(stop) = self
+            .helper_rebind_stop(prepared, context, churn, source_deadline, contended_until)
+            .await
+        else {
+            return true;
+        };
+        {
+            use std::io::Write as _;
+            let diagnostic = serde_json::json!({
+                "event": "toolkit_helper_rebind_stopped",
+                "cause": stop.label(),
+            });
+            let _ = writeln!(std::io::stderr().lock(), "{diagnostic}");
+        }
+        #[cfg(test)]
+        {
+            self.helper_rebind_stops_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(stop);
+            let stopped = self
+                .helper_rebind_stopped_for_test
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(stopped) = stopped {
+                stopped();
+            }
+        }
+        false
+    }
+
+    /// Core's bounded stale-read wait for the changed publication, holding no
+    /// guard, within the dispatch's remaining tool time and the source deadline
+    /// (never reset), and then the checks the rebind relies on. None only when
+    /// the dispatch has its work authority, budget was left for the wait, the
+    /// wait settled, budget is still left, and the helper's source still admits
+    /// work with its admitted helper work and selection current. The source
+    /// check waits out a source collection held by another owner's short
+    /// section until `contended_until`, the submission's one deadline.
+    async fn helper_rebind_stop(
+        &self,
+        prepared: &PreparedHelperController,
+        context: &ToolDispatchContext,
+        churn: &mut meerkat_core::authorization::OwnerChangeChurn,
+        source_deadline: tokio::time::Instant,
+        contended_until: tokio::time::Instant,
+    ) -> Option<HelperRebindStop> {
+        let remaining = || {
+            let request = source_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let tool = context.remaining_tool_time();
+            #[cfg(test)]
+            let tool = self.helper_tool_time_for_test(tool);
+            tool.map_or(request, |tool| tool.min(request))
+        };
+        let Some(work) = context.work_authorization() else {
+            return Some(HelperRebindStop::NoWorkAuthority);
+        };
+        let budget = remaining();
+        if budget.is_zero() {
+            return Some(HelperRebindStop::NoBudget);
+        }
+        if !churn
+            .wait_after_stale_read(
+                work.authorization().as_ref(),
+                Some(budget),
+                "toolkit.setup_helper.submission",
+                None,
+            )
+            .await
+            .settled()
+        {
+            return Some(HelperRebindStop::WaitUnsettled);
+        }
+        if remaining().is_zero() {
+            return Some(HelperRebindStop::BudgetSpent);
+        }
+        if self.with_new_work_admission(|| ()).is_err() {
+            return Some(HelperRebindStop::SourceClosed);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::RebindStop,
+            &prepared.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.hold_sources_for_test(hold));
+        }
+        if self
+            .owner
+            .check_admitted_helper_until(&prepared.admitted, contended_until)
+            .await
+            .is_err()
+        {
+            return Some(HelperRebindStop::HelperNotCurrent);
+        }
+        if self
+            .require_helper_selection(prepared.admitted.selection())
+            .is_err()
+        {
+            return Some(HelperRebindStop::SelectionNotCurrent);
+        }
+        None
+    }
+
+    /// A control's emulated dispatch tool deadline: Core sets a dispatch's
+    /// tool time only inside its own fenced dispatch, so a control bounds the
+    /// helper's wait by this instant as well.
+    #[cfg(test)]
+    fn helper_tool_time_for_test(
+        &self,
+        tool: Option<std::time::Duration>,
+    ) -> Option<std::time::Duration> {
+        let Some(deadline) = self.helper_tool_deadline_for_test.get() else {
+            return tool;
+        };
+        let emulated = deadline.saturating_duration_since(tokio::time::Instant::now());
+        Some(tool.map_or(emulated, |tool| tool.min(emulated)))
+    }
+}
+
+/// Why a Find dispatch's helper stops at ReprepareRequired instead of
+/// rebinding after a same-session PolicyChanged, in the order checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HelperRebindStop {
+    /// The dispatch has no work authorization to wait with.
+    NoWorkAuthority,
+    /// No tool time or source time was left for the wait.
+    NoBudget,
+    /// The changed publication did not settle within that budget.
+    WaitUnsettled,
+    /// The wait settled with no budget left for the rebind.
+    BudgetSpent,
+    /// The helper's source no longer admits work.
+    SourceClosed,
+    /// The admitted helper work is no longer current.
+    HelperNotCurrent,
+    /// The helper's selection is no longer current.
+    SelectionNotCurrent,
+}
+impl HelperRebindStop {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NoWorkAuthority => "no_work_authority",
+            Self::NoBudget => "no_budget",
+            Self::WaitUnsettled => "wait_unsettled",
+            Self::BudgetSpent => "budget_spent",
+            Self::SourceClosed => "source_closed",
+            Self::HelperNotCurrent => "helper_not_current",
+            Self::SelectionNotCurrent => "selection_not_current",
+        }
     }
 }
 
@@ -888,8 +1363,13 @@ mod reprepare_tests {
         for error in [
             GovernedInputError::AdmissionUnresolved {
                 detail: "acceptance answer unavailable".into(),
+                receipt: None,
             },
-            GovernedInputError::Bind("binding unavailable".into()),
+            GovernedInputError::Refused(
+                meerkat_mobkit::identity_first::GovernedBindRefusal::unavailable(
+                    "binding unavailable",
+                ),
+            ),
             GovernedInputError::Unsupported("no governed controller".into()),
             GovernedInputError::BindingChanged,
             GovernedInputError::Unbound,
@@ -906,23 +1386,64 @@ struct PrepareHelperBinder {
     source: Weak<PrivateOriginals>,
     admitted: Arc<AdmittedHelperWork>,
     captured: Mutex<Option<PreparedHelperController>>,
+    // The preparation's one deadline for its binds' "not now" answers (from
+    // its start, never past the source deadline).
+    contended_until: tokio::time::Instant,
 }
 
 #[async_trait]
 impl GovernedInputBinder for PrepareHelperBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         _input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.capture(context)
+            .await
+            .map_err(super::governed_submit::BindFailure::into_error)
+    }
+
+    /// The preparation's one deadline bounds its waits.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        GovernedWaitBudget::Bounded(
+            self.contended_until
+                .saturating_duration_since(tokio::time::Instant::now()),
+        )
+    }
+
+    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
+        // bind never returns input or settlement, so there is no custody here.
+    }
+}
+
+impl PrepareHelperBinder {
+    async fn capture(
+        &self,
+        context: &GovernedBindContext,
+    ) -> Result<BoundGovernedInput, super::governed_submit::BindFailure> {
+        use super::governed_submit::BindFailure;
         let source = self
             .source
             .upgrade()
             .ok_or("Toolkit helper source is unavailable")?;
-        source
-            .owner
-            .check_admitted_helper(&self.admitted)
-            .map_err(|_| "Toolkit helper source is unavailable")?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::PrepareBind,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(source.hold_sources_for_test(hold));
+        }
+        // Never wait inside Core's bind: a held collection answers "not now"
+        // here, with nothing captured; Meta waits outside the bind and binds
+        // this binder again.
+        match source.owner.try_check_admitted_helper(&self.admitted) {
+            Ok(true) => {}
+            Ok(false) if crate::no_wait::may_answer_not_now() => {
+                return Err(helper_source_held(&source, "prepare"));
+            }
+            Ok(false) => return Err("Toolkit helper source is held".into()),
+            Err(_) => return Err("Toolkit helper source is unavailable".into()),
+        }
         source
             .require_helper_selection(self.admitted.selection())
             .map_err(|_| "Toolkit helper selection is unavailable")?;
@@ -951,7 +1472,9 @@ impl GovernedInputBinder for PrepareHelperBinder {
             .lock()
             .map_err(|_| "Toolkit helper preparation is unavailable")?;
         if captured.is_some() {
-            return Err("Toolkit helper preparation was already captured".into());
+            return Err(BindFailure::denied(
+                "Toolkit helper preparation was already captured",
+            ));
         }
         *captured = Some(PreparedHelperController {
             source: self.source.clone(),
@@ -960,12 +1483,30 @@ impl GovernedInputBinder for PrepareHelperBinder {
             target,
             controller: context.controller.clone(),
         });
-        Err("Toolkit helper controller preparation precedes input submission".into())
+        // Captured: this preparation binds nothing by design.
+        Err(BindFailure::withheld(
+            "Toolkit helper controller preparation precedes input submission",
+        ))
     }
+}
 
-    fn retain_unresolved(&self, _settlement: Box<dyn GovernedSettlement>, _detail: &str) {
-        // bind never returns input or settlement, so there is no custody here.
-    }
+/// "Not now" at a helper binder's source check (`binder`: `prepare` or
+/// `submit`): another owner's short section holds the source collection, and
+/// nothing was captured or written. Meta waits, outside the identity's lock,
+/// until it clears, then binds the same binder again.
+fn helper_source_held(
+    source: &PrivateOriginals,
+    binder: &'static str,
+) -> super::governed_submit::BindFailure {
+    #[cfg(any(test, feature = "test-support"))]
+    let _ = crate::source_hold_probe::observe(crate::source_hold_probe::Site::HelperNotNow, binder);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = binder;
+    let owner = source.owner.clone();
+    super::governed_submit::BindFailure::NotNow(meerkat_mobkit::identity_first::GovernedNotNow {
+        condition: meerkat_core::authorization::ControllerReadinessFailure::SourceHeld,
+        until: meerkat_core::authorization::NotNowWait::until_clear(move || owner.sources_held()),
+    })
 }
 
 struct SubmitHelperBinder {
@@ -980,6 +1521,7 @@ struct SubmitHelperBinder {
     // bounded definite-refusal retry can bind a new invocation afterwards.
     // Shared source-owner locks separately exclude competing Candidates.
     pending: Mutex<Weak<PendingHelperAdmission>>,
+    review_custody: crate::review_custody::ReviewCustody,
 }
 
 impl Drop for SubmitHelperBinder {
@@ -995,13 +1537,16 @@ impl Drop for SubmitHelperBinder {
     }
 }
 
-#[async_trait]
-impl GovernedInputBinder for SubmitHelperBinder {
-    async fn bind(
+impl SubmitHelperBinder {
+    async fn submit(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, super::governed_submit::BindFailure> {
+        use super::governed_submit::BindFailure;
+        self.source
+            .with_new_work_admission(|| ())
+            .map_err(|_| BindFailure::closed("Toolkit helper admission is stopped"))?;
         if tokio::time::Instant::now() >= self.source_deadline {
             return Err("Toolkit helper submission deadline elapsed".into());
         }
@@ -1010,16 +1555,42 @@ impl GovernedInputBinder for SubmitHelperBinder {
         {
             #[cfg(test)]
             crate::aa1_failure("helper.bind.placement", "PlacementChanged");
-            return Err("Toolkit helper native placement changed".into());
+            return Err(BindFailure::denied(
+                "Toolkit helper native placement changed",
+            ));
         }
-        self.source
-            .owner
-            .check_admitted_helper(&self.admitted)
-            .map_err(|_| {
-                #[cfg(test)]
-                crate::aa1_failure("helper.bind.source", "Unavailable");
-                "Toolkit helper source is unavailable"
-            })?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hold) = crate::source_hold_probe::observe(
+            crate::source_hold_probe::Site::SubmitBind,
+            &self.admitted.item_id().to_string(),
+        ) {
+            crate::source_hold_probe::retain(self.source.hold_sources_for_test(hold));
+        }
+        // The source check: before the attempt's first durable effect a held
+        // source answers "not now"; past it, the shipped refusal.
+        let source_unavailable = |_: OriginalWriterError| {
+            #[cfg(test)]
+            crate::aa1_failure("helper.bind.source", "Unavailable");
+            "Toolkit helper source is unavailable"
+        };
+        if crate::no_wait::may_answer_not_now() {
+            if !self
+                .source
+                .owner
+                .try_check_admitted_helper(&self.admitted)
+                .map_err(source_unavailable)?
+            {
+                return Err(helper_source_held(&self.source, "submit"));
+            }
+        } else {
+            self.source
+                .owner
+                .check_admitted_helper(&self.admitted)
+                .map_err(source_unavailable)?;
+        }
+        // The decision point: this binder answers no "not now" after its
+        // source check, so the writes below need no effect mark.
+        meerkat_core::protected_section::note_decided("helper.source");
         self.source
             .require_helper_selection(self.admitted.selection())
             .map_err(|_| {
@@ -1073,6 +1644,8 @@ impl GovernedInputBinder for SubmitHelperBinder {
                     )
                     .map_err(|_| "Toolkit could not rebind the exact first helper input")?;
             }
+            // A bind attempt's durable effect, kept marked past the decision.
+            meerkat_core::protected_section::note_effect("helper.custody_attempt");
             self.source
                 .owner
                 .persist_helper_custody_attempt(
@@ -1124,7 +1697,11 @@ impl GovernedInputBinder for SubmitHelperBinder {
                         (
                             input,
                             pending,
-                            custody_recovery::CustodyHandoff::new(false, &self.source),
+                            custody_recovery::CustodyHandoff::new(
+                                false,
+                                &self.source,
+                                &self.review_custody,
+                            ),
                         )
                     }
                     None => match prior {
@@ -1149,6 +1726,7 @@ impl GovernedInputBinder for SubmitHelperBinder {
                             let handoff = custody_recovery::CustodyHandoff::new(
                                 selected && pending.is_first_candidate(),
                                 &self.source,
+                                &self.review_custody,
                             );
                             (input, pending, handoff)
                         }
@@ -1187,6 +1765,29 @@ impl GovernedInputBinder for SubmitHelperBinder {
             settlement: Box::new(settlement),
             entry_fence: self.entry_fence.clone(),
         })
+    }
+}
+
+#[async_trait]
+impl GovernedInputBinder for SubmitHelperBinder {
+    async fn try_bind(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.submit(context, input)
+            .await
+            .map_err(super::governed_submit::BindFailure::into_error)
+    }
+
+    /// The helper's own source deadline bounds its waits as well.
+    fn wait_budget(&self) -> GovernedWaitBudget {
+        let remaining = self
+            .source_deadline
+            .saturating_duration_since(tokio::time::Instant::now());
+        GovernedWaitBudget::Bounded(
+            remaining.min(meerkat_core::authorization::OWNER_CHANGE_WAIT_BOUND),
+        )
     }
 
     fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _detail: &str) {
@@ -1338,7 +1939,8 @@ fn aa1_helper_send_failure(error: &IdentityRuntimeError) {
         IdentityRuntimeError::GovernedInput(error) => match error {
             GovernedInputError::Unsupported(_) => "GovernedInputError::Unsupported",
             GovernedInputError::BindingChanged => "GovernedInputError::BindingChanged",
-            GovernedInputError::Bind(_) => "GovernedInputError::Bind",
+            GovernedInputError::Refused(_) => "GovernedInputError::Refused",
+            GovernedInputError::Held(_) => "GovernedInputError::Held",
             GovernedInputError::Unbound => "GovernedInputError::Unbound",
             GovernedInputError::EntryRefused(_) => "GovernedInputError::EntryRefused",
             GovernedInputError::AdmissionUnresolved { .. } => {

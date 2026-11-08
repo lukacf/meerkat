@@ -56,6 +56,10 @@ export type ConsoleGatewayInteractionRejectedError = ConsoleInteractionRejectedE
 export interface ConsoleAgentAffordances {
   addressable?: boolean;
   can_send_message?: boolean;
+  /** Under enforced access: whether the viewer may change the agent's
+   * console schedules (`agent.send` and `schedule.manage`). Absent
+   * otherwise, where `can_send_message` decides. */
+  can_manage_schedules?: boolean;
   can_retire?: boolean;
   can_respawn?: boolean;
   runtime_mode?: string;
@@ -89,6 +93,10 @@ export interface ConsoleAgent extends SidebarWatchFields {
    * human's branch of that agent's conversation (`meta/fork_member`),
    * as the runtime's roster records the fork. */
   side_chat_of?: string;
+  /** Who may see this side chat, as the server decided it for the viewer:
+   * private to the viewer, private to the person who opened it (the viewer
+   * is an access admin), or shared with everyone who may see its source. */
+  side_chat_audience?: SideChatAudience;
   /** The agent's newest console activity, in milliseconds since the epoch,
    * as the console's frame log recorded it. Advisory: absent means unknown. */
   last_activity_ms?: number;
@@ -114,8 +122,16 @@ export interface ConsoleExperienceAgentSnapshotRow extends Partial<IdentityStatu
   affordances?: ConsoleAgentAffordances;
   model_capabilities?: ConsoleModelCapabilities;
   side_chat_of?: string;
+  side_chat_audience?: string;
   last_activity_ms?: number;
 }
+
+/** Who may see a side chat: `private_to_you` (the viewer opened it on a
+ * console with sign-in), `private_to_creator` (someone else did, and the
+ * viewer sees it as an access admin) or `shared` (everyone who may see its
+ * source: a console without sign-in, or a side chat opened before side chats
+ * were private). */
+export type SideChatAudience = "private_to_you" | "private_to_creator" | "shared";
 
 export interface ConsoleSidebarButtonConfig {
   id: string;
@@ -225,6 +241,13 @@ export interface ConsoleAttentionUiConfig {
   sources?: ConsoleAttentionSourceConfig[];
 }
 
+/** The host's sign-out (console configuration `[sign_out]`): a same-origin
+ * path, followed with a GET link or submitted as a POST form. */
+export interface ConsoleSignOutConfig {
+  href: string;
+  method?: "get" | "post";
+}
+
 export interface ConsoleUiConfig {
   /** Trusted same-origin ES modules exporting a ConsolePanel. */
   panel_modules?: string[];
@@ -240,6 +263,7 @@ export interface ConsoleUiConfig {
   agent_list?: ConsoleAgentListConfig;
   actions?: ConsoleActionsUiConfig;
   attention?: ConsoleAttentionUiConfig;
+  sign_out?: ConsoleSignOutConfig;
 }
 
 export interface ConsolePolicyConfig {
@@ -487,7 +511,7 @@ export type MemoryAuthor =
   | { author: "agent"; identity?: string }
   | { author: "steward"; run_id?: string }
   | { author: "distiller"; run_id?: string }
-  | { author: "operator" }
+  | { author: "operator"; principal?: string }
   | { author: "application" };
 
 export interface MemoryProvenance {

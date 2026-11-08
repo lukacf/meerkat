@@ -405,6 +405,17 @@ describe("MetaBuilder chainable methods", () => {
     assert.throws(() => builder.forkInstructionPolicy("inherit" as never), RangeError);
   });
 
+  it("decisionIngresses() records a copy of the declarations and returns this", () => {
+    const builder = Meta.builder();
+    const chat = { ingress: "chat", attests: "person" as const, maxClockSkewMs: 5000 };
+    const result = builder.decisionIngresses([chat]);
+    chat.maxClockSkewMs = 1;
+    assert.equal(result, builder);
+    assert.deepEqual(builder._config.decisionIngresses, [
+      { ingress: "chat", attests: "person", maxClockSkewMs: 5000 },
+    ]);
+  });
+
   it("memberRestore() records the restore mode and returns this", () => {
     for (const restore of ["on_demand", "on_demand_verified", "eager"] as const) {
       const builder = Meta.builder();

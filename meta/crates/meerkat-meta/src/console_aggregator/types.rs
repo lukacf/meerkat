@@ -46,6 +46,10 @@ pub enum ConsoleFrameStatus {
     DeliveryFailed,
     Completed,
     Redacted,
+    /// A governed send's bind answered bound and its input is being
+    /// submitted: from here it is delivered or fails, and is never held.
+    /// Declared last so the earlier variants keep their discriminants.
+    Submitted,
 }
 
 impl ConsoleFrameStatus {
@@ -53,6 +57,7 @@ impl ConsoleFrameStatus {
         match self {
             Self::Accepted => "accepted",
             Self::Dispatching => "dispatching",
+            Self::Submitted => "submitted",
             Self::Delivered => "delivered",
             Self::DeliveryFailed => "delivery_failed",
             Self::Completed => "completed",
@@ -64,6 +69,7 @@ impl ConsoleFrameStatus {
         match value {
             "accepted" => Self::Accepted,
             "dispatching" => Self::Dispatching,
+            "submitted" => Self::Submitted,
             "delivered" => Self::Delivered,
             "delivery_failed" => Self::DeliveryFailed,
             "redacted" => Self::Redacted,
@@ -580,6 +586,12 @@ pub struct ConsoleSender {
     /// never projected to a view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<meerkat_core::PrincipalRef>,
+    /// The label the agent's model reads right before a person's message on
+    /// a console that requires sign-in: "Message from" and the display name.
+    /// Attribution for the model, never control data. Kept with the stored
+    /// frame (a redispatch reads it there) and never projected to a view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
 }
 
 impl ConsoleSender {
@@ -588,6 +600,34 @@ impl ConsoleSender {
         payload
             .get("sender")
             .and_then(|sender| serde_json::from_value(sender.clone()).ok())
+    }
+
+    /// What this sender's send carries to the agent: its requester and its
+    /// sender label.
+    pub(crate) fn attribution(&self) -> ConsoleHumanAttribution {
+        ConsoleHumanAttribution {
+            requester: self.requester.clone(),
+            sender_label: self
+                .model_label
+                .clone()
+                .and_then(meerkat_mob::SenderLabel::new),
+        }
+    }
+}
+
+/// What a console send carries to the agent's run for the person who sent
+/// it: the requester the run works for and the sender label its model reads
+/// before the message. Both are absent for every send that names no person.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConsoleHumanAttribution {
+    pub(crate) requester: Option<meerkat_core::PrincipalRef>,
+    pub(crate) sender_label: Option<meerkat_mob::SenderLabel>,
+}
+
+impl ConsoleHumanAttribution {
+    /// The attribution a send's recorded sender carries; none without one.
+    pub(crate) fn of_sender(sender: Option<&ConsoleSender>) -> Self {
+        sender.map(ConsoleSender::attribution).unwrap_or_default()
     }
 }
 

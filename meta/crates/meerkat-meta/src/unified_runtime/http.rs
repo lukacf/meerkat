@@ -31,8 +31,9 @@ use super::UnifiedRuntime;
 
 /// The `/healthz` answer: `ok` as plain text, the liveness probe's answer,
 /// and a JSON summary on request. The summary's `status` is `degraded` while
-/// Core holds restored members broken (`broken_members` names each, with
-/// Core's reason), while the identity runtime's lifecycle projection is off
+/// Core holds restored members broken (`broken_member_count` counts them and
+/// names none: a probe's reader is no audience of any member), while the
+/// identity runtime's lifecycle projection is off
 /// or keeps failing (`lifecycle_projection` says which, and why), as it is
 /// when the host's detached job projection says so, and `unreadable` when
 /// that projection says so. `lifecycle_projection` also names the journal
@@ -74,11 +75,12 @@ async fn healthz_response(
     );
     if !broken_members.is_empty() {
         // The worse of the two: a job health that is already unreadable
-        // stays unreadable.
+        // stays unreadable. The summary counts the broken members and names
+        // none: a health probe's reader is no audience of any member.
         if public_projection["status"] != "unreadable" {
             public_projection["status"] = serde_json::json!("degraded");
         }
-        public_projection["broken_members"] = broken_members_json(&broken_members);
+        public_projection["broken_member_count"] = serde_json::json!(broken_members.len());
     }
     if let Some(lifecycle_projection) =
         lifecycle_projection.filter(|status| status.degraded() || status.owed_events > 0)
@@ -107,8 +109,8 @@ fn wants_health_summary(headers: &HeaderMap) -> bool {
 
 /// The open Console's Host check on `/healthz`: the plain liveness answer
 /// serves any host, since a container probe names its pod or service rather
-/// than the console, while the JSON summary names members, so it answers
-/// only the hosts the listener serves.
+/// than the console, while the JSON summary describes the runtime's health,
+/// so it answers only the hosts the listener serves.
 async fn refuse_foreign_host_for_health_summary(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -484,6 +486,8 @@ impl UnifiedRuntime {
             self.console_governed_ingress.clone(),
             self.console_session_fences().clone(),
             self.mob_announcements_slot(),
+            self.durable_decisions().clone(),
+            self.console_audit_log(),
         )
     }
 
@@ -514,6 +518,7 @@ impl UnifiedRuntime {
             Some(self.mob_runtime().clone()),
             self.access_controller().cloned(),
         )
+        .with_identity_runtime(self.identity_runtime_ref().cloned())
     }
 
     pub fn build_console_frontend_router(&self) -> Router {
@@ -678,6 +683,7 @@ impl UnifiedRuntime {
                     }
                 }),
                 self.has_explicit_provider_credentials(),
+                self.console_audit_log(),
             ))
             .merge(agent_events_sse_router_with_access_and_priming(
                 Arc::new(move |agent_id, cursor| {
@@ -706,6 +712,11 @@ impl UnifiedRuntime {
                             let authority_identity = authority_runtime
                                 .identity_for_member_mutation(&agent_id)
                                 .await
+                                .map_err(|error| {
+                                    crate::MobRuntimeError::InvalidConfig(format!(
+                                        "identity event target refused before subscription: {agent_id}: {error}"
+                                    ))
+                                })?
                                 .ok_or_else(|| {
                                     crate::MobRuntimeError::InvalidConfig(format!(
                                         "identity event target lost authority before subscription: {agent_id}"
@@ -1450,17 +1461,19 @@ model = "gpt-5.5"
             .expect("json body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(body["status"], "unreadable", "{body}");
-        assert_eq!(
-            body["broken_members"][0]["member_id"], "personal:alice",
-            "{body}"
+        assert_eq!(body["broken_member_count"], 1, "{body}");
+        assert!(
+            !body.to_string().contains("personal:alice"),
+            "the summary names no member: {body}"
         );
     }
 
     /// While Core holds restored members broken, the JSON summary reads
-    /// degraded and names each member with Core's reason; the plain-text
-    /// liveness answer stays `ok`.
+    /// degraded and counts them, naming none (the probe needs no sign-in,
+    /// and a member's name, a private member's too, is no one's to read
+    /// there); the plain-text liveness answer stays `ok`.
     #[tokio::test]
-    async fn healthz_reads_degraded_and_names_the_broken_members() {
+    async fn healthz_reads_degraded_and_names_no_broken_member() {
         let projection = Arc::new(std::sync::RwLock::new(None));
         let broken = vec![(
             crate::member_comms_id::roster_member_id_for_identity("personal:alice"),
@@ -1492,13 +1505,11 @@ model = "gpt-5.5"
             .expect("json body");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(body["status"], "degraded", "{body}");
-        assert_eq!(
-            body["broken_members"],
-            serde_json::json!([{
-                "member_id": "personal:alice",
-                "error": "restored member cannot publish its comms endpoint",
-            }]),
-            "{body}"
+        assert_eq!(body["broken_member_count"], 1, "{body}");
+        assert!(body.get("broken_members").is_none(), "{body}");
+        assert!(
+            !body.to_string().contains("personal:alice"),
+            "the summary names no member: {body}"
         );
     }
 

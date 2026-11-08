@@ -115,7 +115,7 @@ async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Err
                 evidence: Vec::new(),
                 verification: None,
             },
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await?;
     for spec in std::iter::once(&console_send_target).chain(scheduled_targets.iter()) {
@@ -188,7 +188,10 @@ async fn bridged_deliveries_carry_no_operator_memory() -> Result<(), Box<dyn Err
             HandlingMode::Queue,
             &[],
             &accepted,
-            Some(&alice),
+            &crate::console_aggregator::ConsoleHumanAttribution {
+                requester: Some(alice.clone()),
+                sender_label: None,
+            },
             None,
         )
         .await?;

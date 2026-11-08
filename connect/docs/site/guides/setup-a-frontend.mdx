@@ -6,7 +6,28 @@ icon: "comments"
 
 A frontend lets people talk to an agent through Slack, Telegram, a web app or a device. The application runs the interface and owns participant identity, conversation routing and reply delivery.
 
-This guide describes the configuration to provide when integrating a frontend with your host. For service operations such as reading Slack history, use [service setup](/guides/request-an-integration).
+For service operations such as reading Slack history, use [service setup](/guides/request-an-integration). To let people send messages to an agent through that service, follow the frontend flow below.
+
+## Start the setup conversation
+
+Follow the [CLI quickstart](/quickstart#standalone-cli), choose a realm and
+describe the frontend you want at `You:`. There is no separate frontend mode to
+select. Keep the application that will run the frontend running; the local realm
+holds the setup conversation, while that application owns the frontend.
+
+When the agent requests host selection, use the protected terminal prompts:
+
+- **the paired host:** select the running host and complete device pairing. Choose
+  whether to remember the pairing or keep it only for this process. The optional
+  `--paired-host <origin>` startup flag selects the host before the conversation.
+- **Forge application:** enter its actual Console origin in the form
+  `http://127.0.0.1:PORT`, then its Console password. Sign-in is kept only in memory
+  for this process. Use the port shown by the running application, not a guessed port.
+
+Keep host addresses and credentials out of chat. Enter pairing codes and
+passwords only in those protected prompts. The selected application must provide
+frontend management; a package listing alone does not supply it. In an integrated
+application, use that application's setup entrypoint instead.
 
 ## Choose the host and conversation
 
@@ -34,9 +55,18 @@ replies into that same thread.
 
 Use the host's protected controls for provider credentials. Sign in to the application separately from connecting the provider account.
 
+Choose from the settings the selected host actually offers. The paired host channel
+frontends route messages to each sender's own agent, so that flow has no separate
+destination-agent choice.
+
 ## Review and activate
 
 Review the exact package, configuration, participants and requested service authority. Apply executable or deployment changes through the application's deployment workflow.
+
+Read the host's result before treating the frontend as active. A submitted or
+queued request may still need an operator review, build or activation. The paired host
+submission creates an operator review request; it does not itself start the
+frontend.
 
 After activation, send a message from an admitted identity. Confirm that it reaches the intended agent and that its reply returns to the permitted conversation. Check an excluded participant as part of the application's access validation.
 

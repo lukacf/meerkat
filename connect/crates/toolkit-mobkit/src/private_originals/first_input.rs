@@ -19,7 +19,7 @@ use meerkat_toolkit::host_lifetime::{NativeHostLifetime, control::HostLifetimeEr
 
 impl PrivateOriginals {
     /// Select the exact host once, or confirm that same live owner during
-    /// bootstrap of that same selected host. This weak reverse
+    /// bootstrap after a restrictive workflow reservation. This weak reverse
     /// reference cannot keep a host alive or transfer to a replacement host.
     pub(crate) fn bind_host_lifetime(
         &self,
@@ -55,7 +55,7 @@ impl PrivateOriginals {
         reference: &PrivateOriginalRef,
         context: &GovernedBindContext,
     ) -> Result<Arc<HeldPrivateOriginal>, PrivateOriginalError> {
-        self.binding_for_selected_input(reference, context, None, None, None, None)
+        self.binding_for_selected_input(reference, context, None, None, None, None, None)
             .await
     }
 
@@ -68,8 +68,16 @@ impl PrivateOriginals {
         grant: &PrivateServiceGrantRef,
         approved_login: Option<crate::private_host::ConsoleLoginHandle>,
     ) -> Result<Arc<HeldPrivateOriginal>, PrivateOriginalError> {
-        self.binding_for_selected_input(reference, context, Some(grant), None, None, approved_login)
-            .await
+        self.binding_for_selected_input(
+            reference,
+            context,
+            Some(grant),
+            None,
+            None,
+            approved_login,
+            None,
+        )
+        .await
     }
 
     pub(super) async fn binding_for_batch_input(
@@ -79,8 +87,16 @@ impl PrivateOriginals {
         task: &service_approved_input::ApprovedTaskLink,
         approved_login: Option<crate::private_host::ConsoleLoginHandle>,
     ) -> Result<Arc<HeldPrivateOriginal>, PrivateOriginalError> {
-        self.binding_for_selected_input(reference, context, None, Some(task), None, approved_login)
-            .await
+        self.binding_for_selected_input(
+            reference,
+            context,
+            None,
+            Some(task),
+            None,
+            approved_login,
+            None,
+        )
+        .await
     }
 
     pub(super) async fn binding_for_console_input(
@@ -89,7 +105,18 @@ impl PrivateOriginals {
         context: &GovernedBindContext,
         entry: super::console_ingress::ConsoleEntry,
     ) -> Result<Arc<HeldPrivateOriginal>, PrivateOriginalError> {
-        self.binding_for_selected_input(reference, context, None, None, Some(entry), None)
+        self.binding_for_selected_input(reference, context, None, None, Some(entry), None, None)
+            .await
+    }
+
+    pub(super) async fn binding_for_workflow_input(
+        self: &Arc<Self>,
+        reference: &PrivateOriginalRef,
+        context: &GovernedBindContext,
+        planning: &setup_workflow::InstalledWorkflowPlanning,
+    ) -> Result<Arc<HeldPrivateOriginal>, PrivateOriginalError> {
+        planning.check_for_binding(self, reference)?;
+        self.binding_for_selected_input(reference, context, None, None, None, None, Some(planning))
             .await
     }
 
@@ -101,6 +128,7 @@ impl PrivateOriginals {
         batch: Option<&service_approved_input::ApprovedTaskLink>,
         console: Option<super::console_ingress::ConsoleEntry>,
         approved_login: Option<crate::private_host::ConsoleLoginHandle>,
+        planning: Option<&setup_workflow::InstalledWorkflowPlanning>,
     ) -> Result<Arc<HeldPrivateOriginal>, PrivateOriginalError> {
         let stored = self
             .store
@@ -109,10 +137,98 @@ impl PrivateOriginals {
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_record(&stored, reference)?;
+        if record.console_child_input.is_some()
+            && (console.is_none()
+                || record.workflow_child.is_none()
+                || !matches!(
+                    record.planning_source_evidence,
+                    Some(planning_source_evidence::PlanningSourceEvidence::EffectWaiter { .. })
+                ))
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        if let Some((admission, _)) = self
+            .service_tool_policy
+            .get()
+            .map(|owner| owner.member_route(&reference.route))
+            .transpose()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .flatten()
+        {
+            if let Some(workflow) = &admission.workflow {
+                if admission.class.purpose.is_ordinary()
+                    || &workflow.original != reference
+                    || planning.is_none_or(|planning| !planning.matches_class_workflow(workflow))
+                {
+                    return Err(PrivateOriginalError::Denied);
+                }
+            } else if !admission.class.purpose.is_ordinary() {
+                return Err(PrivateOriginalError::Denied);
+            }
+        }
         if grant.is_some() && batch.is_some() {
             return Err(PrivateOriginalError::Conflict);
         }
-        let selected_setup = if grant.is_none() && batch.is_none() {
+        if planning.is_some()
+            && (grant.is_some()
+                || batch.is_some()
+                || console.is_some()
+                || approved_login.is_some()
+                || record.setup_request.is_some()
+                || record.configured_setup.is_some()
+                || record.approved_task.is_some()
+                || record.class_input.is_some())
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        if record.native_operations.is_some()
+            && (planning.is_some()
+                || record.planning_source_evidence.is_some()
+                || grant.is_some()
+                || batch.is_some()
+                || approved_login.is_some())
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        let selected_parent = self.workflow_parent_basis(&record, reference)?;
+        if selected_parent.is_some()
+            && (planning.is_some()
+                || grant.is_some()
+                || batch.is_some()
+                || console.is_some()
+                || approved_login.is_some())
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        let peer = record.peer_ingress.is_some();
+        if peer
+            && (selected_parent.is_some()
+                || planning.is_some()
+                || grant.is_some()
+                || batch.is_some()
+                || console.is_some()
+                || approved_login.is_some())
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        let selected_class = if !peer
+            && selected_parent.is_none()
+            && planning.is_none()
+            && grant.is_none()
+            && batch.is_none()
+        {
+            self.class_input_basis(&record, reference, &context.session_id)
+                .await?
+        } else {
+            None
+        };
+        let selected_setup = if peer
+            || selected_parent.is_some()
+            || selected_class.is_some()
+            || planning.is_some()
+        {
+            None
+        } else if grant.is_none() && batch.is_none() {
             if record.setup_request.is_some() {
                 // An explicit per-original review takes precedence. It is never
                 // upgraded or replaced by configured agent acquisition.
@@ -133,7 +249,14 @@ impl PrivateOriginals {
             }
             None
         };
-        let selected_basis = if let Some(task) = batch {
+        let selected_basis = if peer {
+            self.peer_operations_basis(reference, &record).await?
+        } else if let Some(parent) = &selected_parent {
+            parent.clone()
+        } else if let Some(planning) = planning {
+            planning.check_for_binding(self, reference)?;
+            planning.operation_basis()
+        } else if let Some(task) = batch {
             if let Some(setup) = task.setup() {
                 self.issue_service_setup(reference, setup, approved_login.as_ref())
                     .await?;
@@ -142,7 +265,7 @@ impl PrivateOriginals {
         } else {
             match grant {
                 Some(grant) => {
-                    let route = self.route(&reference.route)?;
+                    let route = &self.route(&reference.route)?;
                     let original = OriginalWorkRef {
                         authority: route.source_authority.clone(),
                         work: reference.original.clone(),
@@ -151,7 +274,7 @@ impl PrivateOriginals {
                         lineage: self.service_grant_lineage(grant, &original).await?,
                     }
                 }
-                None => match selected_setup.as_ref() {
+                None => match selected_class.as_ref().or(selected_setup.as_ref()) {
                     Some(basis) => basis.clone(),
                     None => WorkAuthorityBasis::TargetedGrantLineages {
                         base: None,
@@ -160,6 +283,10 @@ impl PrivateOriginals {
                 },
             }
         };
+        let selected_basis = self
+            .native_operations_basis(reference, &record, &context.session_id, selected_basis)
+            .await
+            .inspect_err(|error| binding_source_failure("binding.native_basis", error))?;
         if let Some(task) = &record.approved_task {
             if (match task {
                 service_approved_input::ApprovedTaskLink::Single(member) => {
@@ -201,29 +328,35 @@ impl PrivateOriginals {
             .host_lifetime
             .get()
             .and_then(Weak::upgrade)
-            .ok_or(PrivateOriginalError::Unavailable)?;
+            .ok_or(PrivateOriginalError::Unavailable)
+            .inspect_err(|error| binding_source_failure("binding.host_owner", error))?;
         lifetime
             .validate_current_selection()
+            .inspect_err(|error| binding_host_failure("binding.host_current", error))
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let selected = lifetime.selected_policy();
         let native = selected
             .native_host
             .as_ref()
-            .ok_or(PrivateOriginalError::Unavailable)?;
-        let route = native
-            .routes
-            .iter()
-            .find(|route| route.id == reference.route)
-            .ok_or(PrivateOriginalError::Denied)?;
-        let (binding, requester, actor) = route
-            .source_binding(selected)
-            .map_err(|_| PrivateOriginalError::Denied)?;
-        let member = native
-            .members
-            .iter()
-            .find(|member| &member.member == binding)
-            .ok_or(PrivateOriginalError::Denied)?;
-        let source_route = self.route(&reference.route)?;
+            .ok_or(PrivateOriginalError::Unavailable)
+            .inspect_err(|error| binding_source_failure("binding.host_selection", error))?;
+        let (route, member, admitted_context) = self
+            .selected_source_route(&reference.route)
+            .inspect_err(|error| binding_source_failure("binding.route_selection", error))?;
+        let (binding, requester, actor) = route.source_binding(selected).map_err(|_| {
+            crate::aa1_failure("binding.route_source", "PrivateOriginalError::Denied");
+            PrivateOriginalError::Denied
+        })?;
+        if admitted_context
+            .as_ref()
+            .is_some_and(|admitted| admitted.as_str() != context.session_id.to_string())
+        {
+            crate::aa1_failure("binding.route_context", "PrivateOriginalError::Denied");
+            return Err(PrivateOriginalError::Denied);
+        }
+        let source_route = &self
+            .route(&reference.route)
+            .inspect_err(|error| binding_source_failure("binding.route_current", error))?;
         if source_route.grant_target.as_str() != binding.member
             || source_route.grant_caller != native.grant_administrator
             || &record.source.requester != requester
@@ -234,16 +367,20 @@ impl PrivateOriginals {
             || record.source.authentication_domain != route.authentication_domain
             || record.source.event_domain != route.event_domain
         {
+            crate::aa1_failure("binding.route_facts", "PrivateOriginalError::Conflict");
             return Err(PrivateOriginalError::Conflict);
         }
         // This is the exact native registration selected by the tracked
         // identity call. Do not install or rebind its destination here. Native
         // registration and admission retain/check that destination themselves.
-        let machine = self.machine()?;
+        let machine = self
+            .machine()
+            .inspect_err(|error| binding_source_failure("binding.machine", error))?;
         let registration = machine
             .current_session_registration_witness(&context.session_id)
             .await
-            .ok_or(PrivateOriginalError::Unavailable)?;
+            .ok_or(PrivateOriginalError::Unavailable)
+            .inspect_err(|error| binding_source_failure("binding.registration", error))?;
         let target = NativeWorkTarget {
             logical_owner: member.logical_owner.clone(),
             logical_runtime: EvidenceId::new(
@@ -256,7 +393,7 @@ impl PrivateOriginals {
             context_generation: member.context_generation,
             audience: member.audience.clone(),
         };
-        let association = match record.final_association {
+        let association = match record.final_association.clone() {
             Some(saved) => {
                 if saved.candidate().authority_basis != selected_basis
                     || saved.candidate().target != target
@@ -269,11 +406,12 @@ impl PrivateOriginals {
                 let parent = route.controller_parent.clone()
                     .filter(|parent| !parent.is_empty()
                         && parent.len() < meerkat_authorization_contracts::work_association::MAX_ASSOCIATION_REFERENCES)
-                    .ok_or(PrivateOriginalError::Unavailable)?;
-                let facts = context
-                    .controller
-                    .plain_facts()
-                    .map_err(|_| PrivateOriginalError::Unavailable)?;
+                    .ok_or(PrivateOriginalError::Unavailable)
+                    .inspect_err(|error| binding_source_failure("binding.controller.parent_selection", error))?;
+                let facts = context.controller.plain_facts().map_err(|_| {
+                    crate::aa1_failure("binding.controller.facts", "ControllerFactsUnavailable");
+                    PrivateOriginalError::Unavailable
+                })?;
                 let mut bounds = application_operations::parent_restrictions(
                     application_operations::controller(
                         &native.grant_administrator,
@@ -285,8 +423,8 @@ impl PrivateOriginals {
                 );
                 bounds.delegation_depth = DelegationDepth::remaining(0);
                 let mut candidate = InputAuthorityAssociationCandidate {
-                    requester: record.source.requester.clone(),
-                    ingress_actor: record.source.ingress_actor.clone(),
+                    requester: record.bound_requester().clone(),
+                    ingress_actor: record.bound_ingress_actor().clone(),
                     represented_subject: record.source.represented_subject.clone(),
                     original_authentication: super::governed_submit::evidence(
                         &record.source.authentication_domain,
@@ -302,15 +440,7 @@ impl PrivateOriginals {
                         &record.source.event_domain,
                         &record.event.root_event,
                     )?,
-                    contributing_work: record
-                        .event
-                        .contributors
-                        .iter()
-                        .map(|work| OriginalWorkRef {
-                            authority: record.source.source_authority.clone(),
-                            work: work.clone(),
-                        })
-                        .collect(),
+                    contributing_work: record.bound_contributors(),
                     authority_basis: selected_basis,
                     controller_grant_lineage: parent.clone(),
                     controller_model: Some(context.controller.selection().clone()),
@@ -326,8 +456,13 @@ impl PrivateOriginals {
                 };
                 // Validate the complete immutable source shape before native
                 // issuance. Its controller parent is not yet admission-ready.
-                InputAuthorityAssociation::new(candidate.clone())
-                    .map_err(|_| PrivateOriginalError::Conflict)?;
+                InputAuthorityAssociation::new(candidate.clone()).map_err(|_| {
+                    crate::aa1_failure(
+                        "binding.controller.candidate",
+                        "PrivateOriginalError::Conflict",
+                    );
+                    PrivateOriginalError::Conflict
+                })?;
                 let grants = self.owner.grants();
                 let caller = native.grant_administrator.clone();
                 let executor = route.logical_executor.clone();
@@ -338,7 +473,12 @@ impl PrivateOriginals {
                 let issuance_lifetime = lifetime.clone();
                 let issuance_console = console.clone();
                 let issuance_login = approved_login.clone();
+                // The bind attempt, for the blocking writer's issuance.
+                let issuance_attempt = meerkat_core::protected_section::effect_mark();
                 let issued = tokio::task::spawn_blocking(move || {
+                    let _attempt = issuance_attempt
+                        .as_ref()
+                        .map(meerkat_core::protected_section::EffectMark::enter);
                     // The blocking writer retains the same A or approved B
                     // login if its waiting binder disappears.
                     with_controller_login(
@@ -346,29 +486,67 @@ impl PrivateOriginals {
                         issuance_login.as_ref(),
                         || {
                             let issue = || {
-                                let resolved = grants.resolve_controller_lineage(
-                                    &parent,
-                                    &caller,
-                                    represented.as_ref(),
-                                )?;
-                                let expected = resolved
-                                    .restrictions()
-                                    .for_child(&bounds)
-                                    .map_err(|_| GrantRefusal::Denied)?;
+                                let resolved = grants
+                                    .resolve_controller_lineage(
+                                        &parent,
+                                        &caller,
+                                        represented.as_ref(),
+                                    )
+                                    .inspect_err(|error| {
+                                        binding_grant_failure(
+                                            "binding.controller.parent_resolve",
+                                            error,
+                                        )
+                                    })?;
+                                let expected =
+                                    resolved.restrictions().for_child(&bounds).map_err(|_| {
+                                        crate::aa1_failure(
+                                            "binding.controller.parent_bounds",
+                                            "GrantRefusal::Denied",
+                                        );
+                                        GrantRefusal::Denied
+                                    })?;
                                 resolved
                                     .check_current()
+                                    .inspect_err(|error| {
+                                        binding_publication_failure(
+                                            "binding.controller.parent_current",
+                                            error,
+                                        )
+                                    })
                                     .map_err(|_| GrantRefusal::Unavailable)?;
                                 // Identity lookup does not prove permission or intent.
                                 // An unavailable lookup never becomes absence or issuance.
-                                let child = match grants.issued_reference(&child_id)? {
+                                let child = match grants.issued_reference(&child_id).inspect_err(
+                                    |error| {
+                                        binding_grant_failure(
+                                            "binding.controller.child_lookup",
+                                            error,
+                                        )
+                                    },
+                                )? {
                                     Some(issued) => issued,
-                                    None => grants.issue_child(
-                                        &caller,
-                                        parent.last().ok_or(GrantRefusal::Denied)?,
-                                        child_id,
-                                        executor.clone(),
-                                        bounds,
-                                    )?,
+                                    None => {
+                                        // A bind attempt's durable effect: no
+                                        // "not now" may follow it.
+                                        if let Some(attempt) = &issuance_attempt {
+                                            attempt.note("original.controller_grant");
+                                        }
+                                        grants
+                                            .issue_child(
+                                                &caller,
+                                                parent.last().ok_or(GrantRefusal::Denied)?,
+                                                child_id,
+                                                executor.clone(),
+                                                bounds,
+                                            )
+                                            .inspect_err(|error| {
+                                                binding_grant_failure(
+                                                    "binding.controller.child_issue",
+                                                    error,
+                                                )
+                                            })?
+                                    }
                                 };
                                 let mut lineage = parent;
                                 lineage.push(child);
@@ -385,14 +563,22 @@ impl PrivateOriginals {
                                     .map_err(|_| GrantRefusal::Unavailable)?;
                                 Ok::<_, GrantRefusal>(lineage)
                             };
-                            issuance_lifetime.with_current_setup(|| {
-                                issue().map_err(|_| HostLifetimeError::Unavailable)
-                            })
+                            issuance_lifetime
+                                .with_current_setup(|| {
+                                    issue().map_err(|_| HostLifetimeError::Unavailable)
+                                })
+                                .inspect_err(|error| {
+                                    binding_host_failure("binding.controller.host_entry", error)
+                                })
                         },
                     )
                 })
                 .await
-                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .map_err(|_| {
+                    crate::aa1_failure("binding.controller.writer_join", "JoinError");
+                    PrivateOriginalError::Unavailable
+                })?
+                .inspect_err(|error| binding_host_failure("binding.controller.writer", error))
                 .map_err(|_| PrivateOriginalError::Unavailable)?;
                 // A lost issuance/publication response never selects a fresh
                 // child ID. Only a currently usable exact parent/subject/bounds
@@ -428,7 +614,91 @@ impl PrivateOriginals {
                 self.bind_access_source(reference, grant, association, custody)
                     .await?
             }
-            None if selected_setup.is_some() => {
+            None if peer || record.native_operations.is_some() => {
+                let selected = if peer {
+                    peer_ingress::selected_targets(&record)?
+                } else {
+                    native_operations::selected_targets(&record)
+                };
+                // A delivery that governed work sent is bound under that
+                // work's requester and sending agent; every other one under
+                // its route's, which these equal (checked above).
+                let original = self
+                    .owner
+                    .bind_native_targets_async(
+                        association,
+                        custody,
+                        record.bound_requester(),
+                        record.bound_ingress_actor(),
+                        &selected,
+                        |association| async move {
+                            self.persist_or_observe_binding(reference, &association, true)
+                                .await
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        OriginalWriterError::Conflict => PrivateOriginalError::Conflict,
+                        OriginalWriterError::OperationCancelled => PrivateOriginalError::Denied,
+                        _ => PrivateOriginalError::Unavailable,
+                    })?;
+                self.hold_binding(reference.clone(), original.clone())
+                    .await?;
+                original
+            }
+            None if selected_class.is_some() => {
+                let original = self
+                    .owner
+                    .bind_class_callbacks_async(
+                        association,
+                        custody,
+                        requester,
+                        actor,
+                        |association| async move {
+                            self.persist_or_observe_binding(reference, &association, true)
+                                .await
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        OriginalWriterError::Conflict => PrivateOriginalError::Conflict,
+                        OriginalWriterError::OperationCancelled => PrivateOriginalError::Denied,
+                        _ => PrivateOriginalError::Unavailable,
+                    })?;
+                self.hold_binding(reference.clone(), original.clone())
+                    .await?;
+                original
+            }
+            None if planning.is_some_and(|planning| planning.has_mcp_target()) => {
+                let planning = planning.unwrap();
+                let original = self
+                    .owner
+                    .bind_workflow_access_async(
+                        association,
+                        custody,
+                        requester,
+                        actor,
+                        &native.grant_administrator,
+                        |association| async move {
+                            self.persist_or_observe_workflow_binding(
+                                reference,
+                                &association,
+                                planning,
+                            )
+                            .await
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        OriginalWriterError::Conflict => PrivateOriginalError::Conflict,
+                        OriginalWriterError::OperationCancelled => PrivateOriginalError::Denied,
+                        _ => PrivateOriginalError::Unavailable,
+                    })?;
+                self.hold_binding(reference.clone(), original.clone())
+                    .await?;
+                original
+            }
+            None if selected_parent.is_some() || selected_setup.is_some() || planning.is_some() => {
                 let original = self
                     .owner
                     .bind_issued_access_async(
@@ -438,8 +708,20 @@ impl PrivateOriginals {
                         actor,
                         Some(&native.grant_administrator),
                         |association| async move {
-                            self.persist_or_observe_binding(reference, &association, true)
-                                .await
+                            match planning {
+                                Some(planning) => {
+                                    self.persist_or_observe_workflow_binding(
+                                        reference,
+                                        &association,
+                                        planning,
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    self.persist_or_observe_binding(reference, &association, true)
+                                        .await
+                                }
+                            }
                         },
                     )
                     .await
@@ -484,6 +766,58 @@ impl PrivateOriginals {
             .cloned()
             .ok_or(PrivateOriginalError::Unavailable)
     }
+}
+
+// Failure-only labels reuse the existing AA1 sink. Never format owner facts,
+// identifiers or error payloads; preserve the original returned error.
+fn binding_source_failure(stage: &'static str, error: &PrivateOriginalError) {
+    crate::aa1_failure(
+        stage,
+        match error {
+            PrivateOriginalError::Denied => "PrivateOriginalError::Denied",
+            PrivateOriginalError::Unavailable => "PrivateOriginalError::Unavailable",
+            PrivateOriginalError::Conflict => "PrivateOriginalError::Conflict",
+        },
+    );
+}
+
+pub(super) fn binding_host_failure(stage: &'static str, error: &HostLifetimeError) {
+    crate::aa1_failure(
+        stage,
+        match error {
+            HostLifetimeError::InvalidSelection => "HostLifetimeError::InvalidSelection",
+            HostLifetimeError::Unavailable => "HostLifetimeError::Unavailable",
+            HostLifetimeError::Denied => "HostLifetimeError::Denied",
+            HostLifetimeError::WrongOwner => "HostLifetimeError::WrongOwner",
+            HostLifetimeError::NotSettled => "HostLifetimeError::NotSettled",
+        },
+    );
+}
+
+pub(super) fn binding_grant_failure(stage: &'static str, error: &GrantRefusal) {
+    crate::aa1_failure(
+        stage,
+        match error {
+            GrantRefusal::Denied => "GrantRefusal::Denied",
+            GrantRefusal::Duplicate => "GrantRefusal::Duplicate",
+            GrantRefusal::ControllerInUse => "GrantRefusal::ControllerInUse",
+            GrantRefusal::Unavailable => "GrantRefusal::Unavailable",
+        },
+    );
+}
+
+pub(super) fn binding_publication_failure(
+    stage: &'static str,
+    error: &meerkat_authorization::publication::PublicationError,
+) {
+    use meerkat_authorization::publication::PublicationError;
+    crate::aa1_failure(
+        stage,
+        match error {
+            PublicationError::Changed => "PublicationError::Changed",
+            PublicationError::Unavailable => "PublicationError::Unavailable",
+        },
+    );
 }
 
 /// Runs inside the actual blocking grant writer. The same owner decides entry

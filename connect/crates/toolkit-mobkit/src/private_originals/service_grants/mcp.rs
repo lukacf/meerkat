@@ -351,7 +351,7 @@ impl PrivateOriginals {
         else {
             return Err(PrivateOriginalError::Denied);
         };
-        let route = self.route(&grant.route)?;
+        let route = &self.route(&grant.route)?;
         if original.authority != route.source_authority
             || !matches!(&decision.permission.lifetime.scope,
                 LifetimeScope::Task { task } if task.as_str() == original.work.as_str())
@@ -396,7 +396,7 @@ impl PrivateOriginals {
             .iter()
             .find(|selected| selected.selection.server == server)
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let route = self.route(&held.reference.route)?;
+        let route = &self.route(&held.reference.route)?;
         selected.selection.validate(route, &selected.decision)?;
         let claims = association.candidate();
         if selected.decision.route != held.reference.route

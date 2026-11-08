@@ -216,6 +216,16 @@ pub struct UnifiedRuntimeBuilder {
     mob_announcements: Option<crate::mob_announcements::AnnouncementConfig>,
     persistent_metadata: Option<Arc<dyn PersistentMetadataStore>>,
     access_controller: Option<crate::access::AccessController>,
+    decision_ingresses: Option<crate::durable_decisions::DecisionIngressDeclarations>,
+    /// Whether the runtime keeps the gating owner's state in its metadata
+    /// store (see [`keep_gating_state`](Self::keep_gating_state)).
+    keep_gating_state: bool,
+    /// The console audit log's bounds, when not the default (see
+    /// [`console_audit_limits`](Self::console_audit_limits)).
+    console_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
+    /// The bounds of the log's MCP app tool calls, when set apart (see
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)).
+    console_tool_call_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
     flow_editor_host_deploy: bool,
     topology_control_policy: crate::topology_control::TopologyControlPolicy,
     live: Option<super::live_compose::LiveOptions>,
@@ -1358,6 +1368,54 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
+    /// Declare the decision ingresses of this launch: the host channels
+    /// whose attested people decide durable decisions on the stdio host,
+    /// as `runtime_options.decisions` declares them on the gateway. The
+    /// approver map may list only declared ingresses (and the built-in
+    /// `operator`); the build refuses one that names another.
+    pub fn decision_ingresses(
+        mut self,
+        ingresses: crate::durable_decisions::DecisionIngressDeclarations,
+    ) -> Self {
+        self.decision_ingresses = Some(ingresses);
+        self
+    }
+
+    /// Keep the gating owner's state (its pending approvals and its bounded
+    /// gating audit) in the composition's metadata store across restarts:
+    /// restored when the runtime is built, before anything evaluates a
+    /// gating action, and written after every gating change and at
+    /// shutdown. The stock gateways keep it. Off by default, so a host that
+    /// persists [`UnifiedRuntime::gating_state_snapshot`] itself keeps doing
+    /// so: the owner restores only once. A metadata store that keeps nothing
+    /// across restarts keeps gating in memory.
+    pub fn keep_gating_state(mut self, keep: bool) -> Self {
+        self.keep_gating_state = keep;
+        self
+    }
+
+    /// Bound the console audit log. Its two record sets, the console's
+    /// changes and MCP app tool calls, each keep their own budget of
+    /// `limits` (by default 20000 rows, none older than 365 days, each), so
+    /// tool calls never push a change row out;
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)
+    /// bounds the tool calls apart. The log is kept in the composition's
+    /// metadata store. [`Self::build`] refuses limits that keep no row
+    /// (`max_entries` 0).
+    pub fn console_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
+        self.console_audit_limits = Some(limits);
+        self
+    }
+
+    /// Bound the console audit log's MCP app tool calls apart from its
+    /// changes (by default as [`console_audit_limits`](Self::console_audit_limits)
+    /// bounds each record set). [`Self::build`] refuses limits that keep no
+    /// row (`max_entries` 0).
+    pub fn console_tool_call_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
+        self.console_tool_call_audit_limits = Some(limits);
+        self
+    }
+
     /// Let the Flow Editor on the reference app router run `rkat` on this
     /// host for callers that no enforced access controller governs. Off by
     /// default; see [`UnifiedRuntime::allow_flow_editor_host_deploy`].
@@ -1403,6 +1461,19 @@ impl UnifiedRuntimeBuilder {
 
     pub async fn build(mut self) -> Result<UnifiedRuntime, UnifiedRuntimeBuilderError> {
         // --- Identity-first builder validation ---
+
+        if self
+            .console_audit_limits
+            .iter()
+            .chain(&self.console_tool_call_audit_limits)
+            .any(|limits| limits.max_entries == 0)
+        {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "console audit limits: max_entries must be at least 1; a log that keeps no row \
+                 would reuse its row numbers"
+                    .into(),
+            ));
+        }
 
         if self.mob_spec.is_some() && self.mob_storage.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
@@ -1483,6 +1554,13 @@ impl UnifiedRuntimeBuilder {
             })?;
 
         let has_persistent_state = self.persistent_state_path.is_some();
+        // The approver map may list only the decision ingresses this launch
+        // declares, and the built-in operator.
+        crate::durable_decisions::check_approver_ingresses(
+            self.access_controller.as_ref(),
+            &self.decision_ingresses.clone().unwrap_or_default(),
+        )
+        .map_err(|error| UnifiedRuntimeBuilderError::ConflictingConfiguration(error.to_string()))?;
         // Same-root pairing is a documented requirement of
         // `continuity_from_state_dir`; enforce it instead of letting two
         // different directories silently fork session authority from the
@@ -1994,6 +2072,16 @@ impl UnifiedRuntimeBuilder {
             )
         });
         let agent_customizer = self.composed_agent_customizer(agent_memory_provider.clone());
+        // A console side chat inherits its source's tool overlay, recorder
+        // included: every member build binds a side chat's `memory` tool to
+        // the side chat's own identity with this provider, on the classic
+        // and the identity-first path alike.
+        if let Some(provider) = agent_memory_provider.as_ref() {
+            mob_spec.side_chat_memory_slot().fill(
+                provider.clone(),
+                self.agent_memory_config.clone().unwrap_or_default(),
+            );
+        }
 
         // Classic (roster-less) agent memory: register the per-spawn memory
         // customizer on the mob runtime itself, so every member spawn —
@@ -2120,14 +2208,12 @@ impl UnifiedRuntimeBuilder {
         } else {
             (None, None)
         };
-        // Each identity with a pending first-boot row or a rotation a crash
-        // interrupted waits for the roster pass's seat step: the mob
-        // materializes none of them at start, and refuses their wakes
-        // retryable until the seat step for each ends the mark. The identity
-        // runtime keeps the seeded set, so every seat step ends each mark.
-        let mut host_pending_seeded = Vec::new();
-        if let (Some(roster), Some(mob_id)) =
-            (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
+        // Each identity with a pending first-boot row waits for the roster
+        // pass's declaration of it: the mob materializes none of them at
+        // start, and refuses their wakes retryable until the declaration
+        // that carries the row out ends the mark. The mark is Core's: the
+        // identity runtime's door answers Core's typed refusal.
+        if let (Some(roster), Some(_)) = (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
         {
             let first_boot = match self.host_store.as_ref() {
                 Some(host) => Some(
@@ -2142,16 +2228,16 @@ impl UnifiedRuntimeBuilder {
             };
             let host_pending = crate::identity_first::runtime::host_pending_members_before_build(
                 first_boot.as_ref(),
-                Some((persistent_metadata.as_ref(), mob_id)),
                 roster,
             )
             .await;
-            host_pending_seeded.clone_from(&host_pending);
             mob_spec = mob_spec.with_host_pending_members(host_pending);
         }
         // The identity runtime keeps its identity records (each build's tool
         // record, each rotation's intent) in the composition's metadata store.
         let identity_record_store = Arc::clone(&persistent_metadata);
+        // The durable decisions record their attested decide events there.
+        let decision_event_store = Arc::clone(&persistent_metadata);
         let module_agent_events = self.module_agent_events;
         let options = self.options;
         #[allow(unused_mut)]
@@ -2177,6 +2263,22 @@ impl UnifiedRuntimeBuilder {
         #[cfg(feature = "extension-state")]
         {
             runtime.extension_authority = extension_authority;
+        }
+
+        // The console audit log over the composition's metadata store, with
+        // the host's bounds when it set them.
+        if self.console_audit_limits.is_some() || self.console_tool_call_audit_limits.is_some() {
+            let limits = self.console_audit_limits.unwrap_or_default();
+            let tool_call_limits = self.console_tool_call_audit_limits.unwrap_or(limits);
+            runtime.console_audit = crate::console_audit::ConsoleAuditLog::over(
+                Arc::clone(&runtime.persistent_metadata),
+                limits,
+            )
+            .map(|log| Arc::new(log.with_tool_call_limits(tool_call_limits)));
+        }
+        // Restored before anything can evaluate a gating action.
+        if self.keep_gating_state {
+            runtime.keep_gating_state_in_realm().await;
         }
 
         // Construct session bridge from the mob handle for identity-first wiring.
@@ -2266,25 +2368,29 @@ impl UnifiedRuntimeBuilder {
                 ));
             };
             let bridge = session_bridge.clone();
-            let identity_runtime = Arc::new(
-                IdentityRuntime::new(IdentityRuntimeConfig {
-                    continuity_store,
-                    lease_provider,
-                    runtime_instance_id: self
-                        .identity_runtime_instance_id
-                        .clone()
-                        .unwrap_or_else(|| format!("meta-{}", std::process::id())),
-                    has_runtime_store: true,
-                    durability_policy: DurabilityPolicy::SyncWriteThrough,
-                    bridge,
-                    default_timeout: None,
-                })
-                .with_runtime_services(AgentRuntimeServices::new(runtime.mob_runtime.handle()))
-                .with_reset_roster_provider_context(
-                    roster_provider.clone(),
-                    Some(runtime.mob_runtime.handle().definition().clone()),
-                ),
+            let identity_runtime = IdentityRuntime::new(IdentityRuntimeConfig {
+                continuity_store,
+                lease_provider,
+                runtime_instance_id: self
+                    .identity_runtime_instance_id
+                    .clone()
+                    .unwrap_or_else(|| format!("meta-{}", std::process::id())),
+                has_runtime_store: true,
+                durability_policy: DurabilityPolicy::SyncWriteThrough,
+                bridge,
+                default_timeout: None,
+            })
+            .with_runtime_services(AgentRuntimeServices::new(runtime.mob_runtime.handle()))
+            .with_reset_roster_provider_context(
+                roster_provider.clone(),
+                Some(runtime.mob_runtime.handle().definition().clone()),
             );
+            // A governed send's "not now" waits are reported where the
+            // agents' operation refusals are.
+            let identity_runtime = Arc::new(match self.operation_refusal_observer.clone() {
+                Some(observer) => identity_runtime.with_operation_refusal_observer(observer),
+                None => identity_runtime,
+            });
             identity_runtime
                 .set_agent_customizer(agent_customizer.clone())
                 .await;
@@ -2292,7 +2398,6 @@ impl UnifiedRuntimeBuilder {
                 .set_customizer_tool_registry(member_build_wiring.customizer_tool_registry())
                 .await;
             identity_runtime.set_identity_records(identity_record_store, runtime.mob_id());
-            identity_runtime.seed_host_pending(host_pending_seeded);
             // A candidate launch's mob build held every stored member's run
             // starts, and it releases none of them.
             if !runtime.mob_runtime.speaks_for_composition() {
@@ -2399,6 +2504,27 @@ impl UnifiedRuntimeBuilder {
             public_owner,
         );
         runtime.set_live_plan(live_plan);
+        // The durable decisions live in the persistent state directory; a
+        // runtime without one, or on a host store realm, keeps none.
+        if self.host_store.is_none()
+            && let Some(state_dir) = self.persistent_state_path.as_ref()
+        {
+            let realm = MetaStorageLayout::with_injected_roots(state_dir.clone(), None)
+                .meerkat_level_realm()?
+                .clone();
+            let mob_id = runtime.mob_id();
+            let speaks_for_composition = runtime.speaks_for_composition();
+            runtime.set_durable_decisions(
+                crate::durable_decisions::RuntimeDecisions::in_state_dir(
+                    state_dir,
+                    realm,
+                    self.decision_ingresses.clone().unwrap_or_default(),
+                    decision_event_store,
+                    mob_id,
+                    speaks_for_composition,
+                ),
+            );
+        }
         // The error hook lives in a late-bound shared slot created at
         // construction (runtime-owned tasks already hold it), so a
         // builder-supplied hook installs into the slot rather than
@@ -2510,6 +2636,7 @@ impl UnifiedRuntimeBuilder {
                     persistent_state,
                     transcript_store,
                     event_sink: Some(runtime.memory_event_sink()),
+                    private_members: Some(runtime.mob_runtime.private_member_source()),
                     ..Default::default()
                 },
                 self.provider_auth_persistence.clone(),
@@ -2517,6 +2644,14 @@ impl UnifiedRuntimeBuilder {
             .map_err(UnifiedRuntimeBuilderError::Io)?;
             if let Some(panel) = stack.panel.clone() {
                 runtime.set_memory_panel_store(panel);
+            }
+            // The retirements the memory store recorded as private are part
+            // of the private-owner record's durable reads.
+            if let Some(store) = stack.steward_store.clone() {
+                runtime
+                    .mob_runtime
+                    .private_owners()
+                    .bind_private_retirements(store, config.realm.clone());
             }
             // §10.1 dispatch-time taint join: bind the stack's tracker into
             // the member pre-build seam so every member's LLM client marks

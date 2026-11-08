@@ -22,6 +22,9 @@ use crate::runtime::operator_instruction_delivery::{
     MemberInstructionDeliveryOutcome, MemberInstructionPreparation, matched_members,
     member_instruction_record, member_profile,
 };
+use crate::runtime::placed_member_instruction::{
+    placed_member_host, placed_member_instruction_route, release_placed_member_instruction_target,
+};
 use meerkat_core::{
     InstructionContentDigest, InstructionRevision, InstructionSlot, InstructionWriteError,
     MAX_INSTRUCTION_BODY_BYTES, MAX_OPERATOR_INSTRUCTION_ACTIVE_BYTES,
@@ -59,12 +62,37 @@ enum WriteVerdict {
 }
 
 impl MobActor {
+    /// A governed runtime (its machine has a native work authorization host)
+    /// admits an operator-instruction write only with prepared
+    /// authorization, which nothing mints for one yet: a write or revoke is
+    /// refused before MobMachine sees it, so nothing is journaled and no
+    /// member is owed. The refusal is final; a retry is refused the same
+    /// way.
+    fn refuse_operator_instruction_write_on_governed_runtime(
+        &self,
+    ) -> Result<(), OperatorInstructionError> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            if self
+                .runtime_adapter
+                .as_ref()
+                .is_some_and(|runtime| runtime.has_native_work_authorization_host())
+            {
+                return Err(OperatorInstructionError::Refused(
+                    InstructionWriteError::PreparedAuthorizationRequired,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Commit one operator-instruction write (`SetOperatorInstruction`).
     pub(super) async fn set_operator_instruction(
         &mut self,
         write: OperatorInstructionWrite,
         digest: InstructionContentDigest,
     ) -> Result<OperatorInstructionReceipt, OperatorInstructionError> {
+        self.refuse_operator_instruction_write_on_governed_runtime()?;
         let key = write.slot.machine_key();
         let body_bytes = write.body.len() as u64;
         let (target_kind, target_profile, target_member) = write.target.machine_parts();
@@ -123,6 +151,7 @@ impl MobActor {
         slot: InstructionSlot,
         revision: InstructionRevision,
     ) -> Result<OperatorInstructionReceipt, OperatorInstructionError> {
+        self.refuse_operator_instruction_write_on_governed_runtime()?;
         let key = slot.machine_key();
         // The record keeps its target: the journal row carries it.
         let target = self.operator_instruction_target_of(&key);
@@ -285,7 +314,8 @@ impl MobActor {
     /// Prepare one owed member's delivery
     /// (`PrepareMemberInstructionDelivery`): the sealed snapshot at the
     /// machine's generation for the member's bound session, when the machine
-    /// delivers now. A placed member is blocked by the same step.
+    /// delivers now. A placed member's delivery carries its route to its
+    /// member host, from the same machine state.
     pub(super) fn prepare_member_instruction_delivery(
         &mut self,
         agent_identity: &AgentIdentity,
@@ -322,9 +352,17 @@ impl MobActor {
             &member_profile(state, agent_identity),
         )?;
         record.generation = generation;
-        Ok(MemberInstructionPreparation::Deliver(
-            MemberInstructionDelivery::authorized(session_id, record),
-        ))
+        let route = placed_member_instruction_route(
+            state,
+            &self.definition.id,
+            agent_identity,
+            &session_id,
+        )?;
+        let delivery = MemberInstructionDelivery::authorized(session_id, record);
+        Ok(match route {
+            Some(route) => MemberInstructionPreparation::DeliverPlaced { delivery, route },
+            None => MemberInstructionPreparation::Deliver(delivery),
+        })
     }
 
     /// Feed one delivery wave's outcomes back to MobMachine
@@ -426,19 +464,46 @@ impl MobActor {
         )
     }
 
+    /// The snapshot a placed member a `Fresh` spawn mints is born with, for
+    /// its materialize (V7): its whole snapshot at the mob's generation,
+    /// which its member host records in the session it mints.
+    pub(super) fn member_instruction_birth_target(
+        &self,
+        agent_identity: &AgentIdentity,
+        profile_name: &str,
+    ) -> Result<crate::runtime::bridge_protocol::BridgeInstructionTarget, MobError> {
+        crate::runtime::operator_instruction_delivery::member_instruction_record(
+            self.dsl_authority.state(),
+            &self.operator_instructions.bodies,
+            &self.definition.id,
+            agent_identity,
+            profile_name,
+        )
+        .map(|record| {
+            crate::runtime::bridge_protocol::BridgeInstructionTarget::from_record(&record)
+        })
+    }
+
     /// The release verdict of a retiring member
     /// (`ResolveMemberInstructionRelease`) for the session it retires from:
     /// the release to realize, when MobMachine authorizes one. A member
-    /// without a session has no target to release.
+    /// without a session has no target to release. A placed member's roster
+    /// reference may not copy its session: its session is the one MobMachine
+    /// binds it to (or moved to its pending retirement).
     pub(super) fn resolve_member_instruction_release(
         &mut self,
         agent_identity: &AgentIdentity,
         session_id: Option<&SessionId>,
         disposal: mob_dsl::MemberSessionDisposal,
     ) -> Result<Option<MemberInstructionRelease>, MobError> {
-        let Some(session_id) = session_id else {
-            return Ok(None);
+        let session_id = match session_id {
+            Some(session_id) => session_id.clone(),
+            None => match self.placed_member_machine_session(agent_identity) {
+                Some(session_id) => session_id,
+                None => return Ok(None),
+            },
         };
+        let session_id = &session_id;
         let transition = self.apply_dsl_signal_collect_transition(
             mob_dsl::MobMachineSignal::ResolveMemberInstructionRelease {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
@@ -466,6 +531,24 @@ impl MobActor {
             session_id,
             self.definition.id.clone(),
         )))
+    }
+
+    /// The session MobMachine binds a placed member to, or the one its
+    /// releasing retire moved to the runtime's pending retirement; `None`
+    /// for a member that is not placed.
+    fn placed_member_machine_session(&self, agent_identity: &AgentIdentity) -> Option<SessionId> {
+        let state = self.dsl_authority.state();
+        let identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        if !state.member_placement.contains_key(&identity) {
+            return None;
+        }
+        let session = state.member_session_bindings.get(&identity).or_else(|| {
+            state
+                .identity_to_runtime
+                .get(&identity)
+                .and_then(|runtime| state.runtime_retire_pending_sessions.get(runtime))
+        })?;
+        SessionId::parse(&session.0).ok()
     }
 
     /// A destroy's release of one member's operator-instruction target,
@@ -498,7 +581,8 @@ impl MobActor {
     /// Realize a retiring member's authorized release. The member's delivery
     /// lock is taken first, so a delivery in flight lands before the release
     /// and none after it. A target this mob does not own, or a service that
-    /// keeps no durable document, has nothing to release.
+    /// keeps no durable document, has nothing to release. A placed member's
+    /// target is released on its member host, over the supervisor bridge.
     pub(super) fn member_instruction_release_future(
         &self,
         agent_identity: &AgentIdentity,
@@ -509,12 +593,41 @@ impl MobActor {
             .operator_instructions
             .delivery
             .member_lock(agent_identity);
+        let placed = placed_member_host(self.dsl_authority.state(), agent_identity);
+        let bridge = Arc::clone(&self.supervisor_bridge);
+        let identity = agent_identity.clone();
         async move {
             // A delivery prepared before this release writes nothing after
             // it: the release moves the member's epoch on under its lock.
             let mut epoch = lock.lock().await;
             *epoch = epoch.wrapping_add(1);
             let session_id = release.session_id().clone();
+            match placed {
+                Some(Ok(host)) => {
+                    return release_placed_member_instruction_target(
+                        &bridge,
+                        &host,
+                        release.mob_id(),
+                        &identity,
+                        &session_id,
+                    )
+                    .await;
+                }
+                // A placed member whose host has no current binding cannot
+                // be reached: nothing is released, and the retirement goes
+                // on (a revoked host released its members with their
+                // sessions).
+                Some(Err(error)) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "the retiring placed member's host cannot be reached: its operator \
+                         instruction target is not released"
+                    );
+                    return Ok(());
+                }
+                None => {}
+            }
             match service.release_member_instruction_target(release).await {
                 Ok(_)
                 | Err(

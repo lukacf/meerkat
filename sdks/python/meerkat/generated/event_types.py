@@ -32,6 +32,10 @@ from .types import (  # noqa: F401
     ForkNoticeSystemPrompt,
     ForkNoticeTools,
     ForkToolsNotComparedReason,
+    InstructionContentDigest,
+    InstructionEntryKind,
+    InstructionKey,
+    InstructionNamespace,
     InteractionId,
     InterruptedInputKind,
     InterruptedToolRunDisposition,
@@ -874,6 +878,49 @@ class DisputedTurnUsageAccountingIdentity(TypedDict, total=False):
     active_provider: Required[Provider]
     reported_model: Required[str]
     reported_provider: Required[Provider]
+
+
+# A slot's revision: at least 1, strictly increasing per slot within the
+# owner that mints it.
+InstructionRevision = int
+
+
+class InstructionActiveRef(TypedDict, total=False):
+    """One slot of the active set an entry leaves in effect.
+    """
+    body_bytes: Required[int]
+    content_sha256: Required[InstructionContentDigest]
+    key: Required[InstructionKey]
+    namespace: Required[InstructionNamespace]
+    revision: Required[InstructionRevision]
+
+
+class InstructionChangeActivate(TypedDict, total=False):
+    """The body at `revision` applies from this entry on. `supersedes` is
+    the revision that was in effect for the slot, if one was.
+    """
+    body_bytes: Required[int]
+    change: Required[Literal['activate']]
+    content_sha256: Required[InstructionContentDigest]
+    key: Required[InstructionKey]
+    namespace: Required[InstructionNamespace]
+    revision: Required[InstructionRevision]
+    supersedes: NotRequired[Optional[InstructionRevision]]
+
+
+class InstructionChangeRevoke(TypedDict, total=False):
+    """The slot's body stops applying: `revokes` is the revision that was in
+    effect.
+    """
+    change: Required[Literal['revoke']]
+    key: Required[InstructionKey]
+    namespace: Required[InstructionNamespace]
+    revision: Required[InstructionRevision]
+    revokes: Required[InstructionRevision]
+
+
+# One change a delta entry carries.
+InstructionChange = InstructionChangeActivate | InstructionChangeRevoke
 
 
 # Typed reason an interaction stream was abandoned before normal terminal
@@ -2736,10 +2783,40 @@ class AgentEventToolResultsBoundedForRequest(TypedDict, total=False):
     type: Required[Literal['tool_results_bounded_for_request']]
 
 
+class AgentEventOperatorInstructionsApplied(TypedDict, total=False):
+    """An operator-instruction entry of this session was applied. It reports
+    the instructions now in effect for the live session, not their
+    durability: the delta entry a fresh run start appended is published
+    once the run whose start appended it starts, and the snapshot entry a
+    compaction folded the session's entry rows into once that compaction
+    commits (for a staged memory projection, when the runtime commits it,
+    right after its `CompactionCompleted`; a compaction rolled back before
+    its commit is never observed, and its entry sequence goes to the next
+    entry). A restart before the entry is durable (the run's first
+    checkpoint, or the projection's commit) applies the changes again at
+    the next fresh run start and publishes this event again.
+
+    An observation only, projected from the entry row's typed identity:
+    the session's operator-instruction status read is the authority on
+    what is in effect. A run that never starts takes its entry back, so
+    the changes stay pending and a later run start applies them again.
+
+    Appended after every released variant: declaration order is the
+    implicit discriminant (the xtask `released_enum_ordinals` test).
+    """
+    active: NotRequired[list[InstructionActiveRef]]
+    changes: NotRequired[list[InstructionChange]]
+    entry_sequence: Required[int]
+    kind: Required[InstructionEntryKind]
+    run_id: NotRequired[Optional[RunId]]
+    session_id: Required[SessionId]
+    type: Required[Literal['operator_instructions_applied']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest | AgentEventOperatorInstructionsApplied
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

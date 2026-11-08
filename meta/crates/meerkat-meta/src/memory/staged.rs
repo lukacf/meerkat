@@ -1103,7 +1103,7 @@ mod tests {
         let host = StagedMutationBatch {
             kind: StagedBatchKind::FreshWrite,
             realm: "family".to_string(),
-            author: MemoryAuthor::Operator,
+            author: MemoryAuthor::Operator { principal: None },
             ops: vec![StagedOp::Tombstone {
                 id: "op-record".to_string(),
                 rationale: None,
@@ -1131,7 +1131,7 @@ mod tests {
     #[test]
     fn operator_and_application_tiers_rejected_for_every_author() {
         for author in [
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
             MemoryAuthor::Application,
             MemoryAuthor::Steward {
                 run_id: "d".to_string(),

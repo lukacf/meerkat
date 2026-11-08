@@ -38,7 +38,7 @@ flowchart LR
 
 A valid provider signature establishes transport origin. It does not establish the author's application permissions. Provider channel/thread IDs are namespaced lookup keys, not session authority. A Slack thread does not create a visibility ACL separate from its channel.
 
-Inbound routing, semantic delegation and outbound delivery are distinct jobs. A host may support a fixed agent, an authorized selection or a routing agent. Connect exposes only that host's supported choices. A home-automation host, for example, routes admitted senders to their own agents and has no destination-agent selector. Semantic specialist selection stays with the agent; exact lookup follows the chosen binding.
+Inbound routing, semantic delegation and outbound delivery are distinct jobs. A host may support a fixed agent, an authorized selection or a routing agent. Connect exposes only that host's supported choices. For example, one home-automation host routes admitted senders to their own agents and has no destination-agent selector. Semantic specialist selection stays with the agent; exact lookup follows the chosen binding.
 
 ## Independent lifecycles
 

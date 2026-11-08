@@ -52,10 +52,19 @@ impl Default for SpawnIo {
 /// auto-reaping. Its unreaped PID is the identity used for direct-child signals.
 /// Dropping a wait future keeps ownership here. Dropping the handle kills and
 /// reaps the direct child; descendant containment remains the caller's job.
+///
+/// On Linux the direct child of a confined launch is the launch's init, pid 1
+/// of the launch's own pid namespace and the leader of its process group; the
+/// command runs under it. Its status is the command's, as the init reports
+/// it, and killing it ends every process of the launch.
 pub struct NativeChild {
     pid: Option<libc::pid_t>,
     status: Option<ExitStatus>,
     sigchld: Signal,
+    // The read end of the pipe through which a Linux confined launch's init
+    // reports the command's exact wait status before it exits.
+    #[cfg(target_os = "linux")]
+    reported_status: Option<std::os::fd::OwnedFd>,
     pub stdin: Option<ChildStdin>,
     pub stdout: Option<ChildStdout>,
     pub stderr: Option<ChildStderr>,
@@ -85,10 +94,20 @@ impl NativeChild {
             pid: Some(pid),
             status: None,
             sigchld,
+            #[cfg(target_os = "linux")]
+            reported_status: None,
             stdin,
             stdout,
             stderr,
         }
+    }
+
+    /// The pipe through which this Linux confined launch's init reports the
+    /// command's wait status (see the backend's init).
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_reported_status(mut self, status: std::os::fd::OwnedFd) -> Self {
+        self.reported_status = Some(status);
+        self
     }
 
     /// Returns the leader PID until this owner reaps it or loses wait ownership.
@@ -115,7 +134,18 @@ impl NativeChild {
             }
             if result == pid {
                 self.pid = None;
-                self.status = Some(ExitStatus::from_raw(status));
+                let reaped = ExitStatus::from_raw(status);
+                // A Linux confined launch ends the way its command did: the
+                // status its init reported, when it reported one (the init
+                // can end by no signal it sends itself), else the init's own
+                // (killed before the command ended).
+                #[cfg(target_os = "linux")]
+                let reaped = self
+                    .reported_status
+                    .take()
+                    .and_then(|pipe| crate::linux::reported_status(&pipe))
+                    .map_or(reaped, ExitStatus::from_raw);
+                self.status = Some(reaped);
                 return Ok(self.status);
             }
             let error = io::Error::last_os_error();

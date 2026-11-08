@@ -477,6 +477,26 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "ListToolGrantsResult",
     "ToolGrantAuditParams",
     "ToolGrantAuditResult",
+    # Operator instructions (`session/*_instruction*`, `mob/*_instruction*`).
+    # The records precede the params and results that carry them.
+    "InstructionSetErrorData",
+    "WireInstructionSlotView",
+    "WireInstructionEffectiveSlot",
+    "WireSessionInstructionSlot",
+    "SetSessionInstructionParams",
+    "RevokeSessionInstructionParams",
+    "SessionInstructionStatusParams",
+    "SessionInstructionWriteResult",
+    "SessionInstructionStatusResult",
+    "WireInstructionRecord",
+    "WireMemberInstructionSlot",
+    "WireMemberInstructionDelivery",
+    "WireMemberInstructionStatus",
+    "MobSetInstructionParams",
+    "MobRevokeInstructionParams",
+    "MobInstructionStatusParams",
+    "MobInstructionWriteResult",
+    "MobInstructionStatusResult",
     # Durable decisions (`decision/*`). The records precede the params and
     # results that carry them.
     "WireCanonicalPart",
@@ -534,6 +554,25 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireToolGrantExpiryDriver",
     "WireToolGrantRefusalKind",
     "WireToolGrantAuditEvent",
+    # Operator-instruction vocabulary. The refusal codes, dispositions,
+    # effects, entry kinds and state kinds are closed; the pending and block
+    # reasons, the residency and the lowering are tolerant (their schemas
+    # list the known values; the SDK parsers keep any other value). Every
+    # alias a union names precedes it.
+    "InstructionSetErrorCode",
+    "InstructionEffect",
+    "InstructionEntryKind",
+    "WireInstructionPendingReason",
+    "WireInstructionBlockReason",
+    "WireInstructionResidency",
+    "WireInstructionLowering",
+    "WireSessionInstructionDisposition",
+    "WireMobInstructionDisposition",
+    "WireInstructionTarget",
+    "WireInstructionSlotState",
+    "WireInstructionTargetOwner",
+    "WireMemberInstructionDeliveryState",
+    "WireInstructionEffectiveRead",
     # Durable decision vocabulary. The request audience is closed; the result
     # vocabularies are tolerant; the refusal and the error data are closed.
     "DecisionAudienceRequest",

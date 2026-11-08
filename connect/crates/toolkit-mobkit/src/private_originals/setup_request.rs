@@ -8,6 +8,15 @@ use meerkat_authorization_contracts::{
 };
 use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
 
+fn setup_selection_error(error: HostLifetimeError) -> PrivateOriginalError {
+    match error {
+        HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
+            PrivateOriginalError::Unavailable
+        }
+        _ => PrivateOriginalError::Denied,
+    }
+}
+
 /// Exact native references produced by a distinct protected setup review.
 /// Decoding this value does not authorize anything; the source owner reopens
 /// its actual operator decision and resolves the native lineage before use.
@@ -66,7 +75,7 @@ impl PrivateOriginals {
             parent,
             helper_targets: vec![],
         };
-        let route = self.route(&selection.original.route)?;
+        let route = &self.route(&selection.original.route)?;
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
             authority: route.source_authority.clone(),
             work: selection.original.original.clone(),
@@ -92,14 +101,27 @@ impl PrivateOriginals {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
+        let caller = self.selected_source_route(&selection.original.route)?;
+        let admission = self
+            .selected_setup_admission(&caller)
+            .map_err(setup_selection_error)?;
         crate::installed_host::operator_setup::validate_setup_selection(
             &lifetime,
             &self.owner,
             self.store.as_ref(),
             &selection,
+            self,
         )
         .await
-        .map_err(|_| PrivateOriginalError::Denied)?;
+        .map_err(setup_selection_error)?;
+        if self.selected_source_route(&selection.original.route)? != caller
+            || self
+                .selected_setup_admission(&caller)
+                .map_err(setup_selection_error)?
+                != admission
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         let key = self.key(&selection.original)?;
         let stored = self
             .store
@@ -108,6 +130,14 @@ impl PrivateOriginals {
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let mut record = self.decode_record(&stored, &selection.original)?;
+        if self.selected_source_route(&selection.original.route)? != caller
+            || self
+                .selected_setup_admission(&caller)
+                .map_err(setup_selection_error)?
+                != admission
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         if record.operation_cancelled
             || record.final_association.is_some()
             || record.approved_task.is_some()
@@ -126,6 +156,14 @@ impl PrivateOriginals {
         lifetime
             .validate_current_selection()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
+        if self.selected_source_route(&selection.original.route)? != caller
+            || self
+                .selected_setup_admission(&caller)
+                .map_err(setup_selection_error)?
+                != admission
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         record.setup_request = Some(selection.clone());
         let written = self
             .store
@@ -157,11 +195,19 @@ impl PrivateOriginals {
                 return Err(store_error(error));
             }
         }
+        if self.selected_source_route(&selection.original.route)? != caller
+            || self
+                .selected_setup_admission(&caller)
+                .map_err(setup_selection_error)?
+                != admission
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         Ok(selection)
     }
 
     pub(super) async fn setup_request_basis(
-        &self,
+        self: &Arc<Self>,
         record: &SourceRecord,
         reference: &PrivateOriginalRef,
         session: &meerkat_core::SessionId,
@@ -188,21 +234,34 @@ impl PrivateOriginals {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(PrivateOriginalError::Unavailable)?;
+        let selected_caller = self.selected_source_route(&reference.route)?;
+        let selected_admission = self
+            .selected_setup_admission(&selected_caller)
+            .map_err(setup_selection_error)?;
         let mut bounds = crate::installed_host::operator_setup::validate_setup_selection(
             &lifetime,
             &self.owner,
             self.store.as_ref(),
             selection,
+            self,
         )
         .await
-        .map_err(|_| PrivateOriginalError::Denied)?;
+        .map_err(setup_selection_error)?;
+        if self.selected_source_route(&reference.route)? != selected_caller
+            || self
+                .selected_setup_admission(&selected_caller)
+                .map_err(setup_selection_error)?
+                != selected_admission
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         bounds.delegation_depth = DelegationDepth::remaining(0);
         let child_id = self.setup_child_id(selection)?;
         if let Some(saved) = record.final_association.as_ref() {
             self.check_setup_source_binding(record, saved)
                 .map_err(|_| PrivateOriginalError::Conflict)?;
         }
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         let caller = route.grant_caller.clone();
         let executor = route.logical_executor.clone();
         let represented = route.represented_subject.clone();
@@ -211,11 +270,29 @@ impl PrivateOriginals {
         let owner = self.owner.clone();
         let targets = selection.helper_targets.clone();
         let origin = self.setup_origin_for(reference)?;
+        let source = self.clone();
+        let source_route = reference.route.clone();
+        let runtime = tokio::runtime::Handle::current();
+        // The bind attempt, for the blocking writer's issuance.
+        let attempt = meerkat_core::protected_section::effect_mark();
         // The actual blocking writer owns the same login reservation through
         // native issuance even if the waiting binder is dropped.
         let lineage = tokio::task::spawn_blocking(move || {
+            let _attempt = attempt
+                .as_ref()
+                .map(meerkat_core::protected_section::EffectMark::enter);
+            runtime.block_on(source.with_selected_setup_caller(&selected_caller, selected_admission.as_ref(), || {
             super::first_input::with_controller_login(console.as_ref(), None, || {
                 lifetime.with_current_setup(|| {
+                    let current_caller = || {
+                        let selected = source.selected_source_route(&source_route).map_err(|error| match error {
+                            PrivateOriginalError::Unavailable => HostLifetimeError::Unavailable,
+                            _ => HostLifetimeError::Denied,
+                        })?;
+                        if selected != selected_caller { return Err(HostLifetimeError::Denied); }
+                        Ok(())
+                    };
+                    current_caller()?;
                     let issue = || {
                         let current =
                             grants.resolve_lineage(&parent, &caller, represented.as_ref())?;
@@ -226,15 +303,26 @@ impl PrivateOriginals {
                         current
                             .check_current()
                             .map_err(|_| GrantRefusal::Unavailable)?;
+                        current_caller().map_err(|error| match error {
+                            HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => GrantRefusal::Unavailable,
+                            _ => GrantRefusal::Denied,
+                        })?;
                         let child = match grants.issued_reference(&child_id)? {
                             Some(child) => child,
-                            None => grants.issue_child(
-                                &caller,
-                                parent.last().ok_or(GrantRefusal::Denied)?,
-                                child_id.clone(),
-                                executor.clone(),
-                                bounds,
-                            )?,
+                            None => {
+                                // A bind attempt's durable effect: no "not
+                                // now" may follow it.
+                                if let Some(attempt) = &attempt {
+                                    attempt.note("original.setup_request_grant");
+                                }
+                                grants.issue_child(
+                                    &caller,
+                                    parent.last().ok_or(GrantRefusal::Denied)?,
+                                    child_id.clone(),
+                                    executor.clone(),
+                                    bounds,
+                                )?
+                            }
                         };
                         let mut lineage = parent;
                         lineage.push(child);
@@ -248,29 +336,33 @@ impl PrivateOriginals {
                             .map_err(|_| GrantRefusal::Unavailable)?;
                         Ok(lineage)
                     };
-                    let lineage = issue().map_err(|_| HostLifetimeError::Unavailable)?;
-                    let targets = super::setup_targets::issue_targets(
-                        &owner,
-                        &caller,
-                        &executor,
-                        represented.as_ref(),
-                        &origin,
-                        &child_id,
-                        &targets,
-                    )?;
-                    super::setup_targets::project(lineage, targets)
+                    let lineage = issue().map_err(|error| match error {
+                        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+                        _ => HostLifetimeError::Denied,
+                    })?;
+                    current_caller()?;
+                    crate::installed_host::operator_setup::setup_targets::validate_compiled(&targets)?;
+                    let mut issued_targets = Vec::with_capacity(targets.len());
+                    for target in &targets {
+                        current_caller()?;
+                        issued_targets.extend(super::setup_targets::issue_targets(&owner, &caller, &executor, represented.as_ref(),
+                            &origin, &child_id, std::slice::from_ref(target), attempt.as_ref())?);
+                    }
+                    current_caller()?;
+                    super::setup_targets::project(lineage, issued_targets)
                 })
             })
+            }))
         })
         .await
         .map_err(|_| PrivateOriginalError::Unavailable)?
-        .map_err(|_| PrivateOriginalError::Unavailable)?;
+        .map_err(setup_selection_error)?;
         Ok(Some(lineage))
     }
 
     #[cfg(test)]
     pub(super) async fn setup_request_lineage(
-        &self,
+        self: &Arc<Self>,
         record: &SourceRecord,
         reference: &PrivateOriginalRef,
         session: &meerkat_core::SessionId,
@@ -305,6 +397,12 @@ impl PrivateOriginals {
         record: &SourceRecord,
         association: &InputAuthorityAssociation,
     ) -> Result<(), OriginalWriterError> {
+        if let Some((base_record, base_association)) =
+            native_operations::base_projection(record, association)
+                .map_err(|_| OriginalWriterError::Conflict)?
+        {
+            return self.check_setup_source_binding(&base_record, &base_association);
+        }
         let Some(selection) = record.setup_request.as_ref() else {
             return Ok(());
         };
@@ -334,4 +432,4 @@ impl PrivateOriginals {
 pub(in crate::private_originals) mod tests;
 
 #[cfg(test)]
-mod recovery_tests;
+pub(in crate::private_originals) mod recovery_tests;

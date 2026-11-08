@@ -15,8 +15,8 @@ is not a prerequisite for the selected direct 0.9.4 release.
 
 ## Hosted native candidate workflow
 
-This manual-only workflow is source preparation for the Core/Meta 0.9.4 installed
-selection. It does not publish, tag, install on a user host, dispatch another
+This manual-only workflow is source preparation for an explicitly selected,
+supported Core/Meta pair. It does not publish, tag, install on a user host, dispatch another
 workflow, or qualify any bytes until its actual producer and verifier succeed.
 Connect's native package version and application SDK version are independent
 explicit selections, checked against the dispatched source metadata. There is
@@ -35,7 +35,7 @@ without running the product, so it does not require a matching native host.
 The existing producer path is used without weakening its acceptance:
 
 1. Fetch each exact public input by URL, SHA-256 and byte size.
-2. Fetch the exact selected Core/Meta 0.9.4 commits and check any explicitly
+2. Fetch the exact selected Core and Meta commits and check any explicitly
    selected tags against them. Check the selected Cargo manifest/lock,
    complete actual package/feature/dependency graph, and the original public
    Meta SDK wheel against that source. Build the Connect wheel from a
@@ -59,7 +59,7 @@ The existing producer path is used without weakening its acceptance:
    `installed_gateway_schema4_resource_startup_and_shutdown_preview` and its
    existing exclusions remain in `assembly.json`.
 7. Emit the existing `forge-meta-toolkit-runtime-selection-v1` shape, then invoke
-   the selected Meta commit's actual `parse_candidate_selection` and
+   the selected Forge source's actual `parse_candidate_selection` and
    `read_meta_toolkit_artifacts` reader. Its absence or incompatibility refuses.
 8. Upload the whole candidate closure once. A separate job, which executes no
    native product, checks the original upload ID, run/attempt/source and archive
@@ -97,6 +97,8 @@ python3 scripts/connect-candidate.py assemble-cli \
   --candidate-work /absolute/retained/connect-candidate \
   --shutdown-review /absolute/review/native-shutdown-review.json \
   --shutdown-review-sha256 <exact-reviewed-record-sha256> \
+  --rules /absolute/private/release-privacy-rules.json \
+  --exemptions /absolute/private/release-privacy-exemptions.json \
   --output /absolute/new-cli-assembly
 ```
 
@@ -128,7 +130,10 @@ build record. It creates a separate final build record with the two evidence
 references, then invokes the existing assembler. The result is the existing
 `conversation_catalog_local_preparation_and_help_preview`, with
 `cli_tty_qualified: false`. It is neither a Forge gateway selection nor a public
-release, and it retains the assembler's existing exclusions.
+release, and it retains the assembler's existing exclusions. It then scans the
+assembled product and its `.sha256` file for private text (see "Scan the release
+payload for private text" below) and refuses a product that the scan refuses:
+that product is moved to `assembled.refused`, so nothing remains at `assembled`.
 
 These CI wrapper commands require the same retained producer directory through
 independent review and assembly. The existing records name absolute executable
@@ -153,6 +158,59 @@ the component preview. Neither these package tests nor an older successful
 journey qualifies different RC binaries. Autonomous live-model acceptance is a
 separate observation, not inferred from the controlled journey.
 
+## Scan the release payload for private text
+
+Every release file is scanned for private text before it is attested or
+uploaded. One engine does the matching and the container checks:
+`scripts/release-evidence-privacy-scan.py`, kept unchanged and pinned by its
+sha256 in `scripts/release-payload-privacy-scan.py`. The engine decodes nested
+containers four levels deep, does not unpack zstd and reads no member or stream
+larger than 1 GiB. The wrapper walks each payload file with the engine's own
+traversal, and every container the engine does not enter becomes an extra
+artifact of the same engine run: one nested deeper than four levels, a zstd
+container (decompressed), and a compressed tar past the 1 GiB bound, such as a
+large product archive (cut at member boundaries into pieces below the bound,
+keeping every original byte). The scan therefore reaches every level: a
+product archive, the integration library inside it, the wheels, crates and
+source archives inside the library, and what they hold.
+
+```sh
+python3 scripts/connect-candidate.py privacy-scan \
+  --rules /absolute/private/release-privacy-rules.json \
+  --exemptions /absolute/private/release-privacy-exemptions.json \
+  --accepted-findings /absolute/private/accepted-findings.json \
+  --output /absolute/new-privacy-scan \
+  /absolute/staged/<every file to attest or upload>
+```
+
+- The rules and exemptions are private and are never committed. Release mode
+  takes both on the command line and refuses without them; there is no default.
+- Scan every file that will be attested or uploaded: both product archives with
+  their `.sha256` files, the evidence and every other release asset. The
+  embedded integration library is reached through the product archives.
+- The scan fails closed. Any hit refuses, and so does any error the engine
+  reports (a container it cannot decode, a damaged or unsupported archive, a
+  member over its size bound, an unreadable input), unless an accepted finding
+  below covers it exactly. A member over the size bound and an unreadable input
+  are never accepted.
+- `--accepted-findings` is optional. Its entries (schema
+  `release-payload-privacy-scan/accepted/1`) are findings the release owner
+  accepts in exact bytes, such as a third-party file whose text happens to match
+  a rule. Each entry names a category, a rule id, the sha256 of the file that
+  holds the finding (or of a container that encloses it) and a one-line reason.
+  A structural error is accepted with the category `structure`, the engine's
+  error kind as the rule, and the sha256 of the container it was reported in.
+  The same finding in any other bytes refuses, and without the file nothing is
+  accepted. The file stays private, beside the rules.
+- `report.json` holds counts only: hits and errors, accepted and refused, by
+  category and kind, and each payload file's name, size and sha256.
+  `detail.json` holds the matched strings. It is private (mode 0600) and is
+  never uploaded.
+- CI runs only the tests (`scripts/test_release_payload_privacy_scan.py`), with
+  synthetic rules: a made-up marker in
+  `scripts/fixtures/release-payload-privacy-scan/`. CI does not scan release
+  bytes.
+
 ## Required inputs still unbound
 
 `connect-release-inputs.json` selects Linux; `connect-release-inputs-macos-arm64.json`
@@ -161,7 +219,11 @@ The existing owners must supply all of the following separately for each target:
 
 - The final dispatched public Connect source commit, its native package version,
   SDK distribution/version, and exact native Cargo manifest/lock hashes.
-- The exact Core and Meta source commits whose native packages are `0.9.4`.
+- The exact Core and Meta source commits for one supported pair: Core `0.9.4`
+  with Meta `0.9.4`, Core `0.9.5` with Meta `0.9.5`, or Core `0.9.7` with Meta
+  `0.9.6`. Meta `0.9.6` requires Core `0.9.7`; the `0.9.6`/`0.9.6` pair is
+  refused. The Meta SDK and Connect's `native-host` dependency must match the
+  selected Meta version, so they remain `0.9.6` for the `0.9.7`/`0.9.6` pair.
   Each existing `native_release.core` / `native_release.meta` selector has
   exactly `repository`, `version`, `source_sha` and `tag`. `source_sha` is a
   full lowercase 40-character commit SHA. Set `tag` to `""` for an explicit
@@ -195,15 +257,21 @@ The existing owners must supply all of the following separately for each target:
   SDKs, from each non-dist-info wheel member to its exact selected repository-
   relative source file. Connect source supplies its own wheel through its current
   build backend; no wheel payload or version is rewritten. The source must
-  declare the matching `meerkat-meta==0.9.4` native-host dependency.
+  declare the matching exact `meerkat-meta` native-host dependency.
 - A complete offline SDK build-tool requirements file and wheel batch, including
   the build frontend and the selected source backend requirements. No versions
   are inferred. `--no-isolation` uses only that fresh build environment; the
   existing source-owned backend remains responsible for creating the wheel.
-- The exact hashes of the four Forge reader source files in the selected
-  Meta commit checkout. The historical r5 Meta source has no installer reader;
-  its availability is not implied by a version string. Missing or differing
-  reader source refuses before resource/native production.
+- An independent `forge_reader_source` with exactly `repository`, `source_sha`
+  and `tag`. The repository is `lukacf/meerkat-meta`; the lowercase 40-character
+  commit selects the actual Forge installer reader, which ships under `forge-v*`
+  tags independently of Meta's SDK and native release. An empty tag permits an
+  explicitly reviewed commit; a nonempty safe `forge-v*` tag must peel to that
+  exact commit. The four `forge_reader_source_pins` hashes bind its existing
+  owner files. Missing or differing source refuses before resource/native
+  production. This checkout supplies both dependency-batch readers and the
+  final artifact reader. It never substitutes for the native Meta checkout used
+  to compare the selected Meta wheel's source bytes.
 - One complete offline dependency requirements file and wheel batch. The
   existing Forge reader validates both this batch and the SDK build-tool batch
   before either install: only exact single-hash package pins, with original
@@ -236,14 +304,14 @@ in this workflow, so they do not depend on publication of the same candidate.
 
 `accept-publication` accepts an already emitted candidate. It does not run the
 build or fetch commands. Use a separate environment without GitHub write
-credentials; its verifier and Meta-reader child processes receive a scrubbed
+credentials; its verifier and Forge-reader child processes receive a scrubbed
 home/configuration and no inherited credential environment.
 
 ```sh
 python3 scripts/connect-candidate.py accept-publication \
   --request /path/to/selected-publication-request.json \
   --candidate /path/to/candidate-files \
-  --meta-source /path/to/selected-meta-checkout \
+  --forge-reader-source /path/to/selected-forge-checkout \
   --output /path/to/new-acceptance-directory
 ```
 
@@ -277,16 +345,23 @@ The repository is fixed to `lukacf/meerkat-connect` and the workflow to
 verifies each subject; the checked result must match the exact source,
 workflow, ref, run/attempt, issuer and GitHub-hosted runner. The manifest and
 original input selection bind the input digest, native releases and Connect
-version. The Meta checkout's HEAD must be the exact selected commit, with a
-clean original `installer/launchkit` package and matching reader source pins.
+version. The original input digest also binds the independent Forge reader
+selection. That checkout's HEAD must be the exact selected commit, with a clean
+original `installer/launchkit` package and matching reader source pins.
 If the selector includes a tag, its explicit `refs/tags/<tag>` must also resolve
 to that commit. Commit-only selection requires no tag. Neither an SDK wheel
 nor a separate reader wheel substitutes for that checkout. Both paths retain
-the same `0.9.4` native package and Meta SDK version requirements, exact SDK
-source comparison, graph checks and actual owner-reader acceptance.
+the exact selected native package and Meta SDK versions, SDK source comparison,
+graph checks and actual owner-reader acceptance.
+
+Historical attested inputs without `forge_reader_source` retain their original
+exact `native_release.meta` reader selection. An explicit null or malformed
+reader selection refuses; it never falls back. New production requires the
+independent field. `--meta-source` remains a legacy spelling for the reader
+checkout, with the same checks; the two CLI spellings cannot be supplied together.
 
 Acceptance performs bounded data-only extraction, preserves original bytes,
-and checks the complete retained inventory. The selected Meta package supplies
+and checks the complete retained inventory. The selected Forge source supplies
 `parse_candidate_selection`, `packaged_runtime.relocate_selection` and
 `selected_runtime_artifacts`; only that owner relocates physical paths in its
 in-memory view. The original v1 selection and producer records are not
@@ -318,11 +393,14 @@ python3 scripts/connect-candidate.py publish-accepted \
   --output /path/to/new-publication-observation
 ```
 
-`--accepted` selects the prior `acceptance.json` and `assets/` directory.
+`--accepted` selects the prior `acceptance.json`, `assets/`, and the retained
+`unpacked/` text evidence. The writer rechecks each text file against the exact
+size and SHA-256 in that independently selected acceptance.
 `--acceptance-sha256` is its independently selected exact lowercase SHA-256;
 `--output` must not exist. The writer parses the same bytes it hashes, retains
 and rechecks the three allowlisted assets, and repeats attestation verification
-before any upload. Only those original three assets can be added. It imports
+before any upload. It also checks the complete prospective Forge fragment and
+all pinned text evidence as described below. Only those original three assets can be added. It imports
 no product or Forge code and performs no archive extraction. Each upload keeps
 the verified bytes in an open anonymous file through `gh --input -`, so replacing
 an input path cannot substitute unaccepted bytes at the public write.
@@ -343,11 +421,60 @@ Earlier argument or handoff refusal may occur before that report exists. No
 partial result contains a final file inventory, and uploaded assets are not
 deleted as rollback. Only complete readback and final checks produce
 `status: verified_public_inventory`, the selected acceptance digest, release ID,
-tag, original selection and layout, and public wrapper-member URLs with exact
-archive/member sizes and hashes. This is the final public URL inventory; an
-Actions artifact alone is not that handoff.
+tag, unchanged layout, and public wrapper-member URLs with exact archive/member
+sizes and hashes. `forge-fragment.json` contains exactly `files`, `selection`
+and `paths`. Its selection omits only `artifact_root` and the physical `path`
+fields of artifacts and dependency wheels. All other values and row order are
+preserved. `forge-fragment-attribution.json` binds that fragment to the selected
+acceptance and the unchanged original `RUNTIME-SELECTION.json` archive member.
+Forge supplies its own Guide and ordinary-gateway inputs. An Actions artifact
+alone is not the final public handoff.
+
+### Forge delivery checks
+
+Acceptance preserves historical producer data. A successful acceptance can
+still be incompatible with final delivery. Before any public write, the writer
+checks the portable fragment's keys and string values, then every owner-selected
+pinned `.json`, `.jsonl`, `.md`, `.txt` and `.sha256` file, including indirect
+build, resource, gateway-verification and source-manifest records and the
+original runtime selection. It reads each retained text file once, checks its
+selected bytes, and scans that same in-memory copy. The existing 32 MiB metadata
+bound also applies to these reads. Missing, changed or incompatible text refuses
+without rewriting evidence or uploading an asset. Successful observations appear
+under `forge_delivery` in `publication.json`.
+
+The rules are selected from `forge-fill-inputs-030.py`, SHA-256
+`73d9a50e5f7644aa5fa05008b47a25259543a079fde1f8232f95ca31846ec3a4`. Its corrected home-prefix rule permits
+`/home/.cargo/` in pinned evidence and refuses `/Users/.cargo/`. The fragment must
+contain relative or URL-based fields only: absolute paths, home prefixes and
+private-name matches refuse. Pinned evidence uses the owner's narrower personal
+home-path rule, permitting `/Users/runner/`, `/home/runner/` and `/home/.cargo/`.
+These exceptions never admit such paths into the portable fragment.
+
+Decoded JSON keys and string values are checked, so escaped slashes and Unicode
+escapes cannot hide forbidden content. The exact selected wheel file entries
+(F1) and `source-manifest.json` top-level `files[].path` entries (F1b) exempt
+private names only; personal paths always refuse. JSON object keys and sibling
+fields receive no F1b exception. Other text, including JSONL, uses the selected
+helper's raw-text fallback and exact selected wheel-name removal for its private
+name check. No new private-name or path exception is inferred from an example.
+
+Use fresh actual hosted-runner production for final evidence. Do not sanitize
+old records or copy their hashes onto projected replacements: the source,
+resource, build, verification and assembly records bind one another and the
+original attested archive. Selected external inputs may still contain historical
+paths, so hosted production alone is not a delivery pass. The real selected
+Forge fetch/fill/package check against the final public pins remains separate;
+Connect checks only its own complete contribution, not Forge's additional inputs.
 
 ## Scope and remaining work
+
+The fragment projection and delivery guard passed the offline producer and
+publication suites on 26 October 2026: 499 passed, with one Linux
+case-sensitive-filesystem check skipped on macOS. All 152 selected guard and
+provenance cases passed. These use controlled signature, reader and transport
+fixtures; actual hosted production, public Forge acceptance and native product
+qualification remain separate.
 
 The candidate workflow was checked by source reading, Python AST parsing,
 JSON parsing, YAML parsing and exact patch roundtrip. The publication commands
@@ -361,10 +488,10 @@ mismatches, data-only attestation, unchanged historical producer paths, valid bo
 binding mismatches and preserving the other target's release assets. The exact
 npm/pip additions also reject alternate locators and mismatched downloaded bytes.
 They do
-not establish actual signature verification, selected Meta-reader acceptance,
+not establish actual signature verification, selected Forge-reader acceptance,
 public upload or Forge inclusion. No Cargo, packager, native verifier, native
 binary, GitHub job or remote host was executed for this draft. Actual attested
-candidate inputs and the exact selected Meta package must still pass acceptance;
+candidate inputs and the exact selected Forge reader must still pass acceptance;
 the selected source and input joins need a real owner-authorized CI run.
 Each target's installed-product scope is narrower than shared setup workflow,
 acquisition, account login, model/task completion or installation. Success on

@@ -610,6 +610,20 @@ describe("MetaRuntime", () => {
     assert.equal(params.runtime_options.workgraph, "/var/lib/mob/workgraph");
   });
 
+  it("emits the decision ingresses as runtime_options.decisions", () => {
+    const { rt } = createMockRuntime();
+    assert.equal((rt as any)._buildInitParams().runtime_options.decisions, undefined);
+    (rt as any)._config.decisionIngresses = [
+      { ingress: "chat", attests: "person", maxClockSkewMs: 5000 },
+    ];
+
+    const params = (rt as any)._buildInitParams();
+
+    assert.deepEqual(params.runtime_options.decisions, {
+      ingresses: [{ ingress: "chat", attests: "person", max_clock_skew_ms: 5000 }],
+    });
+  });
+
   it("omits workgraph runtime option when unset", () => {
     const { rt } = createMockRuntime();
 

@@ -217,8 +217,8 @@ pub use boot_plan::{
 mod declared_apply;
 pub use declared_apply::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
-    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
-    NotAdoptedReason, UnlistedEntryOutcome,
+    DeclaredEntryRefusal, DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome,
+    FirstBootRequest, NotAdoptedReason, UnlistedEntryOutcome,
 };
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;
@@ -367,6 +367,10 @@ mod panic_capture;
 pub mod path;
 mod pending_spawn_lineage;
 mod placed_carrier_cleanup;
+// A placed member's operator-instruction record and release on its member
+// host (protocol 7): a `BridgeReply` consumer, listed in
+// BRIDGE_CLASSIFIER_FILES.
+pub(crate) mod placed_member_instruction;
 mod provision_guard;
 mod provisioner;
 pub mod reconcile;
@@ -401,7 +405,7 @@ mod supervisor_bridge;
 mod terminalization;
 mod tools;
 pub(crate) use tools::mob_operator_tool_names;
-pub use tools::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
+pub use tools::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub mod topology;
 mod transaction;
 pub mod turn_executor;
@@ -521,10 +525,10 @@ pub use handle::{
     HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
     InitializeAdaptiveRunRequest, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
-    MemberDeliveryReceipt, MemberHandle, MemberInputAdmission, MemberPreviewUnavailable,
-    MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal, MemberRespawnReceipt,
-    MemberRunState, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
-    MemberTurnOptions, MobActorTaskWait, MobActorTaskWatch, MobDestroyError,
+    MemberDeliveryReceipt, MemberHandle, MemberInputAdmission, MemberLifecycleSettlement,
+    MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal,
+    MemberRespawnReceipt, MemberRunState, MemberTargetAbsence, MemberTurnEventSender,
+    MemberTurnHandle, MemberTurnOptions, MobActorTaskWait, MobActorTaskWatch, MobDestroyError,
     MobDestroyMemberRefusal, MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig,
     MobEventsView, MobHandle, MobMachineStateChanges, MobMemberEndpointOwner,
     MobMemberEndpointStatus, MobMemberListEntry, MobMemberPeerEndpoint, MobMemberSnapshot,

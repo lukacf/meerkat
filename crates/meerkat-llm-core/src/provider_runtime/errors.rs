@@ -128,8 +128,8 @@ pub enum AccountModelRefusal {
         model: String,
     },
     /// The account does not offer the model: its model list does not name
-    /// it, or the account's policy disables it. `available` lists the ids
-    /// the account offers on a protocol Meerkat speaks.
+    /// it. `available` lists the ids the account offers on a protocol
+    /// Meerkat speaks.
     #[error(
         "credential '{credential}' does not offer model '{model}'{}",
         offered_models_suffix(.available)
@@ -144,6 +144,24 @@ pub enum AccountModelRefusal {
     UnsupportedEndpoints {
         credential: meerkat_core::AuthCredentialIdentity,
         model: String,
+    },
+    /// The account lists the model with an empty endpoint list: its
+    /// catalog states that the model has no endpoints.
+    #[error("credential '{credential}' lists model '{model}' with no endpoints")]
+    NoEndpoints {
+        credential: meerkat_core::AuthCredentialIdentity,
+        model: String,
+    },
+    /// The account lists the model, but its policy for it is not
+    /// `enabled`; `state` is the policy state the account states (for
+    /// example `disabled` or `unconfigured`).
+    #[error(
+        "credential '{credential}' lists model '{model}' with policy state '{state}', not 'enabled'"
+    )]
+    PolicyNotEnabled {
+        credential: meerkat_core::AuthCredentialIdentity,
+        model: String,
+        state: String,
     },
 }
 

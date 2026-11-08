@@ -15,7 +15,7 @@ use std::sync::{Mutex, PoisonError};
 
 use meerkat_core::types::SessionId;
 use meerkat_meta::identity_first::{
-    AgentIdentity, AgentRuntimeId, BridgeError, MemberRuntimeBinding,
+    AgentIdentity, AgentRuntimeId, BridgeError, CoreIdentityEntry, CoreMember, MemberRuntimeBinding,
 };
 
 #[derive(Clone)]
@@ -31,6 +31,7 @@ struct Member {
 #[derive(Default)]
 pub struct CoreMembers {
     members: Mutex<BTreeMap<AgentIdentity, Member>>,
+    runtime_modes: Mutex<BTreeMap<AgentIdentity, meerkat_mob::MobRuntimeMode>>,
 }
 
 impl CoreMembers {
@@ -190,6 +191,39 @@ impl CoreMembers {
             .durable_identity_members()
             .cloned()
             .collect())
+    }
+
+    /// Core runs `identity`'s member in `mode` from now on (Core's default
+    /// mode until then).
+    pub fn set_runtime_mode(&self, identity: &AgentIdentity, mode: meerkat_mob::MobRuntimeMode) {
+        self.runtime_modes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone(), mode);
+    }
+
+    /// Core's entry of `identity`'s name (`SessionBridge::identity_entry`):
+    /// no identity entry, with the member Core holds under it while it is
+    /// live (its generation, session and role, in the runtime mode a test
+    /// set, Core's default otherwise).
+    pub fn identity_entry(&self, identity: &AgentIdentity) -> CoreIdentityEntry {
+        let entry = CoreIdentityEntry::not_an_entry();
+        let Some(member) = self.live(identity) else {
+            return entry;
+        };
+        let mode = self
+            .runtime_modes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(identity)
+            .copied()
+            .unwrap_or_default();
+        entry.with_member(CoreMember::seated(
+            member.generation,
+            member.session_id,
+            member.profile,
+            mode,
+        ))
     }
 
     fn live(&self, identity: &AgentIdentity) -> Option<Member> {

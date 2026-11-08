@@ -28,6 +28,15 @@ until their semantics have a supported mapping. In particular, do not drop a
 `cwd` requirement, and do not pass literal strings containing `${`, which the
 native TOML loader would expand.
 
+<Note>
+When the host enforces process confinement, Core 0.9.10 refuses servers from an
+`mcp.toml` that a confined process can modify. `rkat` warns that a confined
+process can write the file, and on a governed realm reports the server's failed
+setup to the model with the typed `untrusted_configuration_source` refusal; those
+servers do not launch. Have the host keep the configuration outside process
+write grants, or select the server through its existing realm configuration.
+</Note>
+
 The host supplies the minimal process environment. Empty `env` does not clear
 inherited variables. Credentials remain with the host; do not paste them into
 shared configuration or agent messages. Configure account authentication and

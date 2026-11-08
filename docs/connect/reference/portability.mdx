@@ -29,6 +29,58 @@ A skill is a distribution form, not proof of service access. MCP supports tool o
 
 A portable MCP entry must work independently. Components that require Connect contracts, host services, package state or dependencies cannot also advertise a generic entrypoint that ignores those requirements. Unsupported clients must receive an explicit gap rather than a silently weakened integration.
 
+The existing `setup_inspect_plugin` tool can also list a selected package directory with `{ "staged_id": "selected-plugin", "inventory": "./" }`. The agent can follow the returned `./skills` directory and unknown skill or supporting-file names, then explicitly choose public text with the existing `files` request. Inventory uses the same anchored `PluginRoot` owner as exact reads and visits one directory per call. It reads no file contents and produces no retained source reference. Selected text keeps its existing exact hashes and recovery path after the staging files are removed.
+
+Inventory is sorted and bounded: 256 entries, 1024 UTF-8 bytes per path, 64 KiB total path bytes, and at most 15 directory components in a request. Invalid names, observed directory changes and exceeded limits refuse without partial results. Symlinks and special entries are classified without being followed or opened; an explicitly selected directory may resolve through a symlink only within the package boundary. Completion applies to that directory enumeration, not package compatibility, immutable contents or readiness. The agent still decides which files are useful and what setup is needed.
+
+The Rust export API can copy explicitly included skill documents, supporting files and bundled executables through the anchored `PluginRoot` reader. On Unix, it snapshots file bytes and executable intent from the same opened regular file. Exported executable files use creation mode `0755`, other files `0644`, with the caller's umask preserved. Source ownership, special mode bits and group/world write permissions are not copied. An executable file in an export is still package data; exporting it grants no permission to run it.
+
+`inspect_existing` checks executable intent as well as file contents on Unix. Its fingerprints include an optional `executable` observation. Absence in a historical fingerprint means the mode was not recorded, rather than proving the file was non-executable.
+
+The saved-recipe CLI also supports `export --guidance` and matching `check-export`. A trusted host selects exact retained skill paths and binds the saved recipe and source digests. The exporter reads their bytes from the existing store after staging removal, preserves recognized plugin metadata and extension namespaces, and writes only `plugin.json` and the selected skill text. Every selected skill must include its `SKILL.md`; supporting text can live anywhere beneath that skill. The output adds no MCP configuration, activation or execution authority, and files have no execute bits. See the [local recipe guide](https://github.com/lukacf/meerkat-connect/blob/b1870fa0d3ebb5696830d32f8a15728106898585/crates/toolkit-package/LOCAL-RECIPES.md#export-selected-retained-guidance) for selection and readback commands.
+
+The local round-trip controls cover an authored stdio server used by a generic protocol client after source removal, and saved guidance discovered by an independent file reader after canonical inspection, SQLite retention and staging removal. The latter follows a skill's relative reference to fresh fixture data. These controls do not qualify Windows permissions or full Agent Plugins client conformance. Automatic whole-package discovery, skill frontmatter validation and artifact-backed Connect package realization remain separate work.
+
+### Qualified external-client example
+
+A development case exported [Microsoft's `microsoft-docs` 0.3.1 pack](https://github.com/MicrosoftDocs/mcp/tree/f8ffde185dfd232dbf5d187c22ce299eadc3d583)
+on Linux, then used unchanged [OpenHands SDK 1.49.2](https://github.com/OpenHands/software-agent-sdk/tree/d128a786ee2ee570eb23ff5862ec148b43cfad0b)
+on macOS with Python 3.12.13. This was an explicit format adaptation: all eight
+original files and the license remain intact, while two added canonical JSON
+files select Agent Plugins metadata and map `http` to `streamable-http` without
+changing the published endpoint.
+
+After source staging was removed, the public Rust export API produced and
+inspected the ten-file pack. OpenHands' normal `Plugin.load` and
+`create_mcp_tools` loaded three skills and one server, then one
+`microsoft_docs_fetch` call returned a substantive Azure Blob Storage overview.
+No model, credentials, runtime overlay or alternate HTTP client was needed.
+Normal local context/process cleanup passed independent review.
+
+This establishes one pack/client operation, not a general format-conversion
+feature or full client conformance. Two earlier UMT launch attempts remain failed
+before any tool call. Remote implementation identity, remote session deletion,
+complete-page fidelity, other targets and installed Connect host adoption need
+separate evidence.
+
+### Supported canonical subset
+
+PKG-007 is complete for the declared Agent Plugins 1.0 skill/MCP import/export
+subset. The four verified obligations are useful inert skill guidance, refusal of
+unsupported required Connect contracts, portable exports that remain valid when
+Connect namespaces are ignored, and refusal of malformed transport/credential
+declarations. This combines retained setup and macOS/Linux utility evidence with
+generic-client controls and the actual OpenHands operation above. It does not
+claim every client, target or donor format. D3 and package migration remain open.
+
+For the qualified OpenHands 1.49.2 normal loader, root `plugin.json` selects the
+canonical format. Only root `mcp.json` supplies MCP entries; its absence yields
+an empty map. An invalid canonical manifest fails instead of falling back to
+legacy sidecars. Connect reserves both canonical root names, while retained
+legacy files remain opaque payload. This loader rule was verified against exact
+source; explicitly selecting a legacy loader or using another client is outside
+that profile.
+
 ## Host execution modes
 
 Python and TypeScript integrations can run in a compatible host or supervised workers with isolated dependencies. Native Rust remains useful for host constraints or measured needs. Unselected integrations should remain cold metadata: no import, process or prompt cost merely because a recipe exists.

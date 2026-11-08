@@ -140,6 +140,7 @@ pub mod protocol_supervisor_trust_publish;
 pub mod protocol_supervisor_trust_revoke;
 pub mod recovery;
 pub mod resumed_run_admission;
+pub mod retained_run;
 pub mod retained_work;
 pub(crate) mod run_progress;
 pub mod run_stop;
@@ -651,6 +652,12 @@ pub use input_state::{
 /// names, re-exported so a host or the facade can name it without its own
 /// dependency on the authorization contracts crate.
 pub use meerkat_authorization_contracts::work_association::OriginalWorkRef;
+/// The versioned digest a governed submission's receipt names its authority
+/// association by (`InputAuthorityAssociation::digest`), re-exported for the
+/// same reason; see [`MeerkatMachine::governed_input_by_key`].
+pub use meerkat_authorization_contracts::work_association::{
+    ASSOCIATION_DIGEST_VERSION, AssociationDigest, AssociationDigestError,
+};
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::McpObservationRefusal;
 #[cfg(not(target_arch = "wasm32"))]
@@ -680,9 +687,9 @@ pub use meerkat_machine::{
     RuntimeSessionRegistrationOutcome, RuntimeSessionRegistrationUse,
     RuntimeSessionRegistrationWitness, RuntimeSessionUnregisterAdmission,
     RuntimeSessionUnregisterObserver, RuntimeSessionUnregisterUseAdmission,
-    SessionDurabilityReloadRequired, StagedCustodyRelease, StagedMeerkatMachine,
-    StandaloneSessionRuntimeAuthorities, StoppedRegistrationTakeover, UnregisterQueuedInputs,
-    UnregisterQueuedInputsError, classify_runtime_lifecycle_state,
+    SessionDurabilityReloadRequired, SessionDurableWork, SessionWorkState, StagedCustodyRelease,
+    StagedMeerkatMachine, StandaloneSessionRuntimeAuthorities, StoppedRegistrationTakeover,
+    UnregisterQueuedInputs, UnregisterQueuedInputsError, classify_runtime_lifecycle_state,
     classify_runtime_loop_queue_admission, standalone_session_runtime_authorities,
     standalone_tool_visibility_owner,
 };
@@ -728,6 +735,7 @@ pub use resumed_run_admission::{
     RESUMED_RUN_ADMISSION_RETRY_DELAY, ResumedRunAdmission, ResumedRunAdmissionDecision,
     ResumedRunAdmissionRequest,
 };
+pub use retained_run::{RetainedRunSettledInput, RetainedRunSettlement};
 pub use run_stop::{RunStopContributor, RunStopReceipt};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_hosting::spawn_blocking_holding_claim;

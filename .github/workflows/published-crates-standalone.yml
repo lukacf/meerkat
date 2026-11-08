@@ -44,6 +44,9 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   SCCACHE_GHA_ENABLED: "true"
   SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+  # Never exit on idle (nightly.yml says why): at the default 600 s the
+  # server exits under a long compile, which then starts again uncached.
+  SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
   census:

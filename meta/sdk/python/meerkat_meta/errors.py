@@ -126,6 +126,28 @@ class MetaError(Exception):
     """Base exception for all Meta SDK errors."""
 
 
+#: The kind of :class:`DecideInsideToolCallbackError`.
+DECIDE_INSIDE_TOOL_CALLBACK_KIND = "decide_inside_tool_callback"
+
+
+class DecideInsideToolCallbackError(MetaError):
+    """A durable decision's decide was called while this SDK serves a host
+    tool callback.
+
+    An agent's tool call must never become the operator's (or an attested
+    person's) decision, so ``decisions_decide`` refuses before anything is
+    sent. Decide from the host's own code, outside the tool's handler.
+    """
+
+    kind = DECIDE_INSIDE_TOOL_CALLBACK_KIND
+
+    def __init__(self) -> None:
+        super().__init__(
+            "meta/decisions/decide is refused inside a host tool callback: an "
+            "agent's tool call never decides a durable decision"
+        )
+
+
 class TransportError(MetaError):
     """Raised when the transport layer fails (subprocess died, connection refused, etc.)."""
 
@@ -493,6 +515,13 @@ class StorageResolutionError(RpcError):
       and ``remedy`` what to do: ``"add_to_roster"`` (no roster lists the
       identity) or ``"wake_identity"`` (the roster lists it and its row waits
       to be carried out). Retryable.
+
+    A send, a dispatch or a member mutation by a name the gateway has not
+    registered whose record Core cannot read (written by a newer release, or
+    contradicted by the mob's journal) is refused for good with
+    ``kind`` ``"identity_name_unreadable"``, the name in ``identity`` and
+    ``remedy`` ``"repair_or_upgrade"``: repair the mob's store, or run a
+    release that reads the record.
 
     ``retryable`` is ``True`` only when the gateway says so. The other
     fields are ``None`` when the gateway did not send them; the full
@@ -935,7 +964,11 @@ class IdentityHistoryUnavailableError(RpcError):
     ``"identity_session_absent"`` when a delivery reached a member whose
     session ``session_id`` Core holds no durable copy of: nothing was
     delivered, and Core settles the member; deliver again. A failed read of
-    the whole roster's history names no ``identity``.
+    the whole roster's history names no ``identity``. ``kind`` is
+    ``"governed_input_held"`` when every bind of a governed send answered
+    "not now" until its door's budget ended: nothing was submitted, and the
+    same input may be sent again (``data`` carries the condition, the wait
+    and the input id).
     ``kind``, ``identity`` and ``session_id`` are ``None`` when the gateway
     did not send them.
     """

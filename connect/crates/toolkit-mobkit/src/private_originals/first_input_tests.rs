@@ -538,8 +538,25 @@ impl FirstFixture {
             )
             .await
             .unwrap();
+            // Restore seats a dormant member. This fixture needs its live
+            // controller pin before submitting the first authenticated input.
+            let materialized = runtime
+                .materialize(&identity)
+                .await
+                .unwrap()
+                .expect("the Console fixture requires a session-backed member");
+            assert_eq!(
+                provider.0.load(Ordering::SeqCst),
+                0,
+                "materializing the fixture member must not run a model turn"
+            );
             let status = runtime.status(&identity).await.unwrap();
             let session = status.session_id.expect("native Console session realized");
+            assert_eq!(
+                materialized.session_id(),
+                &session,
+                "materialization must preserve the identity owner's selected session"
+            );
             assert!(
                 status.agent_runtime_id.is_some(),
                 "native Console runtime identity realized"
@@ -581,8 +598,14 @@ impl FirstFixture {
             (session, runtime, member_spec)
         } else {
             let member = MemberIdentity::from(MEMBER);
+            // The identity label marks this spawn as the identity's member, as
+            // Meta marks its own: registering the identity then adopts the
+            // member as the identity's entry, where an unmarked one is refused
+            // as a worker holding the name.
             handle
-                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()))
+                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()).with_labels(
+                    BTreeMap::from([("agent_identity".to_owned(), MEMBER.to_owned())]),
+                ))
                 .await
                 .unwrap();
             let session = handle
@@ -661,7 +684,10 @@ impl FirstFixture {
                 placement: None,
             };
             // Core already owns this spawned member and session; registration adds its roster spec.
-            runtime.register(member_spec.clone()).await;
+            runtime
+                .register(member_spec.clone())
+                .await
+                .expect("the identity registers");
             let status = runtime.status(&identity).await.unwrap();
             assert_eq!(status.state, IdentityLifecycleState::Active);
             assert_eq!(status.session_id, Some(session.clone()));
@@ -718,6 +744,14 @@ impl FirstFixture {
 
 // These observations do not depend on which actual native service owns the session.
 impl<S> FirstFixture<S> {
+    pub(crate) async fn wait_for_turn(
+        &self,
+        identity: &AgentIdentity,
+        ticket: TurnTicket,
+        timeout: std::time::Duration,
+    ) -> TurnOutcome {
+        self.runtime.wait_for_turn(identity, ticket, timeout).await
+    }
     pub(crate) async fn binding(&self) -> Result<Option<InputAuthorityAssociation>, String> {
         tokio::time::timeout(
             WAIT,
@@ -775,6 +809,15 @@ impl<S> FirstFixture<S> {
             Err("native ticket did not complete the original answer".into())
         }
     }
+    pub(crate) fn hold_next_response(&self) -> super::PreparedResponseHold {
+        self.provider.hold_next_response()
+    }
+    pub(crate) fn hold_response_after(
+        &self,
+        preceding_responses: usize,
+    ) -> super::PreparedResponseHold {
+        self.provider.hold_response_after(preceding_responses)
+    }
     pub(crate) fn model_requests(&self) -> usize {
         self.provider.0.load(Ordering::SeqCst)
     }
@@ -794,6 +837,30 @@ impl<S> FirstFixture<S> {
             .await
             .unwrap()
             .unwrap()
+    }
+    /// The originals store as a successor opens it: once this host's close
+    /// released the store's custody, this host's own handle refuses every
+    /// read, so what the close retained is read through a new opener.
+    pub(crate) fn closed_store(&self) -> toolkit_store::SqliteStore {
+        toolkit_store::SqliteStore::open_existing(&self.source_path)
+            .expect("the close released the originals store")
+    }
+    /// [`Self::cold_source_record`] after this host's close.
+    pub(crate) async fn closed_source_record(&self) -> toolkit_store::StoredRecord {
+        self.closed_store()
+            .get(&self.source.key(&self.submission.original).unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    /// [`Self::binding`] after this host's close, from the record a new
+    /// opener of the same database reads.
+    pub(crate) async fn closed_binding(&self) -> Option<InputAuthorityAssociation> {
+        let record = self.closed_source_record().await;
+        self.source
+            .decode_record(&record, &self.submission.original)
+            .unwrap()
+            .final_association
     }
     pub(crate) fn cold_source_custody(
         &self,
@@ -827,6 +894,23 @@ impl<S> FirstFixture<S> {
             .release_original(&original)
             .map_err(|error| error.to_string())
     }
+    /// Hold the source collection on another thread for `hold`, as another
+    /// owner's short section does. Returns once the collection is held.
+    pub(crate) fn hold_source_collection_for(
+        &self,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let owner = self.source.owner.clone();
+        let (held, holding) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let originals = owner.lock_originals_for_test();
+            held.send(()).unwrap();
+            std::thread::sleep(hold);
+            drop(originals);
+        });
+        holding.recv().unwrap();
+        holder
+    }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         shutdown_fixture(&self.native).await
@@ -835,7 +919,7 @@ impl<S> FirstFixture<S> {
     fn preissue_controller(&self, wrong_executor: bool) -> Result<GrantLineageRef, String> {
         // Model a native append that completed before the source final row.
         // This is real durable issuance, not a synthesized lookup result.
-        let route = self
+        let route = &self
             .source
             .route(&self.submission.original.route)
             .map_err(|error| error.to_string())?;
@@ -1047,6 +1131,9 @@ async fn retained_native_id_for_another_executor_is_not_recovered_or_reissued() 
 #[path = "helper_entry_native_tests.rs"]
 mod helper_entry_native;
 
+#[path = "custody_review_tests.rs"]
+mod custody_review_tests;
+
 #[path = "persistent_first_input_fixture.rs"]
 mod persistent;
 
@@ -1063,3 +1150,12 @@ mod helper_report;
 
 #[path = "configured_setup_native_tests.rs"]
 mod configured_setup_native;
+
+#[path = "dedicated_workflow_fixture.rs"]
+pub(in crate::private_originals) mod dedicated;
+
+#[path = "planning_source_evidence_tests.rs"]
+mod planning_source_evidence_tests;
+
+#[path = "first_send_not_now_tests.rs"]
+pub(in crate::private_originals) mod first_send_not_now;

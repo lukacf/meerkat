@@ -2944,7 +2944,7 @@ mod tests {
                                 evidence: Vec::new(),
                                 verification: None,
                             },
-                            MemoryAuthor::Operator,
+                            MemoryAuthor::Operator { principal: None },
                         )
                         .await?;
                 }

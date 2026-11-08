@@ -142,8 +142,8 @@ its open run until its next open.
   too, and the run never continues. The exception is a graceful stop that
   keeps queued work (see
   [Graceful Stops And Deploys](#graceful-stops-and-deploys)): the run then
-  continues at the session's next start, unless an input bound to it is
-  older than the stop's max age by then.
+  continues at the session's next start, unless the stop's max age has
+  passed since the stop by then.
 
 ### Graceful Stops And Deploys
 
@@ -214,14 +214,19 @@ whose run cannot continue to queued, as every start does.
 - **The run continues at the next start**, when its session is opened again
   or its mob rebuilds the member, before the kept queued prompts run.
   Meerkat does not look for such runs at start-up.
-- **The max age still applies.** If any input bound to the run is older
-  than `max_age`, counted from its admission, when the next start finds it,
-  the run's inputs end as `requeue_expired` (as `cancelled` when the run's
-  stop was asked after that start registered it) and the run does not
-  continue: it is closed as interrupted, with the rounds it committed kept.
-  An explicit `max_age` lies between 1 millisecond and 24 hours; the default
-  shutdowns above use 15 minutes (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`,
-  and `RequeueMaxAge::DEFAULT` for a mob Shutdown).
+- **The max age still applies.** If more than `max_age` has passed since
+  the stop when the next start finds the run, the run's inputs end as
+  `requeue_expired` (as `cancelled` when the run's stop was asked after that
+  start registered it) and the run does not continue: it is closed as
+  interrupted, with the rounds it committed kept. The age counts from the
+  stop, not from when the run's inputs were admitted, so `max_age` bounds
+  how long the session may stay down: a run admitted long before a short
+  restart continues. Through 0.9.10 it counted from each input's admission,
+  so a run admitted more than `max_age` before a graceful restart ended
+  `requeue_expired`, however short the restart. An explicit `max_age` lies
+  between 1 millisecond and 24 hours; the default shutdowns above use 15
+  minutes (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`, and
+  `RequeueMaxAge::DEFAULT` for a mob Shutdown).
 
 Any other way of stopping still ends the run in flight: a graceful stop
 that chooses Stop, an explicit stop or cancel, retiring, destroying or
@@ -241,7 +246,7 @@ that is killed leaves its runs as any crash does.
 | The run has no bound inputs (a direct or machine-service turn) | Closes the run as interrupted, with its content kept |
 | The saved transcript and the run cursor disagree | Holds the session for reconciliation; an operator can resolve the hold, unless the cursor cannot be read or its saved response has calls without a message id (see [Storage Operations](/guides/storage-operations#resolve-a-durable-tail-held-for-recovery)) |
 | A durable worker's resume gate refused the run | Settles the run like a stop (see [Resume Gate](#resume-gate)), then closes it as interrupted, with its content kept |
-| A graceful stop kept the run, and an input bound to it is older than the stop's max age at the next start | Ends the run's inputs as `requeue_expired` (as `cancelled` when the run's stop was asked after that start registered it), then closes the run as interrupted, with its content kept |
+| A graceful stop kept the run, and more than the stop's max age has passed since that stop at the next start | Ends the run's inputs as `requeue_expired` (as `cancelled` when the run's stop was asked after that start registered it), then closes the run as interrupted, with its content kept |
 | On a `jsonl` or host-store realm, the process stopped after the run's closing save of a compacted transcript and before the run ended | Closes the run as interrupted: every message it wrote is kept and its inputs do not run again, but a run that had finished still shows the interrupted notice. Without the compaction, the same stop recovers a finished run as completed |
 
 Closing a run as interrupted keeps everything the run committed. Its rounds
@@ -271,6 +276,238 @@ run that names another run keeps the run's tail held for reconciliation
 
 The rules for every kind of durable tail are in
 [Session contracts: durable-tail recovery](/reference/session-contracts#durable-tail-recovery).
+
+### Settling An Open Run Without A Model Request
+
+Since 0.9.11 a host that must not let an open run continue (an app's
+Recover flow, for example) settles the run instead, with no model request.
+The run ends as a stopped run that never resumed does: its inputs end
+`cancelled`, and it is closed as interrupted with the rounds it committed
+kept. A stop, reset or retire that ends the run first, while the settle
+waits, ends it its own way, and the settle reports the terminals that
+committed. Four steps, per member:
+
+1. **Hold the member before the start.** Stage the host's own recovery hold,
+   `HostRunStartHoldReason::HostRecovery`, with
+   `MobBuilder::hold_restored_member_run_starts`. No mob or Meta code stages
+   or releases this hold, so it stands until the host releases it; a retire
+   or destroy of the member drops it with the member. A hold lives in the
+   process only: stage it at every start until the recovery is done.
+2. **Wake the member.** The start materializes every member whose store
+   holds an open run; wake a member it left dormant with
+   `MobHandle::ensure_member_live`. The member's registration keeps the
+   open run, and the hold keeps it from continuing: no model request is
+   made. To find the members that hold work without waking any, read each
+   session cold with `MeerkatMachine::session_work_state`: `HoldsWork` names
+   one whose store holds work, `Idle` one that holds none, and `Unobserved`
+   a store that cannot tell (never read it as idle). The read loads no
+   session body and registers nothing.
+3. **Settle the run.** `MobHandle::settle_member_retained_run` answers
+   `RetainedRunSettlement::Settled { run_id, inputs }` once the settlement
+   committed: the member's registration no longer keeps the run, and each
+   input holds its committed terminal (`cancelled`, or `reset` or `retired`
+   when a reset or a retire ended the run first). It answers `NotRetained`
+   when the member's runtime keeps no run, `Busy { current_run_id: Some(_) }`
+   when a run is current (it continued before the hold, or another run
+   started: the verb never stops a running run; `stop_member_run` does), and
+   `Busy { current_run_id: None }` when the registration cannot settle the
+   run now (it is initializing, draining for its unregister, retired or
+   stopped). A member that is not materialized in this process is refused
+   with `MobError::MemberSessionNotLive`: the verb never wakes a member,
+   since a wake without the hold would let the run continue. A settlement
+   that did not commit, or that left the run's tail standing, is refused
+   too, and never answered `Settled`: `MobError::MemberReloadRequired` when
+   its write failed (the reload loses the settle, so reload the member with
+   `MobHandle::reload_member_registration`, which applies the hold again,
+   and settle again) or its tail repair failed (after the reload the member
+   keeps no run, and the next settle answers `NotRetained`), and
+   `MobError::MemberSessionNotLive` when the session's store realm lost its
+   fence (another writer took it, or the realm stopped itself; see step 4),
+   or when an unregister ended the run first (its inputs then
+   end `stopped` when the unregister keeps queued work, as a mob Shutdown
+   does by default, whatever their state, and `cancelled` when it stops).
+   On a host store realm, a settlement write whose batch the store refused,
+   or left unsettled, poisons the session's scopes while the realm keeps its
+   fence (see [Failures](#failures)): that member's settle then answers
+   `MemberReloadRequired` every time and its reload fails until the realm is
+   opened again, so reloading and settling again cannot succeed in this
+   process (see step 4).
+   When the registration no longer keeps the run but an input of the run
+   reads no committed terminal yet (the read of its stored row failed, for
+   one), the answer is `MobError::MemberInputTerminalNotYetReadable`: settle
+   again.
+4. **Release the hold on every path that leaves no open run.**
+   `MobHandle::release_member_run_starts` with
+   `HostRunStartHoldReason::HostRecovery`: after `Settled`, `NotRetained` and
+   `Busy { current_run_id: Some(_) }`, and for a member that holds no work. A
+   hold left staged keeps the member from ever starting a run, even at its
+   next wake days later. While the run may still be open
+   (`Busy { current_run_id: None }`, or a refusal), keep the hold and settle
+   that member again; releasing it there would let the run continue. Two
+   refusals answer the same on every round, so the member is done:
+   `MobError::MemberNotFound`, for a member the mob no longer holds (a retire
+   dropped its hold with it), and `MobError::UnsupportedForMode`, for one the
+   hold never applied to (a placed member, or one with no session). A
+   release for a member the mob no longer holds answers `MemberNotFound`
+   too, with nothing left staged. Two cases end the recovery in this
+   process for every member. Once the mob is destroyed or shut down, its
+   actor is gone and every command to it (the wake, the settle and the
+   release among them) answers `MobError::ActorCommandChannelClosed` (a
+   destroyed mob's members are gone with it; a mob shut down is recovered
+   at its next start, under the hold again). Once the host store realm lost
+   its fence (`SpiRealm::realm_poisoned` reads `Some`: another writer took
+   the fence, or the realm stopped itself), every settle is refused
+   `MemberSessionNotLive`: the realm refuses this process's reads and writes
+   until it is opened again, so no wake, reload or cold read here can serve
+   a member, and the realm's next owner recovers the runs (this process
+   recovers them only after it opens the realm again). One case ends a
+   single member's recovery in this process while the realm keeps its
+   fence: a settlement write of that member whose batch the store refused,
+   or left unsettled, poisoned its session's scopes (`SpiRealm::poisoned_scopes`
+   lists them). Its settle answers `MemberReloadRequired` every time, and its
+   reload fails until the realm is opened again. The member stays held and
+   nothing of its run runs; opening the realm again (in a new process, or
+   with a new open of the realm in this one) lifts the poison, and a start
+   over the reopened realm, under the hold again, recovers it.
+
+```rust
+use meerkat_mob::{AgentIdentity, HostRunStartHoldReason, MobBuilder, MobError, MobHandle};
+use meerkat_runtime::store::spi::SpiRealm;
+use meerkat_runtime::{MeerkatMachine, RetainedRunSettlement, SessionWorkState};
+
+/// What a member's recovery leaves.
+enum Recovered {
+    /// No open run is kept: release the hold.
+    Done,
+    /// The run may still be open: keep the hold, settle again later.
+    StillOpen,
+    /// The mob's actor is gone: no command to it answers again.
+    MobGone,
+}
+
+async fn recover(
+    handle: &MobHandle,
+    machine: &MeerkatMachine,
+    identity: &AgentIdentity,
+) -> Result<Recovered, Box<dyn std::error::Error + Send + Sync>> {
+    if handle.member_unmaterialized(identity) {
+        // A dormant member whose store holds no work keeps no run.
+        let Some(session_id) = handle.resolve_bridge_session_id(identity).await else {
+            return Ok(Recovered::Done);
+        };
+        if machine.session_work_state(&session_id).await? == SessionWorkState::Idle {
+            return Ok(Recovered::Done);
+        }
+        if let Err(error) = handle.ensure_member_live(identity).await {
+            return final_refusal(error);
+        }
+    }
+    match handle.settle_member_retained_run(identity).await {
+        Ok(RetainedRunSettlement::Busy { current_run_id: None }) => Ok(Recovered::StillOpen),
+        // Settled, NotRetained, or a run is current.
+        Ok(_) => Ok(Recovered::Done),
+        Err(error) => final_refusal(error),
+    }
+}
+
+/// The refusals that answer the same at every call. The mob no longer holds
+/// the member (a retire dropped its hold with it), or the hold never applied
+/// to it (a placed member, or one with no session): that member is done. The
+/// mob's actor is gone (a destroy or a shutdown): the recovery is over. Any
+/// other refusal keeps the hold for a later round.
+fn final_refusal(error: MobError) -> Result<Recovered, Box<dyn std::error::Error + Send + Sync>> {
+    match error {
+        MobError::MemberNotFound(_) | MobError::UnsupportedForMode { .. } => Ok(Recovered::Done),
+        MobError::ActorCommandChannelClosed => Ok(Recovered::MobGone),
+        error => Err(error.into()),
+    }
+}
+
+/// One round over `members`: the members to settle again in a later round,
+/// none when nothing in this process can recover a member any more.
+async fn recover_round(
+    handle: &MobHandle,
+    machine: &MeerkatMachine,
+    realm: Option<&SpiRealm>,
+    members: &[AgentIdentity],
+) -> Vec<AgentIdentity> {
+    let mut settle_again = Vec::new();
+    for identity in members {
+        if realm.is_some_and(|realm| realm.realm_poisoned().is_some()) {
+            // The realm lost its fence: its next owner recovers the runs.
+            return Vec::new();
+        }
+        match recover(handle, machine, identity).await {
+            Ok(Recovered::Done) => {
+                match handle
+                    .release_member_run_starts(identity, HostRunStartHoldReason::HostRecovery)
+                    .await
+                {
+                    // Released, or the mob no longer holds the member:
+                    // nothing stays staged for it.
+                    Ok(()) | Err(MobError::MemberNotFound(_)) => {}
+                    Err(MobError::ActorCommandChannelClosed) => return Vec::new(),
+                    Err(_) => settle_again.push(identity.clone()),
+                }
+            }
+            Ok(Recovered::MobGone) => return Vec::new(),
+            // The run may still be open, or the member needs a reload first:
+            // the hold keeps the run from continuing until a later round.
+            Ok(Recovered::StillOpen) | Err(_) => settle_again.push(identity.clone()),
+        }
+    }
+    settle_again
+}
+
+// `machine` is the MeerkatMachine the mob's session service runs on, and
+// `realm` the host store realm it writes through (`None` on a `sqlite` or
+// `jsonl` realm, which has no fence to lose).
+let handle = MobBuilder::for_resume(storage)
+    .with_session_service(service)
+    .hold_restored_member_run_starts(HostRunStartHoldReason::HostRecovery, members.clone())
+    .resume()
+    .await?;
+let mut settle_again = recover_round(&handle, &machine, realm.as_deref(), &members).await;
+```
+
+Run `recover_round` again over `settle_again` (after reloading a member
+refused `MemberReloadRequired`) until it is empty. A member leaves it once
+its run is settled or none is kept and its hold is released, or once the mob
+no longer holds it or the hold never applied to it; and a round leaves none
+when the mob's actor is gone or the realm lost its fence, which ends the
+recovery in this process (see step 4). On a host store realm, a member whose
+settlement write the store refused, or left unsettled, never leaves it in
+this process: the loop does not empty for that member until the realm is
+opened again (see step 4), so stop settling it once
+`SpiRealm::poisoned_scopes` lists a scope of its session, and keep its hold.
+
+A retry is safe. A settle that arrives while an earlier one is still
+settling the same run joins it and gets the same answer. A retry after the
+run was settled (when a reply was lost, say) answers `NotRetained`; the
+proof is the run's inputs, which read their committed terminals (`cancelled`
+when the settle ended the run) through
+`MeerkatMachine::input_terminal_receipt`.
+
+A runtime embedding with no mob takes the same steps on its
+`MeerkatMachine`: `stage_registration_run_start_hold_only` with
+`RunStartHoldReason::HostRecovery` before the session registers,
+`settle_retained_run`, then `release_run_starts` on the same paths. A
+settlement whose write failed, or whose tail repair left the run's tail
+standing, answers `RuntimeDriverError::RecoveryRepairBlocked`: reload the
+registration (`recover_or_discard_reload_required_registration_if_current`),
+which applies the staged hold again, and settle again (after a failed tail
+repair the reloaded registration keeps no run, so that settle answers
+`NotRetained`). On a host store realm, a settlement write whose batch the
+store refused, or left unsettled, poisons the session's scopes while the
+realm keeps its fence: the settle then answers `RecoveryRepairBlocked` every
+time and the reload fails until the realm is opened again, so the session
+stays held, and nothing of its run runs, until the realm's next open. A
+writer whose host store realm lost its fence (another
+writer took it, or the realm stopped itself) is refused as a session that
+leaves this process at every settle, `RuntimeDriverError::StaleAuthority`:
+the realm refuses that writer's reads and writes until it is opened again,
+so no reload here can serve the session, and the realm's next owner
+recovers the run.
 
 ## Tools That Run Again
 
@@ -367,9 +604,13 @@ This applies to:
 - a call that would run as a detached job under a runner that declares it
   cannot resume or repeat work.
 
-Process custody still stops the earlier process before the agent is rebuilt,
-and the transcript still gets its tool-process recovery notice, as in earlier
-releases.
+Process custody still stops the earlier process before the agent is rebuilt.
+A foreground shell call answered this way, whether the run continues or is
+closed as interrupted, gets no `tool_process_interrupted` block: its
+`outcome_uncertain` result is the record. A background shell job, a monitor
+or a command hook the run started keeps its tool-process recovery notice:
+its process outlives the call that started it, so that call's result does
+not say how the process ended.
 
 Meerkat does not provide exactly-once external effects. A tool whose effect
 must not happen twice deduplicates on the key above.
@@ -463,7 +704,11 @@ fence:
   for it; if another process took the fence or committed meanwhile, the
   realm stops until it is opened again. A later renew never restores it.
   A renew answered `FencedOut` means another process holds the fence, and
-  the realm stops until it is opened again.
+  the realm stops until it is opened again. When an acquire of its own
+  timed out and the store may still have granted it, a token the holder
+  does not know may be its own: it waits out that token's lease and
+  acquires again, and stops the realm only if that token is renewed (a live
+  process holds it) or a batch it did not write shows up.
 - **A stop is a pause.** A run that reaches a model call or a tool call
   while the holder is stopped (a renew failed or timed out, or its window
   closed) waits for that new acquire, for at most one self-fence window
@@ -482,7 +727,11 @@ fence:
   yet. The gap may last any number of waits. A round commit that meets
   the stopped holder waits and suspends the run the same way (the commit
   is written again, once, when the acquire succeeds within the wait); the
-  round it was writing is done again on resume, as after a crash. A
+  round it was writing is done again on resume, as after a crash. A commit
+  whose batch was already sent and is still unsettled when the holder's
+  window closes stops there instead: it fails typed, its scopes are
+  poisoned, and writing them again is refused until the realm is opened
+  again (see Failures below). A
   closing save (the write after the run's final answer) waits and is
   written again the same way, but it cannot suspend the run, whose turn
   has already ended: a closing save still refused after its one wait keeps
@@ -566,6 +815,13 @@ lists every read and the re-base rule.
 - **Unknown outcome.** A commit whose outcome is unknown is settled before
   the scope's next version: Core retries the same batch, with the same commit
   id, or reads the head's commit id.
+- **Unsettled at the fence window.** Core sends a commit's batch only while
+  the holder's self-fence window for the fence token it carries is open: the
+  store's lease for that token may end soon after. A commit still unsettled
+  when that window closes stops there, typed
+  (`RuntimeStoreError::UnsettledAtFenceWindow`), and poisons its scopes like
+  a failed batch; the realm keeps its fence. While renews fail, the retry
+  budget is cut at the window.
 - **Failed batch.** A batch the store refuses, or whose outcome stays unknown
   past the retry budget, poisons every scope it touched. Those scopes refuse
   every later call that needs them, with a typed refusal, until the realm is

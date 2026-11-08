@@ -49,12 +49,13 @@
 use meerkat::{
     AddEvidenceRequest, AttentionListRequest, AttentionPauseRequest, AttentionProjectionRequest,
     AttentionPruneRequest, AttentionReassignRequest, AttentionResumeRequest,
-    BreakGlassAttentionReassignRequest, ClaimWorkItemRequest, CloseWorkItemRequest,
-    CreateWorkItemRequest, GoalAttentionTarget, GoalConfirmRequest, GoalCreateRequest,
-    GoalRequestCloseRequest, GoalStatusRequest, LinkWorkItemsRequest, PolicyEscalateRequest,
-    ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkAttentionBindingId,
-    WorkGraphError, WorkGraphEventFilter, WorkGraphIdParams, WorkGraphService,
-    WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace, WorkOwnerKey, WorkStatus,
+    BreakGlassAttentionReassignRequest, BreakGlassReleaseWorkItemRequest, ClaimWorkItemRequest,
+    CloseWorkItemRequest, CreateWorkItemRequest, GoalAttentionTarget, GoalConfirmRequest,
+    GoalCreateRequest, GoalRequestCloseRequest, GoalStatusRequest, LinkWorkItemsRequest,
+    PolicyEscalateRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
+    WorkAttentionBindingId, WorkGraphError, WorkGraphEventFilter, WorkGraphIdParams,
+    WorkGraphService, WorkGraphSnapshotFilter, WorkItemFilter, WorkItemId, WorkNamespace,
+    WorkOwnerKey, WorkStatus,
 };
 use serde_json::Map;
 
@@ -363,6 +364,137 @@ fn resolve_goal_target(
     }
 }
 
+/// The member of this runtime's mob `mob_id` an owner key names: an agent
+/// key `mob/<mob>/agent/<member>` of that mob. Any other key names none.
+fn owner_key_member(mob_id: &meerkat_mob::MobId, owner_key: &WorkOwnerKey) -> Option<String> {
+    if owner_key.kind != meerkat::WorkOwnerKind::Agent {
+        return None;
+    }
+    let (mob, member) = owner_key.id.strip_prefix("mob/")?.split_once("/agent/")?;
+    (mob == mob_id.as_str() && !member.is_empty() && !member.contains('/'))
+        .then(|| member.to_string())
+}
+
+/// The member a goal or attention target lowered by
+/// `lower_member_session_target` names: the owner forms carry the member's
+/// key, and a session form a member holds is lowered to that member's key.
+/// A session no member holds names none.
+pub(crate) fn target_member(
+    mob_id: &meerkat_mob::MobId,
+    target: &GoalAttentionTarget,
+) -> Option<String> {
+    match target {
+        GoalAttentionTarget::Owner { owner_key } => owner_key_member(mob_id, owner_key),
+        GoalAttentionTarget::Session { .. } => None,
+    }
+}
+
+/// On the console, a member hidden from the caller
+/// ([`crate::access::AccessView::hides_agent`]) named by a target is refused
+/// as an unknown member's, as the console refuses one named in a target's
+/// identity form before the method runs: nothing is recorded for it, and
+/// nothing tells the caller it exists.
+fn refuse_hidden_member(
+    surface: &WorkgraphSurface<'_>,
+    member: Option<&str>,
+) -> Result<(), JsonRpcError> {
+    let (
+        WorkgraphSurface::Console {
+            access: Some(view), ..
+        },
+        Some(member),
+    ) = (surface, member)
+    else {
+        return Ok(());
+    };
+    if view.hides_agent(member) {
+        return Err(crate::http_console::unknown_identity_rpc_error(member));
+    }
+    Ok(())
+}
+
+/// [`refuse_hidden_member`] for the member a lowered target names.
+fn refuse_hidden_target(
+    surface: &WorkgraphSurface<'_>,
+    mob_id: &meerkat_mob::MobId,
+    target: &GoalAttentionTarget,
+) -> Result<(), JsonRpcError> {
+    refuse_hidden_member(surface, target_member(mob_id, target).as_deref())
+}
+
+/// `data.kind` of the -32602 refusal for a goal, reassignment or supervisor
+/// key that names a member private to a person: such a member is built
+/// without WorkGraph tools, and every turn of a bound member takes the
+/// binding's tools, so no binding can serve it and it confirms nothing.
+pub(crate) const PRIVATE_MEMBER_WORKGRAPH_TARGET_KIND: &str = "private_member_workgraph_target";
+
+/// Refuse a lowered target (or supervisor key) that names a member private
+/// to a person (its roster labels name a private owner), for every caller:
+/// the member's owner and an access admin too, who may see it
+/// ([`WorkGraphAdmission::refuse_private_member_target`], which the agent
+/// tool plane asks too). A caller it is hidden from was already refused as
+/// naming an unknown member ([`refuse_hidden_target`]).
+async fn refuse_private_member_target(
+    admission: &WorkGraphAdmission,
+    target: &GoalAttentionTarget,
+) -> Result<(), JsonRpcError> {
+    admission
+        .refuse_private_member_target(target)
+        .await
+        .map_err(admission_error_to_rpc)
+}
+
+/// [`refuse_hidden_member`] for the supervisor a completion policy names,
+/// in any form of its key, then [`refuse_private_member_target`]: a member
+/// built without WorkGraph tools confirms nothing.
+async fn refuse_hidden_supervisor(
+    surface: &WorkgraphSurface<'_>,
+    mob_id: &meerkat_mob::MobId,
+    admission: &WorkGraphAdmission,
+    policy: &meerkat::WorkCompletionPolicy,
+) -> Result<(), JsonRpcError> {
+    let meerkat::WorkCompletionPolicy::Supervisor { owner_key } = policy else {
+        return Ok(());
+    };
+    let supervisor = admission
+        .lower_member_session_target(GoalAttentionTarget::Owner {
+            owner_key: owner_key.clone(),
+        })
+        .await
+        .map_err(admission_error_to_rpc)?;
+    refuse_hidden_target(surface, mob_id, &supervisor)?;
+    refuse_private_member_target(admission, &supervisor).await
+}
+
+/// An attention list filter that names a member hidden from the caller,
+/// swapped for a target no member holds: the list answers as it answers a
+/// name that does not exist.
+async fn absent_if_hidden(
+    surface: &WorkgraphSurface<'_>,
+    mob_id: &meerkat_mob::MobId,
+    admission: &WorkGraphAdmission,
+    target: meerkat::WorkAttentionTarget,
+) -> Result<meerkat::WorkAttentionTarget, JsonRpcError> {
+    let named = match &target {
+        meerkat::WorkAttentionTarget::Session { session_id } => GoalAttentionTarget::Session {
+            session_id: session_id.clone(),
+        },
+        meerkat::WorkAttentionTarget::LoweredOwner { owner_key } => GoalAttentionTarget::Owner {
+            owner_key: owner_key.clone(),
+        },
+    };
+    let lowered = admission
+        .lower_member_session_target(named)
+        .await
+        .map_err(admission_error_to_rpc)?;
+    if refuse_hidden_target(surface, mob_id, &lowered).is_err() {
+        return Ok(meerkat::WorkAttentionTarget::Session {
+            session_id: meerkat::SessionId::new(),
+        });
+    }
+    Ok(target)
+}
+
 /// Synthesize the confirm evidence for an evidence-less wire call: the kind
 /// literal the goal's completion policy admits (mirrors the machine's
 /// `required_confirmation_evidence_kind` vocabulary), keyed on the binding.
@@ -504,6 +636,28 @@ fn admission_error_to_rpc(error: WorkGraphAdmissionError) -> JsonRpcError {
                 })),
             }
         }
+        WorkGraphAdmissionError::PrivateMember { member } => JsonRpcError {
+            code: -32602,
+            message: format!(
+                "Invalid params: member '{member}' is private to a person and is built without \
+                 WorkGraph tools, so no WorkGraph goal, attention binding or supervisor may name it"
+            ),
+            data: Some(serde_json::json!({
+                "kind": PRIVATE_MEMBER_WORKGRAPH_TARGET_KIND,
+                "member": member,
+            })),
+        },
+        WorkGraphAdmissionError::MemberUnreadable { member, detail } => {
+            let detail = format!("the target member '{member}' could not be read: {detail}");
+            JsonRpcError {
+                code: WORKGRAPH_ERROR_CODE,
+                message: detail.clone(),
+                data: Some(serde_json::json!({
+                    "kind": "workgraph_error",
+                    "detail": detail,
+                })),
+            }
+        }
     }
 }
 
@@ -523,14 +677,23 @@ fn admission_error_to_rpc(error: WorkGraphAdmissionError) -> JsonRpcError {
 /// SAME instance or concurrent creates race past the check.
 /// Which RPC surface a workgraph call arrived on. The host stdin surface is
 /// host-trusted but carries no wire principal; the console surface carries
-/// the authenticated console principal (`None` when console auth is off),
-/// which `goal/confirm` promotes into the trusted confirmation seam and
-/// `attention/break_glass_reassign` requires for audit attribution.
+/// the authenticated console principal (`None` for an open console's
+/// caller without a token), which owns the caller's claims and which
+/// `attention/break_glass_reassign` requires for audit attribution, and the
+/// signed-in person, whom `goal/confirm` promotes into the trusted
+/// confirmation seam.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum WorkgraphSurface<'a> {
     HostStdin,
     Console {
         authenticated_principal: Option<&'a str>,
+        /// The signed-in person the connection names, when it names one:
+        /// the only console caller that confirms a goal.
+        person: Option<&'a crate::http_console::ConsoleApprovalDecider>,
+        /// The request's access view, when an access controller is wired: a
+        /// release re-reads it under the configuration committed after its
+        /// last await (an access admin releases anyone's claim).
+        access: Option<&'a crate::access::AccessView>,
     },
 }
 
@@ -570,12 +733,6 @@ pub(crate) async fn handle_workgraph_method(
     {
         return Err(method_not_found());
     }
-    let trusted_principal = match surface {
-        WorkgraphSurface::HostStdin => None,
-        WorkgraphSurface::Console {
-            authenticated_principal,
-        } => console_trusted_principal(authenticated_principal),
-    };
     let Some(service) = service else {
         return Err(workgraph_unavailable_error());
     };
@@ -646,7 +803,12 @@ pub(crate) async fn handle_workgraph_method(
             reject_non_default_namespace(service, &object)?;
             let mut object = object;
             normalize_attention_status_param(&mut object)?;
-            let request: AttentionListRequest = parse_request(object)?;
+            let mut request: AttentionListRequest = parse_request(object)?;
+            // A filter naming a member hidden from the caller lists what a
+            // name no member holds lists.
+            if let Some(target) = request.target.take() {
+                request.target = Some(absent_if_hidden(&surface, mob_id, admission, target).await?);
+            }
             let result = service
                 .list_attention(request)
                 .await
@@ -679,6 +841,17 @@ pub(crate) async fn handle_workgraph_method(
         }
         "meta/workgraph/claim" => {
             let mut object = object;
+            // On the console a claim is owned by its caller: the owner comes
+            // from the connection, and an owner that names anyone else is
+            // refused.
+            if let WorkgraphSurface::Console {
+                authenticated_principal,
+                ..
+            } = surface
+            {
+                let owner = console_claim_owner(authenticated_principal, object.get("owner"))?;
+                object.insert("owner".to_string(), owner);
+            }
             // The wire contract writes owner flat ({kind, id, display_name?});
             // upstream WorkOwner nests the key. Accept both shapes.
             if let Some(Value::Object(owner)) = object.get("owner")
@@ -707,10 +880,41 @@ pub(crate) async fn handle_workgraph_method(
         }
         "meta/workgraph/release" => {
             let request: ReleaseWorkItemRequest = parse_request(object)?;
-            let item = service
-                .release(request)
-                .await
-                .map_err(workgraph_error_to_rpc)?;
+            // On the console the claim's owner releases it; an access admin
+            // releases anyone's, as a break-glass release the work graph
+            // records with the admin and the claim released.
+            let admin = match surface {
+                WorkgraphSurface::HostStdin => None,
+                WorkgraphSurface::Console {
+                    authenticated_principal,
+                    access,
+                    ..
+                } => {
+                    console_release_admin(
+                        service,
+                        authenticated_principal,
+                        access,
+                        &request,
+                        params,
+                    )
+                    .await?
+                }
+            };
+            let item = match admin {
+                None => service.release(request).await,
+                Some(principal) => {
+                    service
+                        .break_glass_release(BreakGlassReleaseWorkItemRequest {
+                            id: request.id,
+                            realm_id: request.realm_id,
+                            namespace: request.namespace,
+                            expected_revision: request.expected_revision,
+                            principal,
+                        })
+                        .await
+                }
+            }
+            .map_err(workgraph_error_to_rpc)?;
             Ok(serde_json::json!({ "item": item }))
         }
         "meta/workgraph/close" => {
@@ -785,6 +989,8 @@ pub(crate) async fn handle_workgraph_method(
             let mut object = object;
             object.remove("binding_id");
             let params: PolicyEscalateParams = parse_request(object)?;
+            refuse_hidden_supervisor(&surface, mob_id, admission, &params.completion_policy)
+                .await?;
             let projection =
                 fetch_authority_projection(service, binding_id, params.namespace.clone()).await?;
             let item = service
@@ -811,10 +1017,14 @@ pub(crate) async fn handle_workgraph_method(
                 .lower_member_session_target(target)
                 .await
                 .map_err(admission_error_to_rpc)?;
+            refuse_hidden_target(&surface, mob_id, &target)?;
+            refuse_private_member_target(admission, &target).await?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             object.insert("target".to_string(), to_result_value(&target));
             let request: GoalCreateRequest = parse_request(object)?;
+            refuse_hidden_supervisor(&surface, mob_id, admission, &request.completion_policy)
+                .await?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;
             admission
                 .check_target_free(
@@ -836,6 +1046,14 @@ pub(crate) async fn handle_workgraph_method(
             let binding_id = parse_binding_id(&object)?;
             let expected_revision = parse_expected_revision(&object)?;
             let namespace = parse_namespace(&object)?;
+            // A confirmation follows the console's decide rule: only a
+            // signed-in person confirms, as itself.
+            let person = match surface {
+                WorkgraphSurface::HostStdin => None,
+                WorkgraphSurface::Console { person, .. } => {
+                    Some(person.ok_or_else(crate::http_console::approver_unauthenticated_error)?)
+                }
+            };
             let evidence = match object.get("evidence") {
                 None | Some(Value::Null) => {
                     // Evidence-less confirm: derive the admissible evidence
@@ -852,6 +1070,14 @@ pub(crate) async fn handle_workgraph_method(
                 }
                 Some(value) => parse_confirm_evidence(value)?,
             };
+            #[cfg(test)]
+            crate::http_console::console_decide_holds::pass(&binding_id.to_string()).await;
+            // After the last await, right before the confirmation is
+            // applied: the person must still be current, and the access
+            // configuration committed now must still grant the confirmation.
+            if let Some(person) = person {
+                person.recheck(method, params)?;
+            }
             let request = GoalConfirmRequest {
                 binding_id,
                 realm_id: None,
@@ -861,7 +1087,9 @@ pub(crate) async fn handle_workgraph_method(
                 principal: None,
                 trusted_principal: None,
             }
-            .with_trusted_principal(trusted_principal);
+            .with_trusted_principal(
+                person.and_then(|person| console_trusted_principal(Some(person.principal()))),
+            );
             let result = service
                 .goal_confirm(request)
                 .await
@@ -918,6 +1146,8 @@ pub(crate) async fn handle_workgraph_method(
                 .lower_member_session_target(target)
                 .await
                 .map_err(admission_error_to_rpc)?;
+            refuse_hidden_target(&surface, mob_id, &target)?;
+            refuse_private_member_target(admission, &target).await?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;
@@ -972,6 +1202,7 @@ pub(crate) async fn handle_workgraph_method(
             reject_non_default_namespace(service, &object)?;
             let WorkgraphSurface::Console {
                 authenticated_principal,
+                ..
             } = surface
             else {
                 return Err(method_not_found());
@@ -1017,6 +1248,8 @@ pub(crate) async fn handle_workgraph_method(
                 .lower_member_session_target(target)
                 .await
                 .map_err(admission_error_to_rpc)?;
+            refuse_hidden_target(&surface, mob_id, &target)?;
+            refuse_private_member_target(admission, &target).await?;
             crate::workgraph_realm::refuse_foreign_mob_target(&target, service)
                 .map_err(workgraph_error_to_rpc)?;
             let _permit = admission.acquire().await.map_err(admission_error_to_rpc)?;
@@ -1046,6 +1279,96 @@ pub(crate) async fn handle_workgraph_method(
         }
         _ => Err(method_not_found()),
     }
+}
+
+/// The owner of a console claim: the caller the connection names. An open
+/// console's caller without a token owns nothing
+/// (`person_authentication_required`), and an `owner` param that names
+/// anyone else, or carries a display name, is refused: the owner never
+/// comes from the request.
+fn console_claim_owner(
+    authenticated_principal: Option<&str>,
+    supplied: Option<&Value>,
+) -> Result<Value, JsonRpcError> {
+    let Some(key) = console_trusted_principal(authenticated_principal) else {
+        return Err(crate::http_console::person_authentication_required_error());
+    };
+    if let Some(supplied) = supplied.filter(|owner| !owner.is_null()) {
+        let supplied_key = supplied.get("key").unwrap_or(supplied);
+        let names_caller = match (
+            supplied_key.get("kind").and_then(Value::as_str),
+            supplied_key.get("id").and_then(Value::as_str),
+        ) {
+            (Some(kind), Some(id)) => format!("{kind}:{id}") == key.canonical(),
+            _ => false,
+        };
+        let display_name = supplied
+            .get("display_name")
+            .is_some_and(|name| !name.is_null());
+        if !names_caller || display_name {
+            return Err(invalid_params(
+                "owner is not accepted: a console claim is owned by the signed-in caller",
+            ));
+        }
+    }
+    Ok(serde_json::json!({ "key": key }))
+}
+
+/// Who releases a console claim. The check reads the item at the release's
+/// expected revision, and the release commits only at that revision, so the
+/// claim checked is the claim released. After that read, the route's last
+/// await, the caller's grants are read again under the access configuration
+/// committed now. The claim's owner releases it with the plain release
+/// (`Ok(None)`); an access admin under that configuration releases anyone's
+/// claim as a break-glass release (`Ok(Some(admin))`); anyone else is
+/// refused (`access_denied`). An open console's caller without a token owns
+/// nothing (`person_authentication_required`).
+async fn console_release_admin(
+    service: &WorkGraphService,
+    authenticated_principal: Option<&str>,
+    access: Option<&crate::access::AccessView>,
+    request: &ReleaseWorkItemRequest,
+    params: &Value,
+) -> Result<Option<String>, JsonRpcError> {
+    let Some(caller) = console_trusted_principal(authenticated_principal) else {
+        return Err(crate::http_console::person_authentication_required_error());
+    };
+    let item = service
+        .get(None, request.namespace.clone(), request.id.clone())
+        .await
+        .map_err(workgraph_error_to_rpc)?;
+    #[cfg(test)]
+    crate::http_console::console_decide_holds::pass(&request.id.to_string()).await;
+    if item.revision != request.expected_revision {
+        return Err(workgraph_error_to_rpc(WorkGraphError::StaleRevision {
+            id: request.id.clone(),
+            expected: request.expected_revision,
+            actual: item.revision,
+        }));
+    }
+    let live = access.map(crate::access::AccessView::refreshed);
+    if let Some(error) = crate::http_console::console_rpc_access_violation(
+        live.as_ref(),
+        "meta/workgraph/release",
+        params,
+    ) {
+        return Err(error);
+    }
+    if item.claim.as_ref().map(|claim| &claim.owner.key) == Some(&caller) {
+        return Ok(None);
+    }
+    if live
+        .as_ref()
+        .is_some_and(crate::access::AccessView::can_administer)
+    {
+        return Ok(Some(caller.id));
+    }
+    Err(JsonRpcError {
+        code: crate::http_console::ACCESS_DENIED_RPC_CODE,
+        message: "only the claim's owner or an access admin releases it; nothing was released"
+            .to_string(),
+        data: Some(serde_json::json!({ "kind": "access_denied" })),
+    })
 }
 
 /// Resolve the console surface's trusted principal for `goal/confirm`.

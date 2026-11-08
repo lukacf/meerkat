@@ -66,36 +66,13 @@ impl HelperCatalogIntent {
         let lineage = basis
             .lineage_for(None)
             .ok_or(OriginalWriterError::Conflict)?;
-        let parent = owner
-            .grants
-            .resolve_controller_lineage(
-                &intent.parent_lineage,
-                &intent.issuer,
-                intent.represented_subject.as_ref(),
-            )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
-        let expected = parent
-            .restrictions()
-            .for_child(&intent.requested)
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
-        let child = owner
-            .grants
-            .resolve_controller_lineage(
+        check_issued_lineage(&intent, lineage, |lineage, executor| {
+            owner.grants.resolve_controller_lineage(
                 lineage,
-                &intent.grantee,
+                executor,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
-        if child.restrictions() != &expected {
-            return Err(OriginalWriterError::Conflict);
-        }
-        parent
-            .check_current()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        child
-            .check_current()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
-        Ok(())
+        })
     }
 }
 

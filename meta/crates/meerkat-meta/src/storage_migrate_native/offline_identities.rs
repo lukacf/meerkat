@@ -289,7 +289,7 @@ pub async fn identity_census_offline(
         if let Err(refusal) = copy_top_level_files(state_dir, scratch.path()) {
             return report.refused(refusal);
         }
-        HeldCompletionMarks::in_state_dir(state_dir).read()
+        HeldCompletionMarks::in_state_dir(state_dir).read_rollback_marks()
     };
     let copy = scratch.path();
 

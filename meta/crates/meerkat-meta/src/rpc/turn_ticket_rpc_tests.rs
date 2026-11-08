@@ -350,6 +350,13 @@ impl SessionBridge for TicketBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &crate::identity_first::AgentIdentity,
+    ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError> {
+        Ok(self.core.identity_entry(identity, false))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -483,6 +490,49 @@ impl SessionBridge for TicketBridge {
             is_final: false,
             peer_reachable_count: 0,
         })
+    }
+
+    /// Core's declared apply through this double's own seat. Core revives a
+    /// seat this double answers archived on that session, Dormant, and
+    /// refuses the revival, as it refuses the resume, while this double
+    /// refuses resumes.
+    async fn apply_declared_roster(
+        &self,
+        roster: crate::identity_first::DeclaredRosterRequest,
+    ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+    {
+        let revive = |identity: &AgentIdentity,
+                      spec: &DurableAgentSpec,
+                      session_id: &meerkat_core::types::SessionId| {
+            if self.refuses_resume.load(Ordering::SeqCst) {
+                return Err(BridgeError::ResumeRejected {
+                    kind: ResumeRejectionKind::Unavailable {
+                        reason:
+                            meerkat_mob::error::SessionResumeUnavailableReason::ArchivedNotRevivable,
+                    },
+                    session_id: session_id.clone(),
+                    detail: "the session is archived and cannot be revived".to_string(),
+                });
+            }
+            let agent_runtime_id = AgentRuntimeId::parse(&format!("rt:{identity}:0"))
+                .map_err(|error| BridgeError::Mob(error.to_string()))?;
+            self.core.bind(
+                identity,
+                &crate::identity_first::MemberRuntimeBinding {
+                    agent_runtime_id,
+                    session_id: Some(session_id.clone()),
+                },
+                &spec.profile,
+            );
+            Ok(())
+        };
+        crate::identity_first::core_test_bridge::apply_through_seats(
+            self,
+            &roster,
+            Some(&revive),
+            None,
+        )
+        .await
     }
 }
 
@@ -1012,7 +1062,10 @@ async fn wait_for_completion_rpc_reports_deadline_and_incarnation_change() {
             Some(session.clone()),
         )
         .unwrap();
-        identity_runtime.register(make_spec("watcher")).await;
+        identity_runtime
+            .register(make_spec("watcher"))
+            .await
+            .expect("the identity registers");
     };
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(wait, rotate)
@@ -1342,13 +1395,14 @@ struct CountingBinder(AtomicUsize);
 
 #[async_trait]
 impl crate::identity_first::GovernedInputBinder for CountingBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         _context: &crate::identity_first::GovernedBindContext,
         _input: meerkat_runtime::Input,
-    ) -> Result<crate::identity_first::BoundGovernedInput, String> {
+    ) -> Result<crate::identity_first::BoundGovernedInput, crate::identity_first::GovernedBindError>
+    {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Err("counted, not bound".to_string())
+        Err(crate::identity_first::GovernedBindRefusal::denied("counted, not bound").into())
     }
 
     fn retain_unresolved(

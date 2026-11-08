@@ -195,23 +195,106 @@ pub struct PreparedApplicationSetup {
     /// input_sha256 covers this raw text, including ignored keys and comments.
     pub definition_source: ApplicationSetupDefinition,
     pub definition: MobDefinition,
-    pub source_helper_roster: DurableAgentSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_helper_roster: Option<DurableAgentSpec>,
     pub native_members: Vec<CompiledNativeMember>,
-    pub source_helper_member: MobMemberBinding,
-    pub helper: InstalledSetupSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_helper_member: Option<MobMemberBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper: Option<InstalledSetupSelection>,
     /// Schema3 retains its genuine original helper artifact. Schema4 forbids
     /// this field and uses final member artifacts in resources.artifact_directory.
     /// Omission in schema4 never creates a legacy source artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub helper_source_surface: Option<SelectedHostArtifact>,
-    pub helper_tools: ApplicationSetupTools,
-    pub helper_profile: ApplicationSetupProfile,
-    pub server: McpServerConfig,
-    pub resources: PreparedApplicationResources,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_tools: Option<ApplicationSetupTools>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_profile: Option<ApplicationSetupProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<McpServerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<PreparedApplicationResources>,
+    /// Compiler-owned final artifacts for a helperless schema4 application.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_directory: Option<PathBuf>,
     pub application_tool_policy: CompiledArtifactReference,
 }
 
 impl PreparedApplicationSetup {
+    /// Validate the compiler-only selection without inventing a setup resource.
+    /// Artifact bytes are checked separately through the authenticated bundle.
+    pub(crate) fn validate_helperless(&self) -> Result<(), String> {
+        if self.schema != 4
+            || self.helper.is_some()
+            || self.source_helper_member.is_some()
+            || self.source_helper_roster.is_some()
+            || self.helper_tools.is_some()
+            || self.helper_profile.is_some()
+            || self.server.is_some()
+            || self.resources.is_some()
+            || self.helper_source_surface.is_some()
+            || self.definition.source_identity.is_some()
+            || self.definition_source.resolve()? != self.definition
+            || !self
+                .artifact_directory
+                .as_ref()
+                .is_some_and(|path| path.is_absolute())
+        {
+            return Err("invalid helperless application selection".into());
+        }
+        let owner = self
+            .native_owner
+            .as_ref()
+            .ok_or("helperless application owner is absent")?;
+        owner.validate().map_err(|error| error.to_string())?;
+        let members = self
+            .native_members
+            .iter()
+            .map(
+                |member| meerkat_toolkit::host_lifetime::policy::PreparedNativeMember {
+                    member: member.member.clone(),
+                    logical_owner: member.logical_owner.clone(),
+                    context_generation: member.context_generation,
+                    audience: member.audience.clone(),
+                    setup_capability: member.setup_capability.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        if owner.native_host.members != members
+            || owner.native_host.realm.as_str() != self.realm.realm_id
+            || meerkat_core::mob_realm_id(self.definition.id.as_str())
+                .map_err(|error| error.to_string())?
+                != owner.native_host.realm
+            || members
+                .iter()
+                .any(|member| member.setup_capability.is_some())
+        {
+            return Err("helperless native owner differs from compiled application".into());
+        }
+        for class in &owner.native_host.member_classes {
+            if self
+                .definition
+                .resolve_inline_profile(&ProfileName::from(class.profile.clone()))
+                .is_none()
+            {
+                return Err("member class requires an exact inline application profile".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn artifact_root(&self) -> Result<&Path, String> {
+        match (&self.resources, &self.artifact_directory) {
+            (Some(resources), None) if self.helper.is_some() => Ok(&resources.artifact_directory),
+            (None, Some(directory)) if self.helper.is_none() => {
+                self.validate_helperless()?;
+                Ok(directory)
+            }
+            _ => Err("mixed or absent compiler artifact selection".into()),
+        }
+    }
+
     /// Reconstruct the exact profile projection on restart from the retained
     /// preparer handoff. The application must first authenticate/pin this bundle
     /// through its existing installer/activation owner. This method checks
@@ -220,11 +303,32 @@ impl PreparedApplicationSetup {
     /// must separately pass project_roster before native reconciliation. Runtime
     /// binding fields are backend declarations, not proof of sealing.
     pub fn helper_projection(&self) -> Result<PreparedSetupHelper, String> {
+        let helper = self
+            .helper
+            .as_ref()
+            .ok_or("application has no setup helper")?;
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or("helper resources are absent")?;
+        let source_member = self
+            .source_helper_member
+            .as_ref()
+            .ok_or("helper source member is absent")?;
+        let source_roster = self
+            .source_helper_roster
+            .as_ref()
+            .ok_or("helper source roster is absent")?;
+        let profile = self.helper_profile.ok_or("helper profile is absent")?;
+        let tools = self.helper_tools.ok_or("helper tools are absent")?;
+        let server = self.server.as_ref().ok_or("helper server is absent")?;
+        if self.artifact_directory.is_some() {
+            return Err("helper resources cannot be mixed with compiler-only artifacts".into());
+        }
         if !matches!(self.schema, 3 | 4)
             || self.definition.source_identity.is_some()
-            || !self.resources.artifact_directory.is_absolute()
-            || self.resources.handoff.path
-                != self.resources.artifact_directory.join("prepare.stdout")
+            || !resources.artifact_directory.is_absolute()
+            || resources.handoff.path != resources.artifact_directory.join("prepare.stdout")
         {
             return Err("invalid prepared application resource selection".into());
         }
@@ -255,21 +359,15 @@ impl PreparedApplicationSetup {
                 return Err("resolved native owner differs from the completed application".into());
             }
         }
-        let bytes = read_regular_artifact(&self.resources.handoff.path)?;
-        if hash(&bytes) != self.resources.handoff.sha256 {
+        let bytes = read_regular_artifact(&resources.handoff.path)?;
+        if hash(&bytes) != resources.handoff.sha256 {
             return Err("retained application preparer handoff changed".into());
         }
         let projection = PreparedSetupConnection::from_preparer_output(&bytes)
-            .and_then(|connection| {
-                self.helper_profile.project(
-                    connection,
-                    self.source_helper_member.clone(),
-                    self.helper_tools,
-                )
-            })
+            .and_then(|connection| profile.project(connection, source_member.clone(), tools))
             .map_err(|error| error.to_string())?
-            .with_retained_public_research(&self.server);
-        if projection.member() != &self.helper.member || projection.server() != &self.server {
+            .with_retained_public_research(server);
+        if projection.member() != &helper.member || projection.server() != server {
             return Err("prepared application helper differs from retained resources".into());
         }
         let mut expected = self.definition_source.resolve()?;
@@ -284,7 +382,7 @@ impl PreparedApplicationSetup {
                 "prepared application definition is missing its exact helper profile".into(),
             );
         }
-        let member = matching_member(&self.native_members, &self.helper.member)?;
+        let member = matching_member(&self.native_members, &helper.member)?;
         match self.schema {
             3 => {
                 let original = self
@@ -309,14 +407,14 @@ impl PreparedApplicationSetup {
         }
         if self.native_members.iter().enumerate().any(|(index, row)| {
             index != member
-                && row.member.mob_id == self.helper.member.mob_id
-                && row.member.role == self.helper.member.role
+                && row.member.mob_id == helper.member.mob_id
+                && row.member.role == helper.member.role
         }) {
             return Err("another native policy member borrows the setup helper role".into());
         }
         // Validate the retained selected row's identity/profile/backend shape.
         // This does not stand in for a call on the actual live provider result.
-        self.project_roster(std::slice::from_ref(&self.source_helper_roster))?;
+        self.project_roster(std::slice::from_ref(source_roster))?;
         Ok(projection)
     }
 
@@ -330,7 +428,7 @@ impl PreparedApplicationSetup {
         let helper = self
             .helper_projection()?
             .with_public_research_from_policy(policy);
-        if helper.server() != &self.server {
+        if Some(helper.server()) != self.server.as_ref() {
             return Err("retained helper ceiling differs from its compiled policy".into());
         }
         Ok(helper)
@@ -345,13 +443,21 @@ impl PreparedApplicationSetup {
         &self,
         current: &[DurableAgentSpec],
     ) -> Result<Vec<DurableAgentSpec>, String> {
-        project_roster_selection(
+        match (
+            &self.helper,
             &self.source_helper_member,
-            &self.helper.member,
             &self.source_helper_roster,
             self.helper_profile,
-            current,
-        )
+        ) {
+            (Some(helper), Some(source), Some(roster), Some(profile)) => {
+                project_roster_selection(source, &helper.member, roster, profile, current)
+            }
+            (None, None, None, None) => {
+                self.validate_helperless()?;
+                Ok(current.to_vec())
+            }
+            _ => Err("incomplete prepared helper selection".into()),
+        }
     }
 }
 
@@ -526,22 +632,7 @@ impl ApplicationSetupInput {
     }
 }
 
-pub(crate) fn read_regular_artifact(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    if !path.is_absolute() || path.is_symlink() || !path.is_file() {
-        return Err("retained compiler artifact must be an absolute regular file".into());
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|error| error.to_string())?
-        .take(256 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    if bytes.len() > 256 * 1024 {
-        return Err("retained compiler artifact exceeds the supported limit".into());
-    }
-    Ok(bytes)
-}
+pub(crate) use crate::retained_artifact::read_regular_artifact;
 
 fn finish(
     validated: ValidatedInput,
@@ -578,18 +669,19 @@ fn finish(
         realm: input.realm,
         definition_source: input.definition,
         definition,
-        source_helper_roster,
+        source_helper_roster: Some(source_helper_roster),
         native_members: input.native_members,
-        source_helper_member,
-        helper: input.helper,
+        source_helper_member: Some(source_helper_member),
+        helper: Some(input.helper),
         helper_source_surface: Some(input.helper_source_surface),
-        helper_tools: input.helper_tools,
-        helper_profile: input.helper_profile,
-        server: projection.server().clone(),
-        resources: PreparedApplicationResources {
+        helper_tools: Some(input.helper_tools),
+        helper_profile: Some(input.helper_profile),
+        server: Some(projection.server().clone()),
+        resources: Some(PreparedApplicationResources {
             artifact_directory: prepared.artifact_directory,
             handoff,
-        },
+        }),
+        artifact_directory: None,
         application_tool_policy: CompiledArtifactReference {
             name: "application-tool-policy.json".into(),
             sha256: hash(&validated.tool_policy),
@@ -607,7 +699,6 @@ fn write_bundle(
     setup: &PreparedApplicationSetup,
     policy: &[u8],
 ) -> Result<SelectedHostArtifact, String> {
-    use std::os::unix::fs::DirBuilderExt;
     // Reconstruct and validate every generated artifact before creating the
     // output directory. The source may have changed while preparation awaited.
     setup.helper_projection()?;
@@ -624,10 +715,43 @@ fn write_bundle(
         4 => compilation::validate_final_artifacts(setup)?,
         _ => return Err("unsupported prepared application schema".into()),
     };
+    write_bundle_with_artifacts(output, setup, policy, artifacts)
+}
+
+fn write_bundle_with_artifacts(
+    output: &Path,
+    setup: &PreparedApplicationSetup,
+    policy: &[u8],
+    artifacts: Vec<(String, Vec<u8>)>,
+) -> Result<SelectedHostArtifact, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    if setup.helper.is_none() {
+        setup.validate_helperless()?;
+        if setup.artifact_directory.as_deref() != Some(output) {
+            return Err("compiler artifact output changed".into());
+        }
+        let mut selected = std::collections::BTreeMap::new();
+        for (name, bytes) in &artifacts {
+            if selected.insert(name.as_str(), bytes).is_some() {
+                return Err("duplicate compiler artifact".into());
+            }
+        }
+        let checked = compilation::validate_final_artifacts_with(setup, |name| {
+            selected
+                .get(name)
+                .map(|bytes| (*bytes).clone())
+                .ok_or_else(|| "member artifact is absent".into())
+        })?;
+        if checked.len() != artifacts.len() {
+            return Err("unselected compiler artifact".into());
+        }
+    }
     if hash(policy) != setup.application_tool_policy.sha256 {
         return Err("prepared application tool-policy bytes differ".into());
     }
-    surface::require_compiled_report_policy(policy, &setup.helper.member)?;
+    if let Some(helper) = &setup.helper {
+        surface::require_compiled_report_policy(policy, &helper.member)?;
+    }
     let setup_bytes = toolkit_package::canonical_json(setup).map_err(|error| error.to_string())?;
     let mut manifest_artifacts = vec![
         serde_json::json!({"path":"application-setup.json", "sha256":hash(&setup_bytes)}),
@@ -800,9 +924,9 @@ pub(crate) fn command(args: &[String], progress: &mut InstallerProgress) -> Resu
         "application_tool_policy":{"path":output.join(&setup.application_tool_policy.name),
             "sha256":setup.application_tool_policy.sha256},
         "helper_initial_surface":{"path":output.join(surface::OUTPUT_NAME),
-            "sha256":setup.native_members[matching_member(&setup.native_members, &setup.helper.member)?].initial_surface.sha256},
-        "helper":setup.helper.member,
-        "prepared_artifact_directory":setup.resources.artifact_directory}),
+            "sha256":setup.native_members[matching_member(&setup.native_members, &setup.helper.as_ref().ok_or("prepared helper is absent")?.member)?].initial_surface.sha256},
+        "helper":setup.helper.as_ref().ok_or("prepared helper is absent")?.member,
+        "prepared_artifact_directory":setup.resources.as_ref().ok_or("prepared resources are absent")?.artifact_directory}),
     )
 }
 

@@ -1218,7 +1218,8 @@ pub use scoped_retained_resume::{
 mod agent_mandate;
 mod boot_obligations;
 pub use boot_obligations::{
-    RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved,
+    RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved, SessionDurableWork,
+    SessionWorkState,
 };
 pub mod composition;
 mod dispatch_control;
@@ -1514,8 +1515,8 @@ pub enum RuntimeSessionUnregisterAdmission {
 /// unregister always has. [`Self::Requeue`] keeps each eligible queued input
 /// (a durable prompt in the Queue lane that is neither directed nor bound to
 /// an objective) durably queued instead, marked for the runtime's next start,
-/// which runs it unless it is older than `max_age` by then. Its waiter is
-/// answered
+/// which runs it unless more than `max_age` has passed since the stop by
+/// then. Its waiter is answered
 /// [`CompletionWaitError::RequeuedAcrossStop`](crate::completion::CompletionWaitError::RequeuedAcrossStop).
 /// [`Self::Keep`] keeps every non-terminal input the registration recovered
 /// from the store exactly as the store holds it, for the next registration
@@ -1532,8 +1533,11 @@ pub enum UnregisterQueuedInputs {
     Stop,
     /// Keep eligible queued inputs durably queued for the next start.
     Requeue {
-        /// The age, measured from admission, past which the next start ends
-        /// a kept input as expired instead of running it.
+        /// How long after the stop a kept input still runs: the next start
+        /// ends an input the stop kept as expired instead of running it once
+        /// more than this has passed since the stop. The age counts from the
+        /// stop that kept the input, not from its admission, so it bounds the
+        /// outage, however long before the stop the input was admitted.
         max_age: std::time::Duration,
     },
     /// Keep every input the registration recovered from the store, exactly
@@ -2493,6 +2497,14 @@ pub enum RunStartHoldReason {
     /// A mob member whose host preparation is owed (a role move its mob
     /// holds) starts no run until its mob releases it.
     HostPreparation,
+    /// The session's host holds it while it recovers it (for example while
+    /// it settles a run a crash left open, with
+    /// [`MeerkatMachine::settle_retained_run`]): it starts no run until its
+    /// host releases this hold. No mob or Meta code stages or releases this
+    /// reason; only the host that staged it does. A mob that retires or
+    /// destroys the member drops what the host staged for the member's
+    /// session.
+    HostRecovery,
 }
 
 impl RunStartHoldReason {
@@ -2501,6 +2513,7 @@ impl RunStartHoldReason {
             Self::MobStop => dsl::RunStartHoldReason::MobStop,
             Self::ToolsNotPublished => dsl::RunStartHoldReason::ToolsNotPublished,
             Self::HostPreparation => dsl::RunStartHoldReason::HostPreparation,
+            Self::HostRecovery => dsl::RunStartHoldReason::HostRecovery,
         }
     }
 }
@@ -3523,6 +3536,26 @@ impl MeerkatMachine {
         self.native_work_authorization_host.get().is_some()
     }
 
+    /// The realm's terminal close: end the custody of the grant owner this
+    /// machine's realm open restored, after the realm's last legitimate
+    /// change (its session service's terminal shutdown calls it). From then
+    /// on that owner refuses every change and use, whoever still holds this
+    /// machine, and its store's lease is handed back, so a same-process
+    /// successor restores the realm's grant owner at once. Without such an
+    /// owner (an ordinary realm, or a grant owner a host supplied, whose own
+    /// close ends its custody) nothing changes. A second call changes
+    /// nothing.
+    pub fn release_realm_custody(&self) {
+        #[cfg(feature = "local-authorization")]
+        if let Some(grants) = self.realm_grant_custody.get()
+            && grants.release_custody().is_err()
+        {
+            tracing::warn!(
+                "the realm's grant owner is poisoned: its lease ends when its last reference drops"
+            );
+        }
+    }
+
     /// Install the trusted host's binder of governed peer deliveries
     /// ([`crate::input_authority::PeerIngressBinder`]): from now on a peer
     /// delivery whose sender the transport established is offered to it
@@ -4245,24 +4278,24 @@ impl PendingRuntimeExecutorAttachment {
     }
 
     /// End, before this attachment can serve, every input an earlier
-    /// graceful stop kept queued that is now older than that stop's max age
-    /// (`crate::input_state::stop_requeue_expired` at `now`). Each is
-    /// abandoned through the machine's `AbandonInput` with the typed
-    /// [`crate::input_state::InputAbandonReason::RequeueExpired`], durably
-    /// committed with its payload retired, so it never runs. The retained
-    /// mutation guard and the pending (non-serving) slot keep the input set
-    /// complete. Every attachment passes here before its serving gate, so no
-    /// path serves a kept input that has not been checked. Returns the
-    /// expired inputs.
+    /// graceful stop kept queued for which more than that stop's max age has
+    /// passed since the stop (`crate::input_state::stop_requeue_expired` at
+    /// `now`). Each is abandoned through the machine's `AbandonInput` with
+    /// the typed [`crate::input_state::InputAbandonReason::RequeueExpired`],
+    /// durably committed with its payload retired, so it never runs. The
+    /// retained mutation guard and the pending (non-serving) slot keep the
+    /// input set complete. Every attachment passes here before its serving
+    /// gate, so no path serves a kept input that has not been checked.
+    /// Returns the expired inputs.
     ///
     /// A run the same stop kept open (marked resumable again by this
     /// registration, its inputs still bound to it) is checked first, as a
-    /// whole: when any of its inputs is over the stop's max age, the run is
-    /// settled with the same reason (`DriverEntry::settle_resumable_run`)
-    /// instead of resumed, or as cancelled when its stop was asked since
-    /// this registration marked it, as every settlement of a stopped run
-    /// is. Its inputs are Staged or Applied, never queued, so the per-input
-    /// sweep would not see them.
+    /// whole: when the stop's max age has passed for any of its inputs, the
+    /// run is settled with the same reason
+    /// (`DriverEntry::settle_resumable_run`) instead of resumed, or as
+    /// cancelled when its stop was asked since this registration marked it,
+    /// as every settlement of a stopped run is. Its inputs are Staged or
+    /// Applied, never queued, so the per-input sweep would not see them.
     pub(crate) async fn settle_expired_stop_requeued_inputs(
         &mut self,
         now: chrono::DateTime<chrono::Utc>,
@@ -8079,6 +8112,60 @@ impl MeerkatMachine {
         }
     }
 
+    /// Deterministically pause the next retained-run settle of `session_id`
+    /// ([`Self::settle_retained_run`]) once the waiters it registered were
+    /// answered, before it takes the session's mutation gate again to read
+    /// what the settlement committed. The first receiver resolves when the
+    /// settle reaches the pause; sending on (or dropping) the returned sender
+    /// lets it go on. Exposed only by test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn arm_retained_run_settle_before_gate_test_hook(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        crate::tokio::sync::oneshot::Receiver<()>,
+        crate::tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = crate::tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = crate::tokio::sync::oneshot::channel();
+        let mut hook = self
+            .test_retained_run_settle_before_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            hook.is_none(),
+            "retained-run settle gate test hook already armed"
+        );
+        *hook = Some((session_id, entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn run_retained_run_settle_before_gate_test_hook(
+        &self,
+        session_id: &SessionId,
+    ) {
+        let armed = {
+            let mut hook = self
+                .test_retained_run_settle_before_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hook
+                .as_ref()
+                .is_some_and(|(armed_session_id, _, _)| armed_session_id == session_id)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered_tx, release_rx)) = armed {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+    }
+
     /// Deterministically pause the runtime loop's next terminal run commit
     /// of `session_id` after the store commit landed and before the
     /// committed boundary is acknowledged to the session executor. The
@@ -11425,6 +11512,14 @@ impl Drop for RunStartHoldInFlightForTest<'_> {
 #[doc(hidden)]
 pub struct MeerkatMachineShared {
     native_work_authorization_host: crate::input_authority::NativeWorkAuthorizationSlot,
+    /// The grant owner this machine's realm open restored, installed by that
+    /// composition before any session is registered. The realm's terminal
+    /// close ends its custody ([`MeerkatMachine::release_realm_custody`]).
+    /// Empty for a grant owner a host supplied: that host's own close ends
+    /// its custody.
+    #[cfg(feature = "local-authorization")]
+    realm_grant_custody:
+        std::sync::OnceLock<Arc<meerkat_authorization::grants::LocalGrantAuthority>>,
     /// Source of [`RuntimeSessionRegistrationUse`] stamps: one machine-wide
     /// sequence, so no two stamps this machine hands out are equal.
     registration_use_sequence: std::sync::atomic::AtomicU64,
@@ -11784,6 +11879,18 @@ pub struct MeerkatMachineShared {
     /// commit.
     #[cfg(any(test, feature = "test-support"))]
     test_runtime_loop_before_terminal_commit: StdMutex<
+        Option<(
+            SessionId,
+            crate::tokio::sync::oneshot::Sender<()>,
+            crate::tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+    /// One-shot deterministic gate in a retained-run settle, after the
+    /// waiters it registered were answered and before it takes the session's
+    /// mutation gate again: a test replaces the registration (a reload)
+    /// while the settle waits there.
+    #[cfg(any(test, feature = "test-support"))]
+    test_retained_run_settle_before_gate: StdMutex<
         Option<(
             SessionId,
             crate::tokio::sync::oneshot::Sender<()>,
@@ -13651,6 +13758,8 @@ impl MeerkatMachine {
         Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(feature = "local-authorization")]
+                realm_grant_custody: std::sync::OnceLock::new(),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
                 peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -13765,6 +13874,8 @@ impl MeerkatMachine {
                 ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_retained_run_settle_before_gate: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -13917,6 +14028,8 @@ impl MeerkatMachine {
         Ok(Self {
             shared: Arc::new(MeerkatMachineShared {
                 native_work_authorization_host: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(feature = "local-authorization")]
+                realm_grant_custody: std::sync::OnceLock::new(),
                 consent_owner_loss_settlement: std::sync::OnceLock::new(),
                 peer_ingress_binder: std::sync::OnceLock::new(),
                 registration_use_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -14031,6 +14144,8 @@ impl MeerkatMachine {
                 ),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_terminal_commit: StdMutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                test_retained_run_settle_before_gate: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 test_runtime_loop_before_boundary_acknowledgement: StdMutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
@@ -14962,6 +15077,9 @@ mod commit_deadline_tests;
 
 #[cfg(test)]
 mod lost_admission_ack_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod retained_run_fence_tests;
 
 #[cfg(all(test, feature = "live", feature = "test-support"))]
 mod live_bridge_original_work_tests;

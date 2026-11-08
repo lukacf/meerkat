@@ -6,6 +6,8 @@
 //! dispatches these methods, and no wire field can supply grants or principals.
 
 use crate::original_ingress::{OriginalWriterError, RetainedToolkitOriginal, ToolkitOriginalOwner};
+#[cfg(test)]
+use meerkat_authorization_contracts::grant::GrantLineageRef;
 use meerkat_authorization_contracts::{constraints::ResourceDomain, evidence::EvidenceId};
 use meerkat_core::{PrincipalRef, RealmId};
 use meerkat_runtime::MeerkatMachine;
@@ -17,25 +19,67 @@ use toolkit_store::{
 };
 
 pub(crate) mod acquisition;
-mod cold_service_admission;
-mod governed_submit;
-pub(crate) mod service_grants;
+#[cfg(test)]
+pub(crate) mod recovery_probe;
 mod setup_admission;
 pub(crate) mod setup_helpers;
 pub(crate) mod setup_results;
+pub(crate) mod setup_workflow;
+#[cfg(test)]
+pub(crate) use setup_workflow::OwnedTransferCommit;
+pub(crate) use setup_workflow::WorkflowLaunchObservation;
+pub use setup_workflow::{
+    ConsoleWorkflowChildInput, ConsoleWorkflowChildPreparer, ConsoleWorkflowChildRequest,
+};
+pub use setup_workflow::{
+    InstalledLateWorkflowHelper, InstalledLateWorkflowWaiter, InstalledWorkflowContext,
+    InstalledWorkflowContextTransfer, InstalledWorkflowMember, InstalledWorkflowPlanning,
+    PreparedWorkflowMember, WorkflowContextObservation, WorkflowDeliveryObservation,
+};
+pub use setup_workflow::{
+    InstalledWorkflowChild, WorkflowChildLaunchRequest, WorkflowChildPreparationError,
+};
+mod cold_service_admission;
+pub mod collector_setup;
+mod governed_submit;
+pub(crate) mod member_mcp;
+pub(crate) mod service_grants;
 pub(crate) use cold_service_admission::RetainedBoundInput;
 mod cold_setup_admission;
-mod configured_setup;
 mod console_ingress;
+mod member_routes;
+mod planning_source_evidence;
+mod workflow_classes;
+pub use workflow_classes::PreparedWorkflowClassSource;
+mod class_input;
+mod native_operations;
+pub(crate) mod peer_ingress;
+pub(crate) mod review_owner;
+pub use native_operations::{
+    NativeOriginalOperationsRequest, NativeOriginalTarget, NativeOriginalTargetRequest,
+    NativePeerAction, NativeRecorderAction,
+};
+mod configured_setup;
 mod controller_setup;
+#[cfg(feature = "test-support")]
+mod retained_consent_test_support;
 mod setup_request;
 pub(crate) use configured_setup::service::ServiceSetupSelection;
 mod setup_targets;
 pub use setup_request::PrivateSetupRequestSelection;
+mod cold_source_coordinates;
 #[cfg(test)]
 mod custody_attempt_tests;
 pub(crate) mod custody_recovery;
 mod first_input;
+#[cfg(test)]
+mod foreground_test_store;
+#[cfg(test)]
+mod source_locator_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub use custody_recovery::promotion_probe::{
+    OriginalPromotionIdentity, OriginalPromotionProbe, OriginalPromotionWrite,
+};
 mod service_approved_input;
 mod service_input_receipt;
 pub use service_input_receipt::{
@@ -74,8 +118,10 @@ pub(crate) use service_approved_input::application::{
     ServiceParentAuthorizationEvidence,
 };
 pub use service_approved_input::{
-    InstalledServiceTask, PreparedPublicInstruction, PreparedPublicServiceBatch,
-    PreparedServiceInstruction, PublicServiceBatchEntry, ServiceMcpPersistenceProposal,
+    InstalledServiceTask, InstalledSharedEntry, InstalledSharedPreparation,
+    PreparedPublicInstruction, PreparedPublicServiceBatch, PreparedServiceInstruction,
+    PublicServiceBatchEntry, ServiceMcpPersistenceProposal, SettledSharedPreparationResolver,
+    SharedPreparationLeave, SharedPreparationResource,
 };
 pub use service_grants::{
     PrivateAccessChoice, PrivateServiceAccessDecision, PrivateServiceGrantObservation,
@@ -98,6 +144,11 @@ pub(crate) fn same_source_origin(left: &StoredRecord, right: &StoredRecord) -> b
                 && left.approved_task == right.approved_task
                 && left.setup_request == right.setup_request
                 && left.configured_setup == right.configured_setup
+                && left.planning_source_evidence == right.planning_source_evidence
+                && left.late_workflow_helper == right.late_workflow_helper
+                && left.console_child_input == right.console_child_input
+                && left.native_operations == right.native_operations
+                && left.peer_ingress == right.peer_ingress
         }
         _ => false,
     }
@@ -119,7 +170,7 @@ pub(crate) fn historical_custody_attempt(
 
 /// An observation in the application's selected source domain. The domain and
 /// qualified authority come from the installed route, never this wire value.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrivateSourceEvidence {
     pub resource_id: EvidenceId,
@@ -162,6 +213,10 @@ pub struct PrivateOriginalRef {
 #[serde(rename_all = "snake_case")]
 pub enum PrivateOriginalCancellation {
     OperationsCancelled,
+    /// Source cancellation and workflow departure succeeded. An unresolved
+    /// workflow close obligation remains for host-owned recovery. This is not
+    /// a runtime, process, controller or descendant settlement observation.
+    OperationsCancelledCleanupPending,
     OperationGrantRevoked,
 }
 
@@ -181,9 +236,21 @@ pub enum PrivateOriginalError {
     Denied,
 }
 
+/// Native currentness failures do not establish a policy denial. This bounded
+/// projection keeps the existing source API and never authorizes a retry.
+pub(crate) fn authorization_error(error: meerkat_core::ToolError) -> PrivateOriginalError {
+    match error.primary_error() {
+        meerkat_core::ToolError::OperationAuthorizationUnavailable
+        | meerkat_core::ToolError::OperationObservationUnavailable => {
+            PrivateOriginalError::Unavailable
+        }
+        _ => PrivateOriginalError::Denied,
+    }
+}
+
 /// Constructed by the installed Rust policy adapter from the selected host
 /// policy. No deserializer or public setter accepts these current owner facts.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PrivateOriginalRoute {
     pub id: Id,
     pub grant_caller: PrincipalRef,
@@ -260,10 +327,44 @@ impl SourceFacts {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceRecord {
+    /// Historical raw-input evidence set only by an actual Console child bind.
+    /// It never restores a human/login or permits application-event submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    console_child_input: Option<console_ingress::ConsoleChildInputEvidence>,
+    /// Core delivery facts, retained under this source owner before binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    peer_ingress: Option<peer_ingress::PeerSource>,
+    /// Explicit immutable ordinary-input target intent, never permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_operations: Option<native_operations::NativeOperationsSelection>,
+    /// Original late-helper selection retained before G's first bind. Current
+    /// native lineage and source/controller custody must be reobserved; these
+    /// historical admission and transport facts preserve child provenance only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    late_workflow_helper: Option<planning_source_evidence::LateWorkflowHelperProvenance>,
+    /// Immutable launch correlation asserted before this source's first bind.
+    /// The existing live P owner must still supply the actual planning handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workflow_child: Option<setup_workflow::RetainedWorkflowChild>,
+    /// Exact ordinary-class operation selection for this input. No native
+    /// admission or current authority is inferred from this historical value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    class_input: Option<class_input::ClassInputSelection>,
     /// First native-bound attempt and source-owned recovery accounting only.
     /// Absence is legacy/unenrolled, never proof of native non-entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     custody_attempt: Option<crate::original_ingress::custody_attempt::CustodyAttempt>,
+    /// Exact non-Console first prepared input retained with custody enrollment
+    /// when no selected bound input is stored. This is replay evidence only:
+    /// it selects no service/planning capability and restores no process handle.
+    /// Legacy enrolled rows may lack it; native payload retirement is not repair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    custody_input: Option<cold_service_admission::RetainedBoundInput>,
+    /// Cleanup custody for exact shared preparations admitted by this source.
+    /// The SetupStore P record owns membership and delivery. These locators
+    /// are retained before join and never authorize an effect or disclosure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shared_preparations: Vec<meerkat_toolkit::setup::SharedPreparationMember>,
     /// Explicit reviewed setup-only choice for this still-unbound original.
     /// Native resolution and the retained operator decision remain authoritative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,7 +397,11 @@ struct SourceRecord {
     approved_task: Option<service_approved_input::ApprovedTaskLink>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     service_admission: Option<service_approved_input::ServiceInputAdmission>,
-    /// Exact bound B or selected stock-operator setup A retained before
+    /// Explicit host selection to retain planning-source input evidence.
+    /// It grants neither source custody nor permission to deliver context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    planning_source_evidence: Option<planning_source_evidence::PlanningSourceEvidence>,
+    /// Exact bound B, selected stock-operator setup A or selected planning input retained before
     /// native submission. The legacy field name remains stable on disk. This
     /// is historical evidence, with no process ingress or resume capability.
     /// Older rows without it cannot be used for cold admission recovery.
@@ -306,10 +411,60 @@ struct SourceRecord {
         Option<meerkat_authorization_contracts::work_association::InputAuthorityAssociation>,
 }
 
+impl SourceRecord {
+    /// The governed work a peer delivery was sent under, when governed work
+    /// sent it in process.
+    fn governed_peer(&self) -> Option<&peer_ingress::GovernedPeerFacts> {
+        self.peer_ingress
+            .as_ref()
+            .and_then(peer_ingress::PeerSource::governed)
+    }
+    /// The requester this original is bound under: the sending work's for a
+    /// delivery that governed work sent, else its route's.
+    fn bound_requester(&self) -> &PrincipalRef {
+        self.governed_peer().map_or(
+            &self.source.requester,
+            peer_ingress::GovernedPeerFacts::requester,
+        )
+    }
+    /// The ingress actor this original is bound under: the sending agent for
+    /// a delivery that governed work sent, else its route's.
+    fn bound_ingress_actor(&self) -> &PrincipalRef {
+        self.governed_peer().map_or(
+            &self.source.ingress_actor,
+            peer_ingress::GovernedPeerFacts::sending_agent,
+        )
+    }
+    /// The contributors this original's binding names: the sending work of
+    /// a delivery that governed work sent, else the event's contributors
+    /// under its route's source authority.
+    fn bound_contributors(
+        &self,
+    ) -> Vec<meerkat_authorization_contracts::work_association::OriginalWorkRef> {
+        match self.governed_peer() {
+            Some(governed) => governed.sending_work().to_vec(),
+            None => self
+                .event
+                .contributors
+                .iter()
+                .map(
+                    |work| meerkat_authorization_contracts::work_association::OriginalWorkRef {
+                        authority: self.source.source_authority.clone(),
+                        work: work.clone(),
+                    },
+                )
+                .collect(),
+        }
+    }
+}
+
 /// Process-local custody alongside the existing canonical original. Native
 /// unresolved submissions remain here until their native owner can settle them.
 /// This is neither another input ledger nor a permission or completion record.
 struct HeldPrivateOriginal {
+    console_child_input: bool,
+    peer_ingress: Option<peer_ingress::PeerSource>,
+    native_operations: Option<native_operations::NativeOperationsSelection>,
     reference: PrivateOriginalRef,
     original: Arc<RetainedToolkitOriginal>,
     service_mcp: Vec<service_grants::RetainedServiceMcpAccess>,
@@ -325,6 +480,11 @@ struct HeldPrivateOriginal {
     first_custody: Mutex<Option<Arc<governed_submit::PendingOriginalAdmission>>>,
     unresolved: Mutex<Vec<Arc<governed_submit::PendingOriginalAdmission>>>,
     service_attachments: Mutex<Vec<Arc<service_approved_input::attachment::HeldServiceAttachment>>>,
+    shared_preparations:
+        Mutex<Vec<service_approved_input::shared_preparation::HeldSharedPreparation>>,
+    setup_workflow: OnceLock<Arc<setup_workflow::HeldSetupWorkflow>>,
+    workflow_selections: Mutex<Vec<setup_workflow::InvocationPlanning>>,
+    workflow_plans: Mutex<Vec<Arc<setup_workflow::InstalledWorkflowPlanning>>>,
 }
 
 /// Exact software selection retained with an application access decision.
@@ -431,7 +591,43 @@ pub trait ServiceInstallationReadback: Send + Sync {
     }
 }
 
+#[cfg(test)]
+type HelperControllerAppended = Arc<dyn Fn(&[GrantLineageRef]) + Send + Sync>;
+#[cfg(test)]
+type ServiceTaskStageProbe = Box<dyn Fn(&'static str) + Send + Sync>;
+
+#[cfg(test)]
+impl PrivateOriginals {
+    pub(crate) fn observe_service_task_stage_for_test(&self, stage: &'static str) {
+        if let Some(probe) = self.service_task_stage_for_test.get() {
+            probe(stage);
+        }
+    }
+    pub(crate) fn probe_service_task_stages_for_test(&self, probe: ServiceTaskStageProbe) {
+        assert!(self.service_task_stage_for_test.set(probe).is_ok());
+    }
+}
+
 pub struct PrivateOriginals {
+    // Observes only a completed controller append, outside its native reservation.
+    // Tests cannot inject a grant, witness or replacement issuance result.
+    #[cfg(test)]
+    helper_controller_appended: OnceLock<HelperControllerAppended>,
+    review_observations: Arc<crate::installed_host::review_diagnostics::ReviewObservations>,
+    #[cfg(test)]
+    pub(crate) metadata_probe: OnceLock<Arc<recovery_probe::MetadataRecoveryProbe>>,
+    // Observes each stage a service task preparation reaches, so a control
+    // can act exactly at one of its checks. It decides nothing.
+    #[cfg(test)]
+    service_task_stage_for_test: OnceLock<ServiceTaskStageProbe>,
+    // A helper control's emulated dispatch tool deadline, and each reason a
+    // helper's rebind stopped (setup_helpers).
+    #[cfg(test)]
+    helper_tool_deadline_for_test: OnceLock<tokio::time::Instant>,
+    #[cfg(test)]
+    helper_rebind_stops_for_test: Mutex<Vec<setup_helpers::HelperRebindStop>>,
+    #[cfg(test)]
+    helper_rebind_stopped_for_test: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     custody_recovery: custody_recovery::CustodyRecovery,
     scope: StoreScope,
     store: Arc<dyn ToolkitStore>,
@@ -446,13 +642,103 @@ pub struct PrivateOriginals {
     controller_pin_source: OnceLock<Weak<dyn meerkat_mobkit::identity_first::ControllerPinSource>>,
     host_lifetime: OnceLock<Weak<meerkat_toolkit::host_lifetime::NativeHostLifetime>>,
     installation_readback: OnceLock<Arc<dyn ServiceInstallationReadback>>,
+    settled_shared_preparations: OnceLock<Arc<dyn SettledSharedPreparationResolver>>,
+    pub(crate) member_mcp_presenter:
+        OnceLock<Arc<dyn crate::installed_host::member_mcp_consumer::MemberMcpPresenter>>,
+    pub(crate) member_mcp_application:
+        OnceLock<Arc<dyn crate::installed_host::member_mcp_consumer::MemberMcpApplication>>,
+    pub(crate) member_mcp_factory:
+        OnceLock<crate::installed_host::operator_setup::member_mcp::MemberMcpFactory>,
     pub(crate) service_tool_policy:
         OnceLock<Arc<crate::installed_host::tool_policy::service_policy::ServicePolicyOwner>>,
 }
 
 impl PrivateOriginals {
-    pub(crate) fn bind_service_tool_policy(
+    pub(crate) fn review_observations(
         &self,
+    ) -> &Arc<crate::installed_host::review_diagnostics::ReviewObservations> {
+        &self.review_observations
+    }
+
+    /// Passive material from this source's actual native grant authority. The
+    /// installed owner first checks its selected source and current lifetime.
+    /// Native still owns operation authorization and contributor ceilings.
+    pub(crate) fn review_grant_bounds(
+        &self,
+        association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+        binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+        now_ms: u64,
+    ) -> Result<String, meerkat_core::OperationAuthorizationError> {
+        use crate::installed_host::review_diagnostics::{Stage, observe};
+        use meerkat_authorization::{
+            grant_policy::operation_grant_target,
+            grants::{GrantRefusal, LineageResolutionRefusal},
+        };
+        use meerkat_authorization_contracts::work_association::WorkAuthorityBasis;
+        use meerkat_core::{OperationAuthorizationError, OperationRefusalKind, OperationRefused};
+        let denied = || {
+            OperationAuthorizationError::from(OperationRefused::new(OperationRefusalKind::Denied))
+        };
+        let claims = association.candidate();
+        let lineage = match &claims.authority_basis {
+            WorkAuthorityBasis::GrantLineage { lineage } => lineage.as_slice(),
+            basis @ WorkAuthorityBasis::TargetedGrantLineages { .. } => {
+                let target = observe(
+                    self.review_observations(),
+                    Stage::GrantTarget,
+                    operation_grant_target(binding),
+                )?;
+                basis.lineage_for(target.as_ref()).ok_or_else(denied)?
+            }
+            WorkAuthorityBasis::HostPolicy { .. } | WorkAuthorityBasis::ServiceMandate { .. } => {
+                return Err(denied());
+            }
+        };
+        let grant = observe(
+            self.review_observations(),
+            Stage::GrantLineage,
+            self.owner
+                .grants()
+                .resolve_lineage_observed(
+                    lineage,
+                    &claims.logical_executor,
+                    claims.represented_subject.as_ref(),
+                )
+                .map_err(|error| match error {
+                    LineageResolutionRefusal::Changed => OperationAuthorizationError::from(
+                        OperationRefused::new(OperationRefusalKind::ReprepareRequired),
+                    ),
+                    LineageResolutionRefusal::Refused(GrantRefusal::Denied) => denied(),
+                    LineageResolutionRefusal::Refused(
+                        GrantRefusal::ControllerInUse
+                        | GrantRefusal::Duplicate
+                        | GrantRefusal::Unavailable,
+                    ) => OperationAuthorizationError::Unavailable,
+                }),
+        )?;
+        let helper_deadline = observe(
+            self.review_observations(),
+            Stage::GrantHelperDeadline,
+            self.helper_operation_deadline(association)
+                .map_err(|error| match error {
+                    PrivateOriginalError::Denied | PrivateOriginalError::Conflict => denied(),
+                    PrivateOriginalError::Unavailable => OperationAuthorizationError::Unavailable,
+                }),
+        )?
+        .unwrap_or(u64::MAX);
+        observe(
+            self.review_observations(),
+            Stage::GrantRender,
+            meerkat_runtime::meerkat_machine::review_bounds_text(
+                &grant.restrictions().conjoin(&claims.admitted_ceiling),
+                grant.expires_at_ms().min(helper_deadline),
+                now_ms,
+            ),
+        )
+    }
+
+    pub(crate) fn bind_service_tool_policy(
+        self: &Arc<Self>,
         owner: Arc<crate::installed_host::tool_policy::service_policy::ServicePolicyOwner>,
     ) -> Result<(), meerkat_toolkit::host_lifetime::control::HostLifetimeError> {
         if let Some(existing) = self.service_tool_policy.get() {
@@ -462,6 +748,7 @@ impl PrivateOriginals {
                 Err(meerkat_toolkit::host_lifetime::control::HostLifetimeError::InvalidSelection)
             };
         }
+        owner.bind_callback_source(self)?;
         self.service_tool_policy.set(owner).map_err(|_| {
             meerkat_toolkit::host_lifetime::control::HostLifetimeError::InvalidSelection
         })
@@ -572,13 +859,29 @@ impl PrivateOriginals {
         store: Arc<dyn ToolkitStore>,
         owner: Arc<ToolkitOriginalOwner>,
     ) -> Result<Self, PrivateOriginalError> {
+        // Test builds witness every store write of a bind attempt.
+        #[cfg(test)]
+        crate::write_witness::install();
         scope.validate().map_err(|_| PrivateOriginalError::Denied)?;
         store
             .capabilities()
             .require_durable_contract()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let value = Self {
+            #[cfg(test)]
+            helper_controller_appended: OnceLock::new(),
+            review_observations: Arc::new(Default::default()),
             custody_recovery: Default::default(),
+            #[cfg(test)]
+            metadata_probe: OnceLock::new(),
+            #[cfg(test)]
+            service_task_stage_for_test: OnceLock::new(),
+            #[cfg(test)]
+            helper_tool_deadline_for_test: OnceLock::new(),
+            #[cfg(test)]
+            helper_rebind_stops_for_test: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            helper_rebind_stopped_for_test: Mutex::new(None),
             scope,
             store,
             owner,
@@ -590,7 +893,11 @@ impl PrivateOriginals {
             controller_pin_source: OnceLock::new(),
             host_lifetime: OnceLock::new(),
             installation_readback: OnceLock::new(),
+            settled_shared_preparations: OnceLock::new(),
             service_tool_policy: OnceLock::new(),
+            member_mcp_application: OnceLock::new(),
+            member_mcp_presenter: OnceLock::new(),
+            member_mcp_factory: OnceLock::new(),
         };
         // The host holds its existing store/lifetime exclusion while opening.
         // Audit once before exposing this adapter; no per-event scope scan.
@@ -731,22 +1038,41 @@ impl PrivateOriginals {
             + 'static,
     {
         let retained = self.owner.retained_resume_check(policy.clone());
-        self.owner.configuration(
-            meerkat_runtime::meerkat_machine::ScopedInvocation::from_policy(policy.clone()),
-            policy,
-            Some(retained),
+        review_owner::observe_configuration(
+            self.owner.configuration(
+                meerkat_runtime::meerkat_machine::ScopedInvocation::from_policy(policy.clone()),
+                policy,
+                Some(retained),
+            ),
+            self.review_observations.clone(),
         )
     }
 
-    fn route(&self, id: &Id) -> Result<&PrivateOriginalRoute, PrivateOriginalError> {
-        self.routes()?
-            .iter()
-            .find(|route| &route.id == id)
+    fn route(
+        &self,
+        id: &Id,
+    ) -> Result<std::borrow::Cow<'_, PrivateOriginalRoute>, PrivateOriginalError> {
+        if let Some(route) = self.routes()?.iter().find(|route| &route.id == id) {
+            return Ok(std::borrow::Cow::Borrowed(route));
+        }
+        self.member_route(id)?
+            .map(std::borrow::Cow::Owned)
             .ok_or(PrivateOriginalError::Denied)
     }
 
     fn key(&self, reference: &PrivateOriginalRef) -> Result<StoreKey, PrivateOriginalError> {
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
+        self.key_for_route(reference, route)
+    }
+
+    fn key_for_route(
+        &self,
+        reference: &PrivateOriginalRef,
+        route: &PrivateOriginalRoute,
+    ) -> Result<StoreKey, PrivateOriginalError> {
+        if reference.route != route.id {
+            return Err(PrivateOriginalError::Denied);
+        }
         Ok(StoreKey {
             realm: self.scope.realm.clone(),
             owner: self.scope.owner.clone(),
@@ -767,7 +1093,46 @@ impl PrivateOriginals {
         &self,
         event: PrivateAuthenticatedEvent,
     ) -> Result<PrivateOriginalRef, PrivateOriginalError> {
+        if let Some(coordinates) = self.cold_ordinary_source_coordinates(&event.route)? {
+            return self
+                .retain_event_for_source_coordinates(event, &coordinates)
+                .await;
+        }
         let route = self.route(&event.route)?;
+        self.retain_event_for_route(event, &route).await
+    }
+
+    // Trusted workflow preparation may retain historical source facts before
+    // native construction. This helper never publishes the supplied route.
+    async fn retain_event_for_route(
+        &self,
+        event: PrivateAuthenticatedEvent,
+        route: &PrivateOriginalRoute,
+    ) -> Result<PrivateOriginalRef, PrivateOriginalError> {
+        self.retain_event_for_route_with_peer(event, route, None)
+            .await
+    }
+
+    async fn retain_event_for_route_with_peer(
+        &self,
+        event: PrivateAuthenticatedEvent,
+        route: &PrivateOriginalRoute,
+        peer_ingress: Option<peer_ingress::PeerSource>,
+    ) -> Result<PrivateOriginalRef, PrivateOriginalError> {
+        self.retain_event_for_route_with_input(event, route, peer_ingress, None)
+            .await
+    }
+
+    async fn retain_event_for_route_with_input(
+        &self,
+        event: PrivateAuthenticatedEvent,
+        route: &PrivateOriginalRoute,
+        peer_ingress: Option<peer_ingress::PeerSource>,
+        console_child_input: Option<console_ingress::ConsoleChildInputEvidence>,
+    ) -> Result<PrivateOriginalRef, PrivateOriginalError> {
+        if event.route != route.id {
+            return Err(PrivateOriginalError::Denied);
+        }
         let source = SourceFacts::from_route(route, self.owner.ingress_domain());
         if event.contributors.len() > 64
             || !valid_digest(&event.content_sha256)
@@ -783,22 +1148,34 @@ impl PrivateOriginals {
             original: event.original.clone(),
             event_sha256,
         };
-        let key = self.key(&reference)?;
+        let key = self.key_for_route(&reference, route)?;
+        let operation_cancelled = peer_ingress
+            .as_ref()
+            .is_some_and(|peer| peer.refused_sender());
         let data = encode(SourceRecord {
+            console_child_input,
+            peer_ingress,
+            native_operations: None,
+            late_workflow_helper: None,
+            workflow_child: None,
+            class_input: None,
             custody_attempt: None,
+            custody_input: None,
+            shared_preparations: Vec::new(),
             setup_request: None,
             configured_setup: None,
             service_setup_children: vec![],
             source,
             event,
             final_association: None,
-            operation_cancelled: false,
+            operation_cancelled,
             service_attachment_failure: None,
             service_attachment_observation: None,
             service_attachment_member: None,
             approved_task: None,
             service_admission: None,
             bound_service_input: None,
+            planning_source_evidence: None,
         })?;
         // An existing final binding changes the record, but not the original
         // admission payload. The store compares that frozen initial request.
@@ -814,7 +1191,7 @@ impl PrivateOriginals {
             .await;
         match admitted {
             Ok(record) => {
-                self.decode_record(record.record(), &reference)?;
+                self.decode_record_for_route(record.record(), &reference, route)?;
             }
             Err(
                 toolkit_store::StoreError::AdmissionConflict
@@ -829,7 +1206,7 @@ impl PrivateOriginals {
                     .await
                     .map_err(store_error)?
                     .ok_or(PrivateOriginalError::Unavailable)?;
-                self.decode_record(&record, &reference)?;
+                self.decode_record_for_route(&record, &reference, route)?;
             }
             Err(error) => return Err(store_error(error)),
         }
@@ -850,11 +1227,20 @@ impl PrivateOriginals {
         stored: &StoredRecord,
         reference: &PrivateOriginalRef,
     ) -> Result<SourceRecord, PrivateOriginalError> {
-        let value = self.decode_stored(stored)?;
         let route = self.route(&reference.route)?;
+        self.decode_record_for_route(stored, reference, &route)
+    }
+
+    fn decode_record_for_route(
+        &self,
+        stored: &StoredRecord,
+        reference: &PrivateOriginalRef,
+        route: &PrivateOriginalRoute,
+    ) -> Result<SourceRecord, PrivateOriginalError> {
+        let value = self.decode_stored(stored)?;
         let mut projected = value.event.clone();
         projected.route = reference.route.clone();
-        if stored.key != self.key(reference)?
+        if stored.key != self.key_for_route(reference, route)?
             || value.source != SourceFacts::from_route(route, self.owner.ingress_domain())
             || projected.original != reference.original
             || digest(&canonical_json(&projected).map_err(|_| PrivateOriginalError::Conflict)?)
@@ -899,7 +1285,7 @@ impl PrivateOriginals {
         self.owner
             .check_bound_source(original)
             .map_err(cold_service_admission::writer_error)?;
-        let record = self.decode_record(stored, reference)?;
+        let mut record = self.decode_record(stored, reference)?;
         if record.operation_cancelled
             || record.final_association.as_ref() != Some(original.association())
         {
@@ -907,6 +1293,13 @@ impl PrivateOriginals {
         }
         match console {
             Some((entry, raw)) => entry.validate_custody_input(&record, raw, input)?,
+            None if record.peer_ingress.is_some() => {
+                record
+                    .peer_ingress
+                    .as_ref()
+                    .ok_or(PrivateOriginalError::Conflict)?
+                    .check_input(input, true)?;
+            }
             None => {
                 if input.header().idempotency_key.as_ref()
                     != Some(&cold_service_admission::source_event_key(&record)?)
@@ -938,6 +1331,27 @@ impl PrivateOriginals {
             // Exact refused-input reuse retains the charged budget and any
             // entered step. It cannot reset or replace the first attempt.
             next = existing.clone();
+        }
+        // Native Console retains a whole raw-input event with a distinct key;
+        // its selected child path already owns exact bound_service_input.
+        // Do not infer a new Console purpose from ordinary text-source custody.
+        if console.is_none() && record.bound_service_input.is_none() {
+            let saved = match &record.peer_ingress {
+                Some(peer) => {
+                    cold_service_admission::RetainedBoundInput::from_peer_bound(input, peer)?
+                }
+                None => cold_service_admission::RetainedBoundInput::from_bound(input)?,
+            };
+            if record
+                .custody_input
+                .as_ref()
+                .is_some_and(|existing| existing != &saved)
+            {
+                return Err(PrivateOriginalError::Conflict);
+            }
+            // Pair the actual first input and its exact fingerprint in one CAS.
+            // Never normalize ID/time here or select a service/planning purpose.
+            record.custody_input = Some(saved);
         }
         Self::custody_transition(stored, record, next)
     }
@@ -995,6 +1409,7 @@ impl PrivateOriginals {
 
     /// Canonical data transition only. Native evidence, decision arbitration,
     /// entered-write ownership and terminal publication belong to the caller.
+    #[cfg(test)]
     pub(crate) fn prepare_custody_transition(
         &self,
         stored: &StoredRecord,
@@ -1050,6 +1465,27 @@ impl PrivateOriginals {
         Ok(event)
     }
 
+    /// Return this owner's canonical historical record locator for an exact
+    /// retained reference, including equivalent route aliases and cancelled
+    /// rows. A missing or mismatched row in this owner's scope is refused.
+    ///
+    /// Use this locator for `SetupWorkflowTerms::planning_source`; callers must
+    /// not reproduce the private key layout. It supplies no current source
+    /// authority, grant, member reservation or native admission evidence.
+    pub async fn source_record_key(
+        &self,
+        reference: &PrivateOriginalRef,
+    ) -> Result<StoreKey, PrivateOriginalError> {
+        let stored = self
+            .store
+            .get(&self.key(reference)?)
+            .await
+            .map_err(store_error)?
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        self.decode_record(&stored, reference)?;
+        Ok(stored.key)
+    }
+
     /// Historical binding for explicit authenticated restore/replay. Reading
     /// this value cannot reconstruct source custody or an accepted InputId.
     pub async fn binding_evidence(
@@ -1078,7 +1514,8 @@ impl PrivateOriginals {
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
     ) -> Result<Option<Arc<StoredRecord>>, OriginalWriterError> {
         self.persist_or_observe_binding(reference, association, false)
-            .await
+            .await?
+            .first_binding_record()
     }
 
     /// The existing original writer holds its mutation mutex around this call.
@@ -1089,8 +1526,20 @@ impl PrivateOriginals {
         reference: &PrivateOriginalRef,
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
         allow_existing: bool,
-    ) -> Result<Option<Arc<StoredRecord>>, OriginalWriterError> {
-        self.persist_or_observe_selected_binding(reference, association, allow_existing)
+    ) -> Result<crate::original_ingress::CanonicalBindingObservation, OriginalWriterError> {
+        self.persist_or_observe_selected_binding(reference, association, allow_existing, None)
+            .await
+    }
+
+    /// The live planning owner selects its own issued lineage. It cannot enter
+    /// through configured setup discovery or a portable association alone.
+    pub(super) async fn persist_or_observe_workflow_binding(
+        &self,
+        reference: &PrivateOriginalRef,
+        association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+        planning: &InstalledWorkflowPlanning,
+    ) -> Result<crate::original_ingress::CanonicalBindingObservation, OriginalWriterError> {
+        self.persist_or_observe_selected_binding(reference, association, true, Some(planning))
             .await
     }
 
@@ -1099,7 +1548,8 @@ impl PrivateOriginals {
         reference: &PrivateOriginalRef,
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
         allow_existing: bool,
-    ) -> Result<Option<Arc<StoredRecord>>, OriginalWriterError> {
+        planning: Option<&InstalledWorkflowPlanning>,
+    ) -> Result<crate::original_ingress::CanonicalBindingObservation, OriginalWriterError> {
         let key = self
             .key(reference)
             .map_err(|_| OriginalWriterError::WrongOwner)?;
@@ -1123,11 +1573,12 @@ impl PrivateOriginals {
             // Only first binding resolves all newly issued parents; a bound
             // target's currentness belongs to its actual native operation.
             if record.final_association.is_some() && !selection.helper_targets.is_empty() {
-                crate::installed_host::operator_setup::validate_retained_setup_selection(
+                crate::installed_host::operator_setup::validate_bound_setup_selection(
                     &lifetime,
                     &self.owner,
                     self.store.as_ref(),
                     selection,
+                    self,
                 )
                 .await
             } else {
@@ -1136,27 +1587,69 @@ impl PrivateOriginals {
                     &self.owner,
                     self.store.as_ref(),
                     selection,
+                    self,
                 )
                 .await
             }
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+            .map_err(|error| match error {
+                meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
+                | meerkat_toolkit::host_lifetime::control::HostLifetimeError::NotSettled => {
+                    OriginalWriterError::Unavailable
+                }
+                _ => OriginalWriterError::WrongOwner,
+            })?;
         }
-        self.check_configured_setup_binding(reference, &record, association)?;
+        match planning {
+            Some(planning) => {
+                planning.check_persistence_binding(self, reference, &record, association)?
+            }
+            None if matches!(
+                &record.planning_source_evidence,
+                Some(planning_source_evidence::PlanningSourceEvidence::OperationalParent { .. })
+            ) =>
+            {
+                let basis = self
+                    .workflow_parent_basis(&record, reference)
+                    .map_err(|error| match error {
+                        PrivateOriginalError::Unavailable => OriginalWriterError::Unavailable,
+                        PrivateOriginalError::Denied => OriginalWriterError::WrongOwner,
+                        PrivateOriginalError::Conflict => OriginalWriterError::Conflict,
+                    })?
+                    .ok_or(OriginalWriterError::Conflict)?;
+                if association.candidate().authority_basis != basis {
+                    return Err(OriginalWriterError::Conflict);
+                }
+                planning_source_evidence::check_binding(&record, association)
+                    .map_err(|_| OriginalWriterError::Conflict)?;
+            }
+            None => self.check_configured_setup_binding(reference, &record, association)?,
+        }
+        self.check_native_binding(&record, association)?;
+        self.check_peer_binding(&record, association)?;
         if self
             .approved_task_is_cancelled(&record)
             .await
             .map_err(|_| OriginalWriterError::Unavailable)?
         {
+            // A bind attempt's durable effect: no "not now" may follow it.
+            meerkat_core::protected_section::note_effect("original.source_cancellation");
             let cancelled = self.persist_source_cancellation(Arc::new(stored)).await?;
             // No first binding may be published after parent cancellation.
             if record.final_association.is_none() {
                 return Err(OriginalWriterError::OperationCancelled);
             }
-            return Ok(Some(cancelled));
+            return Ok(Some(cancelled).into());
         }
         if let Some(saved) = &record.final_association {
             return if allow_existing && saved == association {
-                Ok(record.operation_cancelled.then(|| Arc::new(stored)))
+                if record.operation_cancelled {
+                    Ok(Some(Arc::new(stored)).into())
+                } else {
+                    crate::original_ingress::CanonicalBindingObservation::historical(
+                        association,
+                        record.custody_attempt.as_ref(),
+                    )
+                }
             } else {
                 Err(OriginalWriterError::Conflict)
             };
@@ -1166,6 +1659,8 @@ impl PrivateOriginals {
             // association or task authority on its later replay.
             return Err(OriginalWriterError::OperationCancelled);
         }
+        // A bind attempt's durable effect: no "not now" may follow it.
+        meerkat_core::protected_section::note_effect("original.first_binding");
         // The same source owner retains the exact entered binding operation
         // before I/O, including when commit succeeds but its reply is lost.
         self.owner.retain_first_binding_write(
@@ -1174,6 +1669,7 @@ impl PrivateOriginals {
             &key,
             Arc::new(stored.clone()),
             association,
+            None,
         )?;
         record.final_association = Some(association.clone());
         let data = encode(record).map_err(|_| OriginalWriterError::Conflict)?;
@@ -1189,7 +1685,7 @@ impl PrivateOriginals {
             })
             .await
             .map_err(|_| OriginalWriterError::Unavailable)?;
-        Ok(None)
+        Ok(None.into())
     }
 
     fn check_source_binding(
@@ -1198,7 +1694,13 @@ impl PrivateOriginals {
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
     ) -> Result<(), OriginalWriterError> {
         let c = association.candidate();
+        peer_ingress::check_binding(record, association)
+            .map_err(|_| OriginalWriterError::Conflict)?;
+        native_operations::check_binding(record, association)
+            .map_err(|_| OriginalWriterError::Conflict)?;
         self.check_setup_source_binding(record, association)?;
+        planning_source_evidence::check_binding(record, association)
+            .map_err(|_| OriginalWriterError::Conflict)?;
         let route = &record.source;
         let evidence_matches =
             |actual: &meerkat_authorization_contracts::evidence::HistoricalEvidenceRef,
@@ -1219,8 +1721,8 @@ impl PrivateOriginals {
             || c.ingress_namespace.occurrence_scope != record.event.occurrence
             || c.ingress_namespace.realm != route.realm
             || c.ingress_namespace.ingress != route.ingress
-            || c.requester != route.requester
-            || c.ingress_actor != route.ingress_actor
+            || c.requester != *record.bound_requester()
+            || c.ingress_actor != *record.bound_ingress_actor()
             || c.represented_subject != route.represented_subject
             || c.logical_executor != route.logical_executor
             || c.original_work.authority != route.source_authority
@@ -1230,13 +1732,7 @@ impl PrivateOriginals {
                 &record.event.original_authentication,
             )
             || !evidence_matches(&c.root_event, &route.event_domain, &record.event.root_event)
-            || c.contributing_work.len() != record.event.contributors.len()
-            || c.contributing_work
-                .iter()
-                .zip(&record.event.contributors)
-                .any(|(actual, expected)| {
-                    actual.authority != route.source_authority || &actual.work != expected
-                })
+            || c.contributing_work != record.bound_contributors()
         {
             return Err(OriginalWriterError::WrongOwner);
         }
@@ -1295,7 +1791,6 @@ impl PrivateOriginals {
     /// Retain cancellation in the existing source row. The source owner's
     /// native disposition callback observes this publication. This primitive
     /// does not stop a run and remains internal to the fenced host entry.
-    #[cfg(test)]
     pub(crate) async fn record_operation_cancelled(
         &self,
         reference: &PrivateOriginalRef,
@@ -1311,9 +1806,13 @@ impl PrivateOriginals {
         &self,
         reference: &PrivateOriginalRef,
     ) -> Result<PrivateOriginalCancellation, PrivateOriginalError> {
-        self.record_cancelled_source_set(reference, None, None, None)
+        let cancelled = self
+            .record_cancelled_source_set(reference, None, None, None)
             .await?;
-        Ok(PrivateOriginalCancellation::OperationsCancelled)
+        // Source cancellation and existing physical preparation leave have
+        // completed. The outer channel retains this follow-on work through
+        // caller loss; no initial native binder waits for workflow close.
+        self.depart_cancelled_workflows(&cancelled).await
     }
 
     /// Attach only the actual source owner's returned handle, after its durable
@@ -1345,8 +1844,10 @@ impl PrivateOriginals {
         if record.final_association.as_ref() != Some(original.association()) {
             return Err(PrivateOriginalError::Conflict);
         }
-        let retain_bound_input =
-            record.approved_task.is_some() || self.stock_setup_source(&record, &reference)?;
+        let retain_bound_input = record.peer_ingress.is_some()
+            || record.planning_source_evidence.is_some()
+            || record.approved_task.is_some()
+            || self.stock_setup_source(&record, &reference)?;
         let mut retained = self
             .retained
             .lock()
@@ -1367,15 +1868,27 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Conflict);
         }
         retained.push(Arc::new(HeldPrivateOriginal {
+            console_child_input: record.console_child_input.is_some(),
+            peer_ingress: record.peer_ingress.clone(),
+            native_operations: record.native_operations.clone(),
             reference,
             original,
             service_mcp,
             retain_bound_input,
             console_login: OnceLock::new(),
-            first_input: OnceLock::new(),
+            // A cold Peer replay retains the same exact input and attempt.
+            // The native admitted-original owner still proves admission.
+            first_input: match (&record.peer_ingress, &record.bound_service_input) {
+                (Some(_), Some(input)) => OnceLock::from(input.clone()),
+                _ => OnceLock::new(),
+            },
             first_custody: Mutex::new(None),
             unresolved: Mutex::new(Vec::new()),
             service_attachments: Mutex::new(Vec::new()),
+            shared_preparations: Mutex::new(Vec::new()),
+            setup_workflow: OnceLock::new(),
+            workflow_selections: Mutex::new(Vec::new()),
+            workflow_plans: Mutex::new(Vec::new()),
         }));
         Ok(())
     }
@@ -1404,7 +1917,7 @@ impl PrivateOriginals {
         &self,
         reference: &PrivateOriginalRef,
     ) -> Result<PrivateOriginalCancellation, PrivateOriginalError> {
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         let machine = self.machine()?;
         let original = self
             .retained
@@ -1535,6 +2048,19 @@ fn decode_source_record(stored: &StoredRecord) -> Result<SourceRecord, PrivateOr
     {
         return Err(PrivateOriginalError::Conflict);
     }
+    planning_source_evidence::validate(&value)?;
+    if value.console_child_input.is_some()
+        && value.final_association.is_some()
+        && (value.workflow_child.is_none()
+            || !matches!(
+                value.planning_source_evidence,
+                Some(planning_source_evidence::PlanningSourceEvidence::EffectWaiter { .. })
+            ))
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
+    native_operations::validate(&value)?;
+    peer_ingress::validate(&value)?;
     cold_service_admission::validate_retained_input(&value)?;
     configured_setup::service::ServiceSetupChildObservation::validate_set(&value)?;
     if let Some(task) = &value.approved_task {
@@ -1564,6 +2090,12 @@ fn decode_source_record(stored: &StoredRecord) -> Result<SourceRecord, PrivateOr
 }
 
 fn validate_custody_record(record: &SourceRecord) -> Result<(), PrivateOriginalError> {
+    if let Some(input) = &record.custody_input {
+        if record.custody_attempt.is_none() {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        cold_service_admission::validate_source_input(record, input)?;
+    }
     if let Some(attempt) = &record.custody_attempt {
         let association = record
             .final_association
@@ -1572,12 +2104,17 @@ fn validate_custody_record(record: &SourceRecord) -> Result<(), PrivateOriginalE
         attempt
             .validate_binding(association)
             .map_err(|_| PrivateOriginalError::Conflict)?;
-        if let Some(input) = &record.bound_service_input
-            && !attempt
-                .matches_input(&input.decode()?)
-                .map_err(|_| PrivateOriginalError::Conflict)?
+        for input in record
+            .bound_service_input
+            .iter()
+            .chain(record.custody_input.iter())
         {
-            return Err(PrivateOriginalError::Conflict);
+            if !attempt
+                .matches_input(&cold_service_admission::decode_source_input(record, input)?)
+                .map_err(|_| PrivateOriginalError::Conflict)?
+            {
+                return Err(PrivateOriginalError::Conflict);
+            }
         }
     }
     Ok(())
@@ -1585,6 +2122,8 @@ fn validate_custody_record(record: &SourceRecord) -> Result<(), PrivateOriginalE
 
 fn encode(record: SourceRecord) -> Result<RecordData, PrivateOriginalError> {
     validate_custody_record(&record)?;
+    native_operations::validate(&record)?;
+    peer_ingress::validate(&record)?;
     Ok(RecordData {
         schema: SOURCE_SCHEMA.into(),
         version: if record.custody_attempt.is_some() {

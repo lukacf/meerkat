@@ -1138,7 +1138,7 @@ pub(crate) mod tests {
     async fn timed_readiness(controller: &ConsoleVoiceController, identity: &str) -> Duration {
         let started = std::time::Instant::now();
         let flight = controller
-            .readiness_flight("voice@example.com", identity)
+            .readiness_flight("voice@example.com", None, identity)
             .expect("flight");
         let report = tokio::time::timeout(Duration::from_secs(5), flight.result)
             .await
@@ -1418,7 +1418,7 @@ pub(crate) mod tests {
         )
         .expect("console host");
         let flight = controller
-            .readiness_flight("voice@example.com", "agent-b")
+            .readiness_flight("voice@example.com", None, "agent-b")
             .expect("flight");
         let trace = Arc::clone(&flight.trace);
         assert!(flight.result.await.expect("readiness").available);
@@ -2160,12 +2160,12 @@ pub(crate) mod tests {
         )
         .expect("console host");
         assert!(matches!(
-            controller.ready("other@example.com", "agent-a").await,
+            controller.ready("other@example.com", None, "agent-a").await,
             Err(VoiceError::Unauthorized)
         ));
         assert!(
             controller
-                .ready("voice@example.com", "agent-a")
+                .ready("voice@example.com", None, "agent-a")
                 .await
                 .expect("readiness")
         );
@@ -2202,7 +2202,7 @@ pub(crate) mod tests {
         );
         assert!(
             !controller
-                .ready("voice@example.com", "agent-missing")
+                .ready("voice@example.com", None, "agent-missing")
                 .await
                 .expect("missing member readiness"),
             "readiness and open agree on an unknown member"
@@ -3467,15 +3467,20 @@ pub(crate) mod tests {
     }
 }
 impl SharedHost {
+    /// The voice target `identity` for `principal`, who owns the agents
+    /// private to `private_owner_key` ([`crate::access::PRIVATE_TO_LABEL`]).
     async fn target(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: &str,
     ) -> Result<Arc<ConsoleLiveGrant>, VoiceError> {
         if principal != self.principal {
             return Err(VoiceError::Unauthorized);
         }
-        let access = self.access.view_for_subject(Some(principal));
+        let access = self
+            .access
+            .view_for_caller(Some(principal), private_owner_key);
         if !access.allows_agent(ACTION_AGENT_VIEW, identity)
             || !access.allows_agent(ACTION_AGENT_SEND, identity)
         {
@@ -3515,7 +3520,7 @@ impl SharedHost {
             .session
             .ok_or_else(|| unavailable("no live-capable session for identity"))?;
         self.binding
-            .register(principal, owner, session)
+            .register(principal, private_owner_key, owner, session)
             .map_err(|error| match error {
                 VoiceError::Busy => {
                     tracing::warn!(
@@ -3548,6 +3553,7 @@ impl SharedHost {
     async fn open_owned(
         self: &Arc<Self>,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: &str,
     ) -> Result<Arc<dyn ConsoleVoiceSession>, VoiceError> {
         let target_started = std::time::Instant::now();
@@ -3555,7 +3561,7 @@ impl SharedHost {
         // plain unavailability; the open path keeps that answer rather than
         // the same-request "teardown pending" retry hint.
         let grant = self
-            .target(principal, identity)
+            .target(principal, private_owner_key, identity)
             .await
             .map_err(|error| match error {
                 VoiceError::Busy => VoiceError::Unavailable,
@@ -3623,11 +3629,16 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 
 #[async_trait]
 impl ConsoleVoiceHost for Host {
-    async fn ready(&self, principal: &str, identity: &str) -> Result<bool, VoiceError> {
+    async fn ready(
+        &self,
+        principal: &str,
+        private_owner_key: Option<&str>,
+        identity: &str,
+    ) -> Result<bool, VoiceError> {
         use super::readiness_trace::{VoiceReadinessStage, enter as enter_stage};
         enter_stage(VoiceReadinessStage::Target);
         let target_started = std::time::Instant::now();
-        let grant = match self.0.target(principal, identity).await {
+        let grant = match self.0.target(principal, private_owner_key, identity).await {
             Ok(grant) => grant,
             Err(VoiceError::Unavailable | VoiceError::Busy) => return Ok(false),
             Err(error) => {
@@ -3672,6 +3683,7 @@ impl ConsoleVoiceHost for Host {
     async fn open(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: &str,
     ) -> Result<Arc<dyn ConsoleVoiceSession>, VoiceError> {
         let tracked = if let Some(runtime) = &self.0.identity_runtime {
@@ -3686,12 +3698,13 @@ impl ConsoleVoiceHost for Host {
         if let Some(target) = tracked {
             let shared = Arc::clone(&self.0);
             let principal = principal.to_string();
+            let private_owner_key = private_owner_key.map(str::to_string);
             let identity = identity.to_string();
             crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
                 vec![target],
                 move || async move {
                     shared
-                        .open_owned(&principal, &identity)
+                        .open_owned(&principal, private_owner_key.as_deref(), &identity)
                         .await
                         .map_err(|error| format!("{error:?}"))
                 },
@@ -3699,7 +3712,9 @@ impl ConsoleVoiceHost for Host {
             .await
             .map_err(|_| VoiceError::HostFailed)
         } else {
-            self.0.open_owned(principal, identity).await
+            self.0
+                .open_owned(principal, private_owner_key, identity)
+                .await
         }
     }
 }
@@ -3733,7 +3748,7 @@ impl AuthenticatedHttpLiveAuthority for HttpAuthority {
             operation,
             LiveOperation::Close | LiveOperation::Status | LiveOperation::PlaybackOwnerRevoke
         ) {
-            let access = self.access.view_for_subject(Some(&self.grant.principal));
+            let access = self.grant.access_view(&self.access);
             if self.grant.revoked.load(Ordering::SeqCst)
                 || !access.allows_agent(ACTION_AGENT_VIEW, &self.identity)
                 || !access.allows_agent(ACTION_AGENT_SEND, &self.identity)
@@ -3928,10 +3943,7 @@ impl ConsoleVoiceSession for Session {
         if self.grant.revoked.load(Ordering::SeqCst) {
             return Err(VoiceError::Closed);
         }
-        let access = self
-            .shared
-            .access
-            .view_for_subject(Some(&self.grant.principal));
+        let access = self.grant.access_view(&self.shared.access);
         if !access.allows_agent(ACTION_AGENT_VIEW, &self.identity) {
             return Err(VoiceError::Unauthorized);
         }
@@ -3981,10 +3993,7 @@ impl ConsoleVoiceSession for Session {
         if self.grant.revoked.load(Ordering::SeqCst) {
             return Err(VoiceError::Closed);
         }
-        let access = self
-            .shared
-            .access
-            .view_for_subject(Some(&self.grant.principal));
+        let access = self.grant.access_view(&self.shared.access);
         if !access.allows_agent(ACTION_AGENT_VIEW, &self.identity) {
             return Err(VoiceError::Unauthorized);
         }

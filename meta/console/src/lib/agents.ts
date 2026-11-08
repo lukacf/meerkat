@@ -122,6 +122,14 @@ function lastActivityField(...values: unknown[]): Pick<ConsoleAgent, "last_activ
   return {};
 }
 
+/** A side chat's audience as the server named it for the viewer, as an agent
+ * field; a value this console does not know names none. */
+function sideChatAudienceField(value: unknown): Pick<ConsoleAgent, "side_chat_audience"> {
+  return value === "private_to_you" || value === "private_to_creator" || value === "shared"
+    ? { side_chat_audience: value }
+    : {};
+}
+
 export function normalizeAgents(
   experience: ConsoleExperience | null,
   modules: unknown[]
@@ -207,6 +215,7 @@ export function normalizeAgents(
         ...(typeof entry.side_chat_of === "string" && entry.side_chat_of.trim()
           ? { side_chat_of: entry.side_chat_of.trim() }
           : {}),
+        ...sideChatAudienceField(entry.side_chat_audience),
         ...lastActivityField(entry.last_activity_ms, statusRow?.last_activity_ms),
         model_capabilities: modelCapabilities,
         ...watchFields,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import dataclasses
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ from http.client import HTTPConnection
 import json
 from pathlib import Path
 import socket
+import threading
 import time
 import uuid
 from urllib.parse import urlencode, urlsplit
@@ -376,6 +378,12 @@ class ConsoleScenario:
 
     def configure_owner(self, owner, source):
         native = owner["native_host"]
+        # Trusted preparation selects domains even when a later class-only
+        # application removes every seed route. Add only reads this selection.
+        native["authentication_domain"] = {"authority": copy.deepcopy(native["ingress_domain"]["authority"]),
+                                            "namespace": "fixture-authentication"}
+        native["event_domain"] = {"authority": copy.deepcopy(native["ingress_domain"]["authority"]),
+                                   "namespace": "fixture-events"}
         # SetupScope::key is the existing canonical acquisition store owner.
         self.task_scope = {"realm": native["realm"], "owner": "toolkit/acquisition/" + owner["deployment"]}
         original = next(row for row in native["members"] if row["member"]["member"] == "original")
@@ -387,6 +395,8 @@ class ConsoleScenario:
         route["origin"] = {"kind": "local_console", "member": original["member"],
             "requester": self.human(), "ingress_actor": route["source_authority"]}
         route["represented_subject"] = self.human()
+        route["authentication_domain"] = copy.deepcopy(native["authentication_domain"])
+        route["event_domain"] = copy.deepcopy(native["event_domain"])
         owner["components"], owner["channels"] = [], []
         native.pop("service_parent_administration")
         # Preserve the configured native issuer; the verified human reviews.
@@ -492,6 +502,9 @@ class ConsoleScenario:
                 return {"state": "reviewed", "access_reviewed": True, "grant_issued": True,
                         "fresh_instruction_retained": True, "ready": False}
         return HumanProvider(directory, events)
+
+    async def cleanup_access(self, http, report, provider):
+        pass
 
     async def run(self, private, provider, directory, events, process, base_url):
         require(base_url.rstrip("/") == self.origin, "native listener differs from pinned Console origin")
@@ -643,6 +656,14 @@ class ConsoleScenario:
             report.update(status="failed", error=self.report_value(repr(error)))
             raise
         finally:
+            if token is not None:
+                deadline = max(deadline, time.monotonic() + 30)
+                try:
+                    await self.cleanup_access(http, report, provider)
+                except BaseException as error:
+                    report.update(status="failed", access_cleanup_error=self.report_value(repr(error)))
+                    if original_error is None:
+                        original_error = error
             if enrollment is not None:
                 try:
                     retired = await asyncio.to_thread(enrollment.retire, timeout=10.0)
@@ -656,7 +677,443 @@ class ConsoleScenario:
                         raise
             self.check_response(report)
             v.save_json(directory / "console-journey.json", report)
+        if original_error is not None:
+            raise original_error
         events.add("installed_console_completed", **report["completion"])
+        return report
+
+
+REOPEN_TOOL = "setup_inspect_schema"
+REOPEN_CALL = "restored-schema-inspection"
+REOPEN_REQUEST = 'Inspect the supplied schema {} with setup_inspect_schema and report its SHA-256 digest.'
+REOPEN_DIGEST = hashlib.sha256(b"{}").hexdigest()
+REOPEN_ANSWER = "The supplied schema has SHA-256 " + REOPEN_DIGEST + "."
+REOPEN_ORIGINAL_ANSWER = "The restored setup helper owns this schema inspection."
+
+
+def checked_reopen_schema(value):
+    expected = {"schema_version": 1, "scope": "supplied_schema_evidence_only",
+        "schema_digest": REOPEN_DIGEST, "bytes": 2, "hash_algorithm": "sha256",
+        "byte_convention": "exact_supplied_utf8", "runtime_observation": "not_established",
+        "schema_validation": "not_performed"}
+    require(isinstance(value, dict) and set(value) == set(expected) | {"notice"}
+            and all(value[key] == expected_value for key, expected_value in expected.items())
+            and nonempty(value["notice"]), "restored helper schema result differs from supplied bytes")
+    return value
+
+
+def completed_reopen_tool(frames, accepted, model_result, verifier, helper_session):
+    """Join one ordinary Send/Find to the restored helper's actual inspection."""
+    # A snapshot can expose the same current frame directly and inside its
+    # synthetic frame_updated notice. Equal bytes describe one native event;
+    # conflicting versions must not be silently chosen by this oracle.
+    current = {}
+    for frame in frames:
+        previous = current.get(frame["id"])
+        require(previous is None or previous == frame, "conflicting restored native frame")
+        current[frame["id"]] = frame
+    frames = list(current.values())
+    positions = {frame["id"]: index for index, frame in enumerate(frames)}
+    anchors = [frame for frame in frames if frame["id"] == accepted["input_frame_id"]]
+    if not anchors:
+        return None
+    anchor = anchors[0]
+    require(anchor.get("status") != "delivery_failed",
+            "restored original Send failed native delivery; inspect retained timeline")
+    require(anchor.get("kind") == "user_input" and anchor.get("source", {}).get("kind") == "send"
+            and anchor.get("identity") == accepted["identity"] == "original"
+            and anchor.get("session_id") == accepted["session_id"]
+            and anchor.get("interaction_id") == accepted["interaction_id"]
+            and anchor.get("status") in ("accepted", "delivered")
+            and anchor["payload"].get("content") == REOPEN_REQUEST,
+            "restored original input does not match the accepted Send")
+    sends = [frame for frame in frames if frame.get("kind") == "user_input"
+             and frame.get("source", {}).get("kind") == "send"]
+    require(len(sends) == 1, "reopen admitted another Console Send")
+    original = [frame for frame in frames if frame.get("source", {}).get("kind") == "console_event"
+                and frame.get("identity") == "original"]
+    require(not any(frame.get("kind") in ("interaction_failed", "run_failed") for frame in original),
+            "restored original native interaction failed")
+    starts = [frame for frame in original if frame.get("kind") == "run_started"]
+    require(len(starts) <= 1, "restored original admitted another input")
+    if not starts:
+        return None
+    original_start = starts[0]
+    original_run = run_id(original_start)
+    require(original_start.get("session_id") == original_start["payload"].get("session_id") == accepted["session_id"]
+            and original_start["payload"].get("source_event_type") == "run_started"
+            and input_text(original_start) == REOPEN_REQUEST, "restored original input/session changed")
+    for frame in original:
+        if frame.get("run_id") == original_run:
+            require(run_id(frame) == original_run
+                    and frame.get("interaction_id") == original_start.get("interaction_id")
+                    and frame["payload"]["identity"].get("interaction_id") == original_start.get("interaction_id"),
+                    "restored original native lineage changed")
+    find_calls = [frame for frame in original if frame.get("kind") == "tool_call_requested"]
+    find_results = [frame for frame in original if frame.get("kind") == "tool_result_received"]
+    original_done = [frame for frame in original if frame.get("kind") == "interaction_complete"
+                     and frame["payload"].get("source_event_type") == "run_completed"]
+    require(all(len(rows) <= 1 for rows in (find_calls, find_results, original_done)),
+            "restored original repeated Find or completion")
+    if not find_calls or not find_results or not original_done:
+        return None
+    find_call, find_result, original_finish = find_calls[0], find_results[0], original_done[0]
+    require(all(frame.get("run_id") == original_run for frame in (find_call, find_result, original_finish))
+            and find_call["payload"].get("name") == find_result["payload"].get("name") == "find_and_install"
+            and find_call["payload"].get("id") == find_result["payload"].get("id") == "original-request"
+            and find_call["payload"].get("args") == {"request": REOPEN_REQUEST, "user_context": [], "caller_observations": []}
+            and find_result["payload"].get("is_error") is False, "restored original did not invoke its configured Find")
+    content = find_result["payload"].get("content")
+    require(isinstance(content, list) and content and all(block.get("type") == "text"
+            and isinstance(block.get("text"), str) for block in content), "native Find lacks its actual result")
+    find = verifier.unique_json("\n".join(block["text"] for block in content).encode())
+    require(isinstance(find, dict) and nonempty(find.get("operation")) and find.get("created") is True
+            and find.get("worker") == {"state": "input_admitted", "deduplicated": False,
+                "source_settlement": "fresh_acceptance_promoted"}, "native Find did not admit its actual helper")
+    require(original_finish.get("status") == "completed"
+            and original_finish.get("session_id") == original_finish["payload"].get("session_id") == accepted["session_id"]
+            and original_finish["payload"].get("result") == REOPEN_ORIGINAL_ANSWER
+            and original_finish["payload"].get("extraction_required", False) is False
+            and nonempty(original_finish["payload"].get("assistant_message_id"))
+            and positions[anchor["id"]] < positions[original_start["id"]] < positions[find_call["id"]]
+                < positions[find_result["id"]] < positions[original_finish["id"]],
+            "restored original lacks its ordered committed Find completion")
+    live = [frame for frame in frames if frame.get("source", {}).get("kind") == "console_event"
+            and frame.get("identity") == "helper"]
+    require(not any(frame.get("kind") in ("interaction_failed", "run_failed")
+                    for frame in live),
+            "restored helper native interaction failed")
+    starts = [frame for frame in live if frame.get("kind") == "run_started"]
+    require(len(starts) <= 1, "restored helper started more than one run")
+    if not starts:
+        return None
+    start = starts[0]
+    run = run_id(start)
+    require(start["payload"].get("source_event_type") == "run_started"
+            and start.get("session_id") == start["payload"].get("session_id") == helper_session
+            and helper_session != accepted["session_id"],
+            "restored helper run differs from its selected input/session")
+    helper_input = input_text(start)
+    require(isinstance(helper_input, str) and verifier.unique_json(helper_input.encode()) == {
+                "request": REOPEN_REQUEST, "user_context": [], "caller_observations": []},
+            "restored helper input differs from the complete Find request")
+    selected = [frame for frame in live if frame.get("run_id") == run]
+    for frame in selected:
+        require(run_id(frame) == run
+                and frame.get("interaction_id") == start.get("interaction_id")
+                and frame["payload"]["identity"].get("interaction_id") == start.get("interaction_id"),
+                "restored helper native run lineage changed")
+    calls = [frame for frame in selected if frame.get("kind") == "tool_call_requested"
+             and frame["payload"].get("id") == REOPEN_CALL]
+    results = [frame for frame in selected if frame.get("kind") == "tool_result_received"
+               and frame["payload"].get("id") == REOPEN_CALL]
+    done = [frame for frame in selected if frame.get("kind") == "interaction_complete"
+            and frame["payload"].get("source_event_type") == "run_completed"]
+    require(all(len(rows) <= 1 for rows in (calls, results, done)), "restored helper tool or completion repeated")
+    if not calls or not results or not done or model_result is None:
+        return None
+    call, result, finish = calls[0], results[0], done[0]
+    require(call["payload"].get("name") == result["payload"].get("name") == REOPEN_TOOL
+            and call["payload"].get("args") == {"schema_json": "{}"}
+            and result["payload"].get("is_error") is False,
+            "restored helper did not execute the exact schema inspection")
+    blocks = result["payload"].get("content")
+    # The MCP adapter supplies structuredContent plus its text serialization.
+    # Core retains one canonical Structured block and removes that duplicate text.
+    require(isinstance(blocks, list) and len(blocks) == 1 and isinstance(blocks[0], dict)
+            and set(blocks[0]) == {"type", "data"} and blocks[0]["type"] == "structured",
+            "restored helper native result lacks its exact structured block")
+    value = blocks[0]["data"]
+    require(checked_reopen_schema(value) == checked_reopen_schema(model_result),
+            "restored helper model did not receive the actual native result")
+    require(finish.get("session_id") == finish["payload"].get("session_id") == helper_session
+            and finish.get("status") == "completed" and finish["payload"].get("result") == REOPEN_ANSWER
+            and finish["payload"].get("extraction_required", False) is False
+            and nonempty(finish["payload"].get("assistant_message_id")),
+            "restored helper lacks its committed native answer")
+    require(positions[start["id"]] < positions[call["id"]]
+            < positions[result["id"]] < positions[finish["id"]], "restored helper native order differs")
+    return {"identity": "helper", "session_id": helper_session, "run_id": run,
+        "original_session_id": accepted["session_id"], "original_run_id": original_run,
+        "find_result": find, "original_completion_frame": original_finish["id"],
+        "input_frame_id": anchor["id"], "tool_call_frame": call["id"], "tool_result_frame": result["id"],
+        "completion_frame": finish["id"], "answer": REOPEN_ANSWER, "schema_result": value}
+
+
+class ReopenConsoleScenario(ConsoleScenario):
+    """Reopen without work, then use the ordinary Find route to its helper."""
+    name = "installed-console-reopen-success"
+    restore_after_shutdown = True
+    scope = ("prepared installed application, joined stop and native Restore without a terminal; "
+             "authenticated Console setup reopen and retired-login refusal; zero work from panel reads, "
+             "then one explicit ordinary Find and actual restored-helper schema inspection; "
+             "the created acquisition is not installation or service-readiness proof; "
+             "no browser, interrupted-review recovery or deployed authentication claim")
+
+    def __init__(self, verifier, origin):
+        super().__init__(verifier, origin)
+        self.phase = "prepared"
+        self.phases = []
+        self.retired_token = None
+        self.member_bindings = None
+
+    def observe_native_ready(self, ready):
+        bootstrap = ready.get("identity_bootstrap", {})
+        identities = bootstrap.get("identities", {})
+        require(bootstrap.get("complete") is True and bootstrap.get("ready") is True
+                and set(identities) == {"helper", "original"}
+                and all(row.get("state") == "active" for row in identities.values()),
+                "native reopen bootstrap did not restore every selected identity")
+
+    @staticmethod
+    def require_no_setup_startup_failure(frames):
+        # A completed system-notice frame can describe failed MCP startup.
+        # This catches the observed fresh-fixture regression; absence of a
+        # failure notice does not establish that a helper tool can execute.
+        for frame in frames:
+            payload = frame.get("payload", {})
+            if payload.get("kind") != "mcp":
+                continue
+            blocks = payload.get("blocks")
+            require(isinstance(blocks, list), "MCP startup notice lacks typed blocks")
+            for block in blocks:
+                require(isinstance(block, dict), "MCP startup notice has an invalid block")
+                if block.get("type") == "mcp" and block.get("server_id") == "toolkit-setup":
+                    require(block.get("phase") != "failed",
+                            "required setup helper failed MCP startup during installed reopen")
+
+    def configure_runtime(self, config, directory):
+        super().configure_runtime(config, directory)
+        # The human observes the helper. Only the existing original route can
+        # admit Console input; its configured Find admits the helper's work.
+        with Path(config.access_config_path).open("a") as access:
+            access.write('\n[[rules]]\nid = "reopen-helper-observation"\nsubjects = ["' + EMAIL
+                         + '"]\nactions = ["agent.view"]\nagents = ["helper"]\n')
+
+    def provider(self, directory, events):
+        v = self.v
+
+        class ReopenProvider(v.InstalledAcquisitionProvider):
+            request_text = REOPEN_REQUEST
+            inspection_result = None
+
+            def response(self, body):
+                if body["model"] == "fixture-original-model":
+                    require([message["content"] for message in body["messages"] if message["role"] == "user"]
+                            == [REOPEN_REQUEST], "restored original received another input")
+                    reply = super().response(body)
+                    if reply["finish_reason"] == "stop":
+                        reply["delta"]["content"] = REOPEN_ORIGINAL_ANSWER
+                    return reply
+                require(body["model"] == "fixture-helper-model", "reopen invoked another member's model")
+                require(REOPEN_REQUEST in v.canonical(body["messages"]).decode(),
+                        "restored helper did not receive the original Find request")
+                names = {row["function"]["name"] for row in body["tools"]}
+                results = {}
+                for message in body["messages"]:
+                    if message["role"] == "tool":
+                        identifier = message["tool_call_id"]
+                        require(identifier in self.issued and identifier not in results,
+                                "unissued or repeated restored helper result")
+                        value = v.unique_json(message["content"].encode())
+                        require(isinstance(value, dict) and "error" not in value,
+                                "restored helper tool refused")
+                        if identifier.startswith("reopen-load-"):
+                            v.exact_catalog_load(value, [REOPEN_TOOL])
+                        results[identifier] = value
+                if REOPEN_CALL in results:
+                    self.inspection_result = checked_reopen_schema(results[REOPEN_CALL])
+                    self.finished.set()
+                    return {"delta": {"content": REOPEN_ANSWER}, "finish_reason": "stop"}
+                if REOPEN_TOOL in names:
+                    identifier, tool, arguments = REOPEN_CALL, REOPEN_TOOL, {"schema_json": "{}"}
+                else:
+                    searches = [value for key, value in results.items() if key.startswith("reopen-search-")]
+                    require(len(searches) < 12, "restored setup catalog remained unavailable")
+                    found = searches[-1] if searches else None
+                    if found is not None and not found.get("pending_sources", []):
+                        require(found.get("catalog_exact") is True
+                                and any(row.get("name") == REOPEN_TOOL
+                                        and row.get("visibility_status") in ("loaded", "deferred")
+                                        for row in found.get("results", [])),
+                                "restored catalog did not expose schema inspection")
+                        require(not any(key.startswith("reopen-load-") for key in results),
+                                "restored catalog load did not expose its selected tool")
+                        identifier, tool, arguments = ("reopen-load-" + str(len(self.issued)),
+                            "tool_catalog_load", {"names": [REOPEN_TOOL]})
+                    else:
+                        require(found is None or v.pending_setup_search(found),
+                                "restored catalog did not report its exact pending setup source")
+                        if found is not None:
+                            # Pace only a confirmed pending catalog observation,
+                            # matching the existing helper acquisition fixture.
+                            threading.Event().wait(0.25)
+                        identifier, tool, arguments = ("reopen-search-" + str(len(self.issued)),
+                            "tool_catalog_search", {"query": "setup", "limit": 50})
+                require(tool in names and identifier not in self.issued,
+                        "restored helper lacks its selected tool or would repeat a call")
+                self.issued.add(identifier)
+                self.events.add("controlled_model_tool", model=body["model"], call_id=identifier,
+                                tool=tool, args=arguments)
+                return {"delta": {"tool_calls": [{"index": 0, "id": identifier, "type": "function",
+                    "function": {"name": tool, "arguments": json.dumps(arguments)}}]},
+                    "finish_reason": "tool_calls"}
+
+        return ReopenProvider(directory, events)
+
+    async def run(self, private, provider, directory, events, process, base_url):
+        require(base_url.rstrip("/") == self.origin, "restored Console changed its selected origin")
+        v = self.v
+        report = {"phase": self.phase, "status": "running", "http": [], "snapshots": [],
+                  "login_retirement": "not_observed"}
+        self.phases.append(report)
+        enrollment = None
+        retirement_started = False
+        original_error = None
+        expires = int(time.time() + 2 * v.INSTALLED_LIMIT + 60)
+        scope = "installed-reopen-" + uuid.uuid4().hex
+        token = signed_login(scope, expires)
+        deadline = time.monotonic() + v.INSTALLED_LIMIT
+
+        async def http(method, path, body=None, *, bearer=token, expected=200, text=False):
+            def request():
+                require(process.poll() is None and time.monotonic() < deadline,
+                        "reopen observation exceeded its live owner/deadline")
+                connection = HTTPConnection("127.0.0.1", self.port, timeout=min(10.0, deadline - time.monotonic()))
+                try:
+                    headers = {"Authorization": "Bearer " + bearer} if bearer else {}
+                    if body is not None:
+                        headers.update({"Origin": self.origin, "Content-Type": "application/json"})
+                    connection.request(method, path, body=None if body is None else v.canonical(body), headers=headers)
+                    response = connection.getresponse()
+                    raw = response.read(2 * 1024 * 1024 + 1)
+                    require(len(raw) <= 2 * 1024 * 1024, "reopen response exceeds fixture bound")
+                    value = raw.decode() if text else v.unique_json(raw)
+                    report["http"].append({"method": method, "path": path, "request": body,
+                                           "status": response.status, "response": value})
+                    require(response.status == expected, "actual reopen " + path + " returned " + str(response.status))
+                    return value
+                finally:
+                    connection.close()
+            return await asyncio.to_thread(request)
+
+        async def get(path, **kwargs):
+            return await http("GET", path, **kwargs)
+
+        async def retire():
+            nonlocal retirement_started
+            retirement_started = True
+            retired = await asyncio.to_thread(enrollment.retire, timeout=10.0)
+            report["login_retirement"] = dataclasses.asdict(retired)
+            require(retired.fenced and retired.reservations_drained and not retired.uncertain,
+                    "reopen login retirement did not join")
+
+        try:
+            await get(PANEL + "/data", bearer=None, expected=401)
+            if self.retired_token is not None:
+                # A correctly signed, still-unexpired login from the previous
+                # native owner cannot regain its retired enrollment on Restore.
+                await get(PANEL, bearer=self.retired_token, expected=403, text=True)
+                await get(PANEL + "/data", bearer=self.retired_token, expected=403)
+            enrollment = private.begin_console_login(v.SDK.ConsoleLoginSelection(
+                issuer=ISSUER, subject=SUBJECT, login_scope_id=scope, expires_at_ms=expires * 1000), timeout=10.0)
+            await asyncio.to_thread(enrollment.result)
+            report["enrollment"] = {"id": enrollment.enrollment_id, "login_scope_id": scope, "acknowledged": True}
+            experience = await get("/console/experience")
+            require(sum(button.get("panel") == PANEL for button in
+                        experience["console_config"]["sidebar"]["buttons"]) == 1,
+                    "restored Console lacks its one selected setup panel")
+            for _ in range(2):
+                await get(PANEL, text=True)
+                await get(PANEL + "/panel.js", text=True)
+                status = await get(PANEL + "/data")
+                require(status["review"] is None and status["projection"]["tasks"] == []
+                        and status["page"]["has_next"] is False,
+                        "opening setup created a task or approval")
+                for key in ("application_access", "operator_recovery"):
+                    require(key not in status or status[key]["rows"] == [],
+                            "opening setup unexpectedly retained application access")
+                identities = (await get("/console/identities"))["identities"]
+                require(len(identities) == 2 and {row["identity"] for row in identities} == {"helper", "original"},
+                        "reopen changed the actual native member roster")
+                require(all(row.get("health") == "ready" and row.get("visibility") == "addressable"
+                            for row in identities), "reopen retained an unavailable native identity")
+                bindings = {row["identity"]: row["session_id"] for row in identities}
+                require(all(nonempty(value) for value in bindings.values()), "native member binding is unavailable")
+                if self.member_bindings is None:
+                    self.member_bindings = bindings
+                require(bindings == self.member_bindings, "reopen duplicated or replaced a native member binding")
+                timelines = {}
+                for identity in ("helper", "original"):
+                    page = await get("/console/timeline?" + urlencode({"identity": identity, "limit": 200}))
+                    require(page.get("available", True) is True and isinstance(page.get("frames"), list),
+                            "native reopen timeline unavailable")
+                    if identity == "helper":
+                        self.require_no_setup_startup_failure(page["frames"])
+                    timelines[identity] = page["frames"]
+                snapshot = {"bindings": bindings, "projection": status["projection"], "timelines": timelines}
+                if report["snapshots"]:
+                    require(snapshot == report["snapshots"][0], "panel reopen caused native work")
+                report["snapshots"].append(snapshot)
+                with provider.lock:
+                    require(not provider.requests and not provider.errors, "panel reopen invoked a model")
+            if self.phase == "restored":
+                with provider.lock:
+                    provider.enabled = True
+                    provider.deadline = deadline
+                accepted = await http("POST", "/console/send", {"identity": "original",
+                    "content": REOPEN_REQUEST, "origin": "console", "origin_kind": "operator",
+                    "idempotency_key": "installed-restored-find-" + uuid.uuid4().hex})
+                require(accepted.get("status") == "accepted" and accepted.get("identity") == "original"
+                        and accepted.get("session_id") == self.member_bindings["original"]
+                        and all(nonempty(accepted.get(key)) for key in ("interaction_id", "input_frame_id")),
+                        "restored original Send changed the retained native session")
+                report["accepted_tool_input"] = accepted
+                while time.monotonic() < deadline:
+                    with provider.lock:
+                        require(not provider.errors, "controlled restored helper model refused native execution")
+                        receipt = provider.inspection_result
+                    frames = []
+                    for identity in ("original", "helper"):
+                        page = await get("/console/timeline?" + urlencode({"identity": identity, "limit": 200}))
+                        require(page.get("available", True) is True and isinstance(page.get("frames"), list),
+                                "restored execution timeline unavailable")
+                        frames.extend(frame_record(frame) for frame in page["frames"])
+                    self.require_no_setup_startup_failure(frames)
+                    completion = completed_reopen_tool(frames, accepted, receipt, v, self.member_bindings["helper"])
+                    if completion is not None and provider.finished.is_set():
+                        report["tool_execution"] = completion
+                        report["tool_timeline"] = frames
+                        break
+                    await asyncio.sleep(0.1)
+                require("tool_execution" in report, "restored helper did not complete its actual tool call")
+                after = await get(PANEL + "/data")
+                report["after_inspection"] = after
+                # The panel projects approved source follow-ups, not ordinary
+                # Find acquisitions. Schema inspection creates no such follow-up.
+                require(after["review"] is None and after["projection"]["tasks"] == []
+                        and after["page"]["has_next"] is False,
+                        "schema inspection opened an unselected review or approved follow-up")
+            await retire()
+            await get(PANEL, expected=403, text=True)
+            await get(PANEL + "/data", expected=403)
+            self.retired_token = token
+            report["status"] = "passed"
+        except BaseException as error:
+            original_error = error
+            report.update(status="failed", error=repr(error))
+            raise
+        finally:
+            try:
+                if enrollment is not None and not retirement_started:
+                    await retire()
+            except BaseException as error:
+                report.update(status="failed", retirement_error=repr(error))
+                if original_error is None:
+                    raise
+            finally:
+                v.save_json(directory / "console-journey.json", {"scope": self.scope, "phases": self.phases})
+        events.add("installed_console_reopen_observed", phase=self.phase, member_bindings=self.member_bindings)
         return report
 
 
@@ -1180,15 +1637,23 @@ class TrelloConsoleScenario(ConsoleScenario):
              "native persistence, attachment and same-original completion required; "
              "no vendor operation, account verification or service readiness claim")
 
+    selection = TRELLO_SELECTION
+    operation = TRELLO_OPERATION
+    request_text = TRELLO_REQUEST
+    slots = TRELLO_SLOTS
+    slot_labels = ("config.api_key_env", "config.token_env")
+    expires_in_ms = None
+    selected_tool_policy = None
+
     def __init__(self, verifier, origin):
         super().__init__(verifier, origin)
         self._credential_values = {slot: "controlled-canary-" + uuid.uuid4().hex
-                                   for slot in TRELLO_SLOTS}
+                                   for slot in self.slots}
         self._persistence_proposal = None
         self._credential_service_context = None
 
     def original_request(self):
-        return TRELLO_REQUEST
+        return self.request_text
 
     def completed(self, frames, accepted, context, business):
         require(context is None or self._credential_service_context is not None,
@@ -1237,7 +1702,7 @@ class TrelloConsoleScenario(ConsoleScenario):
             "route": self.v.ACQUISITION_ROUTE, "purpose": "operations",
             "represented_subject": human()}
         source["console_fixture"]["credential_setup"] = {
-            "selection": TRELLO_SELECTION, "request": TRELLO_REQUEST,
+            "selection": self.selection, "request": self.request_text,
             "authentication": {"kind": "declared_secret_slots"},
             "native_admin_subject": EMAIL, "vendor_operation": "not_requested",
         }
@@ -1252,7 +1717,7 @@ class TrelloConsoleScenario(ConsoleScenario):
         original = next(row for row in members if row["member_identity"] == "original")
         operation = [row for row in original["grants"] if row["tool_name"] == self.v.ACQUISITION_OPERATION]
         require(len(operation) == 1, "expected one existing original operation classification")
-        operation[0]["tool_name"] = TRELLO_OPERATION
+        operation[0]["tool_name"] = self.operation
         report = plan["authorities"]["helper_report"]
         require(report.pop("public_issuance_id") == "helper-public-request-parent"
                 and "account_issuance_id" not in report, "unexpected existing helper account authority")
@@ -1268,7 +1733,20 @@ class TrelloConsoleScenario(ConsoleScenario):
         public[0]["issuance_id"] = "original-helper-account-ceiling"
 
     def software_answer(self, review, checked):
-        return software_review(review, checked, TRELLO_OPERATION, selection=TRELLO_SELECTION)
+        return software_review(review, checked, self.operation, selection=self.selection)
+
+    def checked_native_configuration(self, server, launch):
+        require(isinstance(launch, dict) and set(launch) <= {"command", "args", "env", "secret_env"}
+                and nonempty(launch.get("command")) and Path(launch["command"]).is_absolute()
+                and isinstance(launch.get("args", []), list)
+                and all(isinstance(argument, str) for argument in launch.get("args", []))
+                and launch.get("env", {}) == {} and launch.get("secret_env", []) == [],
+                "reconciled launch is not the exact ordinary credential-free stdio input")
+        # Match CheckedInstalls.secret_launch_configuration and the selected
+        # native serde shape, using the real checked publisher launch/slots.
+        return {"name": server, "command": launch["command"],
+            "args": launch.get("args", []), "env": {}, "secret_env": sorted(self.slots),
+            "access": {"allowed_operations": [self.operation]}}
 
     def credential_answer(self, review, accepted, results):
         answer = approval_answer(review)
@@ -1286,21 +1764,11 @@ class TrelloConsoleScenario(ConsoleScenario):
         servers = installed["mcp_configuration"]["mcpServers"]
         require(job["status"] == "succeeded" and observation["status"] == "matched"
                 and observation["job_id"] == job["id"] and len(servers) == 1
-                and installed["family"] == "agno" and installed["profile"] == "trello",
+                and installed["family"] == self.selection["family"] and installed["profile"] == self.selection["profile"],
                 "credential review lacks its actual reconciled Trello installation")
         server = next(iter(servers))
         launch = servers[server]
-        require(isinstance(launch, dict) and set(launch) <= {"command", "args", "env", "secret_env"}
-                and nonempty(launch.get("command")) and Path(launch["command"]).is_absolute()
-                and isinstance(launch.get("args", []), list)
-                and all(isinstance(argument, str) for argument in launch.get("args", []))
-                and launch.get("env", {}) == {} and launch.get("secret_env", []) == [],
-                "reconciled launch is not the exact ordinary credential-free stdio input")
-        # Match CheckedInstalls.secret_launch_configuration and the selected
-        # native serde shape, using the real checked publisher launch/slots.
-        expected_configuration = {"name": server, "command": launch["command"],
-            "args": launch.get("args", []), "env": {}, "secret_env": sorted(TRELLO_SLOTS),
-            "access": {"allowed_operations": [TRELLO_OPERATION]}}
+        expected_configuration = self.checked_native_configuration(server, launch)
         proposal = context["configuration_persistence"]
         defining_realm = proposal["defining_realm"]
         expected_generation = proposal["expected_configuration_generation"]
@@ -1310,15 +1778,20 @@ class TrelloConsoleScenario(ConsoleScenario):
         # The driver obtains these owner facts before recording approval.
         # This case correlates that proposal with actual native outcomes;
         # separate owner controls establish how the handle selects them.
+        application_selection = {"operations": [self.operation], "agent": "original",
+                                 "expires_in_ms": self.expires_in_ms}
+        if self.selected_tool_policy is not None:
+            application_selection["tool_policy"] = self.selected_tool_policy
+            reviewed_original_catalog(request, decision, accepted, self.application_tool_policy, self.v,
+                                      expected_selection=self.selected_tool_policy)
         require(request["phase"] == "installed_credential_service_access"
                 and request["authentication"] == {"kind": "declared_secret_slots"}
                 and request["operation_basis"] == {"kind": "package_published_metadata"}
-                and request["application_selection"] == {"operations": [TRELLO_OPERATION],
-                    "agent": "original", "expires_in_ms": None}
+                and request["application_selection"] == application_selection
                 and request["installation"] == expected_configuration
                 and request["software"]["job_id"] == job["id"]
-                and request["software"]["family"] == "agno"
-                and request["software"]["profile"] == "trello"
+                and request["software"]["family"] == self.selection["family"]
+                and request["software"]["profile"] == self.selection["profile"]
                 and request["software"]["server_name"] == server
                 and request["software"]["validation_id"] == checked["validation_id"]
                 and request["software"]["receipt_sha256"] == installed["receipt_sha256"]
@@ -1330,7 +1803,7 @@ class TrelloConsoleScenario(ConsoleScenario):
                     "defining_realm": defining_realm,
                     "expected_configuration_generation": expected_generation,
                     "configuration": expected_configuration,
-                    "credential_slots": sorted(TRELLO_SLOTS),
+                    "credential_slots": sorted(self.slots),
                     "requested_effects": "persist this exact configuration, then privately store the declared credentials",
                     "authority": "requires current authenticated native realm administration at each mutation entry",
                     "partial_effects": "configuration or credentials can remain after cancellation or later failure"},
@@ -1341,7 +1814,7 @@ class TrelloConsoleScenario(ConsoleScenario):
         require(nonempty(fresh) and original_work_reference(context["prior_original"], self.source_authority)
                 and context["business_task"] == {**self.task_scope,
                     "id": results["original-request"]["operation"]}
-                and context["proposed_fresh_instruction"] == TRELLO_REQUEST
+                and context["proposed_fresh_instruction"] == self.request_text
                 and context["operator_and_requester"] == human()
                 and context["represented_subject"] == human()
                 and context["live_attachment"] == decision["live_attachment"]
@@ -1351,7 +1824,7 @@ class TrelloConsoleScenario(ConsoleScenario):
                     self.v.canonical(expected_configuration)).hexdigest()
                 and body["connector_selection"] == {"server": server, "connector": None}
                 and permission["target"] == "original" and permission["connection"] == server
-                and permission["resource"] == server and permission["operations"] == [TRELLO_OPERATION]
+                and permission["resource"] == server and permission["operations"] == [self.operation]
                 and permission["lifetime"]["scope"] == {"kind": "task", "task": fresh}
                 and type(permission["lifetime"]["expires_at_ms"]) is int
                 and permission["lifetime"]["expires_at_ms"] > int(time.time() * 1000)
@@ -1364,8 +1837,7 @@ class TrelloConsoleScenario(ConsoleScenario):
         require(isinstance(projection, dict) and set(projection) == {"kind", "slots"}
                 and projection["kind"] == "declared_secret_slots"
                 and projection["slots"] == [
-                    {"slot": TRELLO_SLOTS[0], "label": "config.api_key_env"},
-                    {"slot": TRELLO_SLOTS[1], "label": "config.token_env"}],
+                    {"slot": slot, "label": label} for slot, label in zip(self.slots, self.slot_labels)],
                 "protected review does not name exactly the checked two library slots")
         require(self._persistence_proposal is None, "credential persistence review was repeated")
         self._persistence_proposal = {"defining_realm": defining_realm, "server_name": server,
@@ -1378,7 +1850,7 @@ class TrelloConsoleScenario(ConsoleScenario):
         # This body goes only to POST /host/toolkit/setup/credentials. The
         # shared HTTP reporter redacts both canaries before retaining requests.
         return {**answer, "credentials": [
-            {"slot": slot, "value": self._credential_values[slot]} for slot in TRELLO_SLOTS]}, context
+            {"slot": slot, "value": self._credential_values[slot]} for slot in self.slots]}, context
 
     async def access_answer(self, http, review, accepted, results, report):
         answer, context = self.credential_answer(review, accepted, results)
@@ -1400,7 +1872,7 @@ class TrelloConsoleScenario(ConsoleScenario):
                 and type(installed["generation"]) is int and 0 <= installed["generation"] < 2**64,
                 "native configuration install did not return an actual generation")
         require(persistence == {**self._persistence_proposal, "install": installed,
-                    "secrets": [{"slot": slot, "state": "stored"} for slot in TRELLO_SLOTS]},
+                    "secrets": [{"slot": slot, "state": "stored"} for slot in self.slots]},
                 "native persistence differs from the reviewed owner or has incomplete credential writes")
 
     def finish_report(self, report, results, provider, completion):
@@ -1438,21 +1910,23 @@ class TrelloConsoleScenario(ConsoleScenario):
                                  "same_review_retained": True})
         return observations
 
-    def provider(self, directory, events):
+    def credential_provider_type(self):
         scenario = self
 
         class TrelloProvider(self.v.InstalledAcquisitionProvider):
-            request_text = TRELLO_REQUEST
-            operation = TRELLO_OPERATION
-            profile = "trello"
-            selection_values = TRELLO_SELECTION["values"]
+            request_text = scenario.request_text
+            operation = scenario.operation
+            profile = scenario.selection["profile"]
+            family = scenario.selection["family"]
+            package_operations = scenario.selection["operations"]
+            selection_values = scenario.selection["values"]
             access_tool = "toolkit_request_service_account"
             access_call_id = "credential-task-access"
 
             def check_model_request(self, body):
                 # Runs before retaining the model request or dispatching it.
                 scenario.check_response(body)
-                require(not any(call.get("function", {}).get("name") == TRELLO_OPERATION
+                require(not any(call.get("function", {}).get("name") == scenario.operation
                     for message in body["messages"] for call in message.get("tool_calls", [])),
                     "setup-only model history contains a vendor operation")
 
@@ -1462,8 +1936,8 @@ class TrelloConsoleScenario(ConsoleScenario):
             def checked_configuration(self, checked):
                 require(checked["scope"] == "configuration_only"
                         and checked["credential_environment_references"] == [
-                            {"field_path": ["config", "api_key_env"], "environment_variable": TRELLO_SLOTS[0]},
-                            {"field_path": ["config", "token_env"], "environment_variable": TRELLO_SLOTS[1]}],
+                            {"field_path": label.split("."), "environment_variable": slot}
+                            for slot, label in zip(scenario.slots, scenario.slot_labels)],
                         "actual package check differs from the two declared Trello references")
 
             def check_authentication_metadata(self, metadata):
@@ -1472,8 +1946,11 @@ class TrelloConsoleScenario(ConsoleScenario):
                 require("authentication" not in metadata, "Trello publisher unexpectedly declares no-auth")
 
             def access_arguments(self, job_id, raw):
-                return {**super().access_arguments(job_id, raw),
-                        "authentication": {"kind": "declared_secret_slots"}}
+                arguments = {**super().access_arguments(job_id, raw), "expires_in_ms": scenario.expires_in_ms,
+                             "authentication": {"kind": "declared_secret_slots"}}
+                if scenario.selected_tool_policy is not None:
+                    arguments["tool_policy"] = scenario.selected_tool_policy
+                return arguments
 
             def check_access_result(self, result):
                 scenario.check_persistence_result(result)
@@ -1486,7 +1963,7 @@ class TrelloConsoleScenario(ConsoleScenario):
                 if body["model"] == "fixture-original-model":
                     messages = body["messages"]
                     originals = [index for index, row in enumerate(messages)
-                        if row["role"] == "user" and row.get("content") == self.request_text]
+                        if row["role"] == "user" and row.get("content") == scenario.request_text]
                     require(len(originals) in (1, 2), "expected exact setup original and at most one fresh input")
                     require(len(originals) == 2 or not any(row["role"] == "assistant"
                             and row.get("content") == scenario.v.ORIGINAL_A_FINISH for row in messages),
@@ -1502,23 +1979,23 @@ class TrelloConsoleScenario(ConsoleScenario):
                                 "credential fresh input lacks the actual original setup and completed history")
                         require(scenario._credential_service_context is not None,
                                 "credential continuation lacks its reviewed service context")
-                        scenario.v.original_catalog_history(messages, self.request_text, TRELLO_OPERATION, fresh,
+                        scenario.v.original_catalog_history(messages, scenario.request_text, scenario.operation, fresh,
                             service_context=scenario._credential_service_context)
                         tool_results = [row for row in messages if row["role"] == "tool"]
                         require(len(tool_results) == 1 and tool_results[0]["tool_call_id"] == "original-request"
                                 and scenario.v.unique_json(tool_results[0]["content"].encode())
                                     == self.results["original-request"],
                                 "setup-only continuation changed or added original tool effects")
-                        offered = [row for row in body["tools"] if row["function"]["name"] == TRELLO_OPERATION]
+                        offered = [row for row in body["tools"] if row["function"]["name"] == scenario.operation]
                         deferred = [row for row in messages[fresh + 1:] if row["role"] == "user"
-                            and scenario.v.original_tool_notice(row.get("content"), TRELLO_OPERATION) == "added"]
+                            and scenario.v.original_tool_notice(row.get("content"), scenario.operation) == "added"]
                         # Core publishes deferred metadata before loading a tool inline.
                         # This setup-only observation grants no invocation authority;
                         # reviewed native persistence and grant results remain separate.
                         require((len(offered), len(deferred)) in ((1, 0), (0, 1)),
                                 "actual original lacks unambiguous checked Trello operation metadata")
                         require(self.business_observation is None, "setup-only original answer was replayed")
-                        self.business_observation = {"answer": TRELLO_FINISH, "attached_operation": TRELLO_OPERATION,
+                        self.business_observation = {"answer": TRELLO_FINISH, "attached_operation": scenario.operation,
                             "operation_metadata_visibility": "inline" if offered else "deferred",
                             "a_input_history_index": first, "b_input_history_index": fresh,
                             "model_request_index": len(self.requests) - 1,
@@ -1529,4 +2006,7 @@ class TrelloConsoleScenario(ConsoleScenario):
                         return {"delta": {"content": TRELLO_FINISH}, "finish_reason": "stop"}
                 return super().response(body)
 
-        return TrelloProvider(directory, events)
+        return TrelloProvider
+
+    def provider(self, directory, events):
+        return self.credential_provider_type()(directory, events)

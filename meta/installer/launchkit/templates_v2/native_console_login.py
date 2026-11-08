@@ -44,8 +44,11 @@ class NativeConsoleLogin:
                 or is_current is not None and (
                     not callable(is_current) or inspect.iscoroutinefunction(is_current))):
             raise ValueError("Native Console login requires trusted application inputs.")
+        # The enrollment names this login's console tokens: their issuer and
+        # their subject, the account itself unless the login says otherwise.
         self._selection = ConsoleLoginSelection(
-            issuer, login.principal, login.login_scope_id, login.expires_at_ms)
+            issuer, login.principal if login.subject is None else login.subject,
+            login.login_scope_id, login.expires_at_ms)
         self._client, self._login = client, login
         self._application_current = is_current
         self._revoked = False
@@ -144,7 +147,8 @@ class NativeConsoleLogin:
         """Dormant host-owned ceremony on this original enrollment and pipe."""
         self._require_current()
         if (not isinstance(context, ConsoleConnectLogin)
-                or (context.principal, context.login_scope_id, context.expires_at_ms, context.origin)
+                or (context.principal if context.subject is None else context.subject,
+                    context.login_scope_id, context.expires_at_ms, context.origin)
                 != (self.subject, self.login_scope_id, self.expires_at_ms, self.origin)):
             raise NativeConsoleLoginError("invalid_binding")
         return NativeConsoleMcp(self, context, target)

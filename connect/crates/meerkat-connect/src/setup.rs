@@ -80,12 +80,21 @@ pub struct PreparedSetupConnection {
 }
 
 impl PreparedSetupConnection {
+    pub(crate) fn server(&self) -> &McpServerConfig {
+        &self.server
+    }
+
     pub(crate) fn into_server(self) -> McpServerConfig {
         self.server
     }
 
     /// The caller must obtain these bytes from the selected resource preparer.
     /// Unknown/duplicate fields, extra servers and non-stdio transports refuse.
+    /// The selected local toolkit setup service acts without a provider account:
+    /// it manages software/setup work, not the account of any installed service.
+    /// This owner declares that fact explicitly. Parsing does not verify the
+    /// executable or make this constructor appropriate for arbitrary MCP peers;
+    /// the caller must retain the existing resource verification and custody.
     pub fn from_preparer_output(bytes: &[u8]) -> Result<Self, ConnectError> {
         if bytes.len() > CONFIG_LIMIT {
             return Err(ConnectError::InvalidInput(
@@ -101,14 +110,17 @@ impl PreparedSetupConnection {
             || server.command.contains('\0')
             || server.args.iter().any(|argument| argument.contains('\0'))
             || !server.env.is_empty()
+            || !server.secret_env.is_empty()
+            || server.cwd.is_some()
         {
             return Err(ConnectError::InvalidInput(
                 "Prepared setup connection has unsupported execution inputs".into(),
             ));
         }
-        Ok(Self {
-            server: McpServerConfig::stdio(SERVER_NAME, server.command, server.args, server.env),
-        })
+        let mut server =
+            McpServerConfig::stdio(SERVER_NAME, server.command, server.args, server.env);
+        server.account = Some(meerkat_core::McpAccountDeclaration::NoAccount);
+        Ok(Self { server })
     }
 
     /// Enable catalog, preparation, configuration checks and local job controls.
@@ -316,10 +328,36 @@ mod tests {
             br#"{"mcpServers":{"toolkit-setup":{"url":"https://example.com"}}}"#,
             br#"{"mcpServers":{"toolkit-setup":{"command":"python"}}}"#,
             br#"{"mcpServers":{"toolkit-setup":{"command":"/ok","env":{"TOKEN":"secret"}}}}"#,
+            br#"{"mcpServers":{"toolkit-setup":{"command":"/ok","secret_env":["TOKEN"]}}}"#,
+            br#"{"mcpServers":{"toolkit-setup":{"command":"/ok","cwd":"/selected"}}}"#,
             br#"{"mcpServers":{"toolkit-setup":{"command":"/ok","tool_names":{}}}}"#,
+            br#"{"mcpServers":{"toolkit-setup":{"command":"/ok","account":"no_account"}}}"#,
         ] {
             assert!(PreparedSetupConnection::from_preparer_output(bytes).is_err());
         }
+    }
+
+    #[test]
+    fn selected_local_setup_declares_no_account_without_changing_generic_mcp() {
+        let selected = connection().into_server();
+        assert_eq!(
+            selected.account,
+            Some(meerkat_core::McpAccountDeclaration::NoAccount)
+        );
+        assert_eq!(
+            selected,
+            connection().into_server(),
+            "retained handoff reconstruction is exact"
+        );
+        let generic =
+            McpServerConfig::stdio("other", "/unselected", Vec::new(), Default::default());
+        assert_eq!(
+            generic.account, None,
+            "no account may be inferred for an arbitrary stdio peer"
+        );
+        assert!(generic.connector.is_none());
+        // Native connection/target code decides the resulting OperationAccount.
+        // This pure configuration control neither attaches nor dispatches MCP.
     }
 
     #[test]

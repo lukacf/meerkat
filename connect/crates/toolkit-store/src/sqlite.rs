@@ -331,7 +331,11 @@ impl SqliteStore {
     ) -> StoreResult<T> {
         let connection = self.connection.clone();
         let store_id = self.store_id.clone();
+        let custody = crate::io_custody::capture();
         tokio::task::spawn_blocking(move || {
+            // Declare before the lock so connection/publication guards leave
+            // before the last caller hold, including on panic unwinding.
+            let _custody = custody;
             let mut slot = connection.lock().map_err(|_| StoreError::Synchronization)?;
             let owned = slot.as_mut().ok_or(StoreError::OwnerUnavailable)?;
             action(&mut owned.connection, &store_id)

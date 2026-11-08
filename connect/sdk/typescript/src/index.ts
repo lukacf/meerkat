@@ -14,3 +14,6 @@ export type { SlackContext, SlackOptions, SlackPageOptions, SlackPage, SlackFail
 export { GoogleCalendarOperations, CalendarError, CalendarCancelled } from "./connectors/google-calendar.js";
 export type { GoogleCalendarContext, GoogleCalendarOptions, CalendarOperationOptions, CalendarConditionalOptions,
   CalendarListOptions, CalendarEvent, CalendarPage, CalendarFailureKind, CalendarWriteOutcome } from "./connectors/google-calendar.js";
+
+export { ProviderSetupClient, ProviderSetupError, decodeProviderSelection } from "./provider-setup.js";
+export type { ProviderSetupBinding, ProviderSelection, ProviderAnswer } from "./provider-setup.js";

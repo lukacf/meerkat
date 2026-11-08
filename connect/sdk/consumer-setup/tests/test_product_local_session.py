@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from contextlib import nullcontext
 from pathlib import Path
 import sys
 import threading
@@ -176,8 +177,132 @@ class ProductLocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
             request.write_bytes(request.read_bytes() + b" ")
             self.error("recovery_request_changed", lambda: self.observe(owner, selected))
 
+    def local_round_fixture(self):
+        # Existing product receipt/hash path with controlled resource extraction.
+        # The live lease/fingerprint comparison is exercised by local-session tests.
+        product_root = self.root / "product-round"
+        product_root.mkdir()
+        (product_root / "starter.py").write_bytes(b"")
+        archive = product_root / "fixture.tar.gz"
+        archive.write_bytes(b"controlled selected archive")
+        manifest = {"target": product.HOST_TARGETS[(product.platform.system(), product.platform.machine())],
+            "python": str(Path(sys.executable).resolve()), "archive": archive.name, "starter": "starter.py"}
+        receipt = local.encoded({"target": manifest["target"], "workspace": str(self.prepared / "session"),
+            "release": {"archive_sha256": product.sha256(archive)}, "files": {"mcp.json": self.configuration_sha}})
+        (self.prepared / "config/prepared.json").write_bytes(receipt)
+        descriptor = local.encoded(self.descriptor)
+        (self.prepared / "product-mcp.json").write_bytes(descriptor)
+        prepared = local.encoded({"resources_sha256": "a" * 64, "mcp_sha256": self.configuration_sha,
+            "preparation": {"bootstrap": {"host": {"receipt_sha256": local.digest(receipt)}}},
+            "local_setup": {"descriptor_sha256": local.digest(descriptor),
+                            "helper_sha256": self.binding["helper_sha256"]}})
+        (self.prepared / "product-prepared.json").write_bytes(prepared)
+        request = {"prepared": str(self.prepared), "realm_state_root": str(self.realm_root), "realm": "realm",
+            "descriptor_sha256": local.digest(descriptor), "preparation_sha256": local.digest(prepared)}
+        request_path = self.root / "local-round-request.json"
+        def starter_module(name):
+            module = ModuleType(name); module.host = host
+            return module
+        return product_root, manifest, request, request_path, starter_module
+
+    def test_local_round_owner_forwards_only_explicit_expected_fingerprint(self):
+        product_root, manifest, request, request_path, starter_module = self.local_round_fixture()
+        expected = {"binding": self.binding, "session_sha256": "e" * 64, "checkpoints": []}
+        with patch.object(product, "verify_resources", return_value=(manifest, "a" * 64)), \
+             patch.object(product, "ModuleType", side_effect=starter_module), \
+             patch.object(host, "release_snapshot", return_value=({}, self.retained)), \
+             patch.object(host, "recheck_release"), \
+             patch.object(product, "local_projection", return_value=(self.helper, self.binding, self.descriptor)), \
+             patch.object(self.helper, "offer_next_round") as offer:
+            for selected in (request, dict(request, expected_round=expected)):
+                request_path.write_bytes(local.encoded(selected))
+                product.local_round_owner(product_root, request_path, threading.Event(), 77)
+                self.assertEqual(offer.call_args.kwargs, {"expected_round": selected.get("expected_round")})
+                self.assertEqual(offer.call_args.args[1:3], (self.state_root, self.binding))
+                self.assertEqual(offer.call_args.args[-1], 77)
+            for invalid in (dict(request, expected_round=[]), dict(request, unselected=True)):
+                offer.reset_mock()
+                request_path.write_bytes(local.encoded(invalid))
+                with self.assertRaisesRegex(product.ResourceError, "invalid_local_round_request"):
+                    product.local_round_owner(product_root, request_path, threading.Event(), 77)
+                offer.assert_not_called()
+
+    def test_later_linux_round_rechecks_mount_before_offer(self):
+        observed_host = (product.platform.system(), product.platform.machine())
+        with patch.dict(product.HOST_TARGETS, {observed_host: "linux-x86_64"}):
+            product_root, manifest, request, request_path, starter_module = self.local_round_fixture()
+            request_path.write_bytes(local.encoded(request))
+            retained = {path: path.read_bytes() for path in self.prepared.rglob("*") if path.is_file()}
+            with patch.object(product, "verify_resources", return_value=(manifest, "a" * 64)), \
+                 patch.object(product, "ModuleType", side_effect=starter_module), \
+                 patch.object(host, "release_snapshot", return_value=({}, self.retained)), \
+                 patch.object(host, "recheck_release"), \
+                 patch.object(product, "local_projection", return_value=(self.helper, self.binding, self.descriptor)), \
+                 patch.object(self.helper, "offer_next_round") as offer, \
+                 patch.object(product.os, "ST_NOEXEC", 8, create=True), \
+                 patch.object(product.os, "statvfs", return_value=SimpleNamespace(f_flag=8)) as observe:
+                with self.assertRaisesRegex(product.ResourceError, "destination_noexec"):
+                    product.local_round_owner(product_root, request_path, threading.Event(), 77)
+                observe.assert_called_once_with(self.prepared)
+                offer.assert_not_called()
+                observe.reset_mock()
+                observe.side_effect = PermissionError("controlled mount observation failure")
+                with self.assertRaises(PermissionError):
+                    product.local_round_owner(product_root, request_path, threading.Event(), 77)
+                observe.assert_called_once_with(self.prepared)
+                offer.assert_not_called()
+                observe.reset_mock()
+                stopped = threading.Event(); stopped.set()
+                with self.assertRaisesRegex(product.ResourceError, "local_round_cancelled"):
+                    product.local_round_owner(product_root, request_path, stopped, 77)
+                observe.assert_not_called()
+                offer.assert_not_called()
+                self.assertEqual({path: path.read_bytes() for path in self.prepared.rglob("*") if path.is_file()}, retained)
+                self.assertFalse(self.state_root.exists())
+                observe.side_effect = None
+                observe.return_value = SimpleNamespace(f_flag=0)
+                product.local_round_owner(product_root, request_path, threading.Event(), 77)
+                observe.assert_called_once_with(self.prepared)
+                offer.assert_called_once()
+                self.assertEqual(offer.call_args.args[1:3], (self.state_root, self.binding))
+                self.assertEqual(offer.call_args.kwargs, {"expected_round": None})
+
+    def test_nonlinux_later_round_does_not_observe_linux_mount_flags(self):
+        observed_host = (product.platform.system(), product.platform.machine())
+        with patch.dict(product.HOST_TARGETS, {observed_host: "macos-arm64"}):
+            product_root, manifest, request, request_path, starter_module = self.local_round_fixture()
+            request_path.write_bytes(local.encoded(request))
+            with patch.object(product, "verify_resources", return_value=(manifest, "a" * 64)), \
+                 patch.object(product, "ModuleType", side_effect=starter_module), \
+                 patch.object(host, "release_snapshot", return_value=({}, self.retained)), \
+                 patch.object(host, "recheck_release"), \
+                 patch.object(product, "local_projection", return_value=(self.helper, self.binding, self.descriptor)), \
+                 patch.object(self.helper, "offer_next_round") as offer, \
+                 patch.object(product.os, "statvfs", side_effect=AssertionError("unexpected Linux check")) as observe:
+                product.local_round_owner(product_root, request_path, threading.Event(), 77)
+                observe.assert_not_called()
+                offer.assert_called_once()
+
     def test_full_product_readback_checks_realm_and_changes_during_actual_owner_read(self):
         self.full_product_readback("services")
+
+    def test_immutable_release_direct_readback_uses_selected_resource_owner(self):
+        self.full_product_readback("services", immutable=True)
+
+    def test_immutable_release_retained_readback_uses_selected_resource_owner(self):
+        self.full_product_readback("services", retained_return=True, immutable=True)
+
+    def test_immutable_nonlocal_account_readback_binds_original_archive(self):
+        self.full_product_readback("services", immutable=True, direct_session=True)
+
+    def test_immutable_nonlocal_public_readback_binds_original_archive(self):
+        self.full_product_readback("agno", immutable=True, direct_session=True)
+
+    def test_immutable_nonlocal_credential_readback_binds_original_archive(self):
+        self.full_product_readback("services", credential_service=True, immutable=True, direct_session=True)
+
+    def test_legacy_nonlocal_readback_keeps_its_existing_receipt_contract(self):
+        self.full_product_readback("services", direct_session=True)
 
     def test_public_library_readback_uses_the_same_canonical_verifier(self):
         self.full_product_readback("agno")
@@ -260,7 +385,7 @@ class ProductLocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
 
     def full_product_readback(self, family, account_profile=None, *, remote_declaration=False, local_software=False,
                               retained_return=False, retained_pages=False, credential_service=False,
-                              split_selected_runtime=False):
+                              split_selected_runtime=False, immutable=False, direct_session=False):
         # Resource/archive verification is controlled here; the public readback
         # function, receipt/attempt joins, Controller and request decoder are real.
         product_root = self.root / "product"
@@ -271,6 +396,20 @@ class ProductLocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
         manifest = {"target": product.HOST_TARGETS[(product.platform.system(), product.platform.machine())],
                     "python": str(Path(sys.executable).resolve()), "node": str(Path(sys.executable).resolve()),
                     "npm_cli": str(Path(sys.executable).resolve()), "archive": archive.name, "starter": "starter.py"}
+        if immutable:
+            old = self.release
+            self.release = product_root / "library/fixture"
+            self.release.parent.mkdir()
+            shutil.move(old, self.release)
+            self.helper_path = self.release / "setup/local_session.py"
+            self.configuration.write_text(self.configuration.read_text().replace(str(old), str(self.release)))
+            self.configuration_sha = local.digest(self.configuration.read_bytes())
+            self.helper, self.binding, self.descriptor = self.project()
+            manifest["library_release"] = "library/fixture"
+            def writable():
+                for path in [self.release.parent, self.release, *self.release.rglob("*")]:
+                    if path.is_dir(): path.chmod(0o755)
+            self.addCleanup(writable)
         consumers = self.release / "consumers"
         shutil.copytree(self.bundle, consumers)
         self.assertEqual({str(p.relative_to(consumers)): p.read_bytes()
@@ -353,7 +492,7 @@ class ProductLocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
             "preparation": {"bootstrap": {"host": {"receipt_sha256": local.digest(receipt_raw)}}},
             "local_setup": {"descriptor_sha256": local.digest(descriptor_raw),
                             "helper_sha256": self.binding["helper_sha256"]}}))
-        with local.session_owner(self.state_root, self.binding) as retained:
+        with (nullcontext(None) if direct_session else local.session_owner(self.state_root, self.binding)) as retained:
             runner = (remote_exports.ExportCheckRunner if remote else
                       selected_setup.SelectedRunner if selected_package else reconciliation.ReconciliationRunner)
             if account_profile is not None:
@@ -406,7 +545,14 @@ class ProductLocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
                 job = owner.selected_install({key: validation[key] for key in ("validation_id", "effect_sha256")})["job"]
                 owner.join()
             else:
-                owner = self.create(*retained, runner=runner)
+                if direct_session:
+                    owner = backend.Controller(self.bundle, self.sha, self.prepared / "session", backend.FAMILIES,
+                        sys.executable, sys.executable, sys.executable, runner_factory=runner,
+                        verifier=self.bundle / "install-library-consumer.py",
+                        verifier_sha256=self.manifest["files"]["install-library-consumer.py"]["sha256"])
+                    self.controllers.append(owner)
+                else:
+                    owner = self.create(*retained, runner=runner)
                 owner.prepare({"family": family}); owner.join()
                 request = ({"family": "services", "profile": "slack", "operations": ["auth_test"],
                             "values": {"token_env": "TEST_TOKEN", "timeout_seconds": 10}}
@@ -519,11 +665,63 @@ class ProductLocalSessionTests(fixtures.FixtureMixin, unittest.TestCase):
                 module.host = host
                 return module
 
+            if immutable:
+                for path in [*self.release.rglob("*"), self.release, self.release.parent]:
+                    path.chmod(0o555 if path.is_dir() or path.stat().st_mode & 0o111 else 0o444)
+            def selected_snapshot(archive_path, archive_sha, release, target):
+                # The real archive validator is covered by the starter tests;
+                # these readback controls must still select this exact tree.
+                self.assertEqual(release, self.release)
+                return snapshot, self.retained
+
             with patch.object(product, "verify_resources", return_value=(manifest, "a" * 64)), \
                  patch.object(product, "ModuleType", side_effect=starter_module), \
-                 patch.object(host, "release_snapshot", return_value=(snapshot, self.retained)), \
+                 patch.object(host, "release_snapshot", side_effect=selected_snapshot), \
                  patch.object(host, "recheck_release"), patch.object(host, "owner_module", side_effect=load_owner), \
                  patch.object(product, "RETAINED_PAGE", 1 if retained_pages else product.RETAINED_PAGE):
+                if direct_session:
+                    self.assertEqual(owner.workspace, self.prepared / "session")
+                    self.assertFalse(self.state_root.exists())
+                    owner.close_admission()
+                    receipt_path = self.prepared / "config/prepared.json"
+                    # Ordinary readback may cross product versions. The current
+                    # archive must still match the original preparation receipt.
+                    (self.prepared / "product-prepared.json").unlink()
+                    if not immutable:
+                        receipt_path.unlink()
+                    current = product.installation_readback(product_root, self.root / "direct-good",
+                                                            request_path, threading.Event())
+                    self.assertEqual(len(entered), 1)
+                    self.assertEqual(current["mcp_configuration"], json.loads(mcp.read_bytes()))
+                    if not immutable:
+                        return
+                    for number, release_receipt in enumerate(({}, {"archive_sha256": "b" * 64}, None)):
+                        changed = json.loads(receipt_raw)
+                        changed["release"] = release_receipt
+                        receipt_path.write_bytes(local.encoded(changed))
+                        before = len(self.controllers)
+                        destination = self.root / ("direct-wrong-archive-" + str(number))
+                        with self.assertRaisesRegex(product.ResourceError, "readback_preparation_changed"):
+                            product.installation_readback(product_root, destination, request_path, threading.Event())
+                        self.assertEqual(len(self.controllers), before, "refuse before constructing a readback owner")
+                        self.assertEqual(len(entered), 1)
+                        self.assertFalse(destination.exists())
+                    receipt_path.write_bytes(receipt_raw)
+                    # A receipt change during the actual verifier read cannot
+                    # be accepted even when its decoded archive hash is equal.
+                    mutation = lambda: receipt_path.write_bytes(receipt_raw + b"\n")
+                    with self.assertRaisesRegex(product.ResourceError, "readback_preparation_changed"):
+                        product.installation_readback(product_root, self.root / "direct-changed-receipt",
+                                                      request_path, threading.Event())
+                    self.assertEqual(len(entered), 2)
+                    self.assertTrue(self.controllers[-1].closing)
+                    mutation = None
+                    receipt_path.write_bytes(receipt_raw)
+                    self.assertEqual(product.installation_readback(product_root, self.root / "direct-current-again",
+                        request_path, threading.Event()), current)
+                    self.assertEqual(len(entered), 3)
+                    self.assertTrue(all(reader.closing for reader in self.controllers))
+                    return
                 if retained_return:
                     # The new product interface starts from realm inventory.
                     # No prior mcp path, job ID or digest is supplied to it.

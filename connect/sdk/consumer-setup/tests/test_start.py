@@ -1,5 +1,7 @@
 """The ordinary starter composes real preparation, with a controlled installer."""
 import builtins
+import errno
+from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
 import io
 import json
@@ -7,10 +9,11 @@ import os
 import sys
 from pathlib import Path
 import tarfile
+import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import test_bootstrap_host as fixture
 
@@ -24,6 +27,7 @@ spec.loader.exec_module(starter)
 class StarterTests(unittest.TestCase):
     publish_release = fixture.BootstrapTests.publish_release
     installer = fixture.BootstrapTests.installer
+    official_release = fixture.preparation_tests.PreparationTests.official_release
 
     def setUp(self):
         fixture.BootstrapTests.setUp(self)
@@ -82,6 +86,19 @@ class StarterTests(unittest.TestCase):
             "print(json.dumps({'schema_version':1,'scope':'retained_recipe_metadata','status':'initialized'}))\n"
         ).encode(), 0o755)
         self.publish_release(); self.refresh()
+
+    def test_starter_explicit_github_selection_uses_archived_bindings_without_node(self):
+        self.official_release(("github",))
+        self.refresh()
+        self.options.families = "official-github"
+        result = starter.start(self.options)
+        self.assertEqual(result["families"], ["official-github"])
+        argv = json.loads(Path(result["configuration"]).read_bytes())["mcpServers"]["toolkit-setup"]["args"]
+        self.assertEqual(argv[argv.index("--families") + 1], "official-github")
+        self.assertEqual(argv[argv.index("--official-contents-sha256") + 1],
+                         fixture.sha(self.files["official/CONTENTS.json"][0]))
+        self.assertNotIn("--node", argv)
+        self.assertFalse((self.destination / "session").exists())
 
     def test_recipe_initialization_joins_pinned_owner_before_bootstrap(self):
         self.recipe_owner_fixture()
@@ -239,6 +256,249 @@ class StarterTests(unittest.TestCase):
         patch.object(product, "verify_resources", return_value=(manifest, "a" * 64)).start()
         return product, root
 
+    def product_cli(self, product, root, destination=None, extra=()):
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(product, "__file__", str(root / "prepare.py")), \
+                redirect_stdout(output), redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as failure:
+                product.main(["--destination", str(destination or self.destination), *extra])
+        self.assertEqual(failure.exception.code, 1)
+        self.assertEqual(output.getvalue(), "")
+        lines = errors.getvalue().splitlines()
+        self.assertEqual(lines[-1], "Setup preparation unconfirmed. Preserve the setup directory for recovery.")
+        self.assertEqual(len(lines), 2)
+        return json.loads(lines[0])
+
+    def linux_mount_product(self):
+        # Bind every archive/receipt target to Linux while retaining the
+        # controlled installer and current test interpreter. This exercises the
+        # real preparation path, not native Linux or installed acceptance.
+        self.root_name = "toolkit-library-fixture-linux-x86_64"
+        name = "selected/provenance/selection.json"
+        selected = json.loads(self.files[name][0])
+        selected["platform"] = "linux-x86_64"
+        self.files[name] = (json.dumps(selected).encode(), self.files[name][1])
+        self.publish_release()
+        self.name = self.root_name + ".tar.gz"
+        self.selected = self.downloads / self.name
+        self.selection["assets"][0]["upload_name"] = self.name
+        self.refresh()
+        product, root = self.product()
+        product.verify_resources.return_value[0]["target"] = "linux-x86_64"
+        product.HOST_TARGETS = {(product.platform.system(), product.platform.machine()): "linux-x86_64"}
+        load = product.exec.side_effect
+        def load_linux_fixture(code, namespace):
+            load(code, namespace)
+            namespace["current_target"] = lambda: "linux-x86_64"
+        product.exec.side_effect = load_linux_fixture
+        return product, root
+
+    def mount_observation(self, product, flags=0, **changes):
+        observe = Mock(return_value=SimpleNamespace(f_flag=flags))
+        patch.object(product, "os", SimpleNamespace(**{
+            **vars(os), "ST_NOEXEC": 8, "statvfs": observe, **changes})).start()
+        return observe
+
+    def test_product_noexec_parent_refuses_before_starter_or_filesystem_effects(self):
+        self.recipe_owner_fixture()
+        product, root = self.linux_mount_product()
+        observe = self.mount_observation(product, flags=8 | 2)
+        state = self.base / "state"
+        setup = state / ".meerkat-connect" / "test-realm" / "setup-test"
+        setup.mkdir(parents=True)
+        destination = setup / "prepared"
+        before = set(self.base.rglob("*"))
+        record = self.product_cli(product, root, destination,
+            ("--realm-state-root", str(state), "--realm", "test-realm"))
+        self.assertEqual(record, {"schema_version": 1, "kind": "preparation_failure",
+            "phase": "destination_filesystem", "code": "destination_noexec"})
+        observe.assert_called_once_with(setup)
+        product.exec.assert_not_called()
+        self.assertEqual(set(self.base.rglob("*")), before)
+        self.assertFalse(destination.exists())
+        self.assertFalse((setup.parent / "recipes.sqlite").exists())
+
+    def test_product_linux_without_noexec_keeps_actual_preparation_and_protocol(self):
+        product, root = self.linux_mount_product()
+        observe = self.mount_observation(product, flags=2)
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(product, "__file__", str(root / "prepare.py")), \
+                redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(product.main(["--destination", str(self.destination)]), 0)
+        observe.assert_called_once_with(self.destination.parent)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue()), json.loads((self.destination / "product-mcp.json").read_bytes()))
+        self.assertTrue((self.destination / "client/verify-entered").is_file())
+        self.assertTrue((self.destination / "product-prepared.json").is_file())
+
+    def test_product_mount_observation_error_is_not_noexec_or_success(self):
+        product, root = self.linux_mount_product()
+        observe = self.mount_observation(product)
+        for number, expected in ((errno.EACCES, "os_permission_denied"), (errno.ENOSYS, "os_error")):
+            with self.subTest(errno=number):
+                observe.side_effect = OSError(number, "PRIVATE mount error", "/PRIVATE/mount")
+                record = self.product_cli(product, root)
+                self.assertEqual(record["phase"], "destination_filesystem")
+                self.assertEqual(record["code"], expected)
+                product.exec.assert_not_called()
+                self.assertFalse(self.destination.exists())
+
+    def test_product_mount_api_and_invalid_observations_refuse_before_effects(self):
+        product, root = self.linux_mount_product()
+        variants = [({"ST_NOEXEC": None}, 0), ({"ST_NOEXEC": True}, 0),
+                    ({"ST_NOEXEC": 0}, 0), ({"statvfs": None}, 0),
+                    ({}, None), ({}, True), ({}, -1)]
+        for changes, flags in variants:
+            with self.subTest(changes=changes, flags=flags):
+                self.mount_observation(product, flags, **changes)
+                record = self.product_cli(product, root)
+                self.assertEqual(record["phase"], "destination_filesystem")
+                self.assertEqual(record["code"], "destination_mount_unconfirmed")
+                product.exec.assert_not_called()
+                self.assertFalse(self.destination.exists())
+
+    def test_product_destination_validation_precedes_mount_observation(self):
+        product, root = self.linux_mount_product()
+        observe = self.mount_observation(product, flags=8)
+        alias = self.base / "parent-alias"
+        alias.symlink_to(self.base, target_is_directory=True)
+        for destination in (alias / "prepared", self.base, Path("relative-prepared")):
+            with self.subTest(destination=destination):
+                record = self.product_cli(product, root, destination)
+                self.assertEqual(record["phase"], "destination")
+                self.assertEqual(record["code"], "resource_error")
+                observe.assert_not_called()
+                product.exec.assert_not_called()
+        self.assertFalse((self.base / "prepared").exists())
+
+    def test_product_nonlinux_target_does_not_infer_mount_flag_semantics(self):
+        product, root = self.product()
+        observe = self.mount_observation(product, flags=8)
+        result = product.prepare(root, self.destination, threading.Event())
+        observe.assert_not_called()
+        self.assertIn("toolkit-setup", result["mcpServers"])
+        self.assertTrue((self.destination / "client/verify-entered").is_file())
+
+    def test_product_recipe_spawn_denied_retains_phase_without_private_error(self):
+        self.recipe_owner_fixture()
+        product, root = self.product()
+        state = self.base / "state"
+        setup = state / ".meerkat-connect" / "test-realm" / "setup-test"
+        setup.mkdir(parents=True)
+        destination = setup / "prepared"
+        load = product.exec.side_effect
+        calls = []
+        def deny_spawn(argv, **kwargs):
+            calls.append(argv)
+            raise PermissionError(errno.EACCES, "PRIVATE credential configuration", "/PRIVATE/executable")
+        def load_with_spawn_failure(code, namespace):
+            load(code, namespace)
+            # Substitute only process creation at the actual runner boundary.
+            # Resource admission is the existing controlled product fixture.
+            namespace["runner"].subprocess = SimpleNamespace(
+                **{**vars(namespace["runner"].subprocess), "Popen": deny_spawn})
+        with patch.object(product, "exec", side_effect=load_with_spawn_failure):
+            record = self.product_cli(product, root, destination,
+                ("--realm-state-root", str(state), "--realm", "test-realm"))
+        self.assertEqual(record, {"schema_version": 1, "kind": "preparation_failure",
+            "phase": "recipe_initialization", "code": "os_permission_denied"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], "init")
+        self.assertTrue((destination / "distribution" / self.root_name / "selected/bin/toolkit-local-recipes").is_file())
+        for name in ("staging", "client", "config", "product-mcp.json", "product-prepared.json"):
+            self.assertFalse((destination / name).exists(), name)
+        self.assertFalse((setup.parent / "recipes.sqlite").exists())
+
+    def test_product_bootstrap_failure_retains_phase_and_partial_output(self):
+        self.installer("partial")
+        self.refresh()
+        product, root = self.product()
+        record = self.product_cli(product, root)
+        self.assertEqual(record, {"schema_version": 1, "kind": "preparation_failure",
+            "phase": "bootstrap", "code": "owner_refused"})
+        self.assertTrue((self.destination / "client/partial").is_file())
+        self.assertTrue((self.destination / "staging").is_dir())
+        self.assertFalse((self.destination / "product-mcp.json").exists())
+
+    def test_product_success_keeps_stdout_projection_and_stderr_empty(self):
+        product, root = self.product()
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(product, "__file__", str(root / "prepare.py")), \
+                redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(product.main(["--destination", str(self.destination)]), 0)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(json.loads(output.getvalue()), json.loads((self.destination / "product-mcp.json").read_bytes()))
+        self.assertTrue((self.destination / "product-prepared.json").is_file())
+
+    def test_product_explicit_families_reach_actual_preparer_with_exact_official_pins(self):
+        self.official_release(("github",))
+        self.refresh()
+        product, root = self.product()
+        manifest = product.verify_resources.return_value[0]
+        for index, families in enumerate(("official-github", "agno,services,activepieces,official-github")):
+            with self.subTest(families=families):
+                manifest["families"] = families
+                destination = self.base / ("selected-families-" + str(index))
+                product.prepare(root, destination, threading.Event())
+                argv = json.loads((destination / "config/mcp.json").read_bytes())["mcpServers"]["toolkit-setup"]["args"]
+                release = destination / "distribution" / self.root_name
+                for flag, value in {
+                    "--families": families,
+                    "--official-bundle": str(release / "official"),
+                    "--official-contents-sha256": fixture.sha(self.files["official/CONTENTS.json"][0]),
+                    "--official-installer": str(release / "setup/install-library-consumer.py"),
+                    "--official-installer-sha256": fixture.sha(self.files["setup/install-library-consumer.py"][0]),
+                }.items():
+                    self.assertEqual(argv.count(flag), 1)
+                    self.assertEqual(argv[argv.index(flag) + 1], value)
+                for flag, path in (("--node", root / "node"), ("--npm-cli", root / "npm.js")):
+                    if "activepieces" in families.split(","):
+                        self.assertEqual(argv[argv.index(flag) + 1], str(path))
+                    else:
+                        self.assertNotIn(flag, argv)
+                self.assertNotIn("--playwright-host-profile", argv)
+                self.assertFalse((destination / "session").exists())
+                self.assertFalse((destination / "local-session").exists())
+
+    def test_product_official_payload_does_not_enable_unselected_families(self):
+        self.official_release()
+        self.refresh()
+        product, root = self.product()
+        product.prepare(root, self.destination, threading.Event())
+        argv = json.loads((self.destination / "config/mcp.json").read_bytes())["mcpServers"]["toolkit-setup"]["args"]
+        self.assertEqual(argv[argv.index("--families") + 1], "agno,services,activepieces")
+        self.assertFalse(any(arg.startswith("--official-") or arg.startswith("--playwright-") for arg in argv))
+
+    def test_product_family_selection_refuses_unsupported_or_unshipped_families_before_client_install(self):
+        product, root = self.product()
+        manifest = product.verify_resources.return_value[0]
+        for index, families in enumerate(("", "agno,agno", "unknown", "official-github")):
+            with self.subTest(families=families):
+                manifest["families"] = families
+                destination = self.base / ("refused-families-" + str(index))
+                with self.assertRaisesRegex(Exception, "owner_refused"):
+                    product.prepare(root, destination, threading.Event())
+                self.assertFalse((destination / "client").exists())
+                self.assertFalse((destination / "product-mcp.json").exists())
+
+    def test_product_refuses_starter_that_ignores_explicit_families(self):
+        self.official_release(("github",))
+        self.refresh()
+        product, root = self.product()
+        product.verify_resources.return_value[0]["families"] = "official-github"
+        def ignoring_starter(code, namespace):
+            builtins.exec(code, namespace)
+            namespace["current_target"] = lambda: "macos-arm64"
+            start = namespace["start"]
+            def ignore_selection(args, **kwargs):
+                del args.families
+                return start(args, **kwargs)
+            namespace["start"] = ignore_selection
+        with patch.object(product, "exec", side_effect=ignoring_starter):
+            with self.assertRaisesRegex(product.ResourceError, "family_selection_not_prepared"):
+                product.prepare(root, self.destination, threading.Event())
+        self.assertFalse((self.destination / "product-mcp.json").exists())
+
     def npm_product(self):
         self.files["setup/node_acquisition.py"] = ((SOURCE / "node_acquisition.py").read_bytes(), 0o644)
         self.files["selected/bin/toolkit-node-plan"] = (b"# inert Node planner, never executed\n", 0o755)
@@ -307,6 +567,40 @@ class StarterTests(unittest.TestCase):
                     with self.assertRaisesRegex(product.ResourceError, "npm_acquisition_scope_mismatch"):
                         product.prepare(root, destination, threading.Event())
                     self.assertFalse((destination / "product-mcp.json").exists())
+
+    def test_product_npm_acquisition_survives_family_selection_without_library_node(self):
+        product, root, group = self.npm_product()
+        product.verify_resources.return_value[0]["families"] = "agno,services"
+        product.prepare(root, self.destination, threading.Event())
+        output = self.destination / "config"
+        receipt = json.loads((output / "prepared.json").read_bytes())
+        args = json.loads((output / "mcp.json").read_bytes())["mcpServers"]["toolkit-setup"]["args"]
+        self.assertEqual(args[args.index("--families") + 1], "agno,services")
+        for flag, runtime in (("--node", "node"), ("--npm-cli", "npm_cli")):
+            self.assertNotIn(flag, args)
+            self.assertNotIn(runtime, receipt["runtimes"])
+        for flag, runtime, resource in (("--selected-node", "selected_node", "node"),
+                                        ("--selected-npm-cli", "selected_npm_cli", "npm_cli")):
+            path = root / group[resource]
+            self.assertEqual(args.count(flag), 1)
+            self.assertEqual(args[args.index(flag) + 1], str(path))
+            self.assertEqual(receipt["runtimes"][runtime]["path"], str(path))
+            self.assertEqual(receipt["runtimes"][runtime]["sha256"], fixture.sha(path.read_bytes()))
+        archive = root / group["npm_archive"]
+        archive_binding = {"path": str(archive), "sha256": fixture.sha(archive.read_bytes())}
+        for key, value in archive_binding.items():
+            self.assertEqual(receipt["runtimes"]["npm_archive"][key], value)
+        profile = json.loads((output / "node-acquisition.json").read_bytes())
+        self.assertEqual(profile["npm"], archive_binding)
+        self.assertEqual(profile["node_sha256"], fixture.sha((root / group["node"]).read_bytes()))
+        self.assertIs(profile["allow_acquisition"], True)
+        self.assertIs(receipt["public_npm_enabled"], True)
+        self.assertIs(receipt["node_search_enabled"], True)
+        self.assertIn("--allow-node-search", args)
+        selected = json.loads((output / "selected-install.json").read_bytes())
+        self.assertEqual(set(selected["validators"]), {"python", "node"})
+        self.assertFalse((self.destination / "session").exists())
+        self.assertFalse((self.destination / "local-session").exists())
 
     def test_product_node_build_profile_reaches_archived_preparer_as_exact_snapshot(self):
         product, root, _ = self.npm_product()
@@ -525,13 +819,54 @@ class StarterTests(unittest.TestCase):
 
 
 class SelectionTests(unittest.TestCase):
-    def test_current_selection_resolves_both_platforms_without_optional_host_imports(self):
-        manifest = starter.distribution()
-        for target in starter.host.TARGETS:
-            row = starter.selected_asset(manifest, target)
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="starter-selection-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.source = self.base / "sdk/consumer-setup"
+        self.source.mkdir(parents=True)
+        for name in ("start.py", "bootstrap_host.py", "prepare_host.py", "current-distribution.json"):
+            (self.source / name).write_bytes((SOURCE / name).read_bytes())
+        spec = importlib.util.spec_from_file_location("selected_starter", self.source / "start.py")
+        self.starter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.starter)
+
+    def test_selected_manifest_resolves_both_platforms_without_optional_host_imports(self):
+        selection = {"schema_version": 1, "assets": [
+            {"upload_name": "toolkit-library-controlled-" + target + ".tar.gz",
+             "sha256": "a" * 64, "bytes": 7} for target in self.starter.host.TARGETS]}
+        raw = json.dumps(selection).encode()
+        (self.source / "release-manifest.json").write_bytes(raw)
+        (self.source / "current-distribution.json").write_text(json.dumps({
+            "schema_version": 1, "manifest": "release-manifest.json", "manifest_sha256": fixture.sha(raw)}))
+        manifest = self.starter.distribution()
+        self.assertEqual(manifest, selection)
+        for target in self.starter.host.TARGETS:
+            row = self.starter.selected_asset(manifest, target)
             self.assertTrue(row["upload_name"].endswith(target + ".tar.gz"))
         self.assertFalse(any(name.startswith(("meerkat.", "meerkat_mobkit.", "meerkat_toolkit."))
                              for name in __import__("sys").modules))
+
+    def test_missing_default_selection_refuses_before_output_or_owner(self):
+        selector = self.source / "current-distribution.json"
+        # This copied historical pointer has no manifest in the controlled root.
+        # A developer's retained checkout evidence cannot satisfy this selection.
+        pointer = json.loads(selector.read_bytes())
+        self.assertFalse((self.source / pointer["manifest"]).exists())
+        destination = self.base / "new-toolkit"
+        options = SimpleNamespace(timeout_seconds=30, destination=str(destination),
+                                  archive_dir=str(self.base / "downloads"))
+        for missing in ("manifest", "selector"):
+            with self.subTest(missing=missing):
+                if missing == "selector":
+                    selector.unlink()
+                with patch.object(self.starter, "current_target", return_value="macos-arm64"), \
+                     patch.object(self.starter.runner, "run_owner") as owner, \
+                     self.assertRaisesRegex(self.starter.host.PreparationError,
+                         "distribution_selection_unavailable_use_trusted_exported_starter"):
+                    self.starter.start(options)
+                owner.assert_not_called()
+                self.assertFalse(destination.exists())
 
     def test_platform_and_python_mismatch_refuse(self):
         with patch.object(starter.platform, "system", return_value="Windows"):
@@ -542,6 +877,144 @@ class SelectionTests(unittest.TestCase):
              patch.object(starter.sys, "version_info", (3, 12)):
             with self.assertRaisesRegex(Exception, "native_cpython_3_11"):
                 starter.current_target()
+
+
+class PreparationDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("diagnostic_product", SOURCE / "product/prepare.py")
+        self.product = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.product)
+
+    def failure(self, error, phase="resources"):
+        output, errors = io.StringIO(), io.StringIO()
+        def refuse(*args, **kwargs):
+            kwargs["diagnostic"].mark(phase)
+            raise error
+        with patch.object(self.product, "prepare", side_effect=refuse), \
+                redirect_stdout(output), redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as failure:
+                self.product.main(["--destination", "/PRIVATE/destination"])
+        self.assertEqual(failure.exception.code, 1)
+        self.assertEqual(output.getvalue(), "")
+        lines = errors.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[-1], "Setup preparation unconfirmed. Preserve the setup directory for recovery.")
+        self.assertNotIn("PRIVATE", errors.getvalue())
+        return json.loads(lines[0])
+
+    def test_exception_payloads_and_unknown_phases_are_never_formatted(self):
+        class PrivateError(Exception):
+            def __str__(self):
+                raise AssertionError("exception formatting is forbidden")
+        error = PrivateError("PRIVATE credential")
+        error.__cause__ = ValueError("PRIVATE configuration")
+        self.assertEqual(self.failure(error, "/PRIVATE/phase"), {
+            "schema_version": 1, "kind": "preparation_failure", "phase": "unknown", "code": "unexpected_error"})
+        self.assertEqual(self.failure(self.product.ResourceError("PRIVATE input"))["code"], "resource_error")
+        self.assertEqual(self.failure(ValueError("owner_refused"))["code"], "unexpected_error")
+
+    def test_os_error_categories_are_closed_and_do_not_export_errno_or_filename(self):
+        for number, expected in ((errno.EACCES, "os_permission_denied"), (errno.EPERM, "os_operation_not_permitted"),
+                (errno.ENOENT, "os_not_found"), (errno.ENOEXEC, "os_exec_format"), (987654, "os_error")):
+            with self.subTest(errno=number):
+                record = self.failure(OSError(number, "PRIVATE error", "/PRIVATE/path"))
+                self.assertEqual(record["code"], expected)
+                self.assertEqual(set(record), {"schema_version", "kind", "phase", "code"})
+
+    def test_known_owner_codes_require_the_selected_exception_type(self):
+        diagnostic = self.product.PreparationDiagnostic()
+        diagnostic.owner_errors = (starter.host.PreparationError, starter.runner.BootstrapError)
+        for code in ("bootstrap_cancelled", "bootstrap_timeout", "owner_refused", "owner_output_limit"):
+            self.assertEqual(diagnostic.code(starter.runner.BootstrapError(code)), code)
+        self.assertEqual(diagnostic.code(starter.runner.BootstrapError("PRIVATE detail")), "owner_error")
+        self.assertEqual(diagnostic.code(starter.runner.BootstrapError("owner_refused", "PRIVATE")), "owner_error")
+        self.assertEqual(diagnostic.code(self.product.ResourceError("preparation_cancelled")), "preparation_cancelled")
+
+    def test_diagnostic_is_flushed_before_generic_failure(self):
+        events = []
+        class RecordingStream(io.StringIO):
+            def write(self, text):
+                events.append(("write", text))
+                return super().write(text)
+            def flush(self):
+                events.append(("flush", None))
+                return super().flush()
+        stream = RecordingStream()
+        with patch.object(self.product, "verify_resources", side_effect=self.product.ResourceError("PRIVATE")), \
+                redirect_stderr(stream):
+            with self.assertRaises(SystemExit) as failure:
+                self.product.main(["--destination", "/PRIVATE/destination"])
+        self.assertEqual(failure.exception.code, 1)
+        first_flush = next(i for i, value in enumerate(events) if value[0] == "flush")
+        generic = next(i for i, value in enumerate(events) if value[0] == "write" and value[1].startswith("Setup preparation"))
+        self.assertLess(first_flush, generic)
+        self.assertEqual(json.loads(stream.getvalue().splitlines()[0])["phase"], "resources")
+
+    def test_unavailable_diagnostic_sink_preserves_generic_exit(self):
+        class UnavailableOnce(io.StringIO):
+            unavailable = True
+            def write(self, text):
+                if self.unavailable:
+                    self.unavailable = False
+                    raise OSError(errno.ENOSPC, "PRIVATE sink")
+                return super().write(text)
+        stream = UnavailableOnce()
+        with patch.object(self.product, "verify_resources", side_effect=ValueError("PRIVATE")), redirect_stderr(stream):
+            with self.assertRaises(SystemExit) as failure:
+                self.product.main(["--destination", "/PRIVATE/destination"])
+        self.assertEqual(failure.exception.code, 1)
+        self.assertEqual(stream.getvalue(), "Setup preparation unconfirmed. Preserve the setup directory for recovery.\n")
+
+    def test_absent_stderr_never_falls_back_to_protocol_stdout(self):
+        output = io.StringIO()
+        diagnostic = self.product.PreparationDiagnostic()
+        with redirect_stdout(output), redirect_stderr(None):
+            diagnostic.emit(ValueError("PRIVATE"))
+        self.assertEqual(output.getvalue(), "")
+
+    def test_absent_stderr_full_command_preserves_exit_and_empty_stdout(self):
+        output = io.StringIO()
+        with patch.object(self.product, "verify_resources", side_effect=ValueError("PRIVATE")), \
+                redirect_stdout(output), redirect_stderr(None):
+            with self.assertRaises(SystemExit) as failure:
+                self.product.main(["--destination", "/PRIVATE/destination"])
+        self.assertEqual(failure.exception.code, 1)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_diagnostic_formatting_failure_preserves_generic_exit(self):
+        for error in (MemoryError("PRIVATE allocation"), ValueError("PRIVATE formatting")):
+            output, errors = io.StringIO(), io.StringIO()
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(self.product, "verify_resources", side_effect=ValueError("PRIVATE owner")), \
+                    patch.object(self.product.PreparationDiagnostic, "code", side_effect=error), \
+                    redirect_stdout(output), redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as failure:
+                    self.product.main(["--destination", "/PRIVATE/destination"])
+                self.assertEqual(failure.exception.code, 1)
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(errors.getvalue(), "Setup preparation unconfirmed. Preserve the setup directory for recovery.\n")
+
+    def test_other_product_modes_keep_their_existing_generic_failure(self):
+        for flag, method in (("--installation-readback", "installation_readback"), ("--local-round-owner", "local_round_owner")):
+            output, errors = io.StringIO(), io.StringIO()
+            with self.subTest(flag=flag), patch.object(self.product, method, side_effect=ValueError("PRIVATE")), \
+                    redirect_stdout(output), redirect_stderr(errors):
+                with self.assertRaises(SystemExit) as failure:
+                    self.product.main(["--destination", "/PRIVATE/destination", flag, "/PRIVATE/request"])
+                self.assertEqual(failure.exception.code, 1)
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(errors.getvalue(), "Setup preparation unconfirmed. Preserve the setup directory for recovery.\n")
+
+    def test_process_control_exceptions_are_not_reclassified(self):
+        for error in (KeyboardInterrupt(), SystemExit(7)):
+            output, errors = io.StringIO(), io.StringIO()
+            with self.subTest(error=type(error).__name__), patch.object(self.product, "prepare", side_effect=error), \
+                    redirect_stdout(output), redirect_stderr(errors):
+                with self.assertRaises(type(error)) as caught:
+                    self.product.main(["--destination", "/PRIVATE/destination"])
+                self.assertIs(caught.exception, error)
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(errors.getvalue(), "")
 
 
 if __name__ == "__main__":

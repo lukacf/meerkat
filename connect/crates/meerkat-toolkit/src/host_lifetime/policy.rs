@@ -14,6 +14,12 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use toolkit_package::{Id, canonical_json};
 
+mod classes;
+pub use classes::{
+    CompiledClassCallback, CompiledClassCallbackAccount, CompiledMemberClass,
+    CompiledMemberClassInstance, CompiledMemberClassPurpose, validate_member_classes,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledLocalPolicy {
@@ -89,12 +95,21 @@ pub struct CompiledNativeHost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_parent_administration: Option<ServiceParentAdministration>,
     pub ingress_domain: ResourceDomain,
+    /// Installation-owned Console domains, selected before any dynamic Add.
+    /// Both may be absent on legacy static hosts; ordinary Add requires both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_domain: Option<ResourceDomain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_domain: Option<ResourceDomain>,
     pub application_tool_policy: CompiledArtifactReference,
     /// Optional application-owned acquisition configuration in this same
     /// authenticated bundle. Resource preparation cannot issue its backend
     /// generation. Absence preserves existing hosts and canonical bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<CompiledArtifactReference>,
+    /// Finite packaged classes. A declaration does not create a member or grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_classes: Vec<CompiledMemberClass>,
     pub members: Vec<CompiledNativeMember>,
     pub routes: Vec<CompiledNativeSourceRoute>,
 }
@@ -115,6 +130,11 @@ pub struct CompiledAgentSetupCapability {
     /// These are compiler-selected references, not permission or live grants.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub helper_targets: Vec<CompiledAgentSetupTarget>,
+    /// Explicit shared-effect selection. These parents permit exactly one
+    /// further A-to-G attenuation after the original's first binding.
+    /// Ordinary helper targets remain non-delegable and mutually exclusive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_targets: Vec<CompiledAgentSetupTarget>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +186,14 @@ pub struct PreparedNativeHost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_parent_administration: Option<ServiceParentAdministration>,
     pub ingress_domain: ResourceDomain,
+    /// Installation-owned Console domains, selected before any dynamic Add.
+    /// Both may be absent on legacy static hosts; ordinary Add requires both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_domain: Option<ResourceDomain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_domain: Option<ResourceDomain>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_classes: Vec<CompiledMemberClass>,
     pub members: Vec<PreparedNativeMember>,
     pub routes: Vec<CompiledNativeSourceRoute>,
 }
@@ -524,6 +552,9 @@ impl CompiledNativeHost {
             remote_operator: self.remote_operator.clone(),
             service_parent_administration: self.service_parent_administration.clone(),
             ingress_domain: self.ingress_domain.clone(),
+            authentication_domain: self.authentication_domain.clone(),
+            event_domain: self.event_domain.clone(),
+            member_classes: self.member_classes.clone(),
             members: self
                 .members
                 .iter()
@@ -561,7 +592,8 @@ impl PreparedLocalPolicy {
 
 impl PreparedNativeHost {
     fn validate(&self, channels: &[CompiledChannelBinding]) -> Result<(), HostLifetimeError> {
-        if self.members.is_empty()
+        validate_member_classes(&self.member_classes)?;
+        if (self.members.is_empty() && self.member_classes.is_empty())
             || self.grant_administrator.validate_qualified().is_err()
             || self.remote_operator.as_ref().is_some_and(|operator| {
                 operator.validate_qualified().is_err() || operator == &self.grant_administrator
@@ -570,6 +602,25 @@ impl PreparedNativeHost {
             || self.ingress_domain.namespace.is_empty()
         {
             return Err(HostLifetimeError::InvalidSelection);
+        }
+        match (&self.authentication_domain, &self.event_domain) {
+            (None, None) => {}
+            (Some(authentication), Some(event)) => {
+                if [authentication, event].iter().any(|domain| {
+                    domain.authority != self.ingress_domain.authority
+                        || domain.authority.validate_qualified().is_err()
+                        || domain.namespace.is_empty()
+                }) || self.routes.iter().any(|route| {
+                    matches!(
+                        &route.origin,
+                        CompiledNativeSourceOrigin::LocalConsole { .. }
+                    ) && (&route.authentication_domain != authentication
+                        || &route.event_domain != event)
+                }) {
+                    return Err(HostLifetimeError::InvalidSelection);
+                }
+            }
+            _ => return Err(HostLifetimeError::InvalidSelection),
         }
         if let Some(rule) = &self.service_parent_administration
             && (self.remote_operator.is_none()
@@ -617,13 +668,20 @@ impl PreparedNativeHost {
                     .iter()
                     .find(|route| route.id == capability.route)
                     .ok_or(HostLifetimeError::InvalidSelection)?;
-                if capability.parent.validate().is_err()
-                    || capability.helper_targets.len() >= meerkat_authorization_contracts::work_association::MAX_ASSOCIATION_REFERENCES
-                    || capability.helper_targets.windows(2).any(|pair| pair[0].target >= pair[1].target)
-                    || capability.helper_targets.iter().any(|target| target.parent.validate().is_err()
+                let targets = if capability.workflow_targets.is_empty() {
+                    &capability.helper_targets
+                } else {
+                    &capability.workflow_targets
+                };
+                if (!capability.helper_targets.is_empty() && !capability.workflow_targets.is_empty())
+                    || (!capability.workflow_targets.is_empty() && capability.helper.is_none())
+                    || capability.parent.validate().is_err()
+                    || targets.len() >= meerkat_authorization_contracts::work_association::MAX_ASSOCIATION_REFERENCES
+                    || targets.windows(2).any(|pair| pair[0].target >= pair[1].target)
+                    || targets.iter().any(|target| target.parent.validate().is_err()
                         || target.parent == capability.parent)
-                    || capability.helper_targets.iter().enumerate().any(|(index, target)|
-                        capability.helper_targets[..index].iter().any(|prior| prior.parent == target.parent))
+                    || targets.iter().enumerate().any(|(index, target)|
+                        targets[..index].iter().any(|prior| prior.parent == target.parent))
                     || route.source_binding_in(channels)?.0 != &member.member {
                     return Err(HostLifetimeError::InvalidSelection);
                 }

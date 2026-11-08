@@ -16,28 +16,37 @@ from urllib.parse import parse_qsl, urlsplit
 
 
 class McpAuthClient(Protocol):
-    """Existing public MeerkatClient methods, not a new native wire protocol."""
+    """Meerkat client methods or the same-runtime private hosted adapter."""
 
     async def auth_mcp_login_start(self, server_name: str, server_url: str,
-                                   redirect_uri: str, *, oauth_account: str) -> Any: ...
+                                   redirect_uri: str, *, oauth_account: str | None = None,
+                                   oauth_account_selection: str | None = None) -> Any: ...
     async def auth_mcp_login_complete(self, server_name: str, server_url: str, *,
                                       code: str, state: str, redirect_uri: str,
-                                      oauth_account: str) -> Any: ...
+                                      oauth_account: str | None = None,
+                                      oauth_account_selection: str | None = None) -> Any: ...
     async def auth_mcp_login_cancel(self, server_name: str, server_url: str,
-                                    state: str, *, oauth_account: str) -> Any: ...
+                                    state: str, *, oauth_account: str | None = None,
+                                    oauth_account_selection: str | None = None) -> Any: ...
     async def auth_mcp_status(self, server_name: str, server_url: str, *,
-                              oauth_account: str) -> Any: ...
+                              oauth_account: str | None = None,
+                              oauth_account_selection: str | None = None) -> Any: ...
 
 
 @dataclass(frozen=True)
 class McpTarget:
     server_name: str
     server_url: str = field(repr=False)
-    oauth_account: str
+    oauth_account: str | None = None
+    oauth_account_selection: str | None = None
 
     def _wire(self) -> dict[str, str]:
-        return {"server_name": self.server_name, "server_url": self.server_url,
-                "oauth_account": self.oauth_account}
+        return {"server_name": self.server_name, "server_url": self.server_url, **self._auth_kwargs()}
+
+    def _auth_kwargs(self):
+        if self.oauth_account is not None:
+            return {"oauth_account": self.oauth_account}
+        return {"oauth_account_selection": self.oauth_account_selection}
 
 
 @dataclass(frozen=True)
@@ -55,6 +64,7 @@ class CredentialObservation:
     expires_at: str | None
     scopes: tuple[str, ...] | None = None
     has_refresh_token: bool | None = None
+    account_verification: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,10 +78,23 @@ class CleanupObservation:
     native_cancel: str  # acknowledged, unconfirmed, not_requested, not_needed
 
 
+@dataclass(frozen=True)
+class NativeAuthFailure:
+    """Core-owned diagnostic codes, not settlement or retry authority.
+
+    Unknown codes remain observable for a matching newer native runtime. The
+    transport validates their token shape, never provider error text.
+    """
+    reason: str
+    detail: str | None = None
+
+
 class McpAuthError(RuntimeError):
     """Fixed, value-free failure. Unconfirmed effects must not be retried automatically."""
-    def __init__(self, code: str, cleanup: CleanupObservation | None = None):
+    def __init__(self, code: str, cleanup: CleanupObservation | None = None, *,
+                 native_failure: NativeAuthFailure | None = None):
         self.code, self.cleanup = code, cleanup
+        self.native_failure = native_failure
         super().__init__(code)
 
 
@@ -110,8 +133,10 @@ def _origin(value: str) -> str:
 
 def _target(target: McpTarget) -> None:
     if (type(target) is not McpTarget or not _text(target.server_name, 512)
-            or not target.server_name.strip() or not _text(target.oauth_account, 2048)
-            or not target.oauth_account.strip()):
+            or not target.server_name.strip()
+            or (target.oauth_account is not None) == (target.oauth_account_selection is not None)
+            or target.oauth_account is not None and (not _text(target.oauth_account, 4096) or not target.oauth_account.strip())
+            or target.oauth_account_selection is not None and target.oauth_account_selection not in ("discover", "unverified")):
         raise ValueError
     _url(target.server_url)
 
@@ -123,23 +148,34 @@ def _matches(value: Any, target: McpTarget) -> bool:
 def _observation(value: Any, target: McpTarget, *, completed: bool) -> CredentialObservation:
     if not isinstance(value, dict) or not _matches(value.get("mcp"), target):
         raise ValueError
-    account, expires = value.get("account_id"), value.get("expires_at")
-    if (account is not None and account != target.oauth_account) or (
-            expires is not None and not _text(expires, 128)):
+    account, expires, verification = value.get("account_id"), value.get("expires_at"), value.get("account_verification")
+    if (account is not None and not _text(account, 4096)) or (expires is not None and not _text(expires, 128)):
+        raise ValueError
+    authorized = completed or value.get("phase") == "authorized"
+    if target.oauth_account is not None:
+        if (account is not None and account != target.oauth_account) or (authorized and account != target.oauth_account):
+            raise ValueError
+        if verification not in (None, "verified"):
+            raise ValueError
+    elif target.oauth_account_selection == "discover":
+        if verification != "verified" or authorized and account is None:
+            raise ValueError
+    elif target.oauth_account_selection == "unverified":
+        if verification != "unverified" or account is not None:
+            raise ValueError
+    else:
         raise ValueError
     if completed:
         scopes, refresh = value.get("scopes"), value.get("has_refresh_token")
-        if (account != target.oauth_account or type(refresh) is not bool
+        if (type(refresh) is not bool
                 or not isinstance(scopes, list) or len(scopes) > 256
                 or any(not _text(s, 2048) for s in scopes)):
             raise ValueError
-        return CredentialObservation("authorized", account, expires, tuple(scopes), refresh)
+        return CredentialObservation("authorized", account, expires, tuple(scopes), refresh, verification)
     phase = value.get("phase")
     if phase not in ("authorized", "reauth_required", "authorization_required"):
         raise ValueError
-    if phase == "authorized" and account != target.oauth_account:
-        raise ValueError
-    return CredentialObservation(phase, account, expires)
+    return CredentialObservation(phase, account, expires, account_verification=verification)
 
 
 async def observe_mcp_auth(client: McpAuthClient, target: McpTarget,
@@ -148,20 +184,24 @@ async def observe_mcp_auth(client: McpAuthClient, target: McpTarget,
     _bounds(timeout)
     failure = "invalid_target"
     cancelled = False
+    native_failure = None
     try:
         _target(target)
         failure = "status_unconfirmed"
         value = await asyncio.wait_for(client.auth_mcp_status(
-            target.server_name, target.server_url, oauth_account=target.oauth_account), timeout)
+            target.server_name, target.server_url, **target._auth_kwargs()), timeout)
         failure = "invalid_status_response"
         return _observation(value, target, completed=False)
     except asyncio.CancelledError:
         cancelled = True
+    except McpAuthError as error:
+        if error.native_failure is not None:
+            failure, native_failure = "native_auth_failure", error.native_failure
     except Exception:
         pass
     if cancelled:
         raise asyncio.CancelledError("mcp_auth_status_wait_cancelled")
-    raise McpAuthError(failure)
+    raise McpAuthError(failure, native_failure=native_failure)
 
 
 def _bounds(*values: float) -> None:
@@ -182,7 +222,14 @@ async def _join(task: asyncio.Task):
             interrupted = True
 
 
-def _receive_query(query, state, callback) -> bool:
+@dataclass(frozen=True, repr=False)
+class _HostedCallbackResult:
+    """Private callback fields, retained without inventing a native wire shape."""
+    code: str | None
+    issuer: str | None
+
+
+def _receive_query(query, state, callback, *, hosted=False) -> bool:
     """Accept one bounded callback; provider extras never become authority."""
     try:
         if (not isinstance(query, str) or not 0 < len(query) <= 8192
@@ -202,7 +249,10 @@ def _receive_query(query, state, callback) -> bool:
         code, error = params.get("code"), params.get("error")
         if (code is None) == (error is None) or not _text(code if code is not None else error):
             return False
-        callback.set_result(code)
+        issuer = params.get("iss")
+        if hosted and issuer is not None and not _text(issuer):
+            return False
+        callback.set_result(_HostedCallbackResult(code, issuer) if hosted else code)
         return True
     except (ValueError, UnicodeError):
         return False
@@ -276,7 +326,7 @@ class RegisteredHttpsCallback:
         """
         if self._closed or redirect_uri != self._redirect:
             return False
-        return _receive_query(query, self._state, self._callback)
+        return _receive_query(query, self._state, self._callback, hosted=True)
 
     async def close(self):
         """Retire only this inbox. The custodian owns this lifecycle call."""
@@ -383,6 +433,7 @@ class _Outcome:
     observation: CredentialObservation | None
     error: str | None
     cleanup: CleanupObservation
+    native_failure: NativeAuthFailure | None = None
 
 
 class StartedMcpLogin:
@@ -421,7 +472,7 @@ class StartedMcpLogin:
     async def wait(self) -> CredentialObservation:
         outcome = await asyncio.shield(self._run_task)
         if outcome.error:
-            raise McpAuthError(outcome.error, outcome.cleanup)
+            raise McpAuthError(outcome.error, outcome.cleanup, native_failure=outcome.native_failure)
         return outcome.observation
 
     async def close(self) -> CleanupObservation:
@@ -442,17 +493,30 @@ class StartedMcpLogin:
     async def _run(self, callback_timeout):
         self._running.set()
         observation, error = None, None
+        native_failure = None
         state = self._listener.state
         try:
-            code = await asyncio.wait_for(asyncio.shield(self._listener.callback), callback_timeout)
-            if code is None:
+            callback = await asyncio.wait_for(asyncio.shield(self._listener.callback), callback_timeout)
+            issuer = callback.issuer if isinstance(callback, _HostedCallbackResult) else None
+            code = callback.code if isinstance(callback, _HostedCallbackResult) else callback
+            registered = getattr(self._client, "auth_mcp_login_complete_registered", None)
+            if code is not None and issuer is not None and not callable(registered):
+                # The owner's hosted completion contract is not bound yet. Keep
+                # issuer bytes intact and refuse instead of silently dropping
+                # RFC 9207 evidence into the old loopback-only client call.
+                error = "hosted_issuer_binding_unavailable"
+            elif code is None:
                 error = "authorization_denied"
             else:
                 error = "completion_uncertain"
-                value = await asyncio.wait_for(self._client.auth_mcp_login_complete(
-                    self._target.server_name, self._target.server_url, code=code, state=state,
-                    redirect_uri=self._listener.redirect,
-                    oauth_account=self._target.oauth_account), self._rpc_timeout)
+                args = dict(code=code, state=state, redirect_uri=self._listener.redirect,
+                    **self._target._auth_kwargs())
+                complete = self._client.auth_mcp_login_complete
+                if isinstance(callback, _HostedCallbackResult) and callable(registered):
+                    complete = registered
+                    args["iss"] = issuer
+                value = await asyncio.wait_for(complete(
+                    self._target.server_name, self._target.server_url, **args), self._rpc_timeout)
                 error = "invalid_completion_response"
                 observation = _observation(value, self._target, completed=True)
                 error = None
@@ -460,11 +524,16 @@ class StartedMcpLogin:
             error = error or "callback_wait_abandoned"
         except asyncio.CancelledError:
             error = error or "custodian_closed_uncertain"
+        except McpAuthError as failure:
+            if failure.native_failure is not None:
+                error, native_failure = "native_auth_failure", failure.native_failure
+            else:
+                error = error or "callback_unconfirmed"
         except Exception:
             error = error or "callback_unconfirmed"
         cleanup, _ = await _join(asyncio.create_task(self._cleanup(state, observation is None)))
         self._authorize_url = None
-        return _Outcome(observation, error, cleanup)
+        return _Outcome(observation, error, cleanup, native_failure)
 
     async def _cleanup(self, state, cancel):
         await self._listener.close()
@@ -474,7 +543,7 @@ class StartedMcpLogin:
             try:
                 value = await asyncio.wait_for(self._client.auth_mcp_login_cancel(
                     self._target.server_name, self._target.server_url, state,
-                    oauth_account=self._target.oauth_account), self._rpc_timeout)
+                    **self._target._auth_kwargs()), self._rpc_timeout)
                 if (isinstance(value, dict) and _matches(value.get("mcp"), self._target)
                         and value.get("cancelled") is True):
                     disposition = "acknowledged"
@@ -495,6 +564,7 @@ async def begin_mcp_login(client: McpAuthClient, target: McpTarget, *,
     """
     _bounds(callback_timeout, rpc_timeout)
     listener, failure, cancelled = None, "invalid_target", False
+    native_failure = None
     try:
         _target(target)
         if callback is None:
@@ -516,14 +586,15 @@ async def begin_mcp_login(client: McpAuthClient, target: McpTarget, *,
         failure = "start_uncertain"
         value = await asyncio.wait_for(client.auth_mcp_login_start(
             target.server_name, target.server_url, listener.redirect,
-            oauth_account=target.oauth_account), rpc_timeout)
+            **target._auth_kwargs()), rpc_timeout)
         failure = "invalid_start_response_uncertain"
         if not isinstance(value, dict) or not _matches(value.get("mcp"), target):
             raise ValueError
         state, url, redirect = value.get("state"), value.get("authorize_url"), value.get("redirect_uri")
         if not _text(state) or not _text(url):
             raise ValueError
-        presentation = AuthPresentation(_origin(url), target.oauth_account)
+        presentation = AuthPresentation(_origin(url), target.oauth_account or
+            ("Discover account" if target.oauth_account_selection == "discover" else "Unverified resource access"))
         if isinstance(listener, RegisteredHttpsCallback):
             if redirect != listener.redirect:
                 raise ValueError
@@ -544,6 +615,9 @@ async def begin_mcp_login(client: McpAuthClient, target: McpTarget, *,
                                callback_timeout, rpc_timeout)
     except asyncio.CancelledError:
         cancelled = True
+    except McpAuthError as error:
+        if error.native_failure is not None:
+            failure, native_failure = "native_auth_failure", error.native_failure
     except Exception:
         pass
     interrupted = False
@@ -552,7 +626,7 @@ async def begin_mcp_login(client: McpAuthClient, target: McpTarget, *,
     cleanup = CleanupObservation(listener is not None or callback is None, "not_requested")
     if cancelled or interrupted:
         raise McpAuthCancelled(cleanup)
-    raise McpAuthError(failure, cleanup)
+    raise McpAuthError(failure, cleanup, native_failure=native_failure)
 
 
 @dataclass(frozen=True, repr=False)
@@ -561,13 +635,14 @@ class _CustodianResult:
     cleanup: CleanupObservation | None = None
     error: str | None = None
     cancelled: bool = False
+    native_failure: NativeAuthFailure | None = None
 
     def raise_error(self) -> None:
         # Cache values, not exception objects with retained or growing tracebacks.
         if self.cancelled:
             raise McpAuthCancelled(self.cleanup) from None
         if self.error is not None:
-            raise McpAuthError(self.error, self.cleanup) from None
+            raise McpAuthError(self.error, self.cleanup, native_failure=self.native_failure) from None
 
 
 class McpLoginCustodian:
@@ -638,7 +713,8 @@ class McpLoginCustodian:
         except McpAuthCancelled as error:
             return _CustodianResult(cleanup=error.cleanup, cancelled=True)
         except McpAuthError as error:
-            return _CustodianResult(cleanup=error.cleanup, error=error.code)
+            return _CustodianResult(cleanup=error.cleanup, error=error.code,
+                                    native_failure=error.native_failure)
         except asyncio.CancelledError:
             return _CustodianResult(cleanup=CleanupObservation(False, "not_requested"),
                                     cancelled=True)
@@ -675,7 +751,8 @@ class McpLoginCustodian:
         except McpAuthCancelled as error:
             return _CustodianResult(cleanup=error.cleanup, cancelled=True)
         except McpAuthError as error:
-            return _CustodianResult(cleanup=error.cleanup, error=error.code)
+            return _CustodianResult(cleanup=error.cleanup, error=error.code,
+                                    native_failure=error.native_failure)
         except asyncio.CancelledError:
             return _CustodianResult(cleanup=CleanupObservation(False, "unconfirmed"),
                                     cancelled=True)

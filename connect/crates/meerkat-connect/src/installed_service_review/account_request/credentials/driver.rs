@@ -115,21 +115,9 @@ impl InstalledAccountRequests {
                 let Some(reply) = reviewed else {
                     return Ok(request.response.is_closed());
                 };
-                if !console::checkpoint(
-                    &request.current,
-                    &mut request.response,
-                    &bridge,
-                    refresh,
-                    closing.as_mut(),
-                )
-                .await?
-                {
-                    return Ok(request.response.is_closed());
-                }
-                if checked_configuration(&request.selected, &request.selection)?.0 != request.config
-                {
-                    return Err(refused("The credential installation changed after review"));
-                }
+                // The joined review checked currentness before each entered
+                // effect. Its own policy/source publication can invalidate the
+                // old call; report the actual outcome without reauthorizing it.
                 let _ = request.response.send(reply);
                 drop(custody);
                 Ok(true)
@@ -386,6 +374,7 @@ fn install_failure(error: meerkat_mobkit::rpc_gateway::GatewayRealmMcpError) -> 
             | McpRealmPersistError::ServerNotFound(_)
             | McpRealmPersistError::EnvReference(_)
             | McpRealmPersistError::Access(_)
+            | McpRealmPersistError::Cwd(_)
             | McpRealmPersistError::Config(_),
         ) => WriteState::NotWritten,
         _ => WriteState::OutcomeUnknown,
@@ -415,6 +404,13 @@ mod tests {
 
     fn io_failure() -> ConfigRuntimeError {
         ConfigRuntimeError::Io(std::io::Error::other(PAYLOAD))
+    }
+
+    fn cwd_failure() -> McpRealmPersistError {
+        McpRealmPersistError::Cwd(meerkat_core::McpStdioCwdError {
+            server: PAYLOAD.into(),
+            reason: meerkat_core::McpStdioCwdRefusal::NotAbsolute,
+        })
     }
 
     fn pending_reply() -> CredentialReply {
@@ -459,6 +455,8 @@ mod tests {
                 GatewayRealmMcpError::from(McpRealmPersistError::Config(io_failure())),
                 "not_written",
             ),
+            (GatewayRealmMcpError::from(cwd_failure()), "not_written"),
+            (GatewayRealmMcpError::Persist(cwd_failure()), "not_written"),
             (
                 GatewayRealmMcpError::NotAdmitted(AdministrationEntryRefusal::Unavailable(
                     PAYLOAD.into(),

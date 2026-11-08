@@ -28,12 +28,18 @@ host = runner.host
 
 
 def distribution(selector=HERE / "current-distribution.json"):
-    pointer = json.loads(host.read_regular(selector, 65536)[0])
+    try:
+        pointer = json.loads(host.read_regular(selector, 65536)[0])
+    except FileNotFoundError as error:
+        raise host.PreparationError("distribution_selection_unavailable_use_trusted_exported_starter") from error
     if (type(pointer.get("schema_version")) is not int or pointer["schema_version"] != 1
             or not isinstance(pointer.get("manifest"), str)
             or Path(pointer["manifest"]).is_absolute()):
         raise host.PreparationError("invalid_distribution_selection")
-    raw = host.read_regular(selector.parent / pointer["manifest"], 1024 * 1024)[0]
+    try:
+        raw = host.read_regular(selector.parent / pointer["manifest"], 1024 * 1024)[0]
+    except FileNotFoundError as error:
+        raise host.PreparationError("distribution_selection_unavailable_use_trusted_exported_starter") from error
     if host.digest(raw) != host.checked_hash(pointer["manifest_sha256"]):
         raise host.PreparationError("distribution_selection_changed")
     manifest = json.loads(raw)
@@ -104,7 +110,10 @@ def checked_members(archive, root):
     return members
 
 
-def start(args, *, stopped=None):
+def start(args, *, stopped=None, release_dir=None):
+    # Supplied only by the installed product; ordinary starter callers omit it.
+    phase = getattr(args, "_preparation_phase", lambda _: None)
+    phase("starter_inputs")
     stopped = stopped if stopped is not None else threading.Event()
     deadline = time.monotonic() + args.timeout_seconds
     runner.checkpoint(deadline, stopped)
@@ -123,7 +132,11 @@ def start(args, *, stopped=None):
     extra = []
     if getattr(args, "enable_public_github_research", False):
         extra += ["--enable-public-github-research"]
-    families = "agno,services"
+    families = getattr(args, "families", None)
+    if families is not None and not isinstance(families, str):
+        raise host.PreparationError("invalid_library_families")
+    if families is None:
+        families = "agno,services" + (",activepieces" if args.node else "")
     if bool(args.node) != bool(args.npm_cli):
         raise host.PreparationError("node_and_npm_cli_required_together")
     if args.node:
@@ -131,7 +144,6 @@ def start(args, *, stopped=None):
             pins[name] = runtime_pin(getattr(args, name), destination, executable=name == "node")
             flag = name.replace("_", "-")
             extra += ["--" + flag, pins[name]["path"], "--" + flag + "-sha256", pins[name]["sha256"]]
-        families += ",activepieces"
     if args.allow_public_pypi != bool(args.pip_zipapp):
         raise host.PreparationError("public_pypi_requires_explicit_choice_and_pip_zipapp")
     if args.allow_public_pypi:
@@ -225,6 +237,7 @@ def start(args, *, stopped=None):
         if remote_recipes:
             extra += ["--allow-remote-recipes"]
 
+    phase("archive_validation")
     archive_path = downloads / asset["upload_name"]
     raw, _ = host.read_regular(archive_path, host.ARCHIVE_LIMIT)
     if len(raw) != asset["bytes"] or host.digest(raw) != asset["sha256"]:
@@ -234,38 +247,57 @@ def start(args, *, stopped=None):
         members = checked_members(archive, root)
         runner.checkpoint(deadline, stopped)
         host.recheck_pins(pins)
-        destination.mkdir(mode=0o700)
-        extracted = destination / "distribution"
-        extracted.mkdir(mode=0o700)
-        for member in sorted(members, key=lambda item: (len(Path(item.name).parts), not item.isdir())):
-            runner.checkpoint(deadline, stopped)
-            path = extracted / member.name
-            if member.isdir():
-                path.mkdir(mode=0o700)
-            else:
-                with archive.extractfile(member) as source:
-                    payload = source.read(host.FILE_LIMIT + 1)
-                if len(payload) != member.size:
-                    raise host.PreparationError("invalid_archive_member")
-                host.write_new(path, payload)
-                path.chmod(member.mode)
-    release = extracted / root
+        if release_dir is None:
+            phase("archive_extraction")
+            destination.mkdir(mode=0o700)
+            extracted = destination / "distribution"
+            extracted.mkdir(mode=0o700)
+            for member in sorted(members, key=lambda item: (len(Path(item.name).parts), not item.isdir())):
+                runner.checkpoint(deadline, stopped)
+                path = extracted / member.name
+                if member.isdir():
+                    path.mkdir(mode=0o700)
+                else:
+                    with archive.extractfile(member) as source:
+                        payload = source.read(host.FILE_LIMIT + 1)
+                    if len(payload) != member.size:
+                        raise host.PreparationError("invalid_archive_member")
+                    host.write_new(path, payload)
+                    path.chmod(member.mode)
+            release = extracted / root
+        else:
+            release = Path(release_dir)
+            if (not release.is_absolute() or release.is_symlink()
+                    or host.directory(str(release)) != release or release.name != root
+                    or host.compose_overlaps(destination, release)):
+                raise host.PreparationError("invalid_immutable_library_directory")
+            files, directories = host.tree(release)
+            if (release.stat().st_mode & 0o222 or any(mode & 0o222 for mode in files.values())
+                    or any(mode & 0o222 for mode in directories.values())):
+                raise host.PreparationError("immutable_library_is_writable")
     # The canonical owner validates the complete tree and the retained archive
     # again. Only then may the selected archived bootstrap execute.
+    phase("release_validation")
     snapshot, _ = host.release_snapshot(str(archive_path), asset["sha256"], release, target)
     host.recheck_pins(pins)
+    if release_dir is not None:
+        destination.mkdir(mode=0o700)
     if recipes_enabled:
+        phase("recipe_tool_validation")
         recipe_tool = release / host.RECIPES_TOOL
         if (host.RECIPES_TOOL not in snapshot["hashes"]
                 or not snapshot["files"][host.RECIPES_TOOL] & 0o111):
             raise host.PreparationError("local_recipes_owner_unavailable")
         # Initialization and replay belong to the existing durable store owner.
         # The process is joined by the same preparation runner and cancellation.
+        phase("recipe_initialization")
         initialized = runner.run_owner([str(recipe_tool), "init", "--database", database,
             "--realm", realm, "--owner", owner], release, deadline, stopped)
+        phase("recipe_receipt")
         if initialized != {"schema_version": 1, "scope": "retained_recipe_metadata", "status": "initialized"}:
             raise host.PreparationError("local_recipes_initialization_unconfirmed")
         host.recheck_release(release, snapshot)
+    phase("staging_creation")
     (destination / "staging").mkdir(mode=0o700)
     command = [python["path"], "-I", "-B", str(release / "setup/bootstrap_host.py"),
         "--release-archive", str(archive_path), "--release-sha256", asset["sha256"],
@@ -274,7 +306,9 @@ def start(args, *, stopped=None):
         "--client-directory", str(destination / "client"), "--output", str(destination / "config"),
         "--workspace", str(destination / "session"), "--staging-root", str(destination / "staging"),
         "--families", families, "--enable-package-inspection", "--timeout-seconds", str(args.timeout_seconds), *extra]
+    phase("bootstrap")
     result = runner.run_owner(command, release, deadline, stopped)
+    phase("bootstrap_result")
     if (result.get("status") != "prepared" or result.get("release_sha256") != asset["sha256"]
             or result.get("scope") != "offline_setup_client_and_host_configuration_only"
             or result.get("host", {}).get("directory") != str(destination / "config")):
@@ -291,7 +325,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--archive-dir", required=True, help="directory containing the selected Mac or Linux archive")
     parser.add_argument("--destination", required=True, help="new absolute directory; its parent must exist")
-    parser.add_argument("--node", help="trusted compatible Node, paired with --npm-cli; enables Activepieces")
+    parser.add_argument("--families", help="explicit comma-separated family selection; defaults to agno,services plus activepieces with Node")
+    parser.add_argument("--node", help="trusted compatible Node, paired with --npm-cli; defaults include Activepieces when --families is omitted")
     parser.add_argument("--npm-cli", help="trusted npm CLI script for the selected library Node")
     parser.add_argument("--allow-public-pypi", action="store_true", help="allow agent-selected Python package acquisition")
     parser.add_argument("--pip-zipapp", help="trusted pip zipapp; required with --allow-public-pypi")

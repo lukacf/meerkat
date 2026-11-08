@@ -91,7 +91,13 @@ fn selected_body(
             && !matches!(
                 software["family"].as_str(),
                 Some("agno" | "services" | "activepieces" | "selected-python" | "selected-node")
-            ))
+            )
+            && !(credential
+                && software["family"] == "official-github"
+                && matches!(
+                    software["profile"].as_str(),
+                    Some("selected-reads" | "enterprise-selected-reads")
+                )))
     {
         return Err(denied());
     }
@@ -997,6 +1003,283 @@ mod tests {
             rebound.mcp_document_sha256 =
                 digest(&serde_json::to_vec(&changed["mcp_configuration"]).unwrap());
             assert!(checked_readback(&rebound, &reviewed, &changed, public, None).is_err());
+        }
+    }
+
+    #[test]
+    fn official_github_credential_readback_keeps_exact_review_and_launch() {
+        // Parser and launch projection only. The existing package owner still
+        // verifies the pinned official binary, fixed operations and token slot.
+        let (realm, mut record, mut result) = public_fixture(None);
+        let command = "/fixture/install/github-mcp-server";
+        let args = vec![
+            "stdio",
+            "--read-only",
+            "--gh-host",
+            "https://github.com",
+            "--tools",
+            "get_me,list_commits,get_file_contents",
+        ];
+        let configuration = json!({"mcpServers":{"mail":{"command":command,"args":args,
+            "cwd":"/fixture/install","env":{}}}});
+        let body = record.request_body.as_mut().unwrap();
+        body["phase"] = json!("installed_credential_service_access");
+        body["authentication"] = json!({"kind":"declared_secret_slots"});
+        body["software"]["family"] = json!("official-github");
+        body["software"]["profile"] = json!("selected-reads");
+        body["software"]["document_sha256"] =
+            digest(&serde_json::to_vec(&configuration).unwrap()).into();
+        body["application_selection"]["operations"] = json!(["get_me"]);
+        body["credential_slots"] = json!([{"source":"library_field","declaration":{
+            "field_path":["config","token_env"],"environment_variable":"GITHUB_PERSONAL_ACCESS_TOKEN"}}]);
+        let mut config = McpServerConfig::stdio(
+            "mail",
+            command,
+            args.into_iter().map(str::to_owned).collect(),
+            Default::default(),
+        )
+        .with_cwd("/fixture/install")
+        .unwrap();
+        config.access = Some(meerkat_core::McpServerAccess::allowing(["get_me"]));
+        let meerkat_core::mcp_config::McpTransportConfig::Stdio(launch) = &mut config.transport
+        else {
+            panic!("stdio")
+        };
+        launch.secret_env = ["GITHUB_PERSONAL_ACCESS_TOKEN".to_owned()].into();
+        body["installation"] = serde_json::to_value(&config).unwrap();
+        result["family"] = json!("official-github");
+        result["profile"] = json!("selected-reads");
+        result["mcp_configuration"] = configuration;
+        let (observed, request) =
+            checked_credential_review_for_test(&record, &realm, &result).unwrap();
+        assert_eq!(observed, config);
+        assert!(request.get("public_service").is_none());
+        assert_eq!(
+            request["credential_service"],
+            json!({
+            "operation_basis":{"kind":"package_published_metadata"},"operations":["get_me"],
+            "credential_slots":record.request_body.as_ref().unwrap()["credential_slots"]})
+        );
+        assert_eq!(
+            request["software"],
+            record.request_body.as_ref().unwrap()["software"]
+        );
+        for mode in [
+            "public",
+            "account",
+            "profile",
+            "family",
+            "pending",
+            "receipt",
+            "operations",
+            "launch",
+        ] {
+            let mut changed = record.clone();
+            let mut readback = result.clone();
+            let body = changed.request_body.as_mut().unwrap();
+            match mode {
+                "public" => {
+                    body["phase"] = json!("installed_public_service_access");
+                    body["authentication"] = json!({"kind":"none"});
+                }
+                "account" => body["phase"] = json!("installed_account_access"),
+                "profile" => body["software"]["profile"] = json!("other"),
+                "family" => body["software"]["family"] = json!("official-playwright"),
+                "pending" => changed.status = ApprovalStatus::Pending,
+                "receipt" => readback["receipt_sha256"] = json!("f".repeat(64)),
+                "operations" => {
+                    body["application_selection"]["operations"] = json!(["create_issue"])
+                }
+                "launch" => {
+                    readback["mcp_configuration"]["mcpServers"]["mail"]["command"] =
+                        json!("/other/command");
+                    body["software"]["document_sha256"] =
+                        digest(&serde_json::to_vec(&readback["mcp_configuration"]).unwrap()).into();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    checked_credential_review_for_test(&changed, &realm, &readback),
+                    Err(PrivateOriginalError::Denied)
+                ),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn enterprise_github_credential_readback_binds_host_subset_and_configuration_receipt() {
+        // Parser and native launch projection only. The package owner verifies
+        // the pinned source/binary and canonical host before this readback.
+        let (realm, mut record, mut result) = public_fixture(None);
+        let command = "/fixture/install/github-mcp-server";
+        let operations = ["pull_request_read", "get_commit", "issue_read"];
+        let args = vec![
+            "stdio".to_owned(),
+            "--read-only".into(),
+            "--gh-host".into(),
+            "https://github.enterprise.example".into(),
+            "--toolsets=".into(),
+            "--tools".into(),
+            operations.join(","),
+        ];
+        let configuration = json!({"mcpServers":{"mail":{"command":command,"args":args,
+            "cwd":"/fixture/install","env":{}}}});
+        let mut config = McpServerConfig::stdio("mail", command, args, Default::default())
+            .with_cwd("/fixture/install")
+            .unwrap();
+        config.access = Some(meerkat_core::McpServerAccess::allowing(operations));
+        let meerkat_core::mcp_config::McpTransportConfig::Stdio(launch) = &mut config.transport
+        else {
+            panic!("stdio")
+        };
+        launch.secret_env = ["GITHUB_PERSONAL_ACCESS_TOKEN".to_owned()].into();
+        let body = record.request_body.as_mut().unwrap();
+        body["phase"] = json!("installed_credential_service_access");
+        body["authentication"] = json!({"kind":"declared_secret_slots"});
+        body["software"]["family"] = json!("official-github");
+        body["software"]["profile"] = json!("enterprise-selected-reads");
+        body["software"]["document_sha256"] =
+            digest(&serde_json::to_vec(&configuration).unwrap()).into();
+        body["application_selection"]["operations"] = json!(operations);
+        body["credential_slots"] = json!([{"source":"library_field","declaration":{
+            "field_path":["config","token_env"],"environment_variable":"GITHUB_PERSONAL_ACCESS_TOKEN"}}]);
+        body["installation"] = serde_json::to_value(&config).unwrap();
+        result["family"] = json!("official-github");
+        result["profile"] = json!("enterprise-selected-reads");
+        result["mcp_configuration"] = configuration;
+        let (observed, request) =
+            checked_credential_review_for_test(&record, &realm, &result).unwrap();
+        assert_eq!(observed, config);
+        assert!(request.get("public_service").is_none());
+        assert_eq!(
+            request["software"],
+            record.request_body.as_ref().unwrap()["software"]
+        );
+        assert_eq!(
+            request["credential_service"]["operations"],
+            json!(operations)
+        );
+        assert_eq!(
+            request["credential_service"]["credential_slots"],
+            record.request_body.as_ref().unwrap()["credential_slots"]
+        );
+        for mode in [
+            "public",
+            "account",
+            "pending",
+            "profile",
+            "family",
+            "receipt",
+            "configuration",
+            "host",
+            "toolsets",
+            "tools",
+            "operations",
+            "secret-env",
+        ] {
+            let mut changed = record.clone();
+            let mut readback = result.clone();
+            let body = changed.request_body.as_mut().unwrap();
+            match mode {
+                "public" => {
+                    body["phase"] = json!("installed_public_service_access");
+                    body["authentication"] = json!({"kind":"none"});
+                }
+                "account" => body["phase"] = json!("installed_account_access"),
+                "pending" => changed.status = ApprovalStatus::Pending,
+                "profile" => readback["profile"] = json!("selected-reads"),
+                "family" => readback["family"] = json!("services"),
+                "receipt" => readback["receipt_sha256"] = json!("f".repeat(64)),
+                "configuration" => readback["configuration_sha256"] = json!("f".repeat(64)),
+                "operations" => {
+                    body["application_selection"]["operations"] =
+                        json!(["pull_request_read", "create_issue"])
+                }
+                "host" | "toolsets" | "tools" | "secret-env" => {
+                    let launch = &mut readback["mcp_configuration"]["mcpServers"]["mail"];
+                    match mode {
+                        "host" => launch["args"][3] = json!("https://other.enterprise.example"),
+                        "toolsets" => launch["args"][4] = json!("--toolsets=all"),
+                        "tools" => {
+                            launch["args"][6] =
+                                json!("pull_request_read,get_commit,issue_read,create_issue")
+                        }
+                        _ => {
+                            launch["env"] = json!({"GITHUB_PERSONAL_ACCESS_TOKEN":"fixture-secret-not-a-reference"})
+                        }
+                    }
+                    // Even a new matching document digest cannot substitute
+                    // the launch or host retained by the approved review.
+                    body["software"]["document_sha256"] =
+                        digest(&serde_json::to_vec(&readback["mcp_configuration"]).unwrap()).into();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    checked_credential_review_for_test(&changed, &realm, &readback),
+                    Err(PrivateOriginalError::Denied)
+                ),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_readback_preserves_cwd_and_refuses_changed_or_missing_cwd() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().to_str().unwrap();
+        let other = directory.path().join("other").to_str().unwrap().to_owned();
+        for profile in [None, Some("python"), Some("node")] {
+            let (realm, mut record, mut result) = public_fixture(profile);
+            result["mcp_configuration"]["mcpServers"]["mail"]["cwd"] = json!(cwd);
+            let body = record.request_body.as_mut().unwrap();
+            body["installation"]["cwd"] = json!(cwd);
+            body["software"]["document_sha256"] =
+                digest(&serde_json::to_vec(&result["mcp_configuration"]).unwrap()).into();
+            let (selected, reviewed, request) = selected_review(&record, &realm).unwrap();
+            let public = request.get("public_service");
+            let derived = checked_readback(&selected, &reviewed, &result, public, None).unwrap();
+            assert_eq!(derived, reviewed);
+            let meerkat_core::mcp_config::McpTransportConfig::Stdio(launch) = &derived.transport
+            else {
+                panic!("stdio")
+            };
+            assert_eq!(launch.cwd.as_deref(), Some(cwd));
+            assert!(derived.connector.is_none());
+            for replacement in [Some(other.as_str()), None] {
+                let mut changed = result.clone();
+                let launch = changed["mcp_configuration"]["mcpServers"]["mail"]
+                    .as_object_mut()
+                    .unwrap();
+                if let Some(cwd) = replacement {
+                    launch.insert("cwd".into(), json!(cwd));
+                } else {
+                    launch.remove("cwd");
+                }
+                assert!(checked_readback(&selected, &reviewed, &changed, public, None).is_err());
+                // Even a matching document digest cannot change the reviewed
+                // native launch. This exercises descriptor equality as well.
+                let mut rebound = selected.clone();
+                rebound.mcp_document_sha256 =
+                    digest(&serde_json::to_vec(&changed["mcp_configuration"]).unwrap());
+                assert!(checked_readback(&rebound, &reviewed, &changed, public, None).is_err());
+            }
+            for cwd in ["", "relative/directory", "/invalid\0directory"] {
+                let mut changed = result["mcp_configuration"].clone();
+                changed["mcpServers"]["mail"]["cwd"] = json!(cwd);
+                assert_eq!(
+                    public_launch_configuration(
+                        &selected,
+                        &changed,
+                        &BTreeSet::from(["actual_read".into()])
+                    )
+                    .unwrap_err(),
+                    "unsupported_public_launch"
+                );
+            }
         }
     }
 

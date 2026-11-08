@@ -13,7 +13,7 @@ use meerkat_toolkit::host_lifetime::{
     control::{
         HostBootstrapSelection, HostCloseReason, PrivateHostLifetimeControl, SelectedHostArtifact,
     },
-    policy::CompiledLocalPolicy,
+    policy::{CompiledLocalPolicy, CompiledMemberClass, CompiledNativeHost, CompiledNativeMember},
 };
 use std::{collections::VecDeque, path::PathBuf, sync::Mutex};
 use toolkit_package::{Id, canonical_json};
@@ -57,6 +57,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_native_host(None)
+    }
+    fn with_native_host(native_host: Option<CompiledNativeHost>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let bundle = root.join("shared/policy/bundle.1");
@@ -74,7 +77,7 @@ impl Fixture {
             source_policy_sha256: source.sha256.clone(),
             components: vec![],
             channels: vec![],
-            native_host: None,
+            native_host,
         };
         let local_policy = artifact(
             bundle.join("toolkit-local-policy.json"),
@@ -380,4 +383,154 @@ fn inconsistent_retained_artifact_is_rejected_before_carrier_selection() {
         )
         .is_err()
     );
+}
+
+struct PassiveCustomizer;
+#[async_trait]
+impl meerkat_mobkit::identity_first::AgentCustomizer for PassiveCustomizer {
+    async fn customize_build(
+        &self,
+        _: &meerkat_mobkit::identity_first::AgentBuildContext,
+        _: &DurableAgentSpec,
+        _: &mut meerkat_mobkit::identity_first::AgentBuildDraft,
+    ) -> Result<(), meerkat_mobkit::identity_first::CustomizerError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn gateway_customizer_preserves_absence_and_legacy_callback_and_refuses_closed_host() {
+    for close in ["private", "activation", "replacement"] {
+        let fixture = Fixture::new();
+        let inner: Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer> =
+            Arc::new(PassiveCustomizer);
+        assert!(
+            fixture
+                .host
+                .compose_agent_customizer(None)
+                .unwrap()
+                .is_none()
+        );
+        let composed = fixture
+            .host
+            .compose_agent_customizer(Some(inner.clone()))
+            .unwrap()
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&inner, &composed),
+            "an ordinary host must retain the actual callback"
+        );
+        match close {
+            "private" => {
+                fixture.channel.send(true).unwrap();
+            }
+            "activation" => {
+                fixture
+                    .owner
+                    .begin_close_activation(HostCloseReason::Shutdown)
+                    .unwrap();
+            }
+            "replacement" => {
+                std::fs::write(
+                    &fixture.selection.local_policy.path,
+                    b"changed selected policy",
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            fixture.host.compose_agent_customizer(None).is_err(),
+            "{close}"
+        );
+        assert!(
+            fixture.host.compose_agent_customizer(Some(inner)).is_err(),
+            "{close}"
+        );
+    }
+}
+
+#[test]
+fn declared_member_classes_require_sdk_customizer_before_native_bootstrap() {
+    use meerkat_authorization_contracts::constraints::{AudienceRef, ResourceDomain};
+    use meerkat_core::{MobMemberBinding, PrincipalKind, PrincipalRef, TrustDomainId};
+
+    let principal = PrincipalRef::in_domain(
+        PrincipalKind::ServiceAccount,
+        "application",
+        TrustDomainId::new("application").unwrap(),
+    )
+    .unwrap();
+    let reference = CompiledArtifactReference {
+        name: "prepared.json".into(),
+        sha256: digest(BYTES),
+    };
+    let mut native = CompiledNativeHost {
+        authentication_domain: None,
+        event_domain: None,
+        realm: meerkat_core::mob_realm_id("application").unwrap(),
+        grant_administrator: principal.clone(),
+        remote_operator: None,
+        service_parent_administration: None,
+        ingress_domain: ResourceDomain {
+            authority: principal.clone(),
+            namespace: "events".into(),
+        },
+        application_tool_policy: reference.clone(),
+        setup: None,
+        member_classes: vec![],
+        members: vec![CompiledNativeMember {
+            member: MobMemberBinding {
+                mob_id: "application".into(),
+                role: "ordinary".into(),
+                member: "ordinary".into(),
+            },
+            logical_owner: principal.clone(),
+            context_generation: 1,
+            audience: AudienceRef::Principal { principal },
+            initial_surface: reference,
+            setup_capability: None,
+        }],
+        routes: vec![],
+    };
+    // An actual selected native host with no classes keeps optional absence.
+    let ordinary = Fixture::with_native_host(Some(native.clone()));
+    assert!(
+        ordinary
+            .host
+            .compose_agent_customizer(None)
+            .unwrap()
+            .is_none()
+    );
+    native.member_classes.push(CompiledMemberClass {
+        id: Id::new("dynamic").unwrap(),
+        purpose: Default::default(),
+        profile: "ordinary".into(),
+        factory: Id::new("application:dynamic").unwrap(),
+        callback_account: None,
+        callbacks: vec![],
+        grants: vec![],
+    });
+    let declared = Fixture::with_native_host(Some(native));
+    assert!(matches!(
+        declared.host.compose_agent_customizer(None),
+        Err(GatewayHostError::AgentCustomizerRequired)
+    ));
+    // The hook neither consumes native configuration nor opens a runtime.
+    assert!(declared.host.grant_configuration.lock().unwrap().is_some());
+    assert!(declared.host.machine.get().is_none());
+    let inner: Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer> =
+        Arc::new(PassiveCustomizer);
+    assert!(
+        declared
+            .host
+            .compose_agent_customizer(Some(inner))
+            .unwrap()
+            .is_some()
+    );
+    declared.channel.send(true).unwrap();
+    assert!(matches!(
+        declared.host.compose_agent_customizer(None),
+        Err(GatewayHostError::Denied)
+    ));
 }

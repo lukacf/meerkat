@@ -463,6 +463,7 @@ class ExplicitResourceSelectionTests(unittest.TestCase):
         resources = Path(result["resources"])
         manifest, manifest_sha = PREPARE.verify_resources(resources)
         self.assertEqual(manifest_sha, result["resources_sha256"])
+        self.assertNotIn("families", manifest)
         self.assertEqual(result["archive_sha256"], PACKAGE.digest(Path(result["archive"])))
         self.assertEqual(result["input_selection"]["starter"]["manifest_sha256"], self.manifest_sha)
         self.assertEqual({row["name"] for row in manifest["sources"]}, {
@@ -560,6 +561,32 @@ class ExplicitResourceSelectionTests(unittest.TestCase):
                 changed = resources / group["npm_archive"]
                 changed.chmod(0o644); changed.write_bytes(b"altered selected archive")
                 with self.assertRaises(PREPARE.ResourceError): PREPARE.verify_resources(resources)
+
+    def test_family_selection_is_explicit_pinned_resource_policy_on_both_targets(self):
+        families = "agno,services,activepieces,official-github"
+        for target in ("macos-arm64", "linux-x86_64"):
+            with self.subTest(target=target):
+                result, _ = self.build_with_npm(target, resource_options={"families": families})
+                resources = Path(result["resources"])
+                manifest, manifest_sha = PREPARE.verify_resources(resources)
+                self.assertEqual(manifest["families"], families)
+                self.assertEqual(manifest_sha, result["resources_sha256"])
+                with tarfile.open(result["archive"]) as archive:
+                    retained = json.load(archive.extractfile("meerkat-connect-" + target +
+                        "/libexec/meerkat-connect/resources.json"))
+                self.assertEqual(retained["families"], families)
+
+    def test_family_selection_requires_current_explicit_inputs_before_output(self):
+        with mock.patch.object(PACKAGE.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "explicit current starter"):
+                PACKAGE.build(self.root / "unused", self.root, Path("/unused/zstd"), families="official-github")
+            for malformed in (True, [], {"families": "official-github"}):
+                with self.subTest(malformed=malformed):
+                    with self.assertRaisesRegex(ValueError, "invalid library families"):
+                        PACKAGE.build(self.root / "unused", self.root, Path("/unused/zstd"),
+                                      **self.kwargs(), families=malformed)
+            run.assert_not_called()
+        self.assertFalse((self.root / "unused").exists())
 
     def test_npm_group_requires_complete_pins_and_current_explicit_starter_before_output(self):
         values = self.npm_inputs()
@@ -787,6 +814,130 @@ class ExplicitResourceSelectionTests(unittest.TestCase):
         self.assertEqual(build.call_args.kwargs, {"target": "macos-arm64", **expected})
 
 
+class ImmutableLibraryPackagingTests(unittest.TestCase):
+    setUp = ExplicitResourceSelectionTests.setUp
+    repin_manifest = ExplicitResourceSelectionTests.repin_manifest
+    kwargs = ExplicitResourceSelectionTests.kwargs
+
+    def library(self, target="macos-arm64", *, extra=None, bad_mode=False):
+        source = PACKAGE.PREPARE.parent.parent
+        for name in ("start.py", "bootstrap_host.py", "prepare_host.py"):
+            raw = (source / name).read_bytes()
+            (self.root / "sdk/consumer-setup" / name).write_bytes(raw)
+            (self.starter / name).write_bytes(raw)
+        owner = load("packaging_immutable_owner_test", source / "prepare_host.py")
+        self.archive = self.root / ("toolkit-library-controlled-" + target + ".tar.gz")
+        contents = {"schema_version": 1} if target == "macos-arm64" else {
+            "schema_version": 2, "runtime_target": RuntimeCompatibilityTests.LINUX}
+        files = {name: b"inert retained archive member\n" for name in owner.REQUIRED}
+        files["consumers/CONTENTS.json"] = json.dumps(contents).encode()
+        # Packaging must never load this archived program.
+        files["setup/prepare_host.py"] = b"raise AssertionError('archived code executed during packaging')\n"
+        files["selected/bin/toolkit-local-recipes"] = b"inert recipe executable\n"
+        directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+        stem = self.archive.name.removesuffix(".tar.gz")
+        with tarfile.open(self.archive, "w:gz") as archive:
+            for name in sorted({""} | directories | set(files)):
+                member = tarfile.TarInfo(stem + ("/" + name if name else ""))
+                if name in files:
+                    member.mode = 0o755 if name.startswith("selected/bin/") else 0o644
+                    if bad_mode and name == "setup/backend.py": member.mode = 0o777
+                    member.size = len(files[name]); archive.addfile(member, io.BytesIO(files[name]))
+                else:
+                    member.type, member.mode = tarfile.DIRTYPE, 0o755
+                    archive.addfile(member)
+            if extra is not None: archive.addfile(extra)
+        self.manifest["assets"] = [{"upload_name": self.archive.name,
+            "sha256": PACKAGE.digest(self.archive), "bytes": self.archive.stat().st_size}]
+        self.repin_manifest()
+
+    def build(self, target="macos-arm64", *, label="output", **options):
+        upstream = self.root / (label + "-upstream"); upstream.mkdir()
+        targets = copy.deepcopy(PACKAGE.TARGETS)
+        for kind in ("python", "node"):
+            filename = targets[target][kind][0]
+            path = upstream / filename; path.write_bytes(("inert " + kind).encode())
+            targets[target][kind] = (filename, PACKAGE.digest(path), path.stat().st_size)
+        pip = upstream / "pip.pyz"; pip.write_bytes(b"inert pip source")
+        original_extract = PACKAGE.extract
+        def unpack(archive, resources, mapping, **kwargs):
+            if archive.name == "python.tar":
+                RuntimeCompatibilityTests().resources(resources, target,
+                    node="22.23.2" if target == "linux-x86_64" else "24.19.0",
+                    npm="10.9.8" if target == "linux-x86_64" else "11.17.0")
+                cli = resources / "runtime/node/lib/node_modules/npm/bin/npm-cli.js"
+                cli.parent.mkdir(parents=True); cli.write_bytes(b"inert npm CLI")
+            elif archive.name == self.archive.name:
+                original_extract(archive, resources, mapping, **kwargs)
+        with mock.patch.object(PACKAGE, "TARGETS", targets), mock.patch.object(PACKAGE,
+                "PIP", ("pip.pyz", PACKAGE.digest(pip), pip.stat().st_size)), \
+             mock.patch.object(PACKAGE.subprocess, "run") as run, \
+             mock.patch.object(PACKAGE, "extract", side_effect=unpack), \
+             mock.patch.object(PACKAGE, "require_case_sensitive"):
+            result = PACKAGE.build(self.root / label, upstream, Path("/inert/zstd"), target=target,
+                                   **self.kwargs(), **options)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][:3], ["/inert/zstd", "-d", "-c"])
+        return result
+
+    def test_complete_readonly_library_and_volume_are_bound_on_both_targets(self):
+        for target in ("macos-arm64", "linux-x86_64"):
+            with self.subTest(target=target):
+                self.library(target)
+                result = self.build(target, label=target, immutable_library_release=True)
+                root = Path(result["resources"])
+                manifest, digest = PREPARE.verify_resources(root)
+                self.assertEqual(digest, result["resources_sha256"])
+                selected = "library/" + self.archive.name.removesuffix(".tar.gz")
+                self.assertEqual(manifest["library_release"], selected)
+                self.assertEqual(result["library_release"], selected)
+                release = root / selected
+                owner = load("packaging_whole_release_validator", PACKAGE.PREPARE.parent.parent / "prepare_host.py")
+                snapshot, _ = owner.release_snapshot(str(root / manifest["archive"]),
+                    PACKAGE.digest(self.archive), release, target)
+                self.assertEqual(set(snapshot["files"]), {
+                    str(path.relative_to(release)) for path in release.rglob("*") if path.is_file()})
+                for path in [release.parent, release, *release.rglob("*")]:
+                    self.assertIn(stat.S_IMODE(path.stat().st_mode), (0o444, 0o555))
+                with tarfile.open(result["archive"]) as archive:
+                    members = archive.getmembers()
+                    self.assertEqual(result["resource_volume"], {
+                        "manifest_bytes": (root / "resources.json").stat().st_size,
+                        "archive_members": len(members), "archive_member_content_bytes": sum(m.size for m in members),
+                        "largest_archive_member_bytes": max(m.size for m in members),
+                        "resource_entries_including_manifest": len(manifest["entries"]) + 1})
+                self.assertFalse(list(release.rglob("__pycache__")))
+                self.assertEqual(json.loads((self.root / target / "build.json").read_bytes()), result)
+
+    def test_immutable_selection_requires_explicit_current_inputs(self):
+        for value in (True, None, "true", 1):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "immutable library requires"):
+                PACKAGE.build(self.root / "never-created", self.root, Path("/inert/zstd"),
+                              immutable_library_release=value)
+        self.assertFalse((self.root / "never-created").exists())
+
+    def test_immutable_bad_mode_and_link_never_emit_success_archive(self):
+        self.library(bad_mode=True)
+        with self.assertRaisesRegex(Exception, "invalid_archive_member"):
+            self.build(label="bad-mode", immutable_library_release=True)
+        extra = tarfile.TarInfo(self.archive.name.removesuffix(".tar.gz") + "/linked")
+        extra.type, extra.mode, extra.linkname = tarfile.SYMTYPE, 0o755, "setup/backend.py"
+        self.library(extra=extra)
+        with self.assertRaisesRegex(Exception, "invalid_archive_member"):
+            self.build(label="bad-link", immutable_library_release=True)
+        for label in ("bad-mode", "bad-link"):
+            self.assertFalse((self.root / label / "build.json").exists())
+            self.assertFalse(list((self.root / label).glob("*.tar.gz")))
+
+    def test_explicit_cli_forwards_immutable_selection(self):
+        with mock.patch.object(PACKAGE, "build", return_value={}) as build, \
+             mock.patch("sys.argv", ["package", "--destination", str(self.root / "out"),
+                "--upstream", str(self.root), "--zstd", "/inert/zstd", "--immutable-library-release"]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            PACKAGE.main()
+        self.assertTrue(build.call_args.kwargs["immutable_library_release"])
+
+
 class RuntimeCompatibilityTests(unittest.TestCase):
     LINUX = {
         "python": {"implementation": "cpython", "version": "3.11.16", "platform": "linux",
@@ -934,23 +1085,33 @@ class RuntimeCompatibilityTests(unittest.TestCase):
 
     def test_build_refuses_retained_linux_mismatch_before_output_archive_or_success_receipt(self):
         with tempfile.TemporaryDirectory() as scratch:
-            root = Path(scratch)
-            selected = PACKAGE.TARGETS["linux-x86_64"]
+            root = Path(scratch).resolve()
+            targets = copy.deepcopy(PACKAGE.TARGETS)
+            selected = targets["linux-x86_64"]
             archive = root / "dist" / selected["library_dir"] / selected["library"][0]
             archive.parent.mkdir(parents=True)
             self.library(archive, {"schema_version": 2, "runtime_target": self.LINUX})
+            selected["library"] = (archive.name, PACKAGE.digest(archive), archive.stat().st_size)
+            upstream = root / "upstream"; upstream.mkdir()
+            for kind in ("python", "node"):
+                path = upstream / selected[kind][0]
+                path.write_bytes(("inert selected " + kind).encode())
+                selected[kind] = (path.name, PACKAGE.digest(path), path.stat().st_size)
+            pip = upstream / "pip.pyz"; pip.write_bytes(b"inert pip")
             starter = root / "dist/toolkit-setup-20261010-resource-selection-export"
             starter.mkdir()
             for name in PACKAGE.STARTER:
                 (starter / name).write_bytes(b"inert input")
             destination = root / "output"
-            with mock.patch.object(PACKAGE, "ROOT", root), mock.patch.object(PACKAGE, "pin"), \
+            with mock.patch.object(PACKAGE, "ROOT", root), mock.patch.object(PACKAGE, "TARGETS", targets), \
+                    mock.patch.object(PACKAGE, "STARTER", {p.name: PACKAGE.digest(p) for p in starter.iterdir()}), \
+                    mock.patch.object(PACKAGE, "PIP", (pip.name, PACKAGE.digest(pip), pip.stat().st_size)), \
                     mock.patch.object(PACKAGE, "require_case_sensitive"), \
                     mock.patch.object(PACKAGE.subprocess, "run") as decompress, \
                     mock.patch.object(PACKAGE, "extract", side_effect=lambda archive, output, mapping, **kw:
                         self.resources(output, "linux-x86_64", node="24.19.0", npm="11.17.0")):
                 with self.assertRaisesRegex(ValueError, "Node/npm metadata differs"):
-                    PACKAGE.build(destination, root / "upstream", root / "unused-zstd", target="linux-x86_64")
+                    PACKAGE.build(destination, upstream, root / "unused-zstd", target="linux-x86_64")
             decompress.assert_called_once()  # Mocked host zstd only; no runtime execution.
             self.assertTrue(destination.is_dir(), "failed staging is retained")
             self.assertFalse((destination / "build.json").exists())
@@ -974,6 +1135,36 @@ class PreparationTargetTests(unittest.TestCase):
                 root = Path(scratch).resolve()
                 expected = self.resource_fixture(root, target)
                 self.assertEqual(PREPARE.verify_resources(root)[0], expected)
+
+    def test_real_manifest_verifier_requires_valid_readonly_immutable_selection(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch).resolve()
+            release = root / "library/library"
+            release.mkdir(parents=True)
+            member = release / "inert.txt"
+            member.write_bytes(b"not executed")
+            member.chmod(0o444)
+            release.chmod(0o555); release.parent.chmod(0o555)
+            try:
+                manifest = self.resource_fixture(root, "macos-arm64")
+                self.assertEqual(PREPARE.verify_resources(root)[0], manifest)
+                manifest["library_release"] = "library/library"
+                path = root / "resources.json"
+                path.write_text(json.dumps(manifest))
+                self.assertEqual(PREPARE.verify_resources(root)[0], manifest)
+                for invalid in (None, True, [], "", "library/other", "../library/library"):
+                    with self.subTest(selection=invalid):
+                        path.write_text(json.dumps({**manifest, "library_release": invalid}))
+                        with self.assertRaises(PREPARE.ResourceError): PREPARE.verify_resources(root)
+                # Even a fresh manifest pin cannot declare a writable member
+                # to be an immutable library file.
+                member.chmod(0o644)
+                manifest["entries"] = PREPARE.tree_entries(root)
+                path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(PREPARE.ResourceError, "immutable_library_member"):
+                    PREPARE.verify_resources(root)
+            finally:
+                release.chmod(0o755); release.parent.chmod(0o755)
 
     def test_unknown_manifest_target_refuses(self):
         with tempfile.TemporaryDirectory() as scratch:

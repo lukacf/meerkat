@@ -6,28 +6,28 @@ use super::profile_denial::{optional_result, package_response, package_response_
 use super::*;
 use std::os::unix::fs::OpenOptionsExt;
 
-const OPERATION: &str = "get_top_hackernews_stories";
+pub(super) const OPERATION: &str = "get_top_hackernews_stories";
 const SECOND_OPERATION: &str = "search_wikipedia";
 const SECOND_PREFIX: &str = "second-";
 const SECOND_DONE: &str = "The second exact public service access was reviewed. Its installation and the prior Hacker News job were read back in this continued setup conversation; no service operation has run.";
 const SETUP_PROMPT: &str = "Install the supplied Agno Hacker News integration for get_top_hackernews_stories, then install the supplied Agno Wikipedia integration for search_wikipedia with language en. Ask for access for rkat-agent until revoked for each service, and finish both setups without calling either service.";
-const SETUP_DONE: &str = "The exact public service access was reviewed. Setup is closing for finalization; no service operation has run yet.";
+pub(super) const SETUP_DONE: &str = "The exact public service access was reviewed. Setup is closing for finalization; no service operation has run yet.";
 const CONTINUED: &str = "Both retained native results confirm configuration and selected access. The second service was acquired in the same continued setup invocation, and both exact jobs were read back without replaying installation; no service operation has run.";
-const RUN_PROMPT: &str = "Use the installed get_top_hackernews_stories tool with num_stories set to 3, then report all three returned stories with their ids and titles.";
+pub(super) const RUN_PROMPT: &str = "Use the installed get_top_hackernews_stories tool with num_stories set to 3, then report all three returned stories with their ids and titles.";
 const ACCESS_CALL: &str = "review-public-access";
-const STORY_CALL: &str = "fresh-rkat-public-story";
+pub(super) const STORY_CALL: &str = "fresh-rkat-public-story";
 const SEARCH_CALL: &str = "fresh-rkat-public-search";
 const LOAD_CALL: &str = "fresh-rkat-public-load";
 const ACCESS_REVIEW: &str = "Enable this public service?";
 
-fn completed(text: &str) -> String {
+pub(super) fn completed(text: &str) -> String {
     let event = json!({"choices":[{"delta":{"content":text},"finish_reason":"stop"}]});
     format!(
         "data: {event}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":100,\"completion_tokens\":20,\"total_tokens\":120}}}}\n\ndata: [DONE]\n\n"
     )
 }
 
-fn public_access(request: &Request, job_id: &str, raw: &str) -> String {
+pub(super) fn public_access(request: &Request, job_id: &str, raw: &str) -> String {
     public_access_scoped(request, job_id, raw, OPERATION, "", SETUP_DONE)
 }
 
@@ -117,7 +117,7 @@ fn public_access_scoped(
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct Story {
+pub(super) struct Story {
     id: u64,
     title: String,
 }
@@ -125,7 +125,7 @@ struct Story {
 // The retained MCP projection preserves both Agno's text JSON array and its
 // distinct structured {value: <the same JSON string>} block. Parse those exact
 // values, not a substring that could turn an error envelope into success.
-fn public_stories(content: &str) -> Result<Vec<Story>, String> {
+pub(super) fn public_stories(content: &str) -> Result<Vec<Story>, String> {
     let values: Vec<Value> = serde_json::Deserializer::from_str(content)
         .into_iter()
         .collect::<Result<_, _>>()
@@ -168,7 +168,7 @@ fn public_stories(content: &str) -> Result<Vec<Story>, String> {
     Ok(stories)
 }
 
-fn story_answer(stories: &[Story]) -> String {
+pub(super) fn story_answer(stories: &[Story]) -> String {
     stories
         .iter()
         .map(|story| format!("Hacker News story {}: {}", story.id, story.title))
@@ -672,7 +672,7 @@ fn assert_fresh_catalog(results: &[&Value]) {
     }
 }
 
-fn response(request: &Request, phase: usize) -> String {
+pub(super) fn response(request: &Request, phase: usize) -> String {
     let messages = request.body["messages"].as_array().unwrap();
     let fresh = messages
         .iter()
@@ -802,6 +802,53 @@ fn response(request: &Request, phase: usize) -> String {
     completed(&story_answer(&stories))
 }
 
+pub(super) fn fresh_rkat_command(
+    binary: &Path,
+    expected_sha256: &str,
+    root: &Path,
+    state: &Path,
+) -> Command {
+    assert!(binary.is_absolute() && fs::symlink_metadata(binary).unwrap().is_file());
+    assert_eq!(
+        file_digest(binary),
+        expected_sha256,
+        "exact selected rkat artifact"
+    );
+    let mut command = Command::new(binary);
+    command
+        .args(["--realm", REALM, "--state-root"])
+        .arg(state)
+        .arg("--context-root")
+        .arg(root.join("outside-checkout"))
+        .arg("--user-config-root")
+        .arg(root.join("home"))
+        .args([
+            "run",
+            "--model",
+            "cli-fixture",
+            "--provider",
+            "self-hosted",
+            "--output",
+            "json",
+            "--no-stream",
+            "--stdin",
+            "off",
+            "--wait-for-mcp",
+            "--mcp-auth",
+            "stored",
+            RUN_PROMPT,
+        ])
+        // No --as-agent: this acceptance uses ordinary rkat's default principal.
+        .env_clear()
+        .env("HOME", root.join("home"))
+        .env("PATH", root.join("empty-path"))
+        .env("TMPDIR", root)
+        .env("CONNECT_FIXTURE_BEARER", TOKEN)
+        .current_dir(root.join("outside-checkout"))
+        .process_group(0);
+    command
+}
+
 /// This is the same test-owned PTY/process cleanup owner, reusing its roots and
 /// persisted config. It never grants access, rewrites config or reopens Connect.
 impl Cli {
@@ -829,38 +876,8 @@ impl Cli {
             .unwrap();
         let initial_config = fs::read(self.state.join(REALM).join("config.toml")).unwrap();
         let previous_preparations = preparation_artifacts(&self.state).into_iter().collect();
-        let mut command = Command::new(binary);
+        let mut command = fresh_rkat_command(binary, expected_sha256, root, &self.state);
         command
-            .args(["--realm", REALM, "--state-root"])
-            .arg(&self.state)
-            .arg("--context-root")
-            .arg(root.join("outside-checkout"))
-            .arg("--user-config-root")
-            .arg(root.join("home"))
-            .args([
-                "run",
-                "--model",
-                "cli-fixture",
-                "--provider",
-                "self-hosted",
-                "--output",
-                "json",
-                "--no-stream",
-                "--stdin",
-                "off",
-                "--wait-for-mcp",
-                "--mcp-auth",
-                "stored",
-                RUN_PROMPT,
-            ])
-            // No --as-agent: this acceptance uses ordinary rkat's default principal.
-            .env_clear()
-            .env("HOME", root.join("home"))
-            .env("PATH", root.join("empty-path"))
-            .env("TMPDIR", root)
-            .env("CONNECT_FIXTURE_BEARER", TOKEN)
-            .current_dir(root.join("outside-checkout"))
-            .process_group(0)
             .stdin(Stdio::from(self.observer.try_clone().unwrap()))
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(self.observer.try_clone().unwrap()));
@@ -877,7 +894,7 @@ impl Cli {
     }
 }
 
-fn reviewed_descriptor(
+pub(super) fn reviewed_descriptor(
     body: &Value,
     prefix: &str,
     profile: &str,
@@ -905,10 +922,10 @@ fn reviewed_descriptor(
 // helpers own separate groups, so absence of Connect's group alone is not proof
 // of their exit. Unseen descendants remain covered by native close controls.
 #[derive(Clone, Copy, Debug)]
-struct ObservedProcess {
-    pid: u32,
-    parent: u32,
-    group: u32,
+pub(super) struct ObservedProcess {
+    pub(super) pid: u32,
+    pub(super) parent: u32,
+    pub(super) group: u32,
 }
 
 async fn process_identities() -> Vec<ObservedProcess> {
@@ -950,8 +967,12 @@ async fn process_identities() -> Vec<ObservedProcess> {
 
 async fn observed_setup_helpers(cli: &mut Cli) -> Vec<ObservedProcess> {
     assert!(cli.child.try_wait().unwrap().is_none());
+    observed_descendants(cli.child.id()).await
+}
+
+pub(super) async fn observed_descendants(pid: u32) -> Vec<ObservedProcess> {
     let processes = process_identities().await;
-    let mut descendants = BTreeSet::from([cli.child.id()]);
+    let mut descendants = BTreeSet::from([pid]);
     loop {
         let before = descendants.len();
         for process in &processes {
@@ -965,18 +986,16 @@ async fn observed_setup_helpers(cli: &mut Cli) -> Vec<ObservedProcess> {
     }
     let observed: Vec<_> = processes
         .into_iter()
-        .filter(|process| process.pid != cli.child.id() && descendants.contains(&process.pid))
+        .filter(|process| process.pid != pid && descendants.contains(&process.pid))
         .collect();
     assert!(
-        observed
-            .iter()
-            .any(|process| process.group != cli.child.id()),
+        observed.iter().any(|process| process.group != pid),
         "a real setup helper in its own native process group must be observed during review"
     );
     observed
 }
 
-async fn assert_observed_helpers_gone(observed: &[ObservedProcess]) {
+pub(super) async fn assert_observed_helpers_gone(observed: &[ObservedProcess]) {
     let current = process_identities().await;
     for old in observed {
         assert!(
@@ -1295,6 +1314,331 @@ pub(super) async fn run() {
             "observed_setup_helpers_absent":true, "setup_services":["hackernews","wikipedia"],
         })
     );
+}
+
+const UNGRANTED_SETUP: &str = "Install the supplied Agno Hacker News integration for get_top_hackernews_stories, then ask for access for rkat-agent until revoked. Do not call the service.";
+const ACCESS_DENIED: &str = "The software installation remains, but public service access was denied. No service operation has run.";
+const FRESH_UNAVAILABLE: &str = "The exact native catalog cannot load get_top_hackernews_stories in this realm. No service operation was called.";
+
+fn denied_public_access(request: &Request, job_id: &str, raw: &str) -> String {
+    if optional_result(&request.body, ACCESS_CALL).is_none() {
+        return public_access(request, job_id, raw);
+    }
+    assert_eq!(
+        tool_result(&request.body, ACCESS_CALL),
+        json!({
+            "state":"denied","phase":"public_service_access","grant_issued":false,
+        })
+    );
+    completed(ACCESS_DENIED)
+}
+
+fn ungranted_response(request: &Request, phase: usize) -> String {
+    let body = &request.body;
+    let messages = body["messages"].as_array().unwrap();
+    assert!(
+        finalization_notices(messages).unwrap().is_empty(),
+        "no reviewed finalizer may run"
+    );
+    if !messages
+        .iter()
+        .any(|row| row["role"] == "user" && row["content"] == RUN_PROMPT)
+    {
+        return package_response(
+            request,
+            phase,
+            UNGRANTED_SETUP,
+            json!({"family":"agno","profile":"hackernews","operations":[OPERATION],"values":{"timeout":7}}),
+            OPERATION,
+            false,
+            denied_public_access,
+        );
+    }
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/chat/completions");
+    assert_eq!(
+        request.headers.get("authorization").unwrap(),
+        &format!("Bearer {TOKEN}")
+    );
+    assert_eq!(body["model"], "cli-fixture-remote");
+    assert!(phase < 40);
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|row| row["role"] == "user" && row["content"] == RUN_PROMPT)
+            .count(),
+        1
+    );
+    assert!(
+        !messages.iter().any(|row| row["content"]
+            .as_str()
+            .is_some_and(|text| text.contains(UNGRANTED_SETUP)
+                || text.contains(ACCESS_DENIED)
+                || text.contains(TOKEN)))
+    );
+    assert!(
+        !body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == OPERATION),
+        "ungranted operation must never be offered to fresh ordinary rkat"
+    );
+    let results = fresh_results(messages);
+    assert!(results.len() <= 2, "no service call is allowed");
+    if let Some(message) = results.first() {
+        let found: Value = serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+        assert_eq!(found["catalog_exact"], true);
+        assert!(
+            found
+                .get("pending_sources")
+                .is_none_or(|pending| pending == &json!([])),
+            "a connecting source is not an absence proof"
+        );
+        assert!(
+            found["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["name"] != OPERATION)
+        );
+    }
+    if let Some(message) = results.get(1) {
+        let loaded: Value = serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+        assert_eq!(loaded["catalog_exact"], true);
+        assert_eq!(loaded["accepted_names"], json!([]));
+        assert_eq!(loaded["noop_names"], json!([]));
+        let resolutions: Vec<meerkat_core::ToolCatalogLoadResolution> =
+            serde_json::from_value(loaded["resolutions"].clone()).unwrap();
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(resolutions[0].name, OPERATION);
+        assert!(!resolutions[0].accepted && !resolutions[0].accepted_noop);
+        assert_eq!(
+            resolutions[0].rejected_reason,
+            Some(meerkat_core::ToolCatalogLoadRejectedReason::UnknownKey)
+        );
+        return completed(FRESH_UNAVAILABLE);
+    }
+    let (id, name, arguments) = fresh_call(results.len());
+    assert!(
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == name)
+    );
+    deferred_call_response(id, name, arguments)
+}
+
+// Both cases reach the real access prompt after successful software installation.
+// Interrupting here does not exercise an installer crash or an entered grant.
+// Fresh rkat proves effective catalog refusal, not exhaustive grant-store absence.
+async fn ungranted_after_install(interrupt: bool) {
+    let binary =
+        PathBuf::from(std::env::var_os("CONNECT_FINAL_RKAT").expect("supply the exact-final rkat"));
+    let expected_sha256 =
+        std::env::var("CONNECT_FINAL_RKAT_SHA256").expect("supply the exact rkat SHA-256");
+    assert_eq!(expected_sha256.len(), 64);
+    assert!(
+        expected_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert!(binary.is_absolute() && fs::symlink_metadata(&binary).unwrap().is_file());
+    assert_eq!(file_digest(&binary), expected_sha256);
+    let prefix = PathBuf::from(
+        std::env::var_os("CONNECT_REAL_LIBRARY_PREFIX").expect("supply the actual library"),
+    );
+    assert!(prefix.is_absolute());
+    let mut provider = Server::package_provider(ungranted_response).await;
+    let root = root_with_existing_realm().await;
+    let previous = existing_realm_files(&root.path().join("state"));
+    let mut cli = Cli::spawn_configured_in(
+        root,
+        None,
+        &provider.origin,
+        Some(&prefix),
+        true,
+        None,
+        None,
+    );
+    provider
+        .with_profile_provider(cli.shown("Choose a realm number, 'new', or /quit: ", 0))
+        .await;
+    cli.send("new\n");
+    provider
+        .with_profile_provider(cli.shown("New realm: ", 0))
+        .await;
+    cli.send(&format!("{REALM}\n"));
+    provider
+        .with_profile_provider(cli.approve_setup_helper())
+        .await;
+    provider
+        .with_profile_provider(cli.enter_conversation())
+        .await;
+    assert!(provider.requests.lock().unwrap().is_empty());
+    let config = fs::read(cli.state.join(REALM).join("config.toml")).unwrap();
+    let setup_session = cli.reviewed_session();
+    let start = cli.transcript.len();
+    cli.send(&format!("{UNGRANTED_SETUP}\n"));
+    provider
+        .with_profile_provider(cli.shown("Type 'approve ", start))
+        .await;
+    assert!(cli.transcript[start..].contains("service_software_install"));
+    let software_id = cli.transcript[start..]
+        .split("Type 'approve ")
+        .last()
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap()
+        .to_owned();
+    let software_end = cli.transcript.len();
+    cli.send(&format!("approve {software_id}\n"));
+    provider
+        .with_profile_provider(cli.shown(ACCESS_REVIEW, software_end))
+        .await;
+    provider
+        .with_profile_provider(cli.shown("Type 'approve ", software_end))
+        .await;
+    let access_id = cli.transcript[software_end..]
+        .split("Type 'approve ")
+        .last()
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_ne!(software_id, access_id);
+    for expected in ["public_service_access", "rkat-agent", REALM, OPERATION] {
+        assert!(cli.transcript[software_end..].contains(expected));
+    }
+    let setup_body = provider
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .body
+        .clone();
+    let readback = tool_result(&setup_body, "reconciled-install");
+    assert_eq!(readback["observation"]["status"], "matched");
+    let installed = tool_result(&setup_body, "installed-job");
+    assert_eq!(installed["job"]["status"], "succeeded");
+    assert_eq!(installed["job"]["id"], readback["observation"]["job_id"]);
+    reviewed_descriptor(&setup_body, "", "hackernews", OPERATION);
+    let readback = &readback["observation"]["result"];
+    let receipt = PathBuf::from(readback["receipt_path"].as_str().unwrap());
+    let mcp = PathBuf::from(readback["mcp_path"].as_str().unwrap());
+    let selected = receipt
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("configuration/selected.json");
+    let owned_root = fs::canonicalize(cli._root.as_ref().unwrap().path()).unwrap();
+    let retained: Vec<_> = [&receipt, &mcp, &selected]
+        .into_iter()
+        .map(|path| {
+            assert!(path.is_absolute() && fs::canonicalize(path).unwrap().starts_with(&owned_root));
+            let (raw, value) = read_bounded_json(path, 1024 * 1024);
+            (path.clone(), raw, value)
+        })
+        .collect();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&retained[0].1)),
+        readback["receipt_sha256"]
+    );
+    assert_eq!(retained[1].2, readback["mcp_configuration"]);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&retained[2].1)),
+        readback["configuration_sha256"]
+    );
+    assert_eq!(
+        fs::read(cli.state.join(REALM).join("config.toml")).unwrap(),
+        config
+    );
+    let helpers = observed_setup_helpers(&mut cli).await;
+    if interrupt {
+        killpg(Pid::from_raw(cli.child.id() as i32), Signal::SIGINT).unwrap();
+    } else {
+        cli.send(&format!("deny {access_id}\n"));
+        provider
+            .with_profile_provider(cli.shown(ACCESS_DENIED, software_end))
+            .await;
+        provider
+            .with_profile_provider(cli.shown("You: ", software_end))
+            .await;
+        cli.send("/quit\n");
+    }
+    assert!(
+        provider.with_profile_provider(cli.finish()).await.success(),
+        "{}",
+        cli.transcript
+    );
+    assert_observed_helpers_gone(&helpers).await;
+    assert!(
+        !cli.transcript
+            .contains("native access is selected for agent rkat-agent")
+    );
+    assert_eq!(
+        fs::read(cli.state.join(REALM).join("config.toml")).unwrap(),
+        config
+    );
+    for (path, bytes, _) in &retained {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
+    let setup_requests = provider.requests.lock().unwrap().len();
+    let output = cli.start_fresh_rkat(&binary, &expected_sha256);
+    assert!(
+        provider.with_profile_provider(cli.finish()).await.success(),
+        "{}",
+        cli.transcript
+    );
+    provider.finish().await;
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        setup_requests + 3,
+        "actual search, load rejection and completed answer, without service invocation"
+    );
+    let (_, result) = read_bounded_json(&output, 1024 * 1024);
+    let fresh_session: meerkat_core::SessionId =
+        serde_json::from_value(result["session_id"].clone()).unwrap();
+    assert_ne!(fresh_session, setup_session);
+    assert_eq!(result["session_ref"], format!("{REALM}:{fresh_session}"));
+    assert_eq!(result["tool_calls"], 2);
+    assert_eq!(result["text"], FRESH_UNAVAILABLE);
+    assert_eq!(
+        fs::read(cli.state.join(REALM).join("config.toml")).unwrap(),
+        config
+    );
+    assert_eq!(existing_realm_files(&cli.state), previous);
+    for (path, bytes, _) in &retained {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
+    println!(
+        "{}",
+        json!({"event":"connect_cli_ungranted_after_install",
+        "decision":if interrupt { "interrupt" } else { "deny" }, "realm":REALM,
+        "setup_session_id":setup_session,"fresh_session_id":fresh_session,
+        "cli_sha256":file_digest(&prefix.join("bin/meerkat-connect")),"rkat_sha256":expected_sha256,
+        "installation_readback":readback,"installation_evidence_unchanged":true,
+        "realm_configuration_unchanged":true,"observed_setup_helpers_absent":true,
+        "fresh_catalog_rejection":"unknown_key","service_calls":0,
+        "exhaustive_grant_store_observation":false})
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires supplied library and exact-final ordinary rkat"]
+async fn actual_cli_public_access_denial_preserves_install_without_fresh_access() {
+    ungranted_after_install(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires supplied library and exact-final ordinary rkat"]
+async fn actual_cli_public_access_interrupt_preserves_install_without_fresh_access() {
+    ungranted_after_install(true).await;
 }
 
 #[test]

@@ -179,7 +179,8 @@ impl PrivateOriginals {
         }
         let lifetime = self.status_lifetime()?;
         let mut visible_routes = vec![];
-        for route in self.routes()? {
+        let current_routes = self.current_routes()?;
+        for route in &current_routes {
             if !same_source_human(human, &route.requester, route.represented_subject.as_ref()) {
                 continue;
             }
@@ -611,20 +612,13 @@ impl PrivateOriginals {
             .native_host
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let compiled = native
-            .routes
-            .iter()
-            .find(|entry| entry.id == route.id)
-            .ok_or(PrivateOriginalError::Denied)?;
+        let (compiled, target, _) = self.selected_source_route(&route.id)?;
         let (member, requester, actor) = compiled
             .source_binding(selected)
             .map_err(|_| PrivateOriginalError::Denied)?;
-        let target = native
-            .members
-            .iter()
-            .find(|entry| &entry.member == member)
-            .ok_or(PrivateOriginalError::Denied)?;
-        if route.realm != native.realm
+        if &target.member != member
+            || self.route(&route.id)?.as_ref() != route
+            || route.realm != native.realm
             || !same_source_human(human, requester, compiled.represented_subject.as_ref())
             || route.requester != *requester
             || route.ingress_actor != *actor

@@ -7,10 +7,10 @@
 
 use crate::installed_host::operator_setup::OperatorParentOutcome;
 use crate::private_originals::{
-    PrivateAuthenticatedEvent, PrivateOriginalCancellation, PrivateOriginalError,
-    PrivateOriginalRef, PrivateOriginalRetention, PrivateOriginalSubmission, PrivateOriginalSubmit,
-    PrivateOriginals, PrivateServiceAccessDecision, PrivateServiceGrantObservation,
-    PrivateServiceInputObservation,
+    NativeOriginalOperationsRequest, PrivateAuthenticatedEvent, PrivateOriginalCancellation,
+    PrivateOriginalError, PrivateOriginalRef, PrivateOriginalRetention, PrivateOriginalSubmission,
+    PrivateOriginalSubmit, PrivateOriginals, PrivateServiceAccessDecision,
+    PrivateServiceGrantObservation, PrivateServiceInputObservation,
 };
 use meerkat_authorization::publication::LocalAuthorizationPublication;
 use meerkat_toolkit::host_lifetime::control::{
@@ -36,17 +36,35 @@ use tokio::{
 use toolkit_package::Id;
 
 mod console_login;
+mod mcp_auth;
 pub use console_login::{
     ConsoleLoginHandle, ConsoleLoginRefusal, ConsoleLoginReservation, ConsoleLoginRetirement,
-    ConsoleLoginSelection, ConsoleLogins,
+    ConsoleLoginSelection, ConsoleLogins, ObservedConsoleLogin,
+};
+pub use mcp_auth::{
+    HostedMcpAuthEndpoint, HostedMcpTargetResolver, HostedMcpTargetSelection,
+    ResolvedHostedMcpTarget,
 };
 mod service_parent;
 pub use service_parent::{
     ServiceParentAdministrationRequest, ServiceParentCommand, ServiceParentDecision,
     ServiceParentDecisionSource, ServiceParentEndpoint, ServiceParentResponse,
 };
+mod member_classes;
 mod startup;
+mod workflow_child;
+mod workflow_commission;
+pub use member_classes::{
+    MemberClassCommand, MemberClassControlOutcome, MemberClassEndpoint, MemberClassResponse,
+};
 pub use startup::{ApplicationUpdateStartup, PrivateHostStartup, PrivateHostStartupIntent};
+pub use workflow_child::{
+    PrivateWorkflowChildError, PrivateWorkflowChildLauncher, WorkflowChildEndpoint,
+};
+pub use workflow_commission::{
+    WorkflowCommissionRequest, WorkflowCommissionResponse, WorkflowMemberPublication,
+    WorkflowParentRequest,
+};
 
 pub const PRIVATE_HOST_PROTOCOL_VERSION: u16 = 1;
 // Shared with both SDKs; the fixed private frame bound includes its newline.
@@ -77,6 +95,10 @@ struct Request {
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "decoded once per host request and handled at once"
+)]
 enum Command {
     PrepareApplication {
         plan: SelectedHostArtifact,
@@ -92,6 +114,13 @@ enum Command {
     },
     RetireConsoleLogin {
         enrollment_id: u64,
+    },
+    HostedMcpAuth {
+        enrollment_id: u64,
+        operation: mcp_auth::HostedMcpCommand,
+    },
+    MemberClass {
+        operation: MemberClassCommand,
     },
     OpenComponent {
         component: Id,
@@ -149,6 +178,23 @@ enum Command {
     SubmitAuthenticatedOriginal {
         submission: PrivateOriginalSubmit,
     },
+    PrepareOriginalNativeOperations {
+        submission: PrivateOriginalSubmit,
+        request: NativeOriginalOperationsRequest,
+    },
+    PrepareWorkflowParent {
+        request: WorkflowParentRequest,
+    },
+    CommissionWorkflow {
+        request: WorkflowCommissionRequest,
+    },
+    PrepareWorkflowChild {
+        request: crate::private_originals::WorkflowChildLaunchRequest,
+    },
+    PrepareConsoleWorkflowChild {
+        request: crate::private_originals::ConsoleWorkflowChildRequest,
+        enrollment_id: u64,
+    },
     RetainAuthenticatedEvent {
         event: PrivateAuthenticatedEvent,
     },
@@ -185,6 +231,37 @@ enum Reply {
         enrollment_id: u64,
         observation: ConsoleLoginRetirement,
     },
+    HostedMcpAuth {
+        value: serde_json::Value,
+    },
+    MemberClass {
+        observation: MemberClassResponse,
+    },
+    MemberClassMcpRequired {
+        exchange_id: u64,
+        selection: crate::installed_host::member_mcp_consumer::MemberMcpAdmissionSelection,
+        bindings: Option<Vec<crate::installed_host::operator_setup::MemberMcpBindingRef>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accepted_requirement:
+            Option<crate::installed_host::member_mcp_consumer::AcceptedMemberMcpRequirement>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requirement_source: Option<crate::private_originals::PrivateSourceEvidence>,
+    },
+    MemberClassMcpAcknowledged {
+        exchange_id: u64,
+    },
+    MemberClassListingRequired {
+        operation_id: u64,
+        admission_id: Id,
+        identity: String,
+        class: Id,
+    },
+    MemberClassListingAcknowledged {
+        operation_id: u64,
+        admission_id: Id,
+        identity: String,
+        class: Id,
+    },
     ControllerParentReviewed {
         outcome: OperatorParentOutcome,
     },
@@ -218,6 +295,21 @@ enum Reply {
         original: PrivateOriginalRef,
         outcome: PrivateOriginalSubmission,
     },
+    NativeOperationsPrepared {
+        original: PrivateOriginalRef,
+    },
+    WorkflowParentPrepared {
+        original: PrivateOriginalRef,
+    },
+    WorkflowCommissioned {
+        outcome: WorkflowCommissionResponse,
+    },
+    WorkflowChildPrepared {
+        original: PrivateOriginalRef,
+    },
+    ConsoleWorkflowChildSelected {
+        original: Option<PrivateOriginalRef>,
+    },
     AuthenticatedEventRetained {
         original: PrivateOriginalRef,
         state: PrivateOriginalRetention,
@@ -243,13 +335,14 @@ enum Reply {
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum WireError {
+pub enum WireError {
     SourceConflict,
     InvalidSelection,
     Unavailable,
     Denied,
     WrongOwner,
     NotSettled,
+    ObservationChanged,
 }
 
 impl From<HostLifetimeError> for WireError {
@@ -705,6 +798,9 @@ impl PrivateHostClosePublisher {
 }
 
 pub struct PrivateHostConnection {
+    workflow_children: WorkflowChildEndpoint,
+    hosted_mcp: HostedMcpAuthEndpoint,
+    member_classes: MemberClassEndpoint,
     service_parent: Option<ServiceParentEndpoint>,
     console_logins: ConsoleLogins,
     owner: Arc<dyn PrivateHostLifetimeControl>,
@@ -1043,7 +1139,8 @@ impl PrivateHostConnection {
             >,
         C: std::future::Future<Output = Result<T, HostLifetimeError>>,
     {
-        let (reader, mut responses, request_id, selection) = startup.into_installed()?;
+        let (reader, mut responses, request_id, selection, hosted_mcp) =
+            startup.into_installed()?;
         let (owner, originals) = match factory(selection).await {
             Ok((owner, originals)) => (Arc::new(owner), originals),
             Err(error) => {
@@ -1066,6 +1163,8 @@ impl PrivateHostConnection {
             armed: true,
         };
         let console_logins = ConsoleLogins::new(PrivateHostClosed(closed.clone()), publication);
+        let workflow_children = WorkflowChildEndpoint::default();
+        let member_classes = MemberClassEndpoint::new(erased.clone(), console_logins.clone());
         let service_parent = remote_reviews.clone().map(|sender| ServiceParentEndpoint {
             sender,
             owner: erased.clone(),
@@ -1116,6 +1215,13 @@ impl PrivateHostConnection {
         }
         let installed = installed.ok_or(PrivateHostError::Protocol)?;
         let (stop, stop_rx) = watch::channel(false);
+        let (reply_tx, reply_rx) = mpsc::channel::<Response>(32);
+        let (writer_lost_tx, writer_lost) = watch::channel(false);
+        member_classes.bind_transport(member_classes::ListingChannel {
+            replies: reply_tx.clone(),
+            closed: PrivateHostClosed(closed.clone()),
+            failed: writer_lost_tx.clone(),
+        })?;
         let task = tokio::spawn(serve(
             reader,
             responses,
@@ -1124,15 +1230,25 @@ impl PrivateHostConnection {
             operator_reviews,
             remote_reviews,
             console_logins.clone(),
+            hosted_mcp.clone(),
+            member_classes.clone(),
+            workflow_children.clone(),
             close_publisher.clone(),
             stop_rx,
             request_id + 1,
+            reply_tx,
+            reply_rx,
+            writer_lost_tx,
+            writer_lost,
         ));
         loss.armed = false;
         Ok((
             owner,
             originals,
             Self {
+                workflow_children,
+                hosted_mcp,
+                member_classes,
                 service_parent,
                 console_logins,
                 owner: erased,
@@ -1155,6 +1271,18 @@ impl PrivateHostConnection {
 
     pub fn console_logins(&self) -> ConsoleLogins {
         self.console_logins.clone()
+    }
+
+    /// Install the actual same-runtime configured-target resolver once. An
+    /// unbound endpoint refuses every request; the wire cannot supply it.
+    pub fn hosted_mcp_auth(&self) -> HostedMcpAuthEndpoint {
+        self.hosted_mcp.clone()
+    }
+    pub fn member_classes(&self) -> MemberClassEndpoint {
+        self.member_classes.clone()
+    }
+    pub fn workflow_children(&self) -> WorkflowChildEndpoint {
+        self.workflow_children.clone()
     }
 
     pub fn closed_observer(&self) -> PrivateHostClosed {
@@ -1204,17 +1332,23 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
     operator_reviews: Option<mpsc::Sender<LocalControllerReviewRequest>>,
     remote_reviews: Option<mpsc::Sender<RemoteControllerCommand>>,
     console_logins: ConsoleLogins,
+    hosted_mcp: HostedMcpAuthEndpoint,
+    member_classes: MemberClassEndpoint,
+    workflow_children: WorkflowChildEndpoint,
     closed: PrivateHostClosePublisher,
     mut stop: watch::Receiver<bool>,
     mut next_id: u64,
+    reply_tx: mpsc::Sender<Response>,
+    mut reply_rx: mpsc::Receiver<Response>,
+    writer_lost_tx: watch::Sender<bool>,
+    mut writer_lost: watch::Receiver<bool>,
 ) -> Result<(), PrivateHostError> {
     let mut loss = HostLossGuard {
         owner: owner.clone(),
         closed: closed.clone(),
         armed: true,
     };
-    let (reply_tx, mut reply_rx) = mpsc::channel::<Response>(32);
-    let (writer_lost_tx, mut writer_lost) = watch::channel(false);
+    let listing_writer_lost = writer_lost_tx.clone();
     let writer_task = tokio::spawn(async move {
         while let Some(response) = reply_rx.recv().await {
             if write_response(&mut writer, &response).await.is_err() {
@@ -1299,6 +1433,97 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                         continue;
                     }
                     Ok(_) => Err(HostLifetimeError::NotSettled),
+                    Err(error) => Err(error),
+                }
+            }
+            Command::MemberClass { operation } => {
+                if let MemberClassCommand::McpResult {
+                    exchange_id,
+                    selection,
+                    retained,
+                    requirement,
+                } = operation
+                {
+                    let result = member_classes
+                        .mcp_result(exchange_id, selection, retained, requirement)
+                        .map(|()| Reply::MemberClassMcpAcknowledged { exchange_id });
+                    if reply_tx.try_send(response(request.id, result)).is_err() {
+                        break (false, Some(PrivateHostError::Protocol));
+                    }
+                    continue;
+                }
+                if let MemberClassCommand::ListingResult {
+                    operation_id,
+                    admission_id,
+                    identity,
+                    class,
+                    accepted,
+                } = operation
+                {
+                    let outcome = member_classes
+                        .listing_result(
+                            operation_id,
+                            member_classes::ListingSelection {
+                                admission_id: admission_id.clone(),
+                                identity: identity.clone(),
+                                class: class.clone(),
+                            },
+                            accepted,
+                        )
+                        .map(|()| Reply::MemberClassListingAcknowledged {
+                            operation_id,
+                            admission_id,
+                            identity,
+                            class,
+                        });
+                    if reply_tx.try_send(response(request.id, outcome)).is_err() {
+                        break (false, Some(PrivateHostError::Protocol));
+                    }
+                    continue;
+                }
+                if joins.len() >= MAX_PENDING_JOINS {
+                    Err(HostLifetimeError::Unavailable)
+                } else {
+                    let endpoint = member_classes.clone();
+                    let listing = member_classes::ListingChannel {
+                        replies: reply_tx.clone(),
+                        closed: PrivateHostClosed(closed.closed.subscribe()),
+                        failed: listing_writer_lost.clone(),
+                    };
+                    joins.spawn(async move {
+                        response(
+                            request.id,
+                            endpoint
+                                .execute(request.id, operation, listing)
+                                .await
+                                .map(|observation| Reply::MemberClass { observation }),
+                        )
+                    });
+                    continue;
+                }
+            }
+            Command::HostedMcpAuth {
+                enrollment_id,
+                operation,
+            } => {
+                let login = owner
+                    .validate_current_selection()
+                    .and_then(|()| console_logins.parent_enrollment(enrollment_id));
+                match login {
+                    Ok(login) if joins.len() < MAX_PENDING_JOINS => {
+                        let endpoint = hosted_mcp.clone();
+                        joins.spawn(async move {
+                            response(
+                                request.id,
+                                endpoint
+                                    .execute(request.id, login, operation)
+                                    .await
+                                    .map(|value| Reply::HostedMcpAuth { value }),
+                            )
+                        });
+                        continue;
+                    }
+                    Ok(_) => Err(HostLifetimeError::Unavailable),
                     Err(error) => Err(error),
                 }
             }
@@ -1699,6 +1924,141 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                 }
                 Err(HostLifetimeError::Unavailable)
             }
+            Command::PrepareOriginalNativeOperations {
+                submission,
+                request: selected,
+            } => {
+                if *closed.closed.borrow() {
+                    Err(HostLifetimeError::Denied)
+                } else if let Err(error) = owner.validate_current_selection() {
+                    Err(error)
+                } else if let Some(originals) = originals
+                    .as_ref()
+                    .filter(|_| joins.len() < MAX_PENDING_JOINS)
+                {
+                    let originals = originals.clone();
+                    joins.spawn(async move {
+                        let original = submission.original.clone();
+                        service_input_response(
+                            request.id,
+                            originals
+                                .prepare_original_native_operations(submission, selected)
+                                .await
+                                .map(|()| Reply::NativeOperationsPrepared { original }),
+                        )
+                    });
+                    continue;
+                } else {
+                    Err(HostLifetimeError::Unavailable)
+                }
+            }
+            Command::PrepareWorkflowParent { request: selected } => {
+                if *closed.closed.borrow() {
+                    Err(HostLifetimeError::Denied)
+                } else if let Err(error) = owner.validate_current_selection() {
+                    Err(error)
+                } else if joins.len() >= MAX_PENDING_JOINS {
+                    Err(HostLifetimeError::Unavailable)
+                } else {
+                    let endpoint = workflow_children.clone();
+                    joins.spawn(async move {
+                        let original = selected.commission.parent.original.clone();
+                        response(
+                            request.id,
+                            endpoint
+                                .prepare_parent(selected)
+                                .await
+                                .map(|()| Reply::WorkflowParentPrepared { original }),
+                        )
+                    });
+                    continue;
+                }
+            }
+            Command::CommissionWorkflow { request: selected } => {
+                if *closed.closed.borrow() {
+                    Err(HostLifetimeError::Denied)
+                } else if let Err(error) = owner.validate_current_selection() {
+                    Err(error)
+                } else if joins.len() >= MAX_PENDING_JOINS {
+                    Err(HostLifetimeError::Unavailable)
+                } else {
+                    let endpoint = workflow_children.clone();
+                    let publication = WorkflowMemberPublication::new(
+                        member_classes.clone(),
+                        request.id,
+                        member_classes::ListingSelection {
+                            admission_id: selected.admission_id.clone(),
+                            identity: selected.identity.to_string(),
+                            class: selected.instance.class.clone(),
+                        },
+                        member_classes::ListingChannel {
+                            replies: reply_tx.clone(),
+                            closed: PrivateHostClosed(closed.closed.subscribe()),
+                            failed: listing_writer_lost.clone(),
+                        },
+                    );
+                    joins.spawn(async move {
+                        response(
+                            request.id,
+                            endpoint
+                                .commission(selected, publication)
+                                .await
+                                .map(|outcome| Reply::WorkflowCommissioned { outcome }),
+                        )
+                    });
+                    continue;
+                }
+            }
+            Command::PrepareConsoleWorkflowChild {
+                request: selected,
+                enrollment_id,
+            } => {
+                if *closed.closed.borrow() {
+                    Err(HostLifetimeError::Denied)
+                } else if let Err(error) = owner.validate_current_selection() {
+                    Err(error)
+                } else if joins.len() >= MAX_PENDING_JOINS {
+                    Err(HostLifetimeError::Unavailable)
+                } else {
+                    match console_logins.console_proposal_enrollment(enrollment_id) {
+                        Err(error) => Err(error),
+                        Ok(login) => {
+                            let endpoint = workflow_children.clone();
+                            joins.spawn(async move {
+                                workflow_child::child_response(
+                                    request.id,
+                                    endpoint.prepare_console(selected, login).await.map(
+                                        |original| Reply::ConsoleWorkflowChildSelected { original },
+                                    ),
+                                )
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
+            Command::PrepareWorkflowChild { request: selected } => {
+                if *closed.closed.borrow() {
+                    Err(HostLifetimeError::Denied)
+                } else if let Err(error) = owner.validate_current_selection() {
+                    Err(error)
+                } else if joins.len() >= MAX_PENDING_JOINS {
+                    Err(HostLifetimeError::Unavailable)
+                } else {
+                    let endpoint = workflow_children.clone();
+                    joins.spawn(async move {
+                        let original = selected.submission.original.clone();
+                        workflow_child::child_response(
+                            request.id,
+                            endpoint
+                                .prepare(selected)
+                                .await
+                                .map(|()| Reply::WorkflowChildPrepared { original }),
+                        )
+                    });
+                    continue;
+                }
+            }
             Command::SubmitAuthenticatedOriginal { submission } => {
                 let selected = if *closed.closed.borrow() {
                     Err(HostLifetimeError::Denied)
@@ -1879,6 +2239,15 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
             Err(_) => failure = Some(PrivateHostError::OwnerTask),
         }
     }
+    // Pipe loss wakes existing custodians. Start calls above may still have
+    // been in native discovery when loss arrived, so join those first, then
+    // collect every admitted ceremony and its actual cleanup outcome.
+    if let Err(error) = hosted_mcp.close().await {
+        failure = Some(error.into());
+    }
+    if let Err(error) = member_classes.close().await {
+        failure = Some(error.into());
+    }
     drop(reply_tx);
     let mut writer_task = writer_task;
     if tokio::time::timeout(std::time::Duration::from_secs(1), &mut writer_task)
@@ -1912,6 +2281,33 @@ mod tests {
     };
     use tokio::sync::Notify;
     use uuid::Uuid;
+
+    #[test]
+    fn child_observation_changed_is_distinct_and_preserves_host_refusals() {
+        let reply =
+            workflow_child::child_response(7, Err(PrivateWorkflowChildError::ObservationChanged));
+        assert_eq!(
+            serde_json::to_value(reply).unwrap(),
+            serde_json::json!({
+                "version": PRIVATE_HOST_PROTOCOL_VERSION, "id": 7,
+                "result": { "kind": "error", "error": "observation_changed" },
+            })
+        );
+        for error in [
+            HostLifetimeError::InvalidSelection,
+            HostLifetimeError::Unavailable,
+            HostLifetimeError::Denied,
+            HostLifetimeError::WrongOwner,
+            HostLifetimeError::NotSettled,
+        ] {
+            let actual = workflow_child::child_response(9, Err(error.into()));
+            let expected = response(9, Err(error));
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
 
     fn numeric_service_receipt(args: serde_json::Value) -> Reply {
         use crate::private_originals::{
@@ -3298,6 +3694,17 @@ for name in os.listdir('/dev/fd'):
         assert!(
             matches!(startup.intent(), PrivateHostStartupIntent::PrepareApplication(plan) if plan == &artifact)
         );
+        // The factory hook runs before the completed application is adopted.
+        // Its exact resolver must survive that handoff into the served pipe.
+        let resolved = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = resolved.clone();
+        let resolver: mcp_auth::HostedMcpTargetResolver = Arc::new(move |target| {
+            assert_eq!(target.server_name, "startup-selected");
+            observed.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { Err(HostLifetimeError::Denied) })
+        });
+        let retained_auth = startup.hosted_mcp_auth();
+        retained_auth.bind(resolver.clone()).unwrap();
         let next = tokio::spawn(startup.application_prepared(artifact.clone()));
         let mut line = String::new();
         responses.read_line(&mut line).await.unwrap();
@@ -3343,12 +3750,205 @@ for name in os.listdir('/dev/fd'):
         responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], 3);
+        assert_eq!(
+            connection.hosted_mcp_auth().bind(resolver),
+            Err(HostLifetimeError::WrongOwner),
+            "adoption must not replace the factory-bound endpoint"
+        );
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 60_000;
+        send(
+            &mut commands,
+            4,
+            Command::EnrollConsoleLogin {
+                login: ConsoleLoginSelection {
+                    issuer: "issuer".into(),
+                    subject: "sub".into(),
+                    login_scope_id: "startup".into(),
+                    expires_at_ms: expiry,
+                },
+            },
+        )
+        .await;
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["result"]["enrollment_id"], 4);
+        send(
+            &mut commands,
+            5,
+            Command::HostedMcpAuth {
+                enrollment_id: 4,
+                operation: super::mcp_auth::HostedMcpCommand::Describe {
+                    target: serde_json::from_value(serde_json::json!({
+                        "server_name": "startup-selected", "server_url": "https://mcp.invalid",
+                        "oauth_account_selection": "discover",
+                    }))
+                    .unwrap(),
+                },
+            },
+        )
+        .await;
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], 5);
+        assert_eq!(
+            reply["result"],
+            serde_json::json!({"kind":"error", "error":"denied"})
+        );
+        assert_eq!(
+            resolved.load(Ordering::Acquire),
+            1,
+            "the actual private command must reach the resolver bound before adoption"
+        );
         drop(commands);
         tokio::time::timeout(std::time::Duration::from_secs(2), connection.wait_closed())
             .await
             .unwrap();
         connection.finish().await.unwrap();
         assert!(owner.lost.load(Ordering::Acquire));
+    }
+
+    /// Real native ACK handling plus the current Python participant. The
+    /// existing ProbeOwner supplies transport lifetime only, not Add/grant proof.
+    #[tokio::test]
+    async fn absent_mcp_observation_refuses_waiter_and_python_join_is_clean() {
+        use crate::installed_host::member_mcp_consumer::{
+            MemberMcpAdmissionSelection, MemberMcpApplication,
+        };
+        use futures::FutureExt;
+        use std::{panic::AssertUnwindSafe, process::Stdio, time::Duration};
+        let python = std::env::var_os("TOOLKIT_SHARED_TEST_PYTHON")
+            .expect("explicit selected Python with the current SDK and Meta source is required");
+        let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sdk/python/src/meerkat_toolkit/member_classes.py")
+            .canonicalize()
+            .unwrap();
+        let (pipes, commands, responses) = pipes();
+        let mut child = tokio::process::Command::new(python)
+            .args(["-B", "-s", "-c", r#"
+import asyncio, json, os, pathlib, sys
+import meerkat_toolkit.member_classes as member_classes
+from meerkat_toolkit.host_control import HostBootstrapSelection, PrivateHostClient, SelectedHostArtifact
+assert pathlib.Path(member_classes.__file__).resolve() == pathlib.Path(sys.argv[1]).resolve(), 'current candidate SDK required'
+async def main():
+    seen = asyncio.Event()
+    calls = []
+    async def retain(value):
+        raise AssertionError('an absent observation must not retain bindings')
+    async def lookup(selection):
+        raise AssertionError('an observation must not become a binding lookup')
+    async def observe(selection, source):
+        assert selection.wire() == {'admission_id': 'absent-add', 'identity': 'receiver', 'class': 'worker'}
+        assert (source.resource_id, source.revision, source.sha256) == ('requirement', 'revision-1', 'a' * 64)
+        calls.append(None)
+        seen.set()
+        return None
+    participant = member_classes.MemberMcpApplication(retain, lookup, observed_requirement=observe)
+    command_fd, response_fd = os.dup(1), os.dup(0)
+    os.close(1)
+    os.close(0)
+    client = PrivateHostClient(command_fd, response_fd, timeout=5, member_mcp=participant)
+    selected = json.loads(sys.argv[2])
+    for key in ('activation', 'policy_manifest', 'local_policy'):
+        selected[key] = SelectedHostArtifact(**selected[key])
+    try:
+        await asyncio.to_thread(client.bootstrap, HostBootstrapSelection(**selected))
+        await asyncio.wait_for(seen.wait(), 5)
+        await asyncio.wait_for(participant.join(), 5)
+        client.assert_available()
+        assert calls == [None]
+        print('NONE_OBSERVATION_JOINED', file=sys.stderr, flush=True)
+    finally:
+        client.close()
+asyncio.run(main())
+"#])
+            .arg(sdk).arg(serde_json::to_string(&selection()).unwrap())
+            .stdin(Stdio::from(responses)).stdout(Stdio::from(commands))
+            .stderr(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+        let reader = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).await.unwrap();
+            bytes
+        });
+        let mut retained_connection = None;
+        let checked = AssertUnwindSafe(async {
+            let (owner, connection) = tokio::time::timeout(
+                Duration::from_secs(10),
+                PrivateHostConnection::bootstrap(pipes, |_| Ok(ProbeOwner::new(true))),
+            )
+            .await
+            .expect("native bootstrap settled")
+            .unwrap();
+            let endpoint = connection.member_classes();
+            retained_connection = Some((owner, connection));
+            let selection = MemberMcpAdmissionSelection {
+                admission_id: Id::new("absent-add").unwrap(),
+                identity: "receiver".into(),
+                class: Id::new("worker").unwrap(),
+            };
+            let source = serde_json::from_value(serde_json::json!({
+                "resource_id":"requirement", "revision":"revision-1", "sha256":"a".repeat(64),
+            }))
+            .unwrap();
+            let observed = tokio::time::timeout(
+                Duration::from_secs(10),
+                endpoint.accepted_requirement(selection, source),
+            )
+            .await
+            .expect("native waiter settled");
+            assert!(
+                matches!(observed, Err(HostLifetimeError::Denied)),
+                "None is an acknowledged absence, never an accepted requirement"
+            );
+            tokio::time::timeout(Duration::from_secs(10), child.wait())
+                .await
+                .expect("Python participant joined and exited")
+                .unwrap()
+        })
+        .catch_unwind()
+        .await;
+        // Join the actual child and private connection before reporting any
+        // primary assertion. Preserve Python stderr, including a failed join.
+        if child.try_wait().unwrap().is_none() {
+            child.kill().await.unwrap();
+        }
+        child.wait().await.unwrap();
+        let stderr = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .unwrap()
+            .unwrap();
+        let closed = if let Some((owner, connection)) = retained_connection {
+            tokio::time::timeout(Duration::from_secs(5), connection.wait_closed())
+                .await
+                .unwrap();
+            let result = connection.finish().await;
+            assert!(owner.lost.load(Ordering::Acquire));
+            result
+        } else {
+            Ok(())
+        };
+        eprint!("{}", String::from_utf8_lossy(&stderr));
+        let status = match checked {
+            Ok(status) => status,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        closed.unwrap();
+        assert!(
+            status.success(),
+            "Python participant failed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&stderr)
+                .lines()
+                .any(|line| line == "NONE_OBSERVATION_JOINED")
+        );
     }
 
     #[tokio::test]
@@ -3499,6 +4099,267 @@ for name in os.listdir('/dev/fd'):
         }
         drop(commands);
         connection.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn member_listing_ack_bypasses_full_joins_and_eof_releases_waiter_before_close_join() {
+        // Transport-only ownership probe. Actual held policy ordering belongs
+        // to the native class fixture; no member is admitted by this probe.
+        let (pipes, command_file, response_file) = pipes();
+        let mut commands = tokio::net::unix::pipe::Sender::from_file(command_file).unwrap();
+        let mut responses =
+            BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
+        send(
+            &mut commands,
+            1,
+            Command::Bootstrap {
+                selection: selection(),
+            },
+        )
+        .await;
+        let (owner, connection) =
+            PrivateHostConnection::bootstrap(pipes, |_| Ok(ProbeOwner::new(false)))
+                .await
+                .unwrap();
+        let mut line = String::new();
+        responses.read_line(&mut line).await.unwrap();
+        for id in 2..18 {
+            send(
+                &mut commands,
+                id,
+                Command::JoinClose {
+                    handle: owner.close.clone(),
+                },
+            )
+            .await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while owner.joining.load(Ordering::Acquire) < MAX_PENDING_JOINS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let endpoint = connection.member_classes();
+        let (replies, mut required) = mpsc::channel(2);
+        let (failed, _failed_rx) = watch::channel(false);
+        let listing = member_classes::ListingChannel {
+            replies: replies.clone(),
+            closed: connection.closed_observer(),
+            failed: failed.clone(),
+        };
+        let selected = member_classes::ListingSelection {
+            admission_id: Id::new("admission").unwrap(),
+            identity: "dynamic-member".into(),
+            class: Id::new("worker").unwrap(),
+        };
+        let first_selected = selected.clone();
+        let waiter_owner = endpoint.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_owner
+                .request_listing(
+                    999,
+                    first_selected,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+                    listing,
+                )
+                .await
+        });
+        let ready = required.recv().await.unwrap();
+        assert!(matches!(
+            ready.result,
+            Reply::MemberClassListingRequired {
+                operation_id: 999,
+                ..
+            }
+        ));
+        let mut foreign = selected.clone();
+        foreign.admission_id = Id::new("another-admission").unwrap();
+        assert_eq!(
+            endpoint.listing_result(999, foreign, true),
+            Err(HostLifetimeError::WrongOwner)
+        );
+        assert!(
+            !waiter.is_finished(),
+            "foreign ACK must retain the genuine waiter"
+        );
+        for (id, operation_id, expected) in [
+            (18, 999, "member_class_listing_acknowledged"),
+            (19, 999, "error"),
+            (20, 1001, "error"),
+        ] {
+            send(
+                &mut commands,
+                id,
+                Command::MemberClass {
+                    operation: MemberClassCommand::ListingResult {
+                        operation_id,
+                        admission_id: selected.admission_id.clone(),
+                        identity: selected.identity.clone(),
+                        class: selected.class.clone(),
+                        accepted: true,
+                    },
+                },
+            )
+            .await;
+            line.clear();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                responses.read_line(&mut line),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(reply["id"], id);
+            assert_eq!(reply["result"]["kind"], expected);
+            if expected == "error" {
+                assert_eq!(reply["result"]["error"], "denied");
+            }
+        }
+        assert_eq!(waiter.await.unwrap(), Ok(()));
+        let listing = member_classes::ListingChannel {
+            replies,
+            closed: connection.closed_observer(),
+            failed,
+        };
+        let waiter = tokio::spawn(async move {
+            endpoint
+                .request_listing(
+                    1000,
+                    selected,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+                    listing,
+                )
+                .await
+        });
+        required.recv().await.unwrap();
+        drop(commands);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(HostLifetimeError::Unavailable)
+        );
+        assert!(
+            !owner.settled.load(Ordering::Acquire),
+            "EOF must release publication before owner close is joined"
+        );
+        owner.settle();
+        tokio::time::timeout(std::time::Duration::from_secs(2), connection.finish())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn member_listing_open_pipe_no_ack_expires_and_late_ack_is_refused() {
+        // Exercise the actual held-finalizer transport waiter. Its refusal is
+        // not proof that an application-side Python mutation has been joined.
+        let (pipes, command_file, response_file) = pipes();
+        let mut commands = tokio::net::unix::pipe::Sender::from_file(command_file).unwrap();
+        let mut responses =
+            BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
+        send(
+            &mut commands,
+            1,
+            Command::Bootstrap {
+                selection: selection(),
+            },
+        )
+        .await;
+        let (owner, connection) =
+            PrivateHostConnection::bootstrap(pipes, |_| Ok(ProbeOwner::new(true)))
+                .await
+                .unwrap();
+        let mut line = String::new();
+        responses.read_line(&mut line).await.unwrap();
+        let endpoint = connection.member_classes();
+        let (replies, mut required) = mpsc::channel(2);
+        let (failed, failed_rx) = watch::channel(false);
+        let closed = connection.closed_observer();
+        let listing = member_classes::ListingChannel {
+            replies,
+            closed: closed.clone(),
+            failed,
+        };
+        let selected = member_classes::ListingSelection {
+            admission_id: Id::new("admission-deadline").unwrap(),
+            identity: "dynamic-deadline-member".into(),
+            class: Id::new("worker").unwrap(),
+        };
+        let waiter_owner = endpoint.clone();
+        let waiter_selection = selected.clone();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut waiter = tokio::spawn(async move {
+            waiter_owner
+                .request_listing(1002, waiter_selection, deadline, listing)
+                .await
+        });
+        let ready = required.recv().await.unwrap();
+        assert!(matches!(
+            ready.result,
+            Reply::MemberClassListingRequired {
+                operation_id: 1002,
+                ..
+            }
+        ));
+        // No ACK, EOF, writer failure or owner shutdown can explain settlement.
+        let result =
+            match tokio::time::timeout(std::time::Duration::from_secs(2), &mut waiter).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => {
+                    // Even the unfixed regression releases its entered waiter via
+                    // normal pipe EOF before the test reports the missing bound.
+                    drop(commands);
+                    let _ = waiter.await;
+                    connection.finish().await.unwrap();
+                    panic!("open-pipe listing waiter did not settle at its held deadline");
+                }
+            };
+        assert_eq!(result, Err(HostLifetimeError::Denied));
+        assert!(tokio::time::Instant::now() >= deadline);
+        assert!(!closed.is_closed());
+        assert!(!*failed_rx.borrow());
+        assert!(!owner.lost.load(Ordering::Acquire));
+        for (id, accepted) in [(2, true), (3, false)] {
+            send(
+                &mut commands,
+                id,
+                Command::MemberClass {
+                    operation: MemberClassCommand::ListingResult {
+                        operation_id: 1002,
+                        admission_id: selected.admission_id.clone(),
+                        identity: selected.identity.clone(),
+                        class: selected.class.clone(),
+                        accepted,
+                    },
+                },
+            )
+            .await;
+            line.clear();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                responses.read_line(&mut line),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(reply["id"], id);
+            assert_eq!(reply["result"]["kind"], "error");
+            assert_eq!(reply["result"]["error"], "denied");
+        }
+        assert!(
+            !closed.is_closed(),
+            "late ACK refusal keeps the genuine pipe usable"
+        );
+        drop(commands);
+        tokio::time::timeout(std::time::Duration::from_secs(2), connection.finish())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

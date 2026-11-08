@@ -35,6 +35,7 @@ pub struct SecretRequest {
 /// The same immutable checked installation and real protected approval survive
 /// setup close. Only this value retains the hidden input, never its tool reply.
 pub struct ReviewedSecretInstallation {
+    admission: Option<private_service::Admission>,
     storage: ResolvedStorage,
     factory: meerkat::AgentFactory,
     installed: InstalledSelection,
@@ -192,12 +193,63 @@ async fn preview(
 
 pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>(
     owner: &mut TerminalConnectors,
-    mut request: SecretRequest,
+    request: SecretRequest,
     approvals: &LocalApprovals,
     presenter: &mut ApprovalPresenter,
     input: &mut TerminalInput,
     output: &mut W,
     interrupt: F,
+) -> Result<bool, ConnectError> {
+    present_common(
+        owner,
+        request,
+        approvals,
+        Some((presenter, input)),
+        None,
+        output,
+        interrupt,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn present_private(
+    owner: &mut TerminalConnectors,
+    request: SecretRequest,
+    approvals: &LocalApprovals,
+    bridge: &crate::stdio::PromptBridge,
+    admission: private_service::Admission,
+    handoff: &mut Option<plain::PlainHandoff>,
+) -> Result<bool, ConnectError> {
+    let stop = admission.clone();
+    present_common(
+        owner,
+        request,
+        approvals,
+        None,
+        Some(bridge),
+        &mut io::sink(),
+        async {
+            tokio::select! { _ = bridge.closed() => (), _ = stop.closed() => () };
+            Ok(())
+        },
+        Some(admission),
+        Some(handoff),
+    )
+    .await
+}
+
+async fn present_common<F: Future<Output = io::Result<()>> + Send, W: Write>(
+    owner: &mut TerminalConnectors,
+    mut request: SecretRequest,
+    approvals: &LocalApprovals,
+    mut terminal: Option<(&mut ApprovalPresenter, &mut TerminalInput)>,
+    bridge: Option<&crate::stdio::PromptBridge>,
+    output: &mut W,
+    interrupt: F,
+    admission: Option<private_service::Admission>,
+    handoff: Option<&mut Option<plain::PlainHandoff>>,
 ) -> Result<bool, ConnectError> {
     if request.response.is_closed() {
         return Ok(true);
@@ -209,7 +261,10 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
     if owner.target_unresolved(&request.config.name) {
         return selection_refused("prior_finalization_unresolved", request.response, output);
     }
-    if input.require_terminal().is_err() {
+    if terminal
+        .as_mut()
+        .is_some_and(|(_, input)| input.require_terminal().is_err())
+    {
         return selection_refused("protected_terminal_required", request.response, output);
     }
     let check = || -> Result<bool, ConnectError> {
@@ -261,10 +316,11 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
         "authentication":"opaque service credentials; no verified vendor account is asserted",
         "notice":"Save this service in the selected realm, privately store its requested credentials, and give the chosen agent the listed access. Cancellation or failure can leave saved configuration or credentials. The connection will be checked when used."});
     tokio::pin!(interrupt);
-    let decision = match review(
+    let decision = match private_service::review_transport(
         approvals,
-        presenter,
-        input,
+        terminal
+            .as_mut()
+            .map(|(presenter, input)| (&mut **presenter, &mut **input)),
         output,
         review_request(
             &request.selection.installed.session,
@@ -294,17 +350,42 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
         if request.response.is_closed() {
             return Ok(true);
         }
-        writeln!(
-            output,
-            "Credential for {} ({})",
-            review_text(&reference.label()),
-            review_text(reference.environment_variable())
-        )
-        .map_err(|e| ConnectError::native("Display service credential slot", e))?;
-        let value = tokio::select! { biased;
-            signal = interrupt.as_mut() => {signal.map_err(|e| ConnectError::native("Listen for service credential cancellation", e))?; return Ok(false)},
-            _ = request.response.closed() => return Ok(true),
-            value = input.read_service_secret(output) => value.map_err(|e| ConnectError::native("Read hidden service credential", e))?,
+        let value = if let Some((_, input)) = terminal.as_mut() {
+            writeln!(
+                output,
+                "Credential for {} ({})",
+                review_text(&reference.label()),
+                review_text(reference.environment_variable())
+            )
+            .map_err(|e| ConnectError::native("Display service credential slot", e))?;
+            tokio::select! { biased;
+                signal = interrupt.as_mut() => { signal.map_err(|e| ConnectError::native("Listen for service credential cancellation", e))?; return Ok(false) },
+                _ = request.response.closed() => return Ok(true),
+                value = input.read_service_secret(output) => value.map_err(|e| ConnectError::native("Read hidden service credential", e))?,
+            }
+        } else {
+            let bridge = bridge
+                .ok_or_else(|| unavailable("The protected secret transport is unavailable"))?;
+            let admission = admission
+                .as_ref()
+                .ok_or_else(|| unavailable("The original private admission is unavailable"))?;
+            admission.check()?;
+            let prompt = json!({"kind":"service_secret", "job_id":request.selection.installed.job_id,
+                "service":request.config.name, "slot":reference.environment_variable(), "label":reference.label()});
+            tokio::select! { biased;
+                signal = interrupt.as_mut() => { signal.map_err(|e| ConnectError::native("Listen for private credential cancellation", e))?; return Ok(false) },
+                _ = request.response.closed() => return Ok(true),
+                answer = bridge.ask(prompt) => {
+                    admission.check()?;
+                    match answer? {
+                        crate::stdio::PromptAnswer::ServiceSecret { job_id, service, slot, value }
+                            if job_id == request.selection.installed.job_id && service == request.config.name
+                                && slot == reference.environment_variable() =>
+                            Some(ServiceSecret::from_hidden_input(value).map_err(|_| unavailable("The protected service credential is invalid"))?),
+                        _ => return Ok(false),
+                    }
+                },
+            }
         };
         let Some(value) = value else {
             return Ok(false);
@@ -343,9 +424,13 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
             .map_err(|e| ConnectError::native("Listen for service credential cancellation", e))?;
         return Ok(false);
     }
+    if let Some(admission) = &admission {
+        admission.check()?;
+    }
     let selected_inputs = request.selection.selected_inputs().cloned();
     owner.reviewed = Some(
         ReviewedInstallation::Secret(ReviewedSecretInstallation {
+            admission,
             storage: owner.storage.clone(),
             factory: owner.factory.clone(),
             installed: request.selection.installed,
@@ -361,9 +446,14 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
         })
         .into(),
     );
-    let _ = request.response.send(json!({"state":"pending","phase":"initial_service_secret_installation",
+    let value = json!({"state":"pending","phase":"initial_service_secret_installation",
         "reason":"reviewed_finalization_waiting_for_setup_close","grant_issued":false,"credentials_stored":false,
-        "instruction":"The protected review and hidden values are retained. Finish this setup turn so the existing owner can close and finalize. Do not request credentials in chat, repeat this action or claim service readiness."}));
+        "instruction":"The protected review and hidden values are retained. Finish this setup turn so the existing owner can close and finalize. Do not request credentials in chat, repeat this action or claim service readiness."});
+    if let Some(handoff) = handoff {
+        *handoff = Some(plain::PlainHandoff::new(request.response, value));
+    } else {
+        let _ = request.response.send(value);
+    }
     Ok(true)
 }
 
@@ -652,8 +742,19 @@ impl ReviewedSecretInstallation {
         let mut outcome = Outcome::default();
         // Only the create-only generation winner may reach any slot setter.
         // An existing exact definition is not a retry or a repair permission.
-        let Some(saved) = joined_effect(interrupt.as_mut(), &mut outcome.stopped, || {
-            target.add(self.config.clone(), Some(self.expected_generation))
+        let Some(saved) = joined_effect(interrupt.as_mut(), &mut outcome.stopped, || async {
+            match &self.admission {
+                Some(entry) => {
+                    target
+                        .add_entered(self.config.clone(), Some(self.expected_generation), entry)
+                        .await
+                }
+                None => {
+                    target
+                        .add(self.config.clone(), Some(self.expected_generation))
+                        .await
+                }
+            }
         })
         .await
         else {
@@ -689,14 +790,32 @@ impl ReviewedSecretInstallation {
             return Ok(outcome);
         }
         for (reference, value) in self.references.iter().zip(&self.values) {
-            let Some(result) = joined_effect(interrupt.as_mut(), &mut outcome.stopped, || {
-                meerkat::set_mcp_service_secret(
-                    &self.storage,
-                    &persistence,
-                    &self.config,
-                    reference.environment_variable(),
-                    value.expose(),
-                )
+            let Some(result) = joined_effect(interrupt.as_mut(), &mut outcome.stopped, || async {
+                match &self.admission {
+                    Some(entry) => {
+                        meerkat::set_mcp_service_secret_entered(
+                            &self.storage,
+                            &persistence,
+                            &self.config,
+                            reference.environment_variable(),
+                            meerkat_core::auth::McpServiceSecretValue::new(
+                                value.expose().to_owned(),
+                            ),
+                            Arc::new(entry.clone()),
+                        )
+                        .await
+                    }
+                    None => {
+                        meerkat::set_mcp_service_secret(
+                            &self.storage,
+                            &persistence,
+                            &self.config,
+                            reference.environment_variable(),
+                            value.expose(),
+                        )
+                        .await
+                    }
+                }
             })
             .await
             else {
@@ -738,16 +857,62 @@ impl ReviewedSecretInstallation {
             server: self.config.clone(),
             generation,
         };
-        outcome.grant = joined_effect(interrupt.as_mut(), &mut outcome.stopped, || {
-            grant_stock_agent_for_reviewed_installation(
-                &self.storage,
-                &principals,
-                &self.request,
-                &installation,
+        if let Some(admission) = &self.admission {
+            match private_service::accepted_effect(
+                interrupt.as_mut(),
+                &mut outcome.stopped,
+                admission,
+                || {
+                    grant_stock_agent_for_reviewed_installation(
+                        &self.storage,
+                        &principals,
+                        &self.request,
+                        &installation,
+                    )
+                },
             )
-        })
-        .await;
+            .await
+            {
+                Some(Ok(grant)) => outcome.grant = Some(grant),
+                Some(Err(_)) => outcome.refusal = Some("private_admission_retired"),
+                None => (),
+            }
+        } else {
+            outcome.grant = joined_effect(interrupt.as_mut(), &mut outcome.stopped, || {
+                grant_stock_agent_for_reviewed_installation(
+                    &self.storage,
+                    &principals,
+                    &self.request,
+                    &installation,
+                )
+            })
+            .await;
+        }
         Ok(outcome)
+    }
+}
+
+impl ReviewedSecretInstallation {
+    pub(super) fn probe_selection(&self) -> super::ProbeReviewedSelection {
+        super::ProbeReviewedSelection {
+            installed: self.installed.clone(),
+            document: self.document.clone(),
+            inputs: self.selected_inputs.clone(),
+            config: self.config.clone(),
+            request: self.request.clone(),
+        }
+    }
+}
+impl Outcome {
+    pub(super) fn probe_selected(&self) -> bool {
+        self.stopped.is_none()
+            && self.refusal.is_none()
+            && matches!(self.persistence, Some(Ok(_)))
+            && !self.slots.is_empty()
+            && self.slots.iter().all(|(_, result)| result.is_ok())
+            && matches!(self.after, Some(Ok(_)))
+            && matches!(self.grant, Some(Ok(_)))
+            && !self.has_unconfirmed_effect()
     }
 }
 
@@ -1048,6 +1213,7 @@ mod tests {
                 )
                 .unwrap();
             ReviewedSecretInstallation {
+                admission: None,
                 storage: self.storage.clone(),
                 factory: self.factory.clone(),
                 installed: self.installed.clone(),
@@ -1437,6 +1603,7 @@ mod tests {
             // reopens it; an ordinary startup open of it is refused.
             let native = crate::stdio::tests::realm_native_owner(&fixture.storage).await;
             let mut startup = SessionStartup {
+                provider_store_root: None,
                 storage: fixture.storage.clone(),
                 config: meerkat::Config::default(),
                 factory: fixture.factory.clone(),
@@ -2052,5 +2219,358 @@ mod tests {
         );
         assert_eq!(tool().name, SECRET_TOOL);
         assert!(TOOLS.contains(&SECRET_TOOL));
+    }
+    #[tokio::test]
+    async fn private_secret_entry_rechecks_login_and_preserves_unknown_native_write() {
+        for (cancelled, fail_after) in [(true, None), (false, Some(1)), (false, None)] {
+            let root = tempfile::tempdir().unwrap();
+            let fixture = Fixture::new(root.path(), false, fail_after).await;
+            let (retire, receive) = watch::channel(cancelled);
+            let mut reviewed = fixture.review();
+            reviewed.admission = Some(private_service::Admission::new(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64
+                    + 60_000,
+                receive,
+            ));
+            let finalized = finish(reviewed).await;
+            let outcome = secret_outcome(&finalized);
+            if cancelled {
+                assert!(matches!(
+                    outcome.persistence,
+                    Some(Err(
+                        meerkat_core::mcp_config::McpRealmPersistError::NotAdmitted(_)
+                    ))
+                ));
+                assert_eq!(fixture.store.saves.load(Ordering::SeqCst), 0);
+            } else if fail_after.is_some() {
+                assert!(matches!(
+                    outcome.slots[0].1,
+                    Err(meerkat::McpServiceSecretUpdateError::OutcomeUnknown(_))
+                ));
+                assert!(outcome.grant.is_none() && outcome.after.is_none());
+                assert!(finalized.blocks_reentry(&fixture.storage.locator, &fixture.config.name));
+            } else {
+                assert!(outcome.grant.as_ref().is_some_and(Result::is_ok));
+                assert_eq!(fixture.store.saves.load(Ordering::SeqCst), 2);
+            }
+            let observation = finalized.private_observation().to_string();
+            assert!(
+                !observation.contains("fixture-key-value")
+                    && !observation.contains("fixture-token-value")
+            );
+            assert_eq!(finalized.notice()["service_readiness"], "not_observed");
+            drop(retire);
+        }
+    }
+
+    #[tokio::test]
+    async fn private_secret_cancellation_joins_entered_write_but_refuses_next_slot_and_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(root.path(), true, None).await;
+        let _release = ReleaseOnDrop(fixture.store.clone());
+        let (retire, receive) = watch::channel(false);
+        let admission = private_service::Admission::new(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                + 60_000,
+            receive,
+        );
+        let mut reviewed = fixture.review();
+        reviewed.admission = Some(admission.clone());
+        let interrupt = async {
+            admission.closed().await;
+            Ok(())
+        };
+        tokio::pin!(interrupt);
+        let finalizing = ReviewedInstallation::Secret(reviewed)
+            .finalize_outcome_unless_cancelled(interrupt.as_mut());
+        tokio::pin!(finalizing);
+        let early = tokio::select! {
+            result=finalizing.as_mut()=>Some(result),
+            permit=fixture.store.entered.acquire()=>{permit.unwrap().forget();None},
+        };
+        retire.send_replace(true);
+        let after = if early.is_none() {
+            finalizing.as_mut().now_or_never()
+        } else {
+            None
+        };
+        let retained = early.is_none() && after.is_none();
+        fixture.store.release.add_permits(1);
+        let result = match early.or(after) {
+            Some(result) => result,
+            None => finalizing.await,
+        }
+        .unwrap()
+        .unwrap();
+        assert!(retained && result.stopped_during_finalization());
+        let outcome = secret_outcome(&result);
+        assert_eq!(outcome.slots.len(), 1);
+        assert!(outcome.slots[0].1.is_ok());
+        assert!(outcome.grant.is_none());
+        assert_eq!(fixture.store.saves.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn private_secret_presenter_binds_real_checked_job_and_defers_all_writes_until_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(root.path(), false, None).await;
+        let session = SessionId::new();
+        let installs = CheckedInstalls::fixture(Arc::new(NoSetupDispatch(AtomicUsize::new(0))));
+        installs.bind_realm(&fixture.storage.locator).unwrap();
+        let (page, readback) = returning_observation(&fixture, &"b".repeat(64));
+        let page = installs
+            .retain_candidates(&fixture.storage.locator, &session, page)
+            .unwrap();
+        let candidate = page["candidates"][0]["candidate"].as_str().unwrap();
+        installs
+            .retained_select_request(&fixture.storage.locator, &session, candidate)
+            .unwrap();
+        let checked = installs
+            .checked_retained(&fixture.storage.locator, &session, candidate, &readback)
+            .unwrap();
+        let selection = installs
+            .admit_retained(&fixture.storage.locator, &session, candidate, checked)
+            .unwrap();
+        let config = selection
+            .secret_configuration(&BTreeSet::from(["list_cards".into()]))
+            .unwrap();
+        let grant = fixture.review().request;
+        // Fixture::new has already governed this realm. Retain its real stock
+        // bundle for the presenter instead of asking the ordinary opener to
+        // bypass that posture. This open issues no grant or service secret.
+        let (_, persistence) = meerkat::governed_realm::open_stock_realm_persistence_as(
+            &meerkat::DiskStorageProvider,
+            &fixture.storage.locator.state_root,
+            fixture.storage.locator.realm.as_str(),
+            None,
+            Some(meerkat_store::RealmOrigin::Explicit),
+            Some(fixture.storage.layout.clone()),
+            &grant.agent,
+        )
+        .await
+        .unwrap();
+        assert!(persistence.stock_governance().is_some());
+        let mut startup = SessionStartup {
+            provider_store_root: None,
+            storage: fixture.storage.clone(),
+            config: meerkat::Config::default(),
+            factory: fixture.factory.clone(),
+            persistence: Some(persistence),
+            connector_auth: None,
+            standalone: None,
+        };
+        let mut owner = TerminalConnectors::open(&mut startup).await.unwrap();
+        let (approvals, mut presenter) = LocalApprovals::create_paired_host(root.path()).unwrap();
+        approvals.bind_session(&session).unwrap();
+        let (bridge, mut prompts, retire_bridge) = crate::stdio::PromptBridge::channel();
+        let (retire, receive) = watch::channel(false);
+        let admission = private_service::Admission::new(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                + 60_000,
+            receive,
+        );
+        let (send, mut receive) = oneshot::channel();
+        let request = SecretRequest {
+            selection,
+            config,
+            grant,
+            response: send,
+        };
+        let mut handoff = None;
+        let human = async {
+            let result = std::panic::AssertUnwindSafe(async {
+                let mut approval = tokio::time::timeout(Duration::from_secs(5), presenter.next())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    approval.record().proposed_action.body.as_ref().unwrap()["job_id"],
+                    fixture.installed.job_id
+                );
+                approval.decide(ApprovalDecision::Approve).unwrap();
+                for slot in ["FIXTURE_KEY", "FIXTURE_TOKEN"] {
+                    let prompt = tokio::time::timeout(Duration::from_secs(5), prompts.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(prompt.prompt["kind"], "service_secret");
+                    assert_eq!(prompt.prompt["job_id"], fixture.installed.job_id);
+                    assert_eq!(prompt.prompt["service"], "cards");
+                    assert_eq!(prompt.prompt["slot"], slot);
+                    assert_eq!(fixture.store.saves.load(Ordering::SeqCst), 0);
+                    assert!(
+                        prompt
+                            .response
+                            .send(Ok(crate::stdio::PromptAnswer::ServiceSecret {
+                                job_id: fixture.installed.job_id.clone(),
+                                service: "cards".into(),
+                                slot: slot.into(),
+                                value: format!("PRIVATE_{slot}")
+                            }))
+                            .is_ok()
+                    );
+                }
+            })
+            .catch_unwind()
+            .await;
+            if result.is_err() {
+                retire.send_replace(true);
+                retire_bridge.send_replace(true);
+            }
+            result
+        };
+        let presentation = std::panic::AssertUnwindSafe(present_private(
+            &mut owner,
+            request,
+            &approvals,
+            &bridge,
+            admission,
+            &mut handoff,
+        ))
+        .catch_unwind();
+        let (presented, human) = tokio::join!(presentation, human);
+        let retired = owner.retire();
+        approvals.retire();
+        installs.retire();
+        if presented.is_err() || human.is_err() {
+            retire.send_replace(true);
+            retire_bridge.send_replace(true);
+            drop(owner);
+            drop(startup);
+            drop(approvals);
+            drop(installs);
+            drop(presenter);
+            if let Err(panic) = presented {
+                std::panic::resume_unwind(panic);
+            }
+            if let Err(panic) = human {
+                std::panic::resume_unwind(panic);
+            }
+            unreachable!();
+        }
+        assert!(retired.is_ok());
+        assert!(presented.unwrap().unwrap());
+        assert!(matches!(
+            receive.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(fixture.store.saves.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            crate::realm::read_own_mcp_config(&fixture.storage)
+                .await
+                .unwrap(),
+            (fixture.own.clone(), fixture.generation)
+        );
+        // This component control has no agent runtime. Actual Driver closure
+        // remains a separate required native control; it owns the handoff here.
+        handoff.unwrap().complete();
+        let pending = receive.await.unwrap();
+        assert_eq!(pending["state"], "pending");
+        assert!(!pending.to_string().contains("PRIVATE_"));
+        let Some(ReviewedInstallation::Secret(reviewed)) = owner.take_reviewed() else {
+            panic!("missing immutable review")
+        };
+        // The real startup retained the native persistence bundle. Release it
+        // and the retired presenter/auth owners before native administration.
+        drop(owner);
+        drop(startup);
+        drop(approvals);
+        drop(installs);
+        drop(presenter);
+        let finalized = finish(reviewed).await;
+        assert!(
+            secret_outcome(&finalized)
+                .grant
+                .as_ref()
+                .is_some_and(Result::is_ok)
+        );
+        assert!(
+            !finalized
+                .private_observation()
+                .to_string()
+                .contains("PRIVATE_")
+        );
+        drop(retire);
+        drop(retire_bridge);
+    }
+
+    #[tokio::test]
+    async fn private_secret_waiting_for_native_credential_custody_rechecks_login_before_write() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(root.path(), true, None).await;
+        let _release = ReleaseOnDrop(fixture.store.clone());
+        let runtime = crate::realm::own_config_runtime(&fixture.storage).unwrap();
+        McpRealmPersistTarget::new(&runtime)
+            .add(fixture.config.clone(), Some(fixture.generation))
+            .await
+            .unwrap();
+        let persistence = fixture
+            .factory
+            .resolution_provider_auth_persistence()
+            .unwrap()
+            .unwrap();
+        let (retire, receive) = watch::channel(false);
+        let admission = private_service::Admission::new(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+                + 60_000,
+            receive,
+        );
+        let first = meerkat::set_mcp_service_secret(
+            &fixture.storage,
+            &persistence,
+            &fixture.config,
+            "FIXTURE_KEY",
+            "first-value",
+        );
+        tokio::pin!(first);
+        let first_early = tokio::select! {
+            result=first.as_mut()=>Some(result),
+            permit=fixture.store.entered.acquire()=>{permit.unwrap().forget();None},
+        };
+        let second = meerkat::set_mcp_service_secret_entered(
+            &fixture.storage,
+            &persistence,
+            &fixture.config,
+            "FIXTURE_KEY",
+            meerkat_core::auth::McpServiceSecretValue::new("must-not-store".into()),
+            Arc::new(admission),
+        );
+        tokio::pin!(second);
+        let second_early = second.as_mut().now_or_never();
+        let waiting = first_early.is_none() && second_early.is_none();
+        retire.send_replace(true);
+        fixture.store.release.add_permits(1);
+        let (first, second) = tokio::join!(
+            async {
+                match first_early {
+                    Some(result) => result,
+                    None => first.await,
+                }
+            },
+            async {
+                match second_early {
+                    Some(result) => result,
+                    None => second.await,
+                }
+            }
+        );
+        assert!(waiting && first.is_ok());
+        assert!(matches!(
+            second,
+            Err(meerkat::McpServiceSecretUpdateError::NotAdmitted(_))
+        ));
+        assert_eq!(fixture.store.saves.load(Ordering::SeqCst), 1);
     }
 }

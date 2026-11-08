@@ -1,7 +1,7 @@
 # Gmail operations
 
 Import `GmailOperations` from `@rkat/toolkit/connectors/gmail`. This optional
-Node 22+ ESM library runs without Meerkat, MobKit, a browser, Google SDK credentials
+Node 22.12.0+ ESM library runs without Meerkat, MobKit, a browser, Google SDK credentials
 or a tool registry. The existing package runtime dependency is `jsonc-parser`
 3.3.1; this connector adds no dependency.
 

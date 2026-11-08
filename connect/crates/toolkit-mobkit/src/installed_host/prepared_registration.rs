@@ -28,6 +28,7 @@ pub struct PreparedMemberRegistration {
     preparation: Arc<dyn MemberRuntimeRegistrationHook>,
     registry: Arc<ToolConsequencePolicyRegistry>,
     selected_destination: SelectedDestinationParticipant,
+    workflow_members: Vec<Arc<crate::private_originals::PreparedWorkflowMember>>,
     installed: OnceLock<Arc<dyn MemberRuntimeRegistrationHook>>,
 }
 
@@ -54,8 +55,19 @@ impl PreparedMemberRegistration {
             preparation,
             registry,
             selected_destination,
+            workflow_members: Vec::new(),
             installed: OnceLock::new(),
         }
+    }
+
+    /// Attach restrictive selections from the same pending installed host
+    /// before handing this registration hook to native construction.
+    pub fn with_workflow_members(
+        mut self,
+        members: Vec<Arc<crate::private_originals::PreparedWorkflowMember>>,
+    ) -> Self {
+        self.workflow_members = members;
+        self
     }
 
     /// Only final installed composition can bind the relay. The driver must
@@ -87,6 +99,9 @@ impl MemberRuntimeRegistrationHook for PreparedMemberRegistration {
     ) -> Result<MemberDestinationSelection, MobError> {
         let destination = self.current().select_destination(identity).await?;
         (self.selected_destination)(identity, &destination)?;
+        for member in &self.workflow_members {
+            member.selected_destination(identity, &destination)?;
+        }
         Ok(destination)
     }
 

@@ -36,8 +36,8 @@ owner. The separate [Rust `NativeSetup` API](/sdks/rust#embed-the-native-setup-c
 embeds a standalone setup conversation over its factory-created native adapter;
 it is not an application replacement API.
 
-Fresh application startup prepares the offline integration resources before the
-gateway can acknowledge `meta/init`. Set Meta's `gateway_init_timeout` explicitly
+Fresh application startup with a setup helper prepares the offline integration
+resources before the gateway can acknowledge `meta/init`. Set Meta's `gateway_init_timeout` explicitly
 to cover that preparation within the host's startup budget. Its 60-second default
 can expire while preparation is still making progress; the bundled bootstrap
 uses its own 300-second budget. `init_deadline` separately bounds settlement
@@ -59,6 +59,319 @@ admission, routing and delivery. These startup adapters preserve those host
 bindings; they do not supply a generic frontend host or make a one-turn realm
 session persistent. The [custom-extension path](#custom-extension-dependencies)
 describes package compatibility.
+
+### Optional agent setup with an ordinary helper (unreleased)
+
+To let an initial application agent request connector discovery and installation,
+select the existing singleton setup helper in the application's preparation
+plan. `ApplicationSetupProfile::Dedicated` supplies the packaged profile/resource
+projection; `CheckedInstallation` selects the checked setup surface. This uses
+the existing schema-1 plan and schema-4 application input, without another
+installer or a new runtime entrypoint.
+
+The helper is a real initial member with an actual inline research profile,
+identity, destination and policy row. Set its roster `initial_message` to `None`
+and select no background or proactive helper work. Native preparation still
+creates its session and starts its selected MCP adapter; this configuration
+avoids an unsolicited setup/model turn, not startup resource use. Keep any
+zero-instance application classes declared alongside the real initial members.
+They need no placeholder instances and cannot reuse the selected exclusive
+helper profile.
+
+| Existing plan selection | Required binding |
+| --- | --- |
+| `application.helper`, `helper_tools: "checked_installation"`, `helper_profile: "dedicated"` | The same real helper in the definition, roster, member inventory and native owner |
+| Caller tool policy and `authorities.agent_setup` | Explicitly selected `find_and_install` access for the actual initial member and its original-ingress route |
+| `authorities.controllers`, `helper_mcp`, `helper_catalog`, `helper_report` | Retained issuance requests; the existing owner resolves actual controller observations and the packaged helper's finite targets |
+| `acquisition` | The host's stable backend selection, output/target bounds and actual protected installation presenter |
+
+The host keeps its existing model/auth configuration, qualified principals,
+source authentication, policy provider/revision and publication transaction.
+Neither the caller's text nor a tool declaration supplies these facts. Request
+account or public-research scope separately; setup access does not approve an
+installation or grant account access. The existing known-target MCP enrollment
+flow is not a substitute for the agent setup presenter.
+
+Pass the pinned plan to the existing [Python](/sdks/python#native-application-composition)
+or [TypeScript](/sdks/typescript#native-application-composition) fresh application
+entrypoint. Keep the normal finalizer and use the retained `HostBootstrapSelection`
+for Restore. Ordinary helper cleanup and recovery restrictions still apply;
+Restore must not regenerate grants or treat unfinished setup as an empty round.
+
+This recipe describes the existing development source contract, not an installed
+acceptance result. Applications without a selected helper have no agent setup
+path merely because they declare member classes. Later-added callers also need
+their own supported current-source setup binding; the initial caller's selection
+does not flow to them automatically.
+
+Unreleased, source-reviewed development code also supports explicit protected
+setup review for an already Active ordinary caller added from a declared class.
+The class declaration grants nothing: select the actual current caller, session
+and application owner for that original request. Connect rechecks this selection
+after the human review. If the caller retires after grant issuance, the issued
+result remains recorded and later setup work is refused. The ordinary initial
+caller flow is unchanged. Native validation of this extension is still pending.
+
+### Applications without a setup helper (unreleased)
+
+Source-reviewed development code allows schema-4 application preparation to omit
+`helper`, `helper_tools` and `helper_profile` together. The plan then omits
+`acquisition` and helper-specific authority requests. An empty initial roster
+requires nonempty declared member classes and an explicit empty member-policy
+list. Keep the real class customizer configured even when no members start.
+
+Completion retains the compiler-owned `artifact_directory` and application
+policy without a helper, setup server or resource handoff. The installed
+`native_host.setup` selection uses the schema-2 application-only carrier. Existing
+helperful encodings stay unchanged. Fresh startup still completes the actual
+held callback, publishes the selected artifacts and adopts the same native owner;
+Restore uses the retained installation and current application roster.
+
+Connect 0.9.10 includes this helperless path; Forge does not update a
+helperless application in place.
+
+### Declare member classes (unreleased)
+
+A member class describes agents the application may add later. It can have zero
+instances alongside a fixed initial roster, such as a chief and a discovery
+agent. Declaring the class creates no placeholder member, session or grant.
+
+The application compiler supplies the same `member_classes` declarations in its
+schema-1 inventory input and schema-4 compilation input. Each
+`CompiledMemberClass` selects an `id`, inline `profile`, trusted host `factory`
+identity, callback definitions and a grant template. Callback account information
+is explicit when known. Inventory lowering returns identity mappings for the
+initial roster; it does not generate class declarations. Keep those declarations
+in the compiler's selected input.
+
+For the SDK gateway, the existing application build customizer supplies the
+executable callbacks. Connect wraps that customizer and checks its actual tool
+names, descriptions and schemas against the selected class. The `factory` field
+identifies this trusted construction contract; it is not a Python import, an
+executable path or a name to discover in a platform factory catalog. An empty
+callback class can use a pass-through customizer. A class declaring callbacks
+must supply their implementations through the customizer. Configure it for both
+fresh startup and Restore; see the [SDK requirement](/sdks/python#retain-member-mcp-bindings).
+Rust embedders can instead provide the existing `MemberClassFactory` interface.
+
+The initial roster's concrete policy and a class's grant template have different
+jobs. During an authorized Add, Connect's existing policy owner materializes the
+template for the exact admitted member and coordinates policy with native
+publication. Keep that owner composed with the application driver. A raw Meta
+host with an immutable initial policy does not provide this lifecycle, but its
+restriction does not rule out dynamic classes in a Connect-managed application.
+Restore uses the retained admission and the same real customizer.
+
+Service-policy changes also use the canonical policy owner. A fresh proposal
+must preserve the complete initial roster and every Prepared or Active class
+instance from the same prepared snapshot. Each class row must match its exact
+selected declaration, admission and materialized grants. Rebuilding the policy
+from only the initial roster drops required members and is refused. Keep both
+lifecycles attached to that owner; declaration names alone cannot supply this
+preservation evidence.
+
+The selected service-approval path currently targets an initial-roster member.
+Preserving a class instance does not select it as a new service recipient or
+authorize another Add. Recovery validates an old approval against the exact
+class rows and canonical admission state, including any pending reinstatement.
+That historical approval does not restore a retired member's grants. Current
+policy and native admission checks still govern use.
+
+These are development contracts. The class declaration alone proves neither
+successful Add nor callback execution, account access or cold recovery.
+
+### Select native peer and Recorder operations (unreleased)
+
+The development SDK can select finite native operations for a new
+host-authenticated original. Use the running application's inherited private
+client after fresh startup or Restore. Retain the authenticated event, then
+prepare its `PrivateOriginalSubmit` before submitting that same original with
+its unchanged content and transport evidence.
+
+| Surface | Preparation method |
+| --- | --- |
+| Python | `PrivateHostClient.prepare_original_native_operations` |
+| TypeScript | `PrivateHostClient.prepareOriginalNativeOperations` |
+| Rust | `PrivateOriginals::prepare_original_native_operations` |
+
+Python hosts can first call
+`meerkat_toolkit.host_control.validate_native_original_operations_request`.
+It returns an isolated `dict`, never `None`, or raises `HostControlError` for an
+invalid request. Validating its output again produces an equal value; pass that
+same snapshot to preparation. This checks request shape, not current permission,
+and does not retain intent or issue grants.
+
+The `NativeOriginalOperationsRequest` selects installed peer routes for Message
+or Request, peer-directory reads, or the caller's own identity Recorder
+Read/Write/Delete operations. Supply a finite time window and distinct issuance
+IDs. Connect resolves the actual peer keys, declared recipient audiences and
+caller identity scope; model text and tool names do not supply them. Active
+members added from a declared class can be selected through the same path.
+
+Preparation retains the selection without submitting an input. First submission
+binds its native grants; later operations still check current source, member and
+grant authority. Retain the exact request, including its time window and issuance
+IDs, for an exact retry. An existing original cannot be retargeted or renewed by
+changing that selection, including after Restore. Retained selection does not
+replace current member, source or grant checks.
+
+This does not authorize incoming peer originals, automatic
+replies, or Mob/Realm Recorder scopes. The source-reviewed sender path is not
+proof of recipient delivery or a complete conversation.
+
+The separately reviewed receiver candidate requires standing authority retained
+during a newly accepted member Add. It selects replies to the actual sender and
+the receiver's own-identity Recorder Write for the triggered work. An older
+admission without that selection does not gain it through Restore, same-ID Add
+replay or incoming message content. This receiver path still awaits native
+validation. See the
+[current development status](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#native-collaboration-and-recorder-gap).
+
+Member admission and standing grants do not declare peer topology. Select the
+intended peer relationship through the existing native topology owner before
+sending; that relationship alone grants no operation authority.
+
+After successful Add activation, reconcile the application's complete desired
+roster and declared edges through the existing host topology provider. Keep
+reconciliation outside the held Add finalizer: that callback still holds the
+bootstrap controller needed by reconciliation. A full reconciliation may retire
+members omitted from the desired roster, so supply the complete desired state.
+
+### Enroll a read-only collector (unreleased)
+
+Trusted Rust hosts can enroll a collector through the existing `OperatorSetup`
+owner. Obtain `CollectorSetupHost` from the actual gateway factory, select its
+native installation and verified account, and bind the collector principal and
+audience. `prepare_collector_enrollment` creates the exact protected review;
+`finalize_collector_enrollment` retains the approved selection and native grant.
+Use `resume_collector_enrollment` for that retained decision rather than creating
+another approval or issuance ID.
+
+`PrivateOriginals::resolve_collector_operation` rechecks the canonical selection,
+current configuration, account and exact read-only MCP operation. The collector
+is a service original, never an agent input or retained contributor. Cancellation
+fences it before the durable revocation write; an uncertain write stays
+unavailable. Confirmed source cancellation and native grant cleanup remain
+separate outcomes.
+
+Enrollment is separate from opening a connection or making a read. The Rust
+occurrence adapter under development uses this sequence:
+
+1. Call `ToolkitGatewayHost::open_collector_occurrence` with the same
+   `CollectorSetupHost`, retained setup ID and trusted-host `ServiceOccurrence`.
+   Supply explicit `McpStdioLaunchProfile` and `HttpEgressProfile` selections and
+   a finite, positive `ready_timeout`. Opening resolves the current enrollment,
+   checks the actual connection and account, and prepares Core's `ServiceCall`.
+   The occurrence identifiers do not prove that a schedule fired.
+2. Use the returned `CollectorOccurrence::tool_catalog` to construct calls, then
+   call `read` with the actual `ToolCallView` and
+   `ToolExecutionResolutionContext`. Catalog visibility grants no permission.
+   Each read rechecks the enrollment before Core checks the source, grants and
+   exact operation at entry.
+3. Await `CollectorOccurrence::close` and inspect its native
+   `McpRouterShutdownObservation`. Dropping the handle starts physical cleanup;
+   it does not prove settlement. The host retains router custody for its normal
+   joined close. Opening errors preserve any returned cleanup observation.
+
+The adapter uses the same `HostAuthService` that verified the enrolled account.
+It starts no login or browser and installs no ambient credential fallback. This
+first adapter refuses stdio configurations with nonempty `secret_env`: the
+factory does not expose the realm's launch-secret resolver.
+
+`read` preserves Core's complete `ServiceCallOutcome`, including both `result`
+and `audit`; an audit failure after a provider call does not change that call's
+result. `audit_key()` identifies the occurrence's rows in the native store.
+Core makes the decision durable before dispatcher entry. An entry without an
+outcome row means the outcome is unknown and the call may have taken effect;
+do not treat it as a confirmed refusal or replay a call to repair the audit.
+
+This adapter uses the native audit-owner API introduced in
+[Core `0768728d204a`](https://github.com/lukacf/meerkat/commit/0768728d204ac8e2b84edfc2cc7b4c81e67405cb).
+The selected readiness/close and public occurrence read/audit controls passed on
+development candidate `068f515` with Core `dd0ada78` and Meta `a8840da7`;
+see the [current integration status](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#current-integration-status).
+This is a finite Rust
+occurrence API, not an executable scheduled Gmail collector. It supplies no
+runnable, scheduling, announcement delivery or public SDK collector command.
+See the [collector development limits](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#collector-enrollment).
+
+### Member MCP application storage
+
+The optional development `MemberMcpApplication` participant uses the
+application's existing private admission row for exact binding retention and
+cold lookup. Load that storage before constructing or connecting the native
+runtime; lookup can run before the application's normal start hook. Supply it to
+the selected fresh, restore or replacement constructor. For a later process
+Restore, create a new participant over the same retained application rows; the
+previous participant stays closed after shutdown. Native end-to-end qualification
+of this development path remains pending.
+
+On shutdown, close callback entry and join entered writes by awaiting
+`participant.join()` to settlement before stopping the integration that owns
+storage. Keep storage open across cancellation until the existing host cleanup
+owner finishes that join, and preserve callback or acknowledgement uncertainty.
+The runtime's later shutdown repeats the idempotent join. This ordering also
+applies after failed startup; it does not authorize replay or imply rollback.
+The [Python example](/sdks/python#retain-member-mcp-bindings) specifies the exact
+row, empty-versus-missing and private-reference contract.
+
+Development source also supports a remote Python **observed requirement**
+callback. It carries the full accepted source and ordered intent with pending
+binding locators before issue, then re-observes around issuance. Drift withholds
+the binding and triggers exact revocation; failed cleanup is retried before
+registration on the next startup. The application owns its row comparison and
+final publication. The existing in-process Rust owner keeps its synchronous
+predicate, and `operator_self` behavior is unchanged. See the
+[Python contract](/sdks/python#retain-member-mcp-bindings). Eight focused native
+controls passed on `87568b0`, `1288df8` and `068f515`. The latest candidate passed
+all 44 selected native controls; installed shared setup remains unqualified.
+These results do not qualify remote Add, caller-owned final publication or
+installed Forge setup. Existing human approval and grant owners still apply;
+this is not approval reuse across members.
+
+### Private Services setup conversation (unreleased)
+
+The private JSONL `services` and `forge_services` adapters run a dedicated setup
+conversation in an actual fresh Connect session. They do not require an
+artificial application member or make helperless application startup itself a
+discovery conversation. Use the host's trusted viewer, selected realm and exact
+packaged resource digest in protocol-3 initialization. Keep the private child,
+prompt channel and entered work under the host's existing lifecycle owner.
+
+The development source now composes this sequence:
+
+1. Forward the user's complete request and constraints with `connect/send`.
+   The agent requests `toolkit_prepare_services`; the selected packaged helper
+   opens under that session's native attempt guard. Discovery and help do not
+   install a service or grant access.
+2. Let the agent check and install the selected integration. Software approval
+   is separate from `toolkit_enable_public_service`, which reviews the exact
+   installed job, no-sign-in declaration, agent, raw operations and duration
+   through the existing protected approval owner. This adapter's tool set does
+   not expose account or secret setup.
+3. After approved public access, Connect prevents new input and lets the native
+   turn finish. Preserve that turn's completion separately from the later
+   `service_finalization` event. Only an explicit native quiescent `Closed` and
+   successful cleanup of the same helper, guard and host resources allow the
+   existing configuration/grant finalizer to run.
+4. Read the retained finalizer result, then retire and close the private child.
+   Successful persistence and access do not attach the service to the old setup
+   conversation. Start an ordinary `rkat` session in the same realm and roots to
+   perform the user's actual service request, as in the
+   [terminal setup/use flow](/guides/request-an-integration#install-a-service-in-the-terminal).
+
+Explicit retirement, close, cancellation or login expiry prevent administration
+that has not entered. An already-entered write or grant must settle and its
+actual outcome remains visible. Busy, orphaned or unknown native close does not
+authorize finalization. An uncertain finalizer outcome cannot produce a
+successful settlement acknowledgement. Keep stdin open through the retirement
+and close replies; process absence alone does not prove that work settled.
+
+Private Services remains unreleased and unqualified. On the retained `2a8b345`
+candidate, focused native component checks passed, but all four packaged private
+Services attempts failed at setup catalog readiness. Later source corrections
+do not establish successful installed setup or use. See the existing
+[validation record](https://github.com/lukacf/meerkat-connect/blob/main/docs/releases/follow-up.md#completed-product-and-component-results).
 
 ## Prepare a setup researcher
 
@@ -96,12 +409,273 @@ Installing a package does not grant every operation it exports. Operation
 filtering does not make an unsafe selected operation or unsafe startup behavior
 safe: inspect those behaviors before installation and access approval.
 
-## Shared multi-caller setup
+## Select a fresh planning member (unreleased)
 
-Shared planning members, shared preparation and waiter restoration are deferred
-to 0.9.5. The 0.9.4 source retains ordinary setup, including independent callers,
-caller-specific authority, cancellation and recovery. It does not expose the
-shared workflow or peer-transport APIs.
+A host can reserve a compiled member for a workflow's planning lead during a
+fresh full-roster bootstrap. Supply a fresh `DurableAgentSpec` with
+`InternalOnly` addressability and no existing context, initial message, binding
+or placement. Distinct workflows can select distinct compiled members; the
+member name is not a global singleton.
+
+Retain the canonical workflow terms and the exact authenticated planning source
+before construction. The planning grant must be independently issued to the
+lead. One waiter's cancellation does not by itself revoke the shared planning
+source or its grant; final departure still drives source closure and cleanup.
+A workflow reference or member selection supplies no grant.
+
+External Rust hosts obtain `SetupWorkflowTerms.planning_source` by awaiting
+`PrivateOriginals::source_record_key` with the retained planning reference.
+This owner-derived historical locator handles equivalent route aliases without
+exposing the private key layout. It may still resolve a cancelled source; the
+reservation and planning owners separately enforce current authority.
+
+| Host step | Development API |
+| --- | --- |
+| On the composed gateway, reserve the selected fresh member before `prepare_bootstrap` | Await `ToolkitGatewayHost::reserve_workflow_member`; retain its returned `InstalledWorkflowMember` |
+| Confirm the exact host and bind the actual machine, with the same registration owner | The normal `GatewayHostComposition::prepare_bootstrap` call |
+| Complete the captured member inside the actual held full-roster callback, before release | Await `InstalledWorkflowMember::complete_held_member` with that member's `HeldIdentityMember` |
+| After the parent is admitted, retain its independently authorized planning selection for the exact original invocation | `PrivateOriginals::prepare_workflow_planning`, returned as `InstalledOriginalTaskBinding::planning` by `InstalledOriginalTaskOwner::original_binding` |
+
+`PreparedGatewayRuntime::adopt` binds the prepared construction to the final
+host. It does not publish native readiness or start acquisition recovery. Use
+the existing gateway runtime lifecycle to complete bootstrap and publish Ready;
+member selection alone is not a completed startup. Do not start a second
+recovery loop or manufacture a gateway readiness value.
+
+An in-process Rust host that completes the supported identity bootstrap directly
+uses `ToolkitGatewayHost::publish_runtime_bootstrap_completed(&runtime)` to
+publish that runtime's actual one-use completion. The runtime must still match
+the host's bound machine, identity owner and native mob incarnation. This starts
+the configured acquisition recovery owner under the existing close gates;
+normal host close and `join_close` retain responsibility for joining it. The
+method does not emit SDK Ready, admit an input or certify recovery completion.
+This development API and its new lifecycle regressions are not yet runtime
+qualified.
+
+The gateway validates the selection before reserving it, then selects its exact
+host lifetime in the existing source owner and composes the restriction with its
+existing registration hook. Invalid reservations leave the lifetime unselected.
+Normal bootstrap confirms the same live host and binds the actual machine; a
+different host cannot take over a reservation. A later bootstrap failure retains
+the restriction and does not mean the member was activated. The static reservation
+path requires actual registration capture during full-roster construction;
+`reserve_workflow_member` is not an API for adding to an already active roster.
+It retains the registration participant internally. The distinct declared-class
+commissioning path below performs an actual held Add on a running host.
+
+Keep the existing factory, registration and `MemberMcpCustody` owners. The
+registration and input owners enforce the workflow restriction against the
+captured native session and controller, including for retained inputs.
+`InstalledWorkflowMember::session` is an observation, not a capability to
+stop or replace a member. An explicit `planning: None` preserves ordinary
+singleton setup; an unavailable selected workflow does not fall back to it.
+
+For online creation, the development `application_driver::run_with_workflows`
+composition exposes the existing `ApplicationWorkflowRuntime` to the application's
+trusted launch owner. The supplied `toolkit_gateway` selects its private launch
+adapter with `--private-workflow-launch`. It commissions a declared
+`SharedWorkflow` member through actual native held Add, then requires the
+application's durable listing acknowledgment. It uses the actual admitted parent,
+selected WorkGraph claim and independently reviewed helper authority; a class
+name or JSON configuration cannot invent those inputs.
+
+The trusted host first prepares the parent original with the exact
+`WorkflowCommissionRequest` that it will later commission. Do this before the
+parent's first input. Preparation retains the immutable workflow selection and
+issues the parent's finite operation ceiling through the existing native grant
+owner. It neither creates the setup agent nor makes its tools available to the
+parent. An admitted parent with an empty ceiling would otherwise prevent the
+setup agent from using its catalog, even when that agent has its own grant.
+
+| Supplied private SDK | Prepare the parent before its first input | Commission and retain listing settlement | Prepare a participating child before submission |
+| --- | --- | --- | --- |
+| Python | `PrivateHostClient.prepare_workflow_parent` | `PrivateHostClient.begin_workflow_commission` | `PrivateHostClient.prepare_workflow_child` |
+| TypeScript | `PrivateHostClient.prepareWorkflowParent` | `PrivateHostClient.beginWorkflowCommission` | `PrivateHostClient.prepareWorkflowChild` |
+
+For an authenticated Console child, the development Python client instead uses
+`prepare_console_workflow_child(ConsoleWorkflowChildRequest(...), enrollment)`
+before the normal authenticated `/console/send`. The request selects the actual
+parent, planning input, child WorkGraph claim, finite targets and audiences,
+plus that send's key and content digest. The key and acknowledged enrollment
+are correlation only. At bind, the installed ingress checks the native verified
+human, the same live login owner, selected identity, raw input and current
+workflow. Child preparation uses the actual bound session/controller before
+native admission, and retains the login on that source for protected review.
+
+An exact repeated proposal returns either `None` or the retained source locator.
+The locator is recorded before the first awaited source write and is not proof
+of successful preparation or admission. After a partial failure, cancellation or
+login retirement, the same immutable proposal and enrollment owner can still
+observe that locator while the exact enrollment remains retained on the same
+open private connection. Expiry and enrollment pruning can make this observation
+unavailable; retain any observed locator with the request and issuance IDs.
+They cannot claim another Console
+input, refresh authority or issue again through this observation. Retain the
+request and issuance IDs. Cold source evidence preserves the exact input but
+does not restore a login or permit protected work. Ordinary unselected Console
+sends and application-event `prepare_workflow_child` keep their existing paths.
+These Console-child changes remain pending native and installed validation.
+
+Retain the request and its explicit issuance IDs across an uncertain reply;
+retry the same selection rather than allocating new IDs. A changed commission
+or an attempt to retrofit an admitted parent is refused. This preparation is
+specific to the selected shared workflow. Ordinary singleton setup keeps its
+existing configuration path.
+
+A prepared commission is not a submitted G input or completed acquisition.
+Retain its attempt and join an entered publication even if the observing caller
+is cancelled. The application selects a real shared workflow before each
+participating original's first submission; a later new original can join, but
+an already-bound singleton original cannot be upgraded. Ordinary Console requests
+without that host selection keep their single-caller setup path. No heuristic
+grouping or new model-facing workflow tool is implied.
+
+The full supplied two-caller installation, use and ordinary continuation case
+remains unqualified. Actual ordinary class Add and same-session respawn have
+passed separately; that result does not qualify shared G resource reconstruction.
+
+### Observe shared setup progress (unreleased)
+
+An admitted peer can read its own `setup_job` and `setup_jobs` progress while
+another peer's selected validation is running. Those reads retain the exact
+peer and acquisition scope; they do not expose another caller's jobs or permit reuse of a
+closed read entry. Installation and other effects remain serialized, including
+publication of their exact job and validation ownership.
+
+Shared `setup_state` also avoids probing a selected Node toolchain for planning
+data that its response omits. Ordinary setup state still observes that planning
+data afresh, and an actual build check still validates the selected tool. These
+changes passed local Python concurrency, isolation and changed-tool controls;
+they do not establish deployed latency or installed shared-workflow acceptance.
+
+## Restore selected workflow sources (unreleased)
+
+After ordinary native resume, a host can restore the explicitly selected sources
+for a shared setup workflow without submitting their prompts again. The parent
+and caller must have opted into retaining their exact bound inputs before their
+first submission. Inputs that were not selected stay with their application and
+cannot be retrofitted from conversation history.
+
+| Source | Host selection and restoration |
+| --- | --- |
+| Planning parent | Select its operation ceiling with the private SDK parent preparation above before first input. A legacy controller-only parent instead uses `PrivateOriginals::prepare_workflow_parent_source`. Restoration preserves the selected kind and checks actual native custody and current grants; it does not upgrade a legacy parent. |
+| Setup agent | Retain the same canonical workflow and reserve its compiled member before ordinary roster resume. After native registration captures that member, await `InstalledWorkflowMember::restore_admitted_source`. |
+| Original caller | Before its first binding, call `InstalledWorkflowMember::prepare_waiter_source` for the exact original. After ordinary native resume, await `restore_waiter_source` on that same selected workflow member. |
+
+The composed `MobBootstrapSpec` must carry the application's actual
+`controller_pin_source`. Configuring that source only on a separate
+`MobSessionBridge` does not populate the runtime field used by the gateway.
+Keep the real session service and its current actor ownership; stored metadata
+cannot replace it.
+
+When the member factory uses `AgentFactory::user_config_root`, the mob's session
+service reports that root (`MobSessionService::session_comms_identity_root`), and
+the mob seats dormant in-process members under it without a declaration.
+`MobBootstrapSpec::with_session_identity_config_root` stays as an override that
+wins over the reported root: a declared root that differs is logged as a warning
+at bootstrap, and a member seated under a root its factory does not load from is
+refused at its first materialization. A session service that reports no durable
+root has every dormant seat refused unless a root is declared. Empty roots are
+refused during bootstrap.
+
+`UnifiedRuntimeBuilder::session_identity_config_root` configures builder-owned
+specs and rejects a caller-supplied spec; use the raw-spec declaration for a
+custom session service. Matching the roots lets dormant seating and subsequent
+materialization use the same session comms identity. The declaration itself
+does not resume a member or establish cold-recovery acceptance.
+
+These methods restore source custody only. The setup agent remains restricted
+until its actual workflow attachment is completed. Restoring a caller does not
+grant its effects to the setup agent, create a delivery interest, start recovery
+or complete the original task. Missing, changed, cancelled or unselected evidence
+is refused. Both Find-only and explicitly selected effect-waiter sources have
+reconstruction paths. Effect restoration retains the exact previously issued
+target references without reissuing grants; each operation still checks its own
+current target authority. Five idle component controls passed, which does not
+establish convergence of both live recovery owners after Ready.
+
+Cold rebind distinguishes an enrolled historical source whose native custody is
+still unknown from a source that is no longer retained. Until exact native
+restoration succeeds, the former reports `PolicyUnavailable`; a stored Pending
+or Promoted decision does not itself grant custody or establish
+`AdmissionPending`. Failure or cancellation of the restoration read leaves that
+uncertainty intact. A validated Withdrawn decision or an explicit source release
+returns `NotRetained` for the current custody observation. Operation cancellation
+is checked independently and refuses the original.
+
+These source methods do not reconstruct a late-created shared G's physical peer
+or approval custody after process loss. The implemented warm respawn path uses
+the same Driver's retained resource owners for its exact Active/Resume successor,
+preserves the same-session approval binding and replaces the retired peer. It
+retains an eight-peer lifetime bound. Full shared G respawn and gateway restart
+remain unqualified by installed execution.
+
+Existing installed activation is the supported composition path for cold
+reconstruction; a new upstream activation callback is not required. Select the
+same completed installation and canonical workflow/admission before ordinary
+native restore, preserve actual registration and build callbacks, and let native
+Ready publication start the existing recovery owner. Do not repeat fresh
+held-bootstrap finalization or submit another G prompt to recreate authority.
+Ready alone does not establish usable setup tools or settled prior work.
+
+A restored member can have a durable seat without an executor. Reading identity
+status, ownership or session records does not wake it. The development Connect
+setup-continuation path resolves the historical session's canonical identity,
+checks the selected member, role and current session, then explicitly calls
+`materialize_tracked` before consulting live registration and custody. It checks
+the returned session and identity again and retains the existing native
+historical-input and current-authority checks. This wake does not submit another
+input or replay the original task. The public wake API has no atomic
+expected-session argument, so the surrounding checks do not prove that a
+concurrent replacement can never be woken. This correction and its two cold
+continuation regressions remain unqualified by runtime execution.
+
+The physical owner now retains exact close snapshots and request history and
+supports a one-use reattachment claim under the original local lease. Local
+Python controls cover empty and fully settled resources, changed requests and
+unknown work. Prior preparation and validation handles remain readback only;
+reattachment cannot use them to dispatch an old effect again.
+
+Development source now connects the exact completed-artifact and
+workflow/admission association to the native, approval and physical owners'
+close observations. The opt-in private-workflow path selects ordinary installed
+Restore, rechecks current admission and registration, and reconstructs the helper
+from its original source provenance before new caller work. Legacy rows without
+that provenance remain refused. A physical snapshot alone cannot authorize
+reattachment, and prior approval records cannot authorize new work.
+
+This path has passed source review; actual two-process recovery followed by
+fresh caller work and restored helper tool use remains unqualified. Pending
+approvals, interrupted work and unknown effects retain their original records
+and remain unresolved; they cannot be replaced by fresh authorization or
+silently retried. Full recovery includes those cases and is unfinished. Source
+restoration, ordinary empty-round helper reattachment and warm shared respawn
+do not qualify cold shared-G recovery or selected-preparation replay.
+
+Restoring a live Console login is a separate path, and arbitrary older MobKit
+stores are not supported merely because a schema number or source reconstruction
+method exists. See the
+[store compatibility contract](/reference/stores#other-stores-and-schema-compatibility).
+
+## Ordinary authorization review window
+
+The installed host gives ordinary work and already-admitted controller decisions
+an initial **30-minute local policy allowance**, including enrolled collector
+operations that require human review. The host-configured `consent_validity`,
+native grant expiry, retained restrictions and workflow limits can shorten the
+usable approval window. Checking a prepared decision does not extend its
+original expiry or grant additional operations.
+
+This is a finite window, not a guarantee that a pending approval will remain
+usable for 30 minutes. Authority changes, cancellation or another earlier bound
+can invalidate it first, and a longer human wait can still outlast it. Do not
+silently refresh authorization or retry a protected effect to hide that refusal;
+use the operation's reported state and the caller's explicit recovery flow.
+
+Setup-helper **Operation** decisions keep their exact canonical setup deadline.
+The ordinary window cannot extend or replace it, and an unavailable helper
+deadline is still refused. This allowance change adds no renewal task or retry
+and does not change the native owners' shorter grant or restriction bounds.
 
 ## Cancel one original's operations
 
@@ -114,14 +688,105 @@ retained by the host, pass its exact `PrivateOriginalRef`:
 | Python | `PrivateHostClient.cancel_original_operation` |
 | TypeScript | `PrivateHostClient.cancelOriginalOperation` |
 
-The SDK returns `operations_cancelled` when the original source cancellation
-completes. This does not mean every entered operation, process or model run has
-stopped. Sibling requests and shared access retain their own owners. A timeout
-leaves the outcome unknown; the SDK does not repeat the command automatically.
+The development SDKs return one of two states:
+
+| State | What the application can report |
+| --- | --- |
+| `operations_cancelled` | The source cancellation and selected workflow departure completed. |
+| `operations_cancelled_cleanup_pending` | Cancellation and departure completed; the host still owns unfinished workflow cleanup. |
 
 The host starts its acquisition recovery worker only after native bootstrap
-publishes readiness. Prepared-owner adoption alone does not start it. Preserve
-that native lifecycle boundary when composing the host.
+publishes readiness. Prepared-owner adoption alone does not start it; preserve
+the [native lifecycle completion](#select-a-fresh-planning-member-unreleased)
+when composing the host. Keep that existing worker running for pending cleanup.
+Repeating cancellation is not required to drive it. Neither state means every entered
+operation, process or model run has stopped. Sibling requests and shared access
+retain their own owners. A timeout leaves the outcome unknown; the SDK does not
+repeat the command automatically.
+
+For a selected shared workflow, the same recovery worker retires the exact
+membership's future setup calls when setup expires or commits its result. It
+preserves sibling memberships and the Original's other work.
+
+When setup admits an approved service continuation, the acquisition remains a
+cohort member until that exact native service input has a finalized receipt.
+Admission alone does not release membership. Missing, pending or unavailable
+receipt observations leave it pending; the worker observes the retained input
+without restoring a Console login or service grant. A finalized failure also
+permits departure, so departure does not establish successful service use.
+
+Explicit cancellation, setup failure, expiry and ordinary results without an
+approved service admission retain their independent departure behavior. A
+pending result continuation remains deliverable; an acknowledged continuation
+is not replayed to perform cleanup.
+
+After the last waiter leaves, cleanup fences the lead's future effects and
+observes its exact admission or terminal receipt. Active, unknown or receipt-less
+work remains pending. This observation does not establish member retirement or
+physical MCP cleanup. Keep the existing recovery owner running after the caller
+returns.
+
+Use matching development SDK and host generations. Older SDK decoders reject the
+pending-cleanup state, and bootstrap v1 does not negotiate it. Focused
+cancellation/recovery controls pass; the complete shared setup journey is still
+under development.
+
+## Retained original inputs (unreleased)
+
+<Note>
+The ordinary-input retention correction is implemented and source-reviewed.
+Compilation and its native recovery regressions remain pending. This does not
+establish installed cold-recovery acceptance.
+</Note>
+
+The development host retains the exact first prepared authenticated input with
+its custody attempt in the canonical original-source row. This supplies input
+bytes for cold restoration after the native runtime retires its payload.
+Restoration still requires the matching native input, replay evidence, current
+owners and native admission. Retained bytes do not select a service capability,
+restore a login or authorize a new submission.
+
+The complete serialized source record has a **2 MiB limit (2,097,152 bytes)**.
+The prepared input, injected context, authority association and JSON envelope all
+count toward that limit. It is not a two-megabyte allowance for user text.
+Oversized retention fails with `Unavailable` before a Candidate is staged. It
+leaves the previous source row unchanged; an association legitimately written
+by the earlier binding step can remain. The host does not truncate the input or
+raise the storage limit to make it fit.
+
+The exact private payload remains for the lifetime of the existing source row;
+this change adds no automatic pruning. Include that retained content when
+assessing protection and retention of the source database and its backups.
+
+Existing rows without retained input remain readable, but cannot supply missing
+bytes after native payload retirement. Older host binaries reject rows carrying
+the new retention field. Mixed-version writers and rollback to an older binary
+against those rows are unsupported; there is no automatic conversion or repair.
+
+## Read a service input receipt (unreleased)
+
+For an authenticated approved service original already retained by the host,
+pass its exact `PrivateOriginalRef` to the development SDK:
+
+| Surface | Method |
+| --- | --- |
+| Python | `PrivateHostClient.observe_service_input_receipt` |
+| TypeScript | `PrivateHostClient.observeServiceInputReceipt` |
+
+The read preserves native admission, receipt source, input identity, recipient
+batch and outcome. An absent or pending receipt does not establish completion.
+Reading again observes the retained input; it does not submit the work again.
+
+A `finalized` report means a native receipt exists, not that the service action
+succeeded. In particular, `outcome.completion_type: "outcome_unknown"` means the
+prior work's outcome is unknown. Preserve that result without marking an answer
+committed or automatically retrying the action. Its `runtime_termination` receipt
+has a null report `run_id`; the historical run ID is inside `outcome.run_id`.
+That historical ID does not identify a new execution.
+
+Use matching development host and SDK builds. Receipt decoding does not itself
+provide native cold recovery, physical cleanup or support for older stores;
+those paths remain under development.
 
 ## Recover unpublished service approvals
 
@@ -398,7 +1063,7 @@ own concrete owner contracts.
 
 The terminal finalizes service-secret setup through native realm configuration and credential storage. It then returns to the setup conversation; use the service in a new ordinary agent session in that realm. An integrated Console supplies its application-owned persistence and runtime composition.
 
-See [the terminal journey](/guides/request-an-integration#set-up-a-service-key-in-the-terminal)
+See [the terminal journey](/guides/request-an-integration#install-a-service-in-the-terminal)
 for the user-facing steps.
 
 ## Advanced host composition
@@ -442,7 +1107,7 @@ Keep auth, hooks and transport configuration stable during operations. Preserve 
 
 ## Compose setup and continuation
 
-Before offering functional acquisition, the host needs authenticated request admission, durable setup work, exact preparation ownership, human-action handling, permitted activation, role readiness and original-task continuation. Missing any of these is a declared unsupported path.
+Before offering functional acquisition, the host needs authenticated request admission, durable setup work, exact preparation coalescing, human-action handling, permitted activation, role readiness and original-task continuation. Missing any of these is a declared unsupported path.
 
 The original agent's continuation targets its durable task and identity. Resolve the current session through Meerkat/Meta when resuming; an old session ID or a model-supplied correlation is not authority.
 

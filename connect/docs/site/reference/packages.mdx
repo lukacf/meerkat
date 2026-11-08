@@ -71,6 +71,23 @@ frontend and host's own contracts and runtime verification. This source
 inspection improvement does not establish distribution in a Connect archive or
 an installed frontend experience.
 
+## Bind declarations to runtime owners
+
+Owner IDs identify obligations; the selected backend must bind them to actual
+implementations. `ValidatedManifest::check_host` checks the host's advertised
+contract and service vocabulary. It does not resolve arbitrary owner names,
+register callbacks or issue grants.
+
+For [selected Python installation](/acquisition/local-install), authentication,
+policy, readiness, shutdown, rollback and export enforcement remain declarations.
+There is no automatic Connect owner-name lookup on that portable MCP path.
+The host must retain its real configuration/policy selections and use its
+implemented credential, operation and cleanup owners. Readiness check names do
+not run checks, and `maximum_wait_ms` does not set the runtime's timeout.
+Use owner references only where that composition actually supplies the binding;
+leave missing bindings unresolved. Backend-specific checks such as the
+[Compose profile](/reference/deployment#local-compose-backend) are separate.
+
 ## Components
 
 A `Component` names its ID/version, source, runtime, placement, lifetime, activation scope, dependencies, host contracts, state, readiness, shutdown and rollback.

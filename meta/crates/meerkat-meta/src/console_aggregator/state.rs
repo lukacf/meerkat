@@ -28,6 +28,9 @@ pub enum SendTransition {
     /// A governed dispatch's bind answered bound, before its input is
     /// submitted.
     MarkSubmitted,
+    /// A governed dispatch's submission answered unresolved: its native
+    /// admission's answer was lost, and its input may have run.
+    MarkUnresolved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,6 +498,36 @@ mod tests {
                     settled,
                     vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
                 ))
+            );
+        }
+    }
+
+    /// A submitted send whose submission answered unresolved (its input may
+    /// have run) stays submitted, recording that answer: it is neither
+    /// failed nor held, and the runtime's evidence settles it. From every
+    /// other state the mark is refused.
+    ///
+    /// RED before the fix: the mark is refused from `Submitted` too.
+    #[test]
+    fn an_unresolved_submission_keeps_the_send_submitted() {
+        assert_eq!(
+            SendState::Submitted.apply(SendTransition::MarkUnresolved),
+            Ok((
+                SendState::Submitted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            ))
+        );
+        for state in [
+            SendState::Requested,
+            SendState::AcceptedPersisted,
+            SendState::Dispatching,
+            SendState::Delivered,
+            SendState::DeliveryFailed,
+        ] {
+            assert_eq!(
+                state.apply(SendTransition::MarkUnresolved),
+                Err("illegal send state transition"),
+                "{state:?}"
             );
         }
     }

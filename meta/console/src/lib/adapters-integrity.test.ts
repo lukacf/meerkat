@@ -109,11 +109,27 @@ for (const [name, mapper] of [["stock", stock], ["shared", shared]] as const) {
     assert.equal(conversationEntryText(user), "Keep this request");
     const status = held.find(entry => entry.kind === "message" && entry.identity.role === "system");
     assert(status && status.kind === "message");
-    assert.equal(status.text, "Message held: nothing was delivered yet. Send it again.");
+    assert.equal(status.text, "Message held: nothing was delivered yet. Check before sending it again.");
     assert.equal(status.interactionId, "held-run");
     const cleared = mapper(null, [frame("input", "user_input", { content: "Keep this request" }, { status: "accepted", interactionId: "held-run" })], options);
     assert.equal(cleared.length, 1);
     const delivered = mapper(null, [frame("input", "user_input", { content: "Keep this request", delivery_hold: hold }, { status: "delivered" })], options);
+    assert.equal(delivered.length, 1);
+  });
+
+  test(`${name}: an unresolved governed input shows that it may have run until it settles`, () => {
+    const unresolved = { reason: "admission_unresolved", retryable: false };
+    const entries = mapper(null, [frame("input", "user_input", { content: "Keep this request", delivery_unresolved: unresolved }, { status: "submitted", interactionId: "unresolved-run" })], options);
+    const user = entries.find(entry => entry.identity.role === "user");
+    assert(user);
+    assert.equal(conversationEntryText(user), "Keep this request");
+    const status = entries.find(entry => entry.kind === "message" && entry.identity.role === "system");
+    assert(status && status.kind === "message");
+    assert.equal(status.text, "Message may have run. Check before sending it again.");
+    assert.equal(status.interactionId, "unresolved-run");
+    const submitted = mapper(null, [frame("input", "user_input", { content: "Keep this request" }, { status: "submitted", interactionId: "unresolved-run" })], options);
+    assert.equal(submitted.length, 1);
+    const delivered = mapper(null, [frame("input", "user_input", { content: "Keep this request", delivery_unresolved: unresolved }, { status: "delivered" })], options);
     assert.equal(delivered.length, 1);
   });
 

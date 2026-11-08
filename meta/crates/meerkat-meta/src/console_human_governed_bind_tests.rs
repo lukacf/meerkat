@@ -8,8 +8,11 @@
 #[path = "../tests/support/governed_mob.rs"]
 mod governed_support;
 
+#[path = "console_governed_losing_bridge.rs"]
+mod losing;
+
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,10 +49,40 @@ async fn governed_identity_runtime_as(
     fixture: &Fixture,
     addressability: AgentAddressability,
 ) -> (Arc<IdentityRuntime>, AgentIdentity) {
-    let bridge: Arc<dyn SessionBridge> = Arc::new(
-        MobSessionBridge::new(fixture.handle.clone())
-            .with_controller_pin_source(fixture.service.clone()),
-    );
+    governed_identity_runtime_with(addressability, Arc::new(mob_bridge(fixture))).await
+}
+
+/// The fixture's mob session bridge, its session owner pinning the actor's
+/// controller.
+fn mob_bridge(fixture: &Fixture) -> MobSessionBridge {
+    MobSessionBridge::new(fixture.handle.clone())
+        .with_controller_pin_source(fixture.service.clone())
+}
+
+/// [`governed_identity_runtime`] whose session bridge loses a governed
+/// delivery's answer (`lose`), counting in `native_accepted` the real native
+/// admissions of new work it saw before it did.
+async fn governed_identity_runtime_losing(
+    fixture: &Fixture,
+    lose: losing::LostAnswer,
+    native_accepted: Arc<AtomicUsize>,
+) -> (Arc<IdentityRuntime>, AgentIdentity) {
+    governed_identity_runtime_with(
+        AgentAddressability::Addressable,
+        Arc::new(losing::LosingBridge {
+            inner: mob_bridge(fixture),
+            lose,
+            native_accepted,
+        }),
+    )
+    .await
+}
+
+/// [`governed_identity_runtime_as`] over `bridge`.
+async fn governed_identity_runtime_with(
+    addressability: AgentAddressability,
+    bridge: Arc<dyn SessionBridge>,
+) -> (Arc<IdentityRuntime>, AgentIdentity) {
     let runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
         continuity_store: Arc::new(LocalContinuityStore::in_memory().expect("continuity store")),
         lease_provider: Arc::new(LocalLeaseProvider::new()),
@@ -1360,6 +1393,208 @@ async fn a_submitted_send_whose_input_never_reached_the_runtime_fails_on_replay(
     );
     assert_eq!(bind_count(&host), binds, "never dispatched again");
     assert!(host.admitted.lock().unwrap().is_empty(), "admitted nowhere");
+}
+
+/// The unresolved answer a governed send's frame records.
+fn unresolved_record() -> serde_json::Value {
+    json!({"reason": "admission_unresolved", "retryable": false})
+}
+
+/// The send frame once its dispatch answered and ended: settled
+/// (`delivered`, `delivery_failed`), or left `submitted` with its
+/// unresolved answer recorded, its dispatch owner gone.
+async fn unresolved_frame(
+    aggregator: &MetaConsoleAggregator,
+    accepted: &ConsoleInteractionAccepted,
+) -> crate::console_aggregator::ConsoleFrame {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let frame = frame_now(aggregator, accepted).await;
+            if matches!(
+                frame.status,
+                ConsoleFrameStatus::Delivered | ConsoleFrameStatus::DeliveryFailed
+            ) || (frame.payload.get("delivery_unresolved").is_some()
+                && !aggregator.send_dispatch_claimed(&frame.id))
+            {
+                return frame;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the console dispatch answers")
+}
+
+/// A governed Console steer whose native admission was real but whose
+/// answer was lost (the bridge answers an internal error after the native
+/// admission accepted the input as new work, as Meta's governed ingress row
+/// for an error after admission does): the steer answers HTTP 504
+/// `governed_admission_unresolved`, and its frame is not failed. The input
+/// may have run, so the send stays `submitted` and records the unresolved
+/// answer (`delivery_unresolved`). A replay of its key reads the runtime's
+/// evidence, finds the input admitted and settles the send `delivered`,
+/// without a dispatch: admitted once.
+///
+/// RED before the fix: the frame is `delivery_failed` at once, and the
+/// replay replays the failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unresolved_steer_after_a_real_admission_stays_submitted_until_a_replay_settles_it() {
+    let fixture = Arc::new(Fixture::new().await);
+    let native_accepted = Arc::new(AtomicUsize::new(0));
+    let (runtime, _identity) = governed_identity_runtime_losing(
+        &fixture,
+        losing::LostAnswer::PostAdmissionInternal,
+        Arc::clone(&native_accepted),
+    )
+    .await;
+    let aggregator = MetaConsoleAggregator::in_memory();
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "unresolved-steer"));
+    let mut sent = request("unresolved-steer", HUMAN);
+    sent.handling_mode = Some("steer".to_string());
+    let error = send(&aggregator, &runtime, &host, sent.clone())
+        .await
+        .expect_err("the steer's admission answer was lost");
+    let response = super::console_send_error_response(error);
+    assert_eq!(response.status(), axum::http::StatusCode::GATEWAY_TIMEOUT);
+    let body = json_body(response).await;
+    assert_eq!(body["error"], "governed_admission_unresolved", "{body}");
+    assert_eq!(
+        native_accepted.load(Ordering::SeqCst),
+        1,
+        "the native admission accepted the input as new work"
+    );
+    let input = aggregator
+        .query_timeline(ConsoleTimelineQuery::default())
+        .await
+        .unwrap()
+        .frames
+        .into_iter()
+        .find(|frame| frame.kind == "user_input")
+        .expect("the steer's input frame");
+    assert_eq!(
+        input.status,
+        ConsoleFrameStatus::Submitted,
+        "unresolved, never failed: {input:?}"
+    );
+    assert_eq!(
+        input.payload["delivery_unresolved"],
+        unresolved_record(),
+        "{input:?}"
+    );
+    let binds = bind_count(&host);
+
+    let replayed = send(&aggregator, &runtime, &host, sent)
+        .await
+        .expect("the replay answers the acceptance");
+    assert_eq!(replayed.input_frame_id, input.id);
+    assert_eq!(
+        settled(&aggregator, &replayed).await,
+        ConsoleFrameStatus::Delivered,
+        "the replay settles the send from the runtime's evidence"
+    );
+    assert_eq!(bind_count(&host), binds, "never dispatched again");
+    assert_eq!(native_accepted.load(Ordering::SeqCst), 1, "admitted once");
+}
+
+/// A queued governed send whose submission was lost before native admission
+/// settled it (its answer unresolved; here none of its input reached the
+/// runtime) stays `submitted` with its unresolved answer recorded. In the
+/// process that saw that answer an absent read is not final (the input may
+/// still be admitted there): neither a replay of its key nor its recovery
+/// fails it, and nothing dispatches it again. A later process's start
+/// settles it from evidence as any send a stopped process left submitted:
+/// absent there, it fails, its outcome unknown.
+///
+/// RED before the fix: the frame is `delivery_failed` at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unresolved_send_is_failed_by_an_absent_read_only_in_a_later_process() {
+    let fixture = Arc::new(Fixture::new().await);
+    let native_accepted = Arc::new(AtomicUsize::new(0));
+    let (runtime, _identity) = governed_identity_runtime_losing(
+        &fixture,
+        losing::LostAnswer::CustodyLost,
+        Arc::clone(&native_accepted),
+    )
+    .await;
+    let store: Arc<dyn crate::console_aggregator::ConsoleLogStore> =
+        Arc::new(crate::console_aggregator::InMemoryConsoleLogStore::new());
+    let aggregator = MetaConsoleAggregator::new(Arc::clone(&store));
+    aggregator.read_send_admission_from(fixture.machine.clone());
+    let host = ReviewingHost::new(&fixture, &reviewed(&fixture, "unresolved-queued"));
+    let accepted = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("unresolved-queued", HUMAN),
+    )
+    .await
+    .expect("the queued send is accepted");
+    let frame = unresolved_frame(&aggregator, &accepted).await;
+    assert_eq!(
+        native_accepted.load(Ordering::SeqCst),
+        0,
+        "nothing admitted"
+    );
+    assert_eq!(
+        frame.status,
+        ConsoleFrameStatus::Submitted,
+        "unresolved, never failed: {frame:?}"
+    );
+    assert_eq!(
+        frame.payload["delivery_unresolved"],
+        unresolved_record(),
+        "{frame:?}"
+    );
+    let binds = bind_count(&host);
+
+    let replayed = send(
+        &aggregator,
+        &runtime,
+        &host,
+        request("unresolved-queued", HUMAN),
+    )
+    .await
+    .expect("the replay answers the acceptance");
+    assert_eq!(replayed.input_frame_id, accepted.input_frame_id);
+    assert_eq!(
+        frame_now(&aggregator, &accepted).await.status,
+        ConsoleFrameStatus::Submitted,
+        "an absent read in this process never fails it"
+    );
+    let recovered = aggregator
+        .recover_send(
+            std::slice::from_ref(&accepted.identity),
+            "console",
+            "unresolved-queued",
+            &super::ConsoleSendGovernance::default().scope,
+        )
+        .await
+        .expect("the recovery answers")
+        .expect("the caller's own send");
+    assert_eq!(
+        recovered.native,
+        crate::console_aggregator::NativeSendObservation::Absent
+    );
+    assert_eq!(
+        frame_now(&aggregator, &accepted).await.status,
+        ConsoleFrameStatus::Submitted,
+        "nor does its recovery here"
+    );
+    assert_eq!(bind_count(&host), binds, "never dispatched again");
+
+    let later = MetaConsoleAggregator::new(Arc::clone(&store));
+    later.read_send_admission_from(fixture.machine.clone());
+    let outcome = later.reconcile_interrupted_sends().await;
+    assert_eq!(outcome.lost, 1, "{outcome:?}");
+    let failed = frame_now(&later, &accepted).await;
+    assert_eq!(failed.status, ConsoleFrameStatus::DeliveryFailed);
+    assert_eq!(
+        failed.payload["delivery_failure"],
+        json!({"reason": "outcome_unknown", "retryable": true}),
+        "{failed:?}"
+    );
+    assert_eq!(bind_count(&host), binds, "never dispatched again");
 }
 
 /// A governed Console steer the host refuses answers its typed

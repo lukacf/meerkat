@@ -216,6 +216,15 @@ pub struct UnifiedRuntimeBuilder {
     mob_announcements: Option<crate::mob_announcements::AnnouncementConfig>,
     persistent_metadata: Option<Arc<dyn PersistentMetadataStore>>,
     access_controller: Option<crate::access::AccessController>,
+    /// Whether the runtime keeps the gating owner's state in its metadata
+    /// store (see [`keep_gating_state`](Self::keep_gating_state)).
+    keep_gating_state: bool,
+    /// The console audit log's bounds, when not the default (see
+    /// [`console_audit_limits`](Self::console_audit_limits)).
+    console_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
+    /// The bounds of the log's MCP app tool calls, when set apart (see
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)).
+    console_tool_call_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
     flow_editor_host_deploy: bool,
     topology_control_policy: crate::topology_control::TopologyControlPolicy,
     live: Option<super::live_compose::LiveOptions>,
@@ -1358,6 +1367,41 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
+    /// Keep the gating owner's state (its pending approvals and its bounded
+    /// gating audit) in the composition's metadata store across restarts:
+    /// restored when the runtime is built, before anything evaluates a
+    /// gating action, and written after every gating change and at
+    /// shutdown. The stock gateways keep it. Off by default, so a host that
+    /// persists [`UnifiedRuntime::gating_state_snapshot`] itself keeps doing
+    /// so: the owner restores only once. A metadata store that keeps nothing
+    /// across restarts keeps gating in memory.
+    pub fn keep_gating_state(mut self, keep: bool) -> Self {
+        self.keep_gating_state = keep;
+        self
+    }
+
+    /// Bound the console audit log. Its two record sets, the console's
+    /// changes and MCP app tool calls, each keep their own budget of
+    /// `limits` (by default 20000 rows, none older than 365 days, each), so
+    /// tool calls never push a change row out;
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)
+    /// bounds the tool calls apart. The log is kept in the composition's
+    /// metadata store. [`Self::build`] refuses limits that keep no row
+    /// (`max_entries` 0).
+    pub fn console_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
+        self.console_audit_limits = Some(limits);
+        self
+    }
+
+    /// Bound the console audit log's MCP app tool calls apart from its
+    /// changes (by default as [`console_audit_limits`](Self::console_audit_limits)
+    /// bounds each record set). [`Self::build`] refuses limits that keep no
+    /// row (`max_entries` 0).
+    pub fn console_tool_call_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
+        self.console_tool_call_audit_limits = Some(limits);
+        self
+    }
+
     /// Let the Flow Editor on the reference app router run `rkat` on this
     /// host for callers that no enforced access controller governs. Off by
     /// default; see [`UnifiedRuntime::allow_flow_editor_host_deploy`].
@@ -1403,6 +1447,19 @@ impl UnifiedRuntimeBuilder {
 
     pub async fn build(mut self) -> Result<UnifiedRuntime, UnifiedRuntimeBuilderError> {
         // --- Identity-first builder validation ---
+
+        if self
+            .console_audit_limits
+            .iter()
+            .chain(&self.console_tool_call_audit_limits)
+            .any(|limits| limits.max_entries == 0)
+        {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "console audit limits: max_entries must be at least 1; a log that keeps no row \
+                 would reuse its row numbers"
+                    .into(),
+            ));
+        }
 
         if self.mob_spec.is_some() && self.mob_storage.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
@@ -2177,6 +2234,22 @@ impl UnifiedRuntimeBuilder {
         #[cfg(feature = "extension-state")]
         {
             runtime.extension_authority = extension_authority;
+        }
+
+        // The console audit log over the composition's metadata store, with
+        // the host's bounds when it set them.
+        if self.console_audit_limits.is_some() || self.console_tool_call_audit_limits.is_some() {
+            let limits = self.console_audit_limits.unwrap_or_default();
+            let tool_call_limits = self.console_tool_call_audit_limits.unwrap_or(limits);
+            runtime.console_audit = crate::console_audit::ConsoleAuditLog::over(
+                Arc::clone(&runtime.persistent_metadata),
+                limits,
+            )
+            .map(|log| Arc::new(log.with_tool_call_limits(tool_call_limits)));
+        }
+        // Restored before anything can evaluate a gating action.
+        if self.keep_gating_state {
+            runtime.keep_gating_state_in_realm().await;
         }
 
         // Construct session bridge from the mob handle for identity-first wiring.

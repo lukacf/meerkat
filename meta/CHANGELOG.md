@@ -96,6 +96,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   they need the Meta runtime, so on the MobKit runtime the console approves
   nothing.
 
+- Rust: `MemoryAuthor::Operator` is a struct variant with an optional
+  `principal`: `MemoryAuthor::Operator { principal: None }` is the former
+  value, and a match on it adds `{ .. }`. Its JSON form is unchanged when
+  no principal is named. `ConsoleSessionFence` gains `revoked_by`.
+
 ### Security
 
 - Tokens minted with an `auth_config` shared secret no longer count as a
@@ -254,6 +259,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   new one makes everyone new to the console, and the key signs the console
   tokens of every person, administrators included.
 
+- An access configuration that names the new `audit.view` action is refused
+  by earlier releases (unknown action): keep it out of a configuration an
+  earlier gateway may still load.
+
 ### Added
 
 - `meta/console/whoami` reports who the console acts as: the actor
@@ -328,6 +337,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   public key only (`provider: "oidc"`). The client secret is referenced, by
   a declared secret private field or a private file, never written into
   source. Needs the Meta runtime.
+
+- A console side chat records who opened it: `meta/fork_member` writes the
+  caller's console principal (the one `meta/console/whoami` reports) into
+  the side chat's `side_chat_creator` label and answers it as `creator`
+  (`null` for an anonymous caller of an open console). The label counts
+  only on a side chat Meerkat's roster verifies; a `side_chat_creator`
+  label set any other way, or copied from the forked agent, is dropped on
+  every surface. It records the creator and grants nothing, and the
+  console shows it only to the creator and to the admins of an enforced
+  access policy.
+
+- A console audit log: each console change on `POST /console/rpc` and
+  `/console/rpc/multipart`, every MCP app tool call and each Flow Editor
+  change (a draft store write, a deploy with `execute`, a validation with
+  `rkat_validate`), a refusal included, writes a row naming the actor
+  (kind, principal, a person's verified issuer and subject, assurance and a
+  digest of the login, never the token), the method, its target
+  identifiers, the outcome and the owner's receipt; sends, voice and live
+  media are left out, and a request the console cannot authenticate writes
+  none. A row is bounded (at most 16 identifiers each way beyond the
+  change's known ones, which it keeps first, and 4 KiB in all) and says
+  when it left anything out (`truncated`), and the change and its row run
+  on the server, so a caller that goes away cuts neither short. A tool call
+  answered with an error after it reached the member's app is `failed`,
+  not `refused`. The log is kept in the realm's metadata store (a console
+  without a local runtime keeps none), in two record sets each bounded by
+  count and age, the changes and the MCP app tool calls, so tool calls
+  never push a change row out (`UnifiedRuntimeBuilder::console_audit_limits`
+  and `console_tool_call_audit_limits`), and read with
+  `meta/console/audit` (`log`: `changes` or `tool_calls`) under the new
+  `audit.view` access action. Its reads, and `meta/gating/audit`, report
+  `retention`: `durable` where the records survive a restart, `process`
+  where the gateway keeps them in memory.
+- Rust: `PersistentMetadataStore` gains provided realm-document methods
+  (`realm_document_retention`, `realm_document`, `set_realm_document`,
+  `realm_document_keys`) and `RecordRetention`. A store outside Meta keeps
+  no realm documents unless it implements them, so it has no console audit
+  log and keeps gating in memory. `UnifiedRuntime::gating_retention` and
+  `MetaRuntimeHandle::gating_retention` say how long the runtime keeps its
+  gating state.
+- Rust: `AgentMemoryProvider` gains provided `remember_by`, `forget_by` and
+  `supersede_by`, which write on behalf of a named author (the default
+  ignores the author and writes as `remember`, `forget` and `supersede`
+  do), and `ConsoleSessionFences` gains `revoke_sessions_by`, which records
+  who revoked.
 
 ### Changed
 
@@ -405,6 +459,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Forge builds new applications with named console accounts
   (`local-accounts`). The operator signs in as before, with an empty account
   name, and now signs in as a person.
+
+- The stock gateways keep the gating owner's state (pending approvals and
+  the gating audit) in the realm's metadata store across restarts.
+  `UnifiedRuntimeBuilder::keep_gating_state(true)` does the same for an
+  embedded runtime; a host that persists `gating_state_snapshot` itself
+  leaves it off.
+- Memory written from the console names the person who wrote it: its
+  author, `application` before, is now the operator with the caller's
+  principal (an operator naming no one for an anonymous caller of an open
+  console). A quarantine review made in the console names its reviewer on
+  the record it releases.
+- A console session revocation records who revoked (`revoked_by` in the
+  fence record and the answer), and an access edit its author, time and
+  revision (`last_edit` on `meta/access/get`).
 
 ### Fixed
 
@@ -510,6 +578,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   copied again with a warning, so access control stays on. A temporary file
   that a start or setup stopped while writing leaves in `.mobkit` is removed
   by a later one.
+
+- The Approvals panel's Audit tab shows who decided and with what
+  assurance ("Decided by alice@example.test (as Release manager) - person
+  authenticated") when the record names the verified decider, not only
+  the approver label, and says when the gateway keeps its records in
+  memory, where decisions from before a gateway restart may be missing.
 
 ### Known limitations
 

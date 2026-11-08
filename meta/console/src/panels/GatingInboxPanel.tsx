@@ -78,6 +78,10 @@ interface GatingInboxPanelProps {
   /** How many records the audit read asks for: a full read is a window of
    * the newest records, and its counts say so. */
   auditLimit?: number;
+  /** How long the gateway keeps the recorded approvals, as the audit read
+   * reports it: `process` keeps them in the gateway's memory, so decisions
+   * from before a gateway restart may be missing. */
+  auditRetention?: string | null;
   selectedPendingId?: string;
   /** Host-provided attention items, listed on Pending after the approvals. */
   hostAttention?: HostAttentionSnapshot;
@@ -177,6 +181,27 @@ function riskWords(record: GatingAuditEntryView): string {
   return word ? `${word} (${code})` : code;
 }
 
+const ASSURANCE_WORDS: Record<string, string> = {
+  person_authenticated: "person authenticated",
+  service_credential: "service credential",
+  device_trusted: "device trusted",
+};
+
+/// Who decided, in words: the verified principal the record names, the
+/// approver label they decided as when it is another name, and the
+/// assurance the decision was authenticated with:
+/// "alice@example.test (as Release manager) - person authenticated".
+function deciderWords(record: GatingAuditEntryView, directory: AgentDirectory): string {
+  const principal = record.decidingPrincipal ?? "";
+  const as = record.approverId && record.approverId !== principal
+    ? ` (as ${agentDisplayName(record.approverId, directory)})`
+    : "";
+  const assurance = record.deciderAssurance
+    ? ` - ${ASSURANCE_WORDS[record.deciderAssurance] ?? humanizeEnum(record.deciderAssurance).toLowerCase()}`
+    : "";
+  return `${principal}${as}${assurance}`;
+}
+
 /// The recorded facts of a row, each one "Label: value" string. People read
 /// names; an identity the roster does not know reads as its key.
 function recordFacts(
@@ -195,7 +220,10 @@ function recordFacts(
     if (!record.decision || !DECISION_VERDICTS.has(record.decision)) {
       facts.push(`Decision: ${record.decision ? humanizeEnum(record.decision) : "Not recorded"}`);
     }
-    if (record.approverId) facts.push(`Approver: ${agentDisplayName(record.approverId, directory)}`);
+    // A record that names the verified decider reads who decided, as which
+    // approver and with what assurance; an older one keeps its label.
+    if (record.decidingPrincipal) facts.push(`Decided by: ${deciderWords(record, directory)}`);
+    else if (record.approverId) facts.push(`Approver: ${agentDisplayName(record.approverId, directory)}`);
     facts.push(`Outcome: ${outcomeWords(record.outcome) || "Not recorded"}`);
   }
   return facts;
@@ -421,6 +449,7 @@ export function GatingInboxPanel({
   auditUpdatedAtMs,
   auditError,
   auditLimit,
+  auditRetention,
   selectedPendingId,
   hostAttention,
   hostDecideSources,
@@ -616,6 +645,11 @@ export function GatingInboxPanel({
         {auditCapped ? (
           <p className="gating-inbox__window" data-testid="gating-audit-window">
             {`The newest ${auditLimit} records. ${tab === "auto" ? `${automaticCount} of them were allowed automatically.` : "Older records are not loaded."}`}
+          </p>
+        ) : null}
+        {auditRetention === "process" ? (
+          <p className="gating-inbox__window" data-testid="gating-audit-retention">
+            Kept in the gateway's memory: decisions from before a gateway restart may be missing.
           </p>
         ) : null}
         {rows.length === 0 ? (

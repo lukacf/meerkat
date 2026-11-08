@@ -359,6 +359,24 @@ test("gating audit distinguishes actor from approver and reads the recorded deta
   assert.equal(normalizeGatingAuditEntry(null).riskTier, "unknown");
 });
 
+test("gating audit reads the decider, the binding and the assurance a decision recorded", () => {
+  const record = normalizeGatingAuditEntry({
+    event_type: "approval_decided", risk_tier: "r3", outcome: "allowed",
+    detail: {
+      decision: "approve", approver_id: "release-manager", deciding_principal: " alice@example.test ",
+      approver_binding: "held", deciding_assurance: "person_authenticated",
+    },
+  });
+  assert.equal(record.decidingPrincipal, "alice@example.test");
+  assert.equal(record.approverId, "release-manager");
+  assert.equal(record.approverBinding, "held");
+  assert.equal(record.deciderAssurance, "person_authenticated");
+  const unnamed = normalizeGatingAuditEntry({ detail: { decision: "approve", approver_id: "human", deciding_principal: null } });
+  assert.equal(unnamed.decidingPrincipal, undefined);
+  assert.equal(unnamed.approverBinding, undefined);
+  assert.equal(unnamed.deciderAssurance, undefined);
+});
+
 test("normalize gating and routing payloads for the shared control-plane contract", () => {
   // A console decision names no approver: one a caller supplies is dropped,
   // since the gateway decides as the signed-in person.

@@ -21897,6 +21897,9 @@ function normalizeGatingAuditEntry(value) {
     outcome: trimString(record10.outcome),
     decision: trimString(detail.decision),
     approverId: trimString(detail.approver_id),
+    decidingPrincipal: trimString(detail.deciding_principal),
+    approverBinding: trimString(detail.approver_binding),
+    deciderAssurance: trimString(detail.deciding_assurance),
     automaticAllowance: record10.event_type === "evaluated" && (record10.outcome === "allowed" || record10.outcome === "allowed_with_audit")
   };
 }
@@ -63392,6 +63395,7 @@ function withDetail(line, detail) {
   return detail ? "".concat(line, " \xB7 ").concat(detail) : line;
 }
 var DEBUG_RECORD_AUTHOR = /^\s*(Agent|Steward|Distiller)\s*\{\s*(identity|run_id)\s*:\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\}\s*$/;
+var DEBUG_OPERATOR_AUTHOR = /^\s*Operator\s*\{\s*principal\s*:\s*(?:None|Some\(\s*"((?:[^"\\]|\\.)*)"\s*\))\s*,?\s*\}\s*$/;
 var DEBUG_UNIT_AUTHOR = /^\s*(Operator|Application)\s*$/;
 function unescapeDebugText(text14) {
   return text14.replace(/\\(u\{([0-9a-fA-F]{1,6})\}|.)/g, (_match, escape, hex3) => {
@@ -63418,6 +63422,7 @@ function parseMemoryAuthor(value) {
     const author = value.author;
     const identity = value.identity;
     const runId = value.run_id;
+    const principal = value.principal;
     switch (author) {
       case "agent":
         return typeof identity === "string" && identity.trim() ? { author: "agent", identity: identity.trim() } : null;
@@ -63425,6 +63430,7 @@ function parseMemoryAuthor(value) {
       case "distiller":
         return typeof runId === "string" && runId ? { author, run_id: runId } : { author };
       case "operator":
+        return typeof principal === "string" && principal.trim() ? { author: "operator", principal: principal.trim() } : { author: "operator" };
       case "application":
         return { author };
       default:
@@ -63441,6 +63447,11 @@ function parseMemoryAuthor(value) {
     const kind = variant === "Steward" ? "steward" : "distiller";
     return text14 ? { author: kind, run_id: text14 } : { author: kind };
   }
+  const operator = DEBUG_OPERATOR_AUTHOR.exec(value);
+  if (operator) {
+    const principal = operator[1] === void 0 ? "" : unescapeDebugText(operator[1]).trim();
+    return principal ? { author: "operator", principal } : { author: "operator" };
+  }
   const unit = DEBUG_UNIT_AUTHOR.exec(value);
   if (unit) return { author: unit[1] === "Operator" ? "operator" : "application" };
   const key = value.trim();
@@ -63456,7 +63467,7 @@ function memoryAuthorWords(author, names = {}) {
     case "distiller":
       return "the memory distiller";
     case "operator":
-      return "an operator";
+      return author.principal || "an operator";
     case "application":
       return "the application";
   }
@@ -67428,6 +67439,17 @@ function riskWords(record10) {
   const code4 = record10.riskTier.toUpperCase();
   return word ? "".concat(word, " (").concat(code4, ")") : code4;
 }
+var ASSURANCE_WORDS = {
+  person_authenticated: "person authenticated",
+  service_credential: "service credential",
+  device_trusted: "device trusted"
+};
+function deciderWords(record10, directory) {
+  const principal = record10.decidingPrincipal ?? "";
+  const as = record10.approverId && record10.approverId !== principal ? " (as ".concat(agentDisplayName(record10.approverId, directory), ")") : "";
+  const assurance = record10.deciderAssurance ? " - ".concat(ASSURANCE_WORDS[record10.deciderAssurance] ?? humanizeEnum(record10.deciderAssurance).toLowerCase()) : "";
+  return "".concat(principal).concat(as).concat(assurance);
+}
 function recordFacts(record10, actor, directory, withDecision) {
   const facts = [
     "Risk: ".concat(riskWords(record10)),
@@ -67437,7 +67459,8 @@ function recordFacts(record10, actor, directory, withDecision) {
     if (!record10.decision || !DECISION_VERDICTS.has(record10.decision)) {
       facts.push("Decision: ".concat(record10.decision ? humanizeEnum(record10.decision) : "Not recorded"));
     }
-    if (record10.approverId) facts.push("Approver: ".concat(agentDisplayName(record10.approverId, directory)));
+    if (record10.decidingPrincipal) facts.push("Decided by: ".concat(deciderWords(record10, directory)));
+    else if (record10.approverId) facts.push("Approver: ".concat(agentDisplayName(record10.approverId, directory)));
     facts.push("Outcome: ".concat(outcomeWords(record10.outcome) || "Not recorded"));
   }
   return facts;
@@ -67609,6 +67632,7 @@ function GatingInboxPanel({
   auditUpdatedAtMs,
   auditError,
   auditLimit,
+  auditRetention,
   selectedPendingId,
   hostAttention,
   hostDecideSources,
@@ -67754,6 +67778,7 @@ function GatingInboxPanel({
       /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(Notice, { className: "gating-inbox__note", children: "Approval records do not confirm execution." }),
       rows.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(DecisionsStrip, { events: stripEvents, now: now3, automatic: tab2 === "auto" }) : null,
       auditCapped ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("p", { className: "gating-inbox__window", "data-testid": "gating-audit-window", children: "The newest ".concat(auditLimit, " records. ").concat(tab2 === "auto" ? "".concat(automaticCount, " of them were allowed automatically.") : "Older records are not loaded.") }) : null,
+      auditRetention === "process" ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)("p", { className: "gating-inbox__window", "data-testid": "gating-audit-retention", children: "Kept in the gateway's memory: decisions from before a gateway restart may be missing." }) : null,
       rows.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime90.jsx)(EmptyState, { title: "No ".concat(tab2, " items."), inline: hostShown }) : groups.map((group) => /* @__PURE__ */ (0, import_jsx_runtime90.jsxs)("section", { className: "gating-day", "data-testid": "gating-day:".concat(group.key), children: [
         /* @__PURE__ */ (0, import_jsx_runtime90.jsxs)("div", { className: "gating-day__label", children: [
           group.label,
@@ -67929,6 +67954,7 @@ var ACCESS_ACTION_WORDS = {
   "topology.cross_authority": "Connect agents across teams",
   "mobpack.author": "Author team packages",
   "mobpack.deploy": "Deploy team packages",
+  "audit.view": "Read the console audit log",
   "access.admin": "Administer console access",
   "extension.read": "Read extension state",
   "extension.edit": "Edit extension state",
@@ -67950,6 +67976,7 @@ var FAMILY_WORDS = {
   topology: "topology",
   mobpack: "team package",
   access: "console access",
+  audit: "audit",
   extension: "extension"
 };
 function accessActionLabel(action) {
@@ -67998,7 +68025,7 @@ var ACCESS_FAMILIES = [
   {
     id: "admin",
     label: "Admin",
-    actions: ["access.admin", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"]
+    actions: ["access.admin", "audit.view", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"]
   }
 ];
 function familiesFor(catalog) {
@@ -69492,7 +69519,7 @@ function authorDisplay(author, nameOf = stripAgentKeyPrefix) {
     case "distiller":
       return "The memory distiller";
     case "operator":
-      return "An operator";
+      return author.principal ? "".concat(author.principal, " (operator)") : "An operator";
     case "application":
       return "The application";
     default:
@@ -94530,7 +94557,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const refreshGatingAudit = import_react103.default.useCallback(() => panelRefreshFlight("gating-audit", async () => {
     try {
       const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES2.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT });
-      setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+      setGatingData({
+        pending: [],
+        audit: Array.isArray(audit?.entries) ? audit.entries : [],
+        updatedAtMs: Date.now(),
+        retention: typeof audit?.retention === "string" ? audit.retention : null
+      });
       setGatingAuditError(null);
     } catch (error49) {
       setGatingAuditError(errorMessage(error49));
@@ -96359,6 +96391,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditUpdatedAtMs: gatingData.updatedAtMs,
           auditError: gatingAuditError,
           auditLimit: GATING_AUDIT_LIMIT,
+          auditRetention: gatingData.retention,
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
           readOnly: consoleReadOnly,
@@ -96465,6 +96498,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditUpdatedAtMs: gatingData.updatedAtMs,
           auditError: gatingAuditError,
           auditLimit: GATING_AUDIT_LIMIT,
+          auditRetention: gatingData.retention,
           audit: gatingData.audit,
           onDecide: (pid, decision) => void onGatingDecision(pid, decision),
           readOnly: consoleReadOnly,

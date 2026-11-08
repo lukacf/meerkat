@@ -25,6 +25,7 @@ pub mod child_mob_storage;
 pub mod compaction_policy;
 pub mod config_convention;
 pub mod console_aggregator;
+pub(crate) mod console_audit;
 pub mod console_auth_config;
 pub mod console_config;
 pub mod console_contracts;
@@ -48,6 +49,7 @@ pub mod gateway_composition;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gateway_mcp_composition;
 pub mod gateway_wiring;
+pub(crate) mod gating_persistence;
 pub mod governance;
 pub mod host_store;
 pub(crate) mod host_store_documents;
@@ -168,6 +170,7 @@ pub use console_aggregator::{
     ReplaySubscriptionTransition, SendEffect, SendState, SendTransition, SourceIngestionEffect,
     SourceIngestionState, SourceIngestionTransition, SqliteConsoleLogStore,
 };
+pub use console_audit::ConsoleAuditLimits;
 pub use console_config::{
     ConsoleActionsUiConfig, ConsoleAgentBadgeConfig, ConsoleAgentListConfig,
     ConsoleAgentSectionConfig, ConsoleAppearanceConfig, ConsoleAttentionSourceConfig,
@@ -299,7 +302,7 @@ pub use runtime::{
     ModuleCleanupObservation, ModuleCleanupOperation, ModuleCleanupPhase,
     ModuleCleanupProcessObservation, ModuleCleanupReapedProcess, ModuleHealthState,
     ModuleHealthTransition, ModuleRouteError, ModuleRouteRequest, ModuleRouteResponse,
-    NormalizationError, PersistentMetadataStore, RpcRouteError, RpcRuntimeError,
+    NormalizationError, PersistentMetadataStore, RecordRetention, RpcRouteError, RpcRuntimeError,
     RuntimeBoundaryError, RuntimeDecisionInputs, RuntimeDecisionState, RuntimeFromConfigError,
     RuntimeMetadataTable, RuntimeMutationError, RuntimeOptions, RuntimeRoute,
     RuntimeRouteMutationError, RuntimeShutdownReport, SessionPersistenceRow, SessionStoreContract,

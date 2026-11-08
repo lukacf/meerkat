@@ -302,7 +302,7 @@ export interface ConsoleAppProps {
 }
 
 type RoutingPanelData = ReturnType<typeof buildRoutingSectionView>;
-type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number };
+type GatingPanelData = { pending: unknown[]; audit: unknown[]; updatedAtMs?: number; retention?: string | null };
 /** The recorded approvals the Approvals panel reads: the newest 50. */
 const GATING_AUDIT_LIMIT = 50;
 type RoutingReadState = {
@@ -4023,8 +4023,13 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [gatingAuditError, setGatingAuditError] = React.useState<string | null>(null);
   const refreshGatingAudit = React.useCallback(() => panelRefreshFlight("gating-audit", async () => {
     try {
-      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT }) as { entries?: unknown[] };
-      setGatingData({ pending: [], audit: Array.isArray(audit?.entries) ? audit.entries : [], updatedAtMs: Date.now() });
+      const audit = await executeHeadlessCommand(CONSOLE_COMMAND_NAMES.listGatingAudit, controlWorkbenchTarget("gating"), { limit: GATING_AUDIT_LIMIT }) as { entries?: unknown[]; retention?: unknown };
+      setGatingData({
+        pending: [],
+        audit: Array.isArray(audit?.entries) ? audit.entries : [],
+        updatedAtMs: Date.now(),
+        retention: typeof audit?.retention === "string" ? audit.retention : null,
+      });
       setGatingAuditError(null);
     } catch (error) {
       // The panel keeps the loaded records and shows why the refresh failed.
@@ -6410,6 +6415,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
           auditLimit={GATING_AUDIT_LIMIT}
+          auditRetention={gatingData.retention}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}
@@ -6519,6 +6525,7 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
           auditUpdatedAtMs={gatingData.updatedAtMs}
           auditError={gatingAuditError}
           auditLimit={GATING_AUDIT_LIMIT}
+          auditRetention={gatingData.retention}
           audit={gatingData.audit}
           onDecide={(pid, decision) => void onGatingDecision(pid, decision)}
           readOnly={consoleReadOnly}

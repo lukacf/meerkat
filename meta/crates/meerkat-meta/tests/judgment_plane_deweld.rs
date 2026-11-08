@@ -128,7 +128,7 @@ impl FakeJudgmentStore {
             tags: vec![],
             provenance: MemoryProvenance {
                 evidence: vec![],
-                author: MemoryAuthor::Operator,
+                author: MemoryAuthor::Operator { principal: None },
                 profile: None,
                 verification: None,
             },
@@ -865,7 +865,7 @@ fn fake_fact(id: String, identity: &str, updated_at_ms: u64, body: String) -> Me
         tags: vec![],
         provenance: MemoryProvenance {
             evidence: vec![],
-            author: MemoryAuthor::Operator,
+            author: MemoryAuthor::Operator { principal: None },
             profile: None,
             verification: None,
         },

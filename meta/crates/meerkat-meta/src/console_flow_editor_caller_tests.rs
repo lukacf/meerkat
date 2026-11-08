@@ -26,6 +26,7 @@ fn flow_editor(fences: crate::auth::session_fence::ConsoleSessionFences) -> Rout
         fences,
         None,
         false,
+        None,
     )
 }
 

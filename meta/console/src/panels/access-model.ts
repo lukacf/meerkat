@@ -38,7 +38,7 @@ export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   {
     id: "admin",
     label: "Admin",
-    actions: ["access.admin", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
+    actions: ["access.admin", "audit.view", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
   },
 ];
 

@@ -593,4 +593,33 @@ mod tests {
             }
         ));
     }
+
+    /// The advisory `gate` of a `tool_grants/list` result is tolerant: a
+    /// field this version does not know, in the gate or in its entries, is
+    /// ignored, so a newer server's gate never fails the result it rides on.
+    #[test]
+    fn a_list_result_reads_a_gate_whose_entries_carry_fields_it_does_not_know() {
+        let listed: ListToolGrantsResult = serde_json::from_value(json!({
+            "grants": [],
+            "gate": {
+                "running": {
+                    "gated": {
+                        "tools": ["shell"],
+                        "mcp_servers": ["tickets"],
+                        "attached_mcp_servers": ["tickets"],
+                    },
+                    "not_mounted": {"families": ["memory"], "since_revision": 3},
+                    "opened": ["shell"],
+                },
+                "next_build": {"gated": {"tools": ["shell"], "quota": 2}},
+            },
+        }))
+        .expect("a gate field this version does not know is ignored");
+        let gate = listed.gate.expect("the gate reads");
+        let running = gate.running.expect("the running gate reads");
+        assert_eq!(running.gated.tools, vec!["shell".to_string()]);
+        assert_eq!(running.gated.mcp_servers, vec!["tickets".to_string()]);
+        assert_eq!(running.not_mounted.families, vec!["memory".to_string()]);
+        assert_eq!(gate.next_build.gated.tools, vec!["shell".to_string()]);
+    }
 }

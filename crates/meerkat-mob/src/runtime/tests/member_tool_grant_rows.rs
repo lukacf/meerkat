@@ -150,3 +150,79 @@ async fn a_member_grant_with_a_deadline_completes_and_arms_the_serving_session()
         "the serving session's deadline driver is armed for the grant"
     );
 }
+
+/// A grant that reaches the mob's actor while a retirement holds its last
+/// stage, the projection cleanup, is refused as an unknown member, and no
+/// live grant outlives the retirement. The retirement's terminal step has
+/// ended the identity's grants and MobMachine has unbound the identity, but
+/// the roster drops the identity only when the cleanup reports, so there
+/// MobMachine's binding alone refuses the commit.
+#[tokio::test]
+async fn a_grant_inside_a_retirements_cleanup_stage_is_refused() {
+    let (handle, _service) =
+        create_test_mob_with_runtime_backed_real_comms(sample_definition()).await;
+    let runtime = handle
+        .runtime_adapter
+        .clone()
+        .expect("a runtime-backed mob holds grants");
+    let worker = AgentIdentity::from("worker-in-cleanup");
+    let subject = ToolGrantSubject::member(
+        handle.definition.id.as_str(),
+        &handle.live_incarnation(),
+        worker.as_str(),
+    );
+    seat(&handle, &worker).await;
+    let hold =
+        crate::runtime::actor::retirement_stage_hold::install(&worker, "retire-projection-cleanup");
+    let retiring = {
+        let handle = handle.clone();
+        let worker = worker.clone();
+        tokio::spawn(async move { handle.retire(worker).await })
+    };
+    tokio::time::timeout(STEP, hold.entered())
+        .await
+        .expect("the retirement reaches its projection cleanup within the bound");
+    let state = handle
+        .query_machine_state()
+        .await
+        .expect("the machine state reads");
+    assert!(
+        !state.identity_to_runtime.contains_key(
+            &crate::machines::mob_machine::AgentIdentity::from_domain(&worker)
+        ),
+        "the terminal step has unbound the identity"
+    );
+    assert!(
+        handle.roster.read().await.get(&worker).is_some(),
+        "the roster still holds the identity during the cleanup"
+    );
+
+    let attempt =
+        tokio::time::timeout(STEP, handle.grant_member_tool(&worker, shell_grant(), None))
+            .await
+            .expect("the grant answers within the bound");
+    hold.release();
+    tokio::time::timeout(STEP, retiring)
+        .await
+        .expect("the retirement answers within the bound")
+        .expect("the retirement task joins")
+        .expect("the member retires");
+    assert!(
+        matches!(
+            &attempt,
+            Err(MemberToolGrantError::Mob(MobError::MemberNotFound(identity))) if identity == &worker
+        ),
+        "a grant inside the cleanup stage is refused as an unknown member: {attempt:?}"
+    );
+    let listed = runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the grants read")
+        .grants;
+    assert!(
+        listed
+            .iter()
+            .all(|grant| grant.status != ToolGrantStatus::Active),
+        "no live grant outlives the retirement: {listed:?}"
+    );
+}

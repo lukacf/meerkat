@@ -1535,3 +1535,96 @@ async fn a_build_reads_which_gated_servers_a_live_server_grant_covers() {
         );
     }
 }
+
+/// The shell's MCP server predicate answers what the generated machine
+/// admits. For every gate over two servers (its gated servers, its ungated
+/// servers and its unconfigured-servers mode) and every server asked, a third
+/// one the gate does not know included, each reader of the gate
+/// (`SessionToolVisibilityState::tool_grant_gates_server` for dispatch and
+/// visibility, `InstalledToolGrantGate::gates_server` for `applies`,
+/// `GrantGatedTools::gates_mcp_server` for a grant request) gates exactly the
+/// servers a real `MeerkatMachine` admits for `ExtendToolGrantGate` and for
+/// `SurfaceStageGatedAdd`. A change to the machine's server guards fails here
+/// until the shell follows it.
+#[tokio::test]
+async fn the_server_predicate_answers_what_the_machine_admits() {
+    use meerkat_core::handles::ExternalToolSurfaceHandle;
+    use meerkat_core::tool_grant::GrantGatedTools;
+
+    let subsets = || -> [BTreeSet<String>; 4] {
+        [
+            BTreeSet::new(),
+            BTreeSet::from(["a".to_string()]),
+            BTreeSet::from(["b".to_string()]),
+            BTreeSet::from(["a".to_string(), "b".to_string()]),
+        ]
+    };
+    let mut checked = 0usize;
+    let mut gated_count = 0usize;
+    for gated in subsets() {
+        for ungated in subsets() {
+            if !gated.is_disjoint(&ungated) {
+                continue;
+            }
+            for mode in [false, true] {
+                for server in ["a", "b", "c"] {
+                    let machine = MeerkatMachine::ephemeral();
+                    let bindings = machine
+                        .prepare_bindings(SessionId::new())
+                        .await
+                        .expect("bindings prepare");
+                    let install = InstalledToolGrantGate {
+                        gated_servers: gated.clone(),
+                        gates_unconfigured_servers: mode,
+                        ungated_servers: ungated.clone(),
+                        ..InstalledToolGrantGate::default()
+                    };
+                    let owner = bindings.tool_visibility_owner();
+                    owner
+                        .replace_tool_grant_gate(install.clone())
+                        .expect("the build installs its gate");
+                    let visibility = owner
+                        .visibility_state()
+                        .expect("the gate reads")
+                        .tool_grant_gates_server(server);
+                    let installed = install.gates_server(server);
+                    let requested = GrantGatedTools {
+                        mcp_servers: gated.clone(),
+                        unconfigured_mcp_servers: mode,
+                        ..GrantGatedTools::default()
+                    }
+                    .gates_mcp_server(server, &ungated);
+                    let extended = owner
+                        .extend_tool_grant_gate(
+                            server,
+                            BTreeSet::from([ToolName::from(format!("{server}_tool"))]),
+                        )
+                        .is_ok();
+                    let staged = bindings
+                        .external_tool_surface()
+                        .stage_gated_add(server.to_string(), 0)
+                        .is_ok();
+                    let context = format!(
+                        "gated {gated:?}, ungated {ungated:?}, mode {mode}, server {server}: \
+                         machine extend {extended}, machine stage {staged}, visibility \
+                         {visibility}, installed {installed}, requested {requested}"
+                    );
+                    assert_eq!(extended, staged, "{context}");
+                    assert_eq!(visibility, extended, "{context}");
+                    assert_eq!(installed, extended, "{context}");
+                    assert_eq!(requested, extended, "{context}");
+                    checked += 1;
+                    gated_count += usize::from(extended);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        checked, 54,
+        "every gate over two servers, every server asked"
+    );
+    assert!(
+        gated_count > 0 && gated_count < checked,
+        "the machine gates some servers and not others: {gated_count} of {checked}"
+    );
+}

@@ -10561,6 +10561,80 @@ mod tests {
             );
         }
 
+        /// A role whose profile configures and gates the server `s` and gates
+        /// the server `u` it does not configure; its member built without a
+        /// grant left `s` unattached. An identity grant of `s` answers
+        /// `applies: "at_next_build"`: a turn right after it still finds no
+        /// `s` tool and no `s` process starts. A grant of `u` answers `now`:
+        /// no build attaches `u`, and the running build gates it wherever it
+        /// is attached. After a respawn the build connects `s`, and a grant
+        /// of `s` answers `now`.
+        #[tokio::test]
+        async fn a_grant_of_a_server_its_build_left_unattached_applies_at_the_next_build() {
+            let mut rig = rig().await;
+            let started = rig.temp.path().join("started");
+            let server = serde_json::to_value(fixture_server("s", "s_", &started)).unwrap();
+            create_realm_mob(
+                &rig,
+                "unattached",
+                "unattached-worker",
+                worker_profile(serde_json::json!({
+                    "mcp_servers": [server],
+                    "grant_gated": {"mcp_servers": ["s", "u"]},
+                })),
+            )
+            .await;
+            spawn(&rig, "unattached", "worker-1", None).await;
+            let before =
+                member_turn(&mut rig, "unattached", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(before.found_no_tool(), "{before:?}");
+
+            let granted = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity grant of the unattached server",
+            )
+            .await;
+            assert_eq!(granted["applies"], "at_next_build", "{granted}");
+            let after =
+                member_turn(&mut rig, "unattached", "worker-1", &S_TOOLS, Some("s_echo")).await;
+            assert!(
+                after.found_no_tool(),
+                "the running build has no s tool: {after:?}"
+            );
+            assert_eq!(started_count(&started), 0);
+
+            let unconfigured = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "u"}),
+                "an identity grant of a gated server no build configures",
+            )
+            .await;
+            assert_eq!(unconfigured["applies"], "now", "{unconfigured}");
+
+            respawn(&rig, "unattached", "worker-1").await;
+            let open = member_turn_until(
+                &mut rig,
+                "unattached",
+                "worker-1",
+                &S_TOOLS,
+                "s_echo",
+                Turn::settled,
+            )
+            .await;
+            assert!(open.ran() && open.offers("s_echo"), "{open:?}");
+            let attached = grant(
+                &rig,
+                identity_subject("unattached", "worker-1"),
+                serde_json::json!({"kind": "mcp_server", "server": "s"}),
+                "an identity grant of the attached server",
+            )
+            .await;
+            assert_eq!(attached["applies"], "now", "{attached}");
+        }
+
         /// A role gates the shell family and the tool name `fx_echo`, which
         /// nothing the member mounts provides; a member spawned with its own
         /// profile that switches shell off builds, with `fx_echo` gated from

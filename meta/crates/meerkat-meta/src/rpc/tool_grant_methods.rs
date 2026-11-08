@@ -467,6 +467,9 @@ async fn grant(surface: &ToolGrantSurface<'_>, params: &Value) -> Result<Value, 
         },
         reason: params.reason,
         window,
+        // A Meta grant is bounded by its window only: its params name no
+        // run scope.
+        run_scope: None,
     };
     let grant = commit_member_grant(surface, &params.identity, &subject, grant).await?;
     result(&GrantToolResult {
@@ -635,6 +638,7 @@ mod tests {
             issued_at_ms: 1,
             expires_at_ms: 2,
             ended_at_ms: None,
+            scope: meerkat_contracts::WireToolGrantScope::Window,
         });
         assert_eq!(
             grant.subject,
@@ -819,6 +823,7 @@ grant_gated = {{ tools = ["datetime"] }}
                 },
                 reason: None,
                 window: ToolGrantWindow::For(Duration::from_mins(10)),
+                run_scope: None,
             },
         )
         .await

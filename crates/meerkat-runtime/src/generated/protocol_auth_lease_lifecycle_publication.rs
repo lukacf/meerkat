@@ -57,6 +57,7 @@ pub(crate) struct AuthLeaseLifecyclePublicationScope {
     expires_at: Option<u64>,
     credential_generation: u64,
     credential_published_at_millis: Option<u64>,
+    adopted_marker_generation: Option<u64>,
 }
 
 impl AuthLeaseLifecyclePublicationScope {
@@ -71,6 +72,7 @@ impl AuthLeaseLifecyclePublicationScope {
             expires_at: state.expires_at,
             credential_generation: state.credential_generation,
             credential_published_at_millis: state.credential_published_at_millis,
+            adopted_marker_generation: state.adopted_marker_generation,
         }
     }
 
@@ -131,7 +133,7 @@ impl AuthLeaseLifecyclePublicationObligation {
         };
         #[allow(improper_ctypes_definitions, unsafe_code)]
         unsafe extern "Rust" {
-            #[link_name = concat!("__meerkat_core_runtime_generated_auth_lease_transition_build_v1_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX"))]
+            #[link_name = concat!("__meerkat_core_runtime_generated_auth_lease_transition_build_v2_", env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX"))]
             fn core_runtime_generated_auth_lease_transition_build(
                 token: &'static (dyn std::any::Any + Send + Sync),
                 lease_key: meerkat_core::handles::LeaseKey,
@@ -139,6 +141,7 @@ impl AuthLeaseLifecyclePublicationObligation {
                 expires_at: u64,
                 generation: u64,
                 credential_published_at_millis: Option<u64>,
+                adopted_marker_generation: Option<u64>,
             ) -> Result<meerkat_core::handles::AuthLeaseTransition, String>;
         }
         #[allow(unsafe_code)]
@@ -150,6 +153,7 @@ impl AuthLeaseLifecyclePublicationObligation {
                 self.expires_at.unwrap_or(u64::MAX),
                 self.credential_generation,
                 self.credential_published_at_millis,
+                scope.adopted_marker_generation,
             )
         }
     }

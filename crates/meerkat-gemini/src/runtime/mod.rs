@@ -175,8 +175,10 @@ impl ManagedGoogleOauthAuthorizer {
         cached: &ManagedGoogleOauthCredential,
         current: &meerkat_core::handles::AuthLeaseSnapshot,
     ) -> bool {
+        // The cached record's marker names the publication with the marker
+        // generation the lease records for it.
         current.credential_present
-            && cached.publication.generation == Some(current.generation)
+            && cached.publication.generation == Some(current.marker_generation())
             && Some(cached.publication.expires_at) == current.expires_at
             && cached.publication.credential_published_at_millis
                 == current.credential_published_at_millis

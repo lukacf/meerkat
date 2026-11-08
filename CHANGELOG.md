@@ -1142,6 +1142,25 @@ them.
   rebuild. `rkat realm govern`, `grant` and `revoke-grant` refused by a held
   or unusable fence exit 58 or 59.
 
+- `meerkat-core`: `AuthLeaseSnapshot` gains the public fields
+  `adopted_marker_generation: Option<u64>` (the generation the durable
+  lifecycle marker of the lease's current publication carries when it is not
+  the lease's own generation) and `released_publication_at_millis:
+  Option<u64>` (the publication time of the credential the lease last
+  withdrew) (see Fixed). Code that builds a snapshot literally sets both
+  (`None` for a lease that adopted no record and withdrew no credential).
+  `AuthLeaseSnapshot::marker_generation`,
+  `AuthLeaseTransition::adopted_marker_generation` and
+  `AuthLeaseTransition::marker_generation` are new. `meerkat-machine-schema`
+  and `meerkat-runtime` (the generated AuthMachine): `AuthMachineState` gains
+  the fields `adopted_marker_generation` and `released_publication_at_millis`,
+  and the input variant `AuthMachineInput::RestoreCredentialLifecycleSnapshot`
+  gains the fields `adopted_marker_generation` and
+  `released_publication_at_millis`. `meerkat-machine-kernels` (the generated
+  AuthMachine kernel): `generated::auth::State` and
+  `generated::auth::inputs::RestoreCredentialLifecycleSnapshot` gain the same
+  two fields.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -2957,6 +2976,25 @@ them.
   resumes, one already stuck this way included, with no repair: the
   replayed abandonment changes and ends nothing, since the later member
   ended on its own. Affects 0.8.0 through 0.9.10.
+- MCP OAuth and connector OAuth: a long-running process serves the
+  credential another process stores after logging the target out and in
+  again, both when its credential lease was ahead of that login (it had
+  published the credential more often) and when its lease had withdrawn its
+  credential before (a logout, or a read that found the credential
+  removed), instead of answering that reauthentication is required on every
+  read until it logged in itself or restarted. A failed save of that
+  process's refresh stores the other process's credential back with the
+  generation it was published under, instead of one the publishing process
+  refuses. The lease keeps the larger of the two generations, which never
+  goes back, and records the one the stored record carries and the
+  publication time of a credential it withdrew; a record published at or
+  before that time stays refused. A managed-store provider lease that
+  withdrew its credential takes such a later login too.
+- GitHub Copilot: a long-running process that picks up a later sign-in
+  another process stored for the same account (for example when it reads
+  the account's status) no longer keeps serving the earlier sign-in's
+  token from its cache, for an operator token kept in the credential store
+  and for the device sign-in alike.
 
 ### Security
 

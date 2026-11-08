@@ -318,10 +318,19 @@ fmt:
 	@echo "$(GREEN)Fixing formatting...$(NC)"
 	$(CARGO) fmt --all
 
-# Security audit using cargo-deny
+# Security audit using cargo-deny, over every feature set the releases ship:
+# the whole workspace with default features (each of Core's four binaries
+# builds its own package with its defaults), Meta's gateways (meta-release.yml
+# builds them with `--features openai-live`; meta/deny.toml, which cargo-deny
+# reads beside meerkat-meta's manifest, audits every Meta feature) and
+# Connect's binaries (connect/scripts/connect-candidate.py builds them with
+# `--features console,toolkit-mobkit/native-host`; the root deny.toml). A
+# default-feature audit alone never sees the crates those features bring in.
 audit:
 	@echo "$(GREEN)Running security audit...$(NC)"
 	$(CARGO) deny check
+	$(CARGO) deny --manifest-path meta/crates/meerkat-meta/Cargo.toml check
+	$(CARGO) deny --manifest-path connect/crates/meerkat-connect/Cargo.toml --features console,toolkit-mobkit/native-host check
 
 # Alternative audit using cargo-audit (if cargo-deny not available)
 audit-alt:

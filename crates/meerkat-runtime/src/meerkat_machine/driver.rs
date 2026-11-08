@@ -845,7 +845,8 @@ impl IngressView<'_> {
     }
 
     /// Whether `input_id` may join the current run `run_id` at a live
-    /// boundary: inputs of different requesters never share a run (see
+    /// boundary: inputs of different requesters never share a run, and the
+    /// Steer lane is first in, first out across requesters (see
     /// [`EphemeralRuntimeDriver::live_boundary_joins_run_batch`]).
     pub(crate) fn live_boundary_joins_run_batch(&self, input_id: &InputId, run_id: &RunId) -> bool {
         self.driver.live_boundary_joins_run_batch(input_id, run_id)

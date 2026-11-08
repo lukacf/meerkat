@@ -161,9 +161,9 @@ pub(crate) type WallClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 /// stays open. A stream whose caller a token identified ends once the
 /// Console's verifier no longer accepts that token: the moment a request
 /// with the token is refused, on its expiry or on a session fence set for
-/// its principal. It is built from the verifier's retained verification and
-/// asks the verifier itself, never reads the token, and does not depend on
-/// an access controller.
+/// its principal or its login (a sign-out). It is built from the verifier's
+/// retained verification and asks the verifier itself, never reads the
+/// token, and does not depend on an access controller.
 pub(crate) struct StreamAuthentication {
     verification: ConsoleCallerVerification,
     /// The first instant the verifier refuses the token, from its latest
@@ -314,7 +314,11 @@ fn agent_stream_allowed(view: &AccessView, agent_id: &str, policy_identity: &str
 /// ([`AccessView::hides_agent`]: private to another person), under the name
 /// the request used or the member it resolved to. Such a stream is refused
 /// as a stream of an unknown member, enforced access or not.
-fn agent_stream_hidden(view: &AccessView, agent_id: &str, policy_identity: &str) -> bool {
+pub(crate) fn agent_stream_hidden(
+    view: &AccessView,
+    agent_id: &str,
+    policy_identity: &str,
+) -> bool {
     view.hides_agent(agent_id) || view.hides_agent(policy_identity)
 }
 
@@ -909,6 +913,10 @@ pub(crate) async fn project_structural_envelope_for_console(
 pub(crate) struct ProjectedStructuralEvent {
     envelope: crate::MobStructuralEventEnvelope,
     member: StructuralEventMember,
+    /// The members the event names besides the one it is attributed to: the
+    /// endpoints of a mob-level event, and the members of the run it belongs
+    /// to (its bound members and every member a step dispatched to).
+    endpoints: Vec<String>,
 }
 
 enum StructuralEventMember {
@@ -931,7 +939,7 @@ pub(crate) async fn project_structural_member(
     require_exact_authority: bool,
 ) -> ProjectedStructuralEvent {
     let envelope = projection.envelope;
-    let member = if let Some(identity) = envelope.agent_identity.as_deref() {
+    let mut member = if let Some(identity) = envelope.agent_identity.as_deref() {
         let exact = if let Some(authority) = projection.member_authority.as_ref() {
             crate::http_console::sse_member_authorization_projection(
                 handle,
@@ -969,7 +977,26 @@ pub(crate) async fn project_structural_member(
     } else {
         StructuralEventMember::Mob
     };
-    ProjectedStructuralEvent { envelope, member }
+    let mut endpoints = projection.endpoints;
+    if let Some(run_id) = envelope
+        .run_id
+        .as_deref()
+        .and_then(|run_id| run_id.parse::<meerkat_mob::RunId>().ok())
+        && let Ok(Some(run)) = handle.flow_status(run_id).await
+    {
+        // The members of the run, from its role targets and the mob's
+        // per-target dispatch records. Who a run reached that cannot be read
+        // leaves the event unresolved: it is shown to no one.
+        match crate::run_members::run_members(runtime, handle, &run).await {
+            Ok(members) => endpoints.extend(members),
+            Err(_) => member = StructuralEventMember::Unresolved,
+        }
+    }
+    ProjectedStructuralEvent {
+        envelope,
+        member,
+        endpoints,
+    }
 }
 
 impl ProjectedStructuralEvent {
@@ -982,6 +1009,16 @@ impl ProjectedStructuralEvent {
         visibility_policy: &dyn ConsoleVisibilityPolicy,
         access_view: Option<&AccessView>,
     ) -> Option<crate::MobStructuralEventEnvelope> {
+        // An event that names a member hidden from the caller (a wiring edge
+        // to it, an instruction for it, a run that reached it) is shown to no
+        // one but that member's audience.
+        if access_view.is_some_and(|view| {
+            self.endpoints
+                .iter()
+                .any(|endpoint| view.hides_agent(endpoint))
+        }) {
+            return None;
+        }
         let enforced_view = access_view.filter(|view| view.enforced());
         let mut envelope = self.envelope;
         let policy_identity = match self.member {

@@ -79,6 +79,13 @@ pub const CONSOLE_WHOAMI_METHOD: &str = "meta/console/whoami";
 /// how it ended, read a page at a time after a cursor. Served on the Console
 /// route only, under the `audit.view` access action.
 pub const CONSOLE_AUDIT_METHOD: &str = "meta/console/audit";
+/// Sign the calling request's caller out of one Console login: the login its
+/// token belongs to (the issuer's `sid`, or the token alone without one).
+/// The Console refuses every token of that login issued before the
+/// sign-out, on every route, and ends the streams and voice sessions such
+/// tokens opened; the caller's other logins and its schedules are untouched.
+/// Served on the Console route only.
+pub const CONSOLE_SIGN_OUT_METHOD: &str = "meta/console/sign_out";
 /// The caller's own person-addressed attention items, newest first: replies
 /// meant for the caller that no private thread of theirs took. Served on the
 /// Console route only; a caller who is not a verified person reads none.
@@ -547,6 +554,27 @@ pub(crate) fn console_session_fence_json(
             fence.not_before_epoch_seconds,
         ),
         "revoked_by": fence.revoked_by,
+    })
+}
+
+/// The answer to [`CONSOLE_SIGN_OUT_METHOD`]: what the login was
+/// (`session`, the issuer's `sid`; `token`, a token without one) and, for a
+/// `session` login, the earliest `iat` a token of it is accepted with from
+/// now on (a sign-in again). A `token` login is no other token, so it has
+/// none.
+pub(crate) fn console_sign_out_json(signed_out: &crate::runtime::ConsoleSignedOut) -> Value {
+    let (login, accepts_tokens_issued_from) = match signed_out.login {
+        crate::runtime::ConsoleLoginKind::Session => (
+            "session",
+            Some(crate::runtime::session_fence_first_accepted_iat(
+                signed_out.not_before_epoch_seconds,
+            )),
+        ),
+        crate::runtime::ConsoleLoginKind::Token => ("token", None),
+    };
+    serde_json::json!({
+        "login": login,
+        "accepts_tokens_issued_from": accepts_tokens_issued_from,
     })
 }
 
@@ -1577,7 +1605,10 @@ where
 
         let member_ids = identity_rt
             .identity_bootstrap_member_ids_for_status(&status)
-            .await;
+            .await
+            .map_err(|error| {
+                format!("identity bootstrap readiness could not read Core's members: {error}")
+            })?;
         let (mapped_generation, mapped_status) =
             identity_rt.identity_bootstrap_status_with_generation();
         if mapped_generation != generation || mapped_status != status {
@@ -2046,6 +2077,10 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/console/send",
     crate::console_voice::VOICE_OPEN_METHOD,
     "meta/console/recover_send",
+    // Operator instruction writes: the mob's journal, which the
+    // authoritative launch delivers to its members.
+    "meta/set_instruction",
+    "meta/revoke_instruction",
     // Console schedules: a deferred send's definition or its end, in the
     // schedule store the authoritative launch drains.
     "meta/schedule/create",
@@ -2073,6 +2108,7 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/access/groups/set",
     "meta/access/groups/delete",
     CONSOLE_REVOKE_SESSIONS_METHOD,
+    CONSOLE_SIGN_OUT_METHOD,
     // A person's dismissal of one of their attention items, in the realm's
     // metadata store the authoritative launch reads.
     CONSOLE_ATTENTION_DISMISS_METHOD,
@@ -2106,10 +2142,9 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
 /// ([`workgraph_methods::is_workgraph_mutating_method`]); the
 /// host-executing or externally writing arm of a method a candidate
 /// otherwise serves ([`candidate_launch_refuses_host_execution`]); or a
-/// Flow Editor draft store write the authoritative launch reads
-/// ([`candidate_launch_refuses_draft_store_write`]). Reads still answer:
-/// the declaration read, the WorkGraph reads, the draft reads, a deploy
-/// plan, a structural validation and a BigQuery read among them.
+/// Flow Editor change ([`candidate_launch_refuses_mobpack_change`]). Reads
+/// still answer: the declaration read, the WorkGraph reads, the draft reads,
+/// a deploy plan, a structural validation and a BigQuery read among them.
 pub(crate) fn candidate_launch_refuses(
     method: &str,
     params: &Value,
@@ -2119,34 +2154,73 @@ pub(crate) fn candidate_launch_refuses(
         || mob_methods::is_member_declaration_mutating_method(method)
         || workgraph_methods::is_workgraph_mutating_method(method)
         || candidate_launch_refuses_host_execution(method, params)
-        || candidate_launch_refuses_draft_store_write(method, params, state_dir)
+        || candidate_launch_refuses_mobpack_change(method, params, state_dir)
 }
 
-/// The Flow Editor draft store methods that write the store.
-const MOBPACK_DRAFT_STORE_WRITE_METHODS: &[&str] = &[
-    "meta/mobpacks/create",
-    "meta/mobpacks/save",
-    "meta/mobpacks/delete",
-    "meta/mobpacks/undo",
-    "meta/mobpacks/redo",
-];
+/// What a Flow Editor change does on the host ([`mobpack_authoring_change`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MobpackAuthoringChange {
+    /// Writes the Flow Editor's draft store.
+    DraftStoreWrite,
+    /// Writes a mobpack archive and runs `rkat` on the host.
+    HostRun,
+}
 
-/// Whether a candidate launch refuses a Flow Editor draft store write: every
-/// one but a write to a store file the caller names (`store_path`) outside
-/// the launch's `state_dir` and the gateway home that is not the store
-/// `META_FLOW_EDITOR_DRAFT_STORE` names
+/// The change a mobpack authoring request makes, `None` for one that only
+/// reads and renders. This is the one list of the Flow Editor's changes:
+/// the draft store writes (`meta/mobpacks/create`, `save`, `delete`, `undo`
+/// and `redo`), a deploy with `execute` and a validation with
+/// `rkat_validate`, each arm decided on the request as its handler parses
+/// it. The Console's caller check of the Flow Editor
+/// ([`is_mobpack_authoring_change`]) and a candidate launch's refusal
+/// ([`candidate_launch_refuses_mobpack_change`]) both read it, so the two
+/// cannot drift.
+pub(crate) fn mobpack_authoring_change(
+    method: &str,
+    params: &Value,
+) -> Option<MobpackAuthoringChange> {
+    match method {
+        "meta/mobpacks/create"
+        | "meta/mobpacks/save"
+        | "meta/mobpacks/delete"
+        | "meta/mobpacks/undo"
+        | "meta/mobpacks/redo" => Some(MobpackAuthoringChange::DraftStoreWrite),
+        "meta/mobpacks/deploy" if crate::mobpack::deploy_execute_requested(params) => {
+            Some(MobpackAuthoringChange::HostRun)
+        }
+        "meta/mobpacks/validate" if crate::mobpack::validate_with_rkat_requested(params) => {
+            Some(MobpackAuthoringChange::HostRun)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a mobpack authoring request changes anything
+/// ([`mobpack_authoring_change`]).
+pub(crate) fn is_mobpack_authoring_change(method: &str, params: &Value) -> bool {
+    mobpack_authoring_change(method, params).is_some()
+}
+
+/// Whether a candidate launch refuses a Flow Editor change
+/// ([`mobpack_authoring_change`]): each one that runs `rkat` on the host,
+/// and each draft store write but one to a store file the caller names
+/// (`store_path`) outside the launch's `state_dir` and the gateway home
+/// that is not the store `META_FLOW_EDITOR_DRAFT_STORE` names
 /// ([`draft_store_write_reaches_a_read_store`]).
-fn candidate_launch_refuses_draft_store_write(
+fn candidate_launch_refuses_mobpack_change(
     method: &str,
     params: &Value,
     state_dir: Option<&std::path::Path>,
 ) -> bool {
-    MOBPACK_DRAFT_STORE_WRITE_METHODS.contains(&method)
-        && draft_store_write_reaches_a_read_store(
+    match mobpack_authoring_change(method, params) {
+        Some(MobpackAuthoringChange::HostRun) => true,
+        Some(MobpackAuthoringChange::DraftStoreWrite) => draft_store_write_reaches_a_read_store(
             params,
             state_dir,
             crate::mobpack::env_draft_store_path().as_deref(),
-        )
+        ),
+        None => false,
+    }
 }
 
 /// Whether a draft write with `params` reaches a store the authoritative
@@ -2214,19 +2288,15 @@ fn resolved_host_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The arms of methods a candidate otherwise serves that run something on
-/// the host or write outside it: `meta/mobpacks/deploy` with `execute`
-/// (writes a mobpack archive and runs `rkat mob run`),
-/// `meta/mobpacks/validate` with `rkat_validate` (writes an archive and runs
-/// `rkat mob validate`), `meta/session_store/bigquery`'s row insert, and a
-/// `meta/gating/evaluate` of an R3 action that names an approval route
-/// (`approval_recipient` and `approval_channel`), which sends the approval
-/// request through the delivery module. Each is decided on the request as
-/// its handler parses it.
+/// the host or write outside it, other than the Flow Editor's changes
+/// ([`candidate_launch_refuses_mobpack_change`]):
+/// `meta/session_store/bigquery`'s row insert, and a `meta/gating/evaluate`
+/// of an R3 action that names an approval route (`approval_recipient` and
+/// `approval_channel`), which sends the approval request through the
+/// delivery module. Each is decided on the request as its handler parses
+/// it.
 fn candidate_launch_refuses_host_execution(method: &str, params: &Value) -> bool {
-    let flag = |name: &str| params.get(name).and_then(Value::as_bool).unwrap_or(false);
     match method {
-        "meta/mobpacks/deploy" => flag("execute"),
-        "meta/mobpacks/validate" => flag("rkat_validate") || flag("rkatValidate"),
         "meta/gating/evaluate" => parse_gating_evaluate_params(params).is_ok_and(|request| {
             let named = |field: Option<&str>| field.is_some_and(|value| !value.trim().is_empty());
             request.risk_tier == GatingRiskTier::R3
@@ -2256,11 +2326,8 @@ pub(crate) fn explicit_provider_credentials_refusal(
     params: &Value,
     response_id: Value,
 ) -> Option<JsonRpcResponse> {
-    let executes = method == "meta/mobpacks/deploy"
-        && params
-            .get("execute")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    let executes =
+        method == "meta/mobpacks/deploy" && crate::mobpack::deploy_execute_requested(params);
     if !(explicit_provider_credentials && executes) {
         return None;
     }
@@ -2309,6 +2376,12 @@ fn candidate_launch_refused(method: &str, response_id: Value) -> JsonRpcResponse
             "{method} is refused: this gateway is a candidate launch, which writes no session \
              fence; revoke the sessions on the authoritative launch, whose fence record this \
              launch's Console reads"
+        )
+    } else if method == CONSOLE_SIGN_OUT_METHOD {
+        format!(
+            "{method} is refused: this gateway is a candidate launch, which writes no session \
+             fence; sign out on the authoritative launch, whose fence record this launch's \
+             Console reads"
         )
     } else {
         format!(
@@ -2739,6 +2812,9 @@ async fn handle_unified_rpc_json_inner(
                     "meta/prune_member_system_rows",
                     "meta/member_activate_instruction",
                     "meta/member_instruction_activations",
+                    "meta/set_instruction",
+                    "meta/revoke_instruction",
+                    "meta/instruction_status",
                     "meta/reconcile_identity",
                     "meta/status_identity_bootstrap",
                     "meta/wait_identity_bootstrap",
@@ -6237,6 +6313,45 @@ async fn handle_unified_rpc_json_inner(
             ))
             .await
         }
+        // The gateway mob's operator instructions (host verbs, listed with an
+        // identity runtime): a member target names a Meta identity.
+        "meta/set_instruction" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_set_instruction(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        "meta/revoke_instruction" => {
+            if identity_ctx.is_none() {
+                return maybe_identity_not_configured(is_notification, response_id);
+            }
+            Box::pin(operator_methods::handle_revoke_instruction(
+                runtime,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
+        "meta/instruction_status" => {
+            let ctx = match identity_ctx {
+                Some(ctx) => ctx,
+                None => return maybe_identity_not_configured(is_notification, response_id),
+            };
+            Box::pin(operator_methods::handle_instruction_status(
+                runtime,
+                ctx,
+                &request.params,
+                response_id,
+            ))
+            .await
+        }
         "meta/compact_member" => {
             let ctx = match identity_ctx {
                 Some(ctx) => ctx,
@@ -7321,12 +7436,12 @@ fn identity_lifecycle_state_json(
 /// The `meta/status_identity` answer of a registered identity: its
 /// roster policy and Core's facts, read per call. `agent_runtime_id`,
 /// `session_id` and `generation` are always present (null when Core holds
-/// no binding), and so are `runtime_mode` (null without a runtime mode
-/// override) and `customizer_tools_pending` (null while the identity's
-/// customizer tools are published); `convergence`, `wake_refusal` and
-/// `replaced_session` only when set. Every field comes from the one status
-/// read. The session repair hold is answered by `meta/member_health`, not
-/// here.
+/// no binding), and so are `runtime_mode` (the mode Core runs the identity's
+/// member in; null while Core holds no member of it) and
+/// `customizer_tools_pending` (null while the identity's customizer tools
+/// are published); `convergence`, `wake_refusal` and `replaced_session`
+/// only when set. Every field comes from the one status read. The session
+/// repair hold is answered by `meta/member_health`, not here.
 fn identity_status_wire(status: &crate::identity_first::IdentityStatus) -> Value {
     let mut result = serde_json::json!({
         "state": identity_lifecycle_state_json(status.state),
@@ -7694,10 +7809,12 @@ pub(crate) fn identity_error_code(err: &crate::identity_first::IdentityRuntimeEr
         | IdentityRuntimeError::IdentitySessionAbsent { .. } => IDENTITY_HISTORY_UNAVAILABLE_CODE,
         IdentityRuntimeError::IdentityHostAdopted { .. } => IDENTITY_HOST_ADOPTED_CODE,
         // The first-boot manifest: the migrated state directory and
-        // Core's stores disagree, the storage-resolution class.
+        // Core's stores disagree, the storage-resolution class. So does a
+        // name whose record Core cannot read.
         IdentityRuntimeError::FirstBootManifestUnreadable { .. }
         | IdentityRuntimeError::FirstBootRowRefused { .. }
-        | IdentityRuntimeError::FirstBootRowPending { .. } => STORAGE_RESOLUTION_CODE,
+        | IdentityRuntimeError::FirstBootRowPending { .. }
+        | IdentityRuntimeError::IdentityNameUnreadable { .. } => STORAGE_RESOLUTION_CODE,
         // Core's own class for its refusal: invalid params for an invalid key
         // or a conflict, a capability gap, an unreadable status.
         IdentityRuntimeError::KeyedSendRefused { error, .. } => {
@@ -8285,6 +8402,120 @@ mod tests {
         }
     }
 
+    /// The Flow Editor's changes are one list, read by the Console's caller
+    /// check and by a candidate launch's refusal alike, and each arm is
+    /// decided on the request as its handler parses it: a change for one is
+    /// a change for the other, and a read or an in-process arm is neither.
+    /// (A candidate refuses every draft write that reaches a store the
+    /// authoritative launch reads, as one naming no store does.)
+    #[test]
+    fn the_flow_editor_changes_are_one_list_for_both_checks() {
+        let changes = [
+            ("meta/mobpacks/create", json!({})),
+            ("meta/mobpacks/save", json!({})),
+            ("meta/mobpacks/delete", json!({})),
+            ("meta/mobpacks/undo", json!({})),
+            ("meta/mobpacks/redo", json!({})),
+            ("meta/mobpacks/deploy", json!({ "execute": true })),
+            ("meta/mobpacks/validate", json!({ "rkat_validate": true })),
+            ("meta/mobpacks/validate", json!({ "rkatValidate": true })),
+        ];
+        let reads = [
+            ("meta/mobpacks/list", json!({})),
+            ("meta/mobpacks/get", json!({})),
+            ("meta/mobpacks/catalogs", json!({})),
+            ("meta/mobpacks/schema", json!({})),
+            ("meta/mobpacks/templates", json!({})),
+            ("meta/mobpacks/apply_operation", json!({})),
+            ("meta/mobpacks/graph_projection", json!({})),
+            ("meta/mobpacks/graph_to_flow", json!({})),
+            ("meta/mobpacks/source", json!({})),
+            ("meta/mobpacks/export", json!({})),
+            ("meta/mobpacks/import", json!({})),
+            ("meta/mobpacks/deploy_command", json!({ "execute": true })),
+            ("meta/mobpacks/deploy", json!({ "execute": false })),
+            ("meta/mobpacks/deploy", json!({ "execute": "true" })),
+            ("meta/mobpacks/validate", json!({})),
+            // The handler reads `rkat_validate` first and only falls back to
+            // `rkatValidate` when it is absent.
+            (
+                "meta/mobpacks/validate",
+                json!({ "rkat_validate": false, "rkatValidate": true }),
+            ),
+        ];
+        for (method, params) in &changes {
+            assert!(
+                super::is_mobpack_authoring_change(method, params),
+                "{method} with {params} is a change"
+            );
+            assert!(
+                super::candidate_launch_refuses(method, params, None),
+                "a candidate refuses {method} with {params}"
+            );
+        }
+        for (method, params) in &reads {
+            assert!(
+                !super::is_mobpack_authoring_change(method, params),
+                "{method} with {params} changes nothing"
+            );
+            assert!(
+                !super::candidate_launch_refuses(method, params, None),
+                "a candidate serves {method} with {params}"
+            );
+        }
+    }
+
+    /// An operator instruction write changes the mob's journal, which the
+    /// authoritative launch delivers to its members: a candidate refuses
+    /// both writes typed, with the candidate refusal, and still answers the
+    /// status read; an authoritative launch serves all three.
+    #[test]
+    fn candidate_launch_refuses_instruction_writes() {
+        let refusal = |method: &str, params: &Value| {
+            super::candidate_launch_refusal(false, None, method, params, json!(7))
+                .and_then(|refusal| refusal.error)
+                .map(|error| (error.code, error.data))
+        };
+        let candidate_launch = Some((
+            crate::mob_announcements::rpc::ANNOUNCEMENTS_REFUSED_CODE,
+            Some(json!({ "kind": "candidate_launch" })),
+        ));
+        let write = json!({
+            "namespace": "host",
+            "key": "persona",
+            "revision": 1,
+            "body": "Answer as the release reviewer.",
+            "target": { "kind": "member", "identity": "review:singleton" },
+        });
+        let revoke = json!({ "namespace": "host", "key": "persona", "revision": 2 });
+        let read = json!({ "identity": "review:singleton" });
+        assert_eq!(
+            refusal("meta/set_instruction", &write),
+            candidate_launch,
+            "a candidate refuses meta/set_instruction"
+        );
+        assert_eq!(
+            refusal("meta/revoke_instruction", &revoke),
+            candidate_launch,
+            "a candidate refuses meta/revoke_instruction"
+        );
+        assert_eq!(
+            refusal("meta/instruction_status", &read),
+            None,
+            "a candidate still answers meta/instruction_status"
+        );
+        for (method, params) in [
+            ("meta/set_instruction", &write),
+            ("meta/revoke_instruction", &revoke),
+            ("meta/instruction_status", &read),
+        ] {
+            assert!(
+                super::candidate_launch_refusal(true, None, method, params, json!(7)).is_none(),
+                "an authoritative launch serves {method}"
+            );
+        }
+    }
+
     /// A candidate launch acts nowhere: it refuses the operator verbs that
     /// write a member's session transcript, typed, as it refuses member
     /// input, and an authoritative launch serves them.
@@ -8338,6 +8569,49 @@ mod tests {
             ),
             "{}",
             refusal.message
+        );
+    }
+
+    /// A candidate launch refuses a sign-out, which would write the session
+    /// fence record the authoritative launch reads, and sends the caller to
+    /// the authoritative launch.
+    #[test]
+    fn a_candidate_launch_refusal_of_a_sign_out_names_the_authoritative_launch() {
+        let refusal = super::candidate_launch_refusal(
+            false,
+            None,
+            super::CONSOLE_SIGN_OUT_METHOD,
+            &json!({}),
+            json!(7),
+        )
+        .and_then(|refusal| refusal.error)
+        .expect("a candidate refuses a sign-out");
+        assert_eq!(
+            (
+                refusal.code,
+                refusal.data,
+                refusal
+                    .message
+                    .contains("sign out on the authoritative launch"),
+            ),
+            (
+                crate::mob_announcements::rpc::ANNOUNCEMENTS_REFUSED_CODE,
+                Some(json!({ "kind": "candidate_launch" })),
+                true,
+            ),
+            "{}",
+            refusal.message
+        );
+        assert!(
+            super::candidate_launch_refusal(
+                true,
+                None,
+                super::CONSOLE_SIGN_OUT_METHOD,
+                &json!({}),
+                json!(7)
+            )
+            .is_none(),
+            "an authoritative launch serves it"
         );
     }
 
@@ -8904,6 +9178,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn last_member_binding(
             &self,
             identity: &AgentIdentity,
@@ -8958,6 +9240,16 @@ mod tests {
             identity: &AgentIdentity,
         ) -> Result<crate::identity_first::MemberStanding, BridgeError> {
             self.core.member_standing(identity)
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            Ok(crate::identity_first::DeclaredRosterAnswer::kept_for(
+                &roster,
+            ))
         }
     }
 
@@ -10372,9 +10664,12 @@ shell = true
             default_timeout: None,
         }));
         let owed = AgentIdentity::parse("owed-member")?;
-        // Its held pass ended without publishing it: Core never spawned it,
-        // and the identity owes its host a fresh held completion.
-        identity_rt.record_held_completion(&owed, false);
+        // Its host holds it (a held pass marked it and ended without
+        // publishing it): Core never spawned it, and the identity owes its
+        // host a held completion.
+        identity_rt
+            .mark_held_completion_owed(std::slice::from_ref(&owed))
+            .await?;
         let roster_provider = Arc::new(ContextRequiredStaticRosterProvider::new(vec![
             DurableAgentSpec {
                 identity: owed.clone(),
@@ -11293,7 +11588,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -11628,7 +11924,8 @@ shell = true
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
                 Arc::new(identity_rt),
@@ -12446,13 +12743,18 @@ shell = true
         };
 
         // Every identity method the stale-binding refusal covers: the identity
-        // status, inspect and lifecycle methods, the delivery methods, and two
-        // operator member verbs (the operator path answers through its own
-        // response conversion). meta/member_activate_instruction and
+        // status, inspect and lifecycle methods, the delivery methods, and
+        // three operator member verbs (the operator path answers through its
+        // own response conversion). meta/member_activate_instruction and
         // meta/bound_member_transcript need an activation and a wired
         // transcript service before they resolve; the operator verb harness
         // covers them (operator_verbs_with_preconditions_refuse_a_stale_runtime_id).
-        let operator_methods = ["meta/member_instruction_activations", "meta/compact_member"];
+        // meta/set_instruction's member target is checked after the loop.
+        let operator_methods = [
+            "meta/member_instruction_activations",
+            "meta/compact_member",
+            "meta/instruction_status",
+        ];
         for method in [
             "meta/status_identity",
             "meta/inspect_identity",
@@ -12472,6 +12774,7 @@ shell = true
             "meta/completion_cursor",
             "meta/member_instruction_activations",
             "meta/compact_member",
+            "meta/instruction_status",
         ] {
             let response = Box::pin(call(method, "rt:review:singleton:0")).await?;
             assert_eq!(
@@ -12548,6 +12851,42 @@ shell = true
                 },
             }),
             "{member:#?}"
+        );
+        // An operator instruction's member target passes the same gate, and
+        // the refused write records nothing.
+        let write = Box::pin(handle_unified_rpc_json(
+            &runtime,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "meta/set_instruction",
+                "params": {
+                    "namespace": "host",
+                    "key": "persona",
+                    "revision": 1,
+                    "body": "Answer as the reviewer.",
+                    "target": { "kind": "member", "identity": "rt:review:singleton:0" },
+                },
+            })
+            .to_string(),
+            Duration::from_secs(1),
+            None,
+            Some(&identity_ctx),
+        ))
+        .await;
+        let write = serde_json::from_str::<Value>(&write)?;
+        assert_eq!(
+            write["error"]["data"]["kind"],
+            json!("stale_identity_runtime_binding"),
+            "{write:#?}"
+        );
+        let records = runtime
+            .mob_handle()
+            .operator_instruction_status(meerkat_mob::OperatorInstructionStatusQuery::default())
+            .await?;
+        assert!(
+            records.desired.is_empty(),
+            "the refused write records nothing: {records:?}"
         );
         let status = identity_runtime.status(&identity).await?;
         assert_eq!(
@@ -13374,7 +13713,8 @@ shell = true
                     binding: None,
                     placement: None,
                 })
-                .await;
+                .await
+                .expect("the identity registers");
         }
         let identity_ctx = IdentityFirstContext {
             runtime: crate::identity_first::PublicIdentityRuntime::new(
@@ -15053,9 +15393,16 @@ comms = true
                 default_timeout: None,
             }));
             let identity = AgentIdentity::parse(durable)?;
+            // Declared as Core holds its member (turn-driven), so the
+            // registration's declaration keeps the member as it is: a
+            // declared runtime mode that differs restamps the member, whose
+            // successor's comms runtime the wiring could reach before it is up.
+            let mut spec = rpc_durable_spec(identity.as_str(), "worker");
+            spec.runtime_mode_override = Some(meerkat_mob::MobRuntimeMode::TurnDriven);
             identity_rt
-                .register(rpc_durable_spec(identity.as_str(), "worker"))
-                .await;
+                .register(spec)
+                .await
+                .expect("the identity registers");
             runtime.attach_identity_first_context(Arc::new(
                 crate::identity_first::IdentityFirstRuntimeContext::new(
                     identity_rt,
@@ -15493,6 +15840,165 @@ comms = true
              Mob retire was not invoked"
         );
 
+        Ok(())
+    }
+
+    /// `meta/retire_member` by a name this runtime has not registered, which
+    /// Core holds for an identity, answers the identity door's typed refusal,
+    /// and the mob's raw plane retires nothing, though a raw member holds the
+    /// name there: a created entry and a removed name answer `-32001`, an
+    /// unreadable name `-32014` (`identity_name_unreadable`), and an entry a
+    /// host declared, before this process's roster pass registered it,
+    /// `-32052` (`identity_history_unavailable`, retryable).
+    ///
+    /// RED: read `identity_for_member_mutation`'s refusal as "no identity" in
+    /// the RPC member verbs: the raw plane retires the member under the name,
+    /// and the verb answers it accepted.
+    #[tokio::test]
+    async fn retire_member_of_a_name_no_roster_pass_registers_is_refused_typed()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp_dir = tempfile::tempdir()?;
+        let runtime = Box::pin(
+            UnifiedRuntime::builder()
+                .mob_spec(rpc_test_mob_spec(&temp_dir)?)
+                .module_config(MetaConfig {
+                    modules: Vec::new(),
+                    discovery: DiscoverySpec {
+                        namespace: "rpc-unregistered-retire-test".to_string(),
+                        modules: Vec::new(),
+                    },
+                    pre_spawn: Vec::new(),
+                })
+                .timeout(Duration::from_secs(5))
+                .build(),
+        )
+        .await?;
+        let names = [
+            "door-created",
+            "door-removed",
+            "door-unreadable",
+            "door-declared",
+        ];
+        // A raw member holds each name in the mob: what a raw retire ends.
+        for name in names {
+            runtime
+                .spawn(SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    name.to_string(),
+                    None,
+                    None,
+                    None,
+                ))
+                .await?;
+        }
+
+        let core_bridge = Arc::new(CoreReadsBridge::default());
+        let created = AgentIdentity::parse("door-created")?;
+        let declared = AgentIdentity::parse("door-declared")?;
+        // Core holds a member of the created entry and of the declared one.
+        for identity in [&created, &declared] {
+            bind_live(
+                &core_bridge.core,
+                identity,
+                &meerkat_mob::ProfileName::from("worker"),
+                1,
+                Some(meerkat_core::types::SessionId::new()),
+            )
+            .map_err(|err| format!("Core's member of {identity}: {err:?}"))?;
+        }
+        core_bridge.hold_created(&created);
+        core_bridge.hold_declared(&declared);
+        core_bridge.hold_removed(&AgentIdentity::parse("door-removed")?);
+        core_bridge.hold_unreadable(&AgentIdentity::parse("door-unreadable")?);
+        // This process has run no roster pass: it registered nothing.
+        let identity_rt = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
+            continuity_store: Arc::new(LocalContinuityStore::in_memory()?),
+            lease_provider: Arc::new(LocalLeaseProvider::new()),
+            runtime_instance_id: "rpc-unregistered-retire-test".to_string(),
+            has_runtime_store: true,
+            durability_policy: DurabilityPolicy::SyncWriteThrough,
+            bridge: Some(core_bridge.clone()),
+            default_timeout: None,
+        }));
+        let identity_ctx = IdentityFirstContext {
+            runtime: crate::identity_first::PublicIdentityRuntime::new(
+                Arc::clone(&identity_rt),
+                runtime.mob_runtime().clone(),
+            ),
+            roster_provider: Arc::new(EmptyRosterProvider),
+            topology_provider: None,
+            customizer: None,
+            agent_memory_provider: None,
+            mob_definition: None,
+            transcript_edit_service: None,
+            compaction_floors: None,
+        };
+
+        for (id, (name, code, data)) in [
+            ("door-created", -32001, Value::Null),
+            ("door-removed", -32001, Value::Null),
+            (
+                "door-unreadable",
+                crate::rpc::STORAGE_RESOLUTION_CODE,
+                json!({
+                    "kind": "identity_name_unreadable",
+                    "identity": "door-unreadable",
+                    "remedy": "repair_or_upgrade",
+                    "retryable": false,
+                }),
+            ),
+            (
+                "door-declared",
+                crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": "door-declared",
+                    "retryable": true,
+                }),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let raw = handle_unified_rpc_json(
+                &runtime,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "meta/retire_member",
+                    "params": { "member_id": name },
+                })
+                .to_string(),
+                Duration::from_secs(5),
+                None,
+                Some(&identity_ctx),
+            )
+            .await;
+            let response: Value = serde_json::from_str(&raw)?;
+            assert!(
+                response["result"].is_null(),
+                "{name}: meta/retire_member is refused: {response:#?}"
+            );
+            assert_eq!(
+                (
+                    response["error"]["code"].clone(),
+                    response["error"]["data"].clone()
+                ),
+                (json!(code), data),
+                "{name}: the identity door's typed refusal: {response:#?}"
+            );
+        }
+
+        let members = runtime.mob_handle().list_members().await;
+        for name in names {
+            assert!(
+                members
+                    .iter()
+                    .any(|entry| entry.agent_identity.as_str() == name),
+                "{name}: the raw plane retired nothing: {members:?}"
+            );
+        }
+        let _ = runtime.mob_handle().stop().await;
         Ok(())
     }
 

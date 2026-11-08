@@ -10,15 +10,17 @@ or recreating the original sign-in ceremony.
 
 This is not a browser flow, credential store, refresh scheduler, account picker,
 native completion handle or tool grant. The production downstream credential
-binding remains with the native owner under #1631. A local signed fixture test
+binding remains with the selected native owner. A local signed fixture test
 does not establish a real Google login or protected browser integration.
 The [native owner's accepted contract](https://github.com/lukacf/meerkat/issues/1631#issuecomment-5975028207)
 puts nonce custody in the flow authority. It generates and retains the nonce
 at start, returns it for the authorization URL, then supplies it from the
 admitted attempt at completion. Toolkit and application hosts never generate,
 persist or derive it. The nonce expires or is consumed with that attempt; a
-reopened flow gets a fresh one. This contract is scheduled under #1631 after
-0.8.51 and is not yet a consumable SDK API.
+reopened flow gets a fresh one. Current Core supplies native nonce custody and
+public connector login APIs, but this stateless Google helper is not
+automatically composed into that owner. See [generic connector sign-in](CONNECTOR-AUTH.md#profile-limits-and-qualification)
+for the separate provider-composition and credential-use requirements.
 
 ## Host composition
 

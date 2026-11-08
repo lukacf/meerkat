@@ -1,6 +1,6 @@
 [package]
 name = "toolkit-mobkit"
-version = "0.9.4"
+version = "0.9.10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -21,7 +21,8 @@ unimplemented = "deny"
 
 [features]
 default = []
-native-host = ["dep:meerkat", "dep:meerkat-mobkit", "dep:meerkat-mob", "dep:meerkat-mob-mcp", "dep:meerkat-runtime", "dep:meerkat-authorization", "dep:nix", "dep:axum", "dep:futures"]
+test-support = ["native-host"]
+native-host = ["dep:meerkat", "dep:meerkat-mcp", "dep:meerkat-mobkit", "dep:meerkat-mob", "dep:meerkat-mob-mcp", "dep:meerkat-runtime", "dep:meerkat-authorization", "dep:nix", "dep:axum", "dep:futures"]
 
 [dependencies]
 axum = { version = "0.8", optional = true }
@@ -29,6 +30,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 # Native prerequisite bindings belong to the explicit candidate workspace.
 meerkat = { workspace = true, optional = true, features = ["session-store", "local-authorization"] }
+meerkat-mcp = { workspace = true, optional = true }
 meerkat-mobkit = { workspace = true, optional = true }
 meerkat-mob = { workspace = true, optional = true }
 meerkat-mob-mcp = { workspace = true, optional = true }
@@ -51,8 +53,12 @@ futures = { workspace = true, optional = true }
 nix = { version = "0.29", features = ["fs", "socket"], optional = true }
 
 [dev-dependencies]
+# Exact prepared-call context for the native workflow failure controls.
+meerkat-core = { workspace = true, features = ["test-support"] }
 # Existing native actor gate for the isolated queued-admission race fixture.
 meerkat-mob = { workspace = true, features = ["test-support"] }
+# The actual SQLite runtime owner's one-shot committed-acknowledgement loss.
+meerkat-runtime = { workspace = true, features = ["test-support"] }
 meerkat-tools.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true

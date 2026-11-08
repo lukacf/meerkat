@@ -94,7 +94,7 @@ async fn mutate(
                 .unwrap()
                 .singleton_grant()
                 .unwrap();
-            let route = source.route(&b.route).unwrap();
+            let route = &source.route(&b.route).unwrap();
             let original = OriginalWorkRef {
                 authority: route.source_authority.clone(),
                 work: b.original.clone(),

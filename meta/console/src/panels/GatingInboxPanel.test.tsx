@@ -197,6 +197,17 @@ describe("GatingInboxPanel recorded audit", () => {
     expect(older.textContent?.includes("Decided by:")).toBe(false);
   });
 
+  it("names the decider without an assurance the record does not carry", () => {
+    const decided = {
+      ...evaluated, audit_id: "no-assurance", pending_id: "pending-3", event_type: "approval_decided", risk_tier: "r3", outcome: "allowed",
+      detail: { decision: "approve", approver_id: "release-manager", deciding_principal: "alice@example.test", approver_binding: "held" },
+    };
+    const view = render(<GatingInboxPanel pending={[]} audit={[decided]} onDecide={vi.fn()} />);
+    fireEvent.click(view.getByTestId("gating-tab:audit"));
+    const row = view.getByTitle("send-message", { exact: true }).closest<HTMLElement>(".gitem")!;
+    expect(within(row).getByText("Decided by: alice@example.test (as Release manager)")).toBeTruthy();
+  });
+
   it("says when the records are kept in the gateway's memory, without claiming a start time", () => {
     const memory = "Kept in the gateway's memory: decisions from before a gateway restart may be missing.";
     const view = render(<GatingInboxPanel pending={[]} audit={[evaluated]} onDecide={vi.fn()} auditRetention="process" />);

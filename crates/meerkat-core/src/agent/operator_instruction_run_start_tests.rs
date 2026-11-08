@@ -734,3 +734,127 @@ async fn a_later_run_that_skips_the_run_start_never_adopts_a_reserved_run_id() {
         "a later run never adopts a reserved run id"
     );
 }
+
+/// What an `operator_instructions_applied` observation carries.
+type AppliedObservation = (
+    meerkat_core::SessionId,
+    u64,
+    meerkat_core::InstructionEntryKind,
+    Option<meerkat_core::lifecycle::RunId>,
+    Vec<meerkat_core::InstructionActiveRef>,
+    Vec<meerkat_core::InstructionChange>,
+);
+
+/// The `operator_instructions_applied` observations among `events`, in
+/// order.
+fn applied_observations(events: &[meerkat_core::event::AgentEvent]) -> Vec<AppliedObservation> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            meerkat_core::event::AgentEvent::OperatorInstructionsApplied {
+                session_id,
+                entry_sequence,
+                kind,
+                run_id,
+                active,
+                changes,
+            } => Some((
+                session_id.clone(),
+                *entry_sequence,
+                *kind,
+                run_id.clone(),
+                active.clone(),
+                changes.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Run `input` and collect what the run published.
+async fn run_collecting(
+    agent: &mut TestAgent,
+    input: &str,
+) -> Vec<meerkat_core::event::AgentEvent> {
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(512);
+    agent
+        .run_with_events(input.into(), event_tx)
+        .await
+        .expect("the run completes");
+    let mut events = Vec::new();
+    while let Ok(event) = event_rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+/// The delta entry a fresh run start appended is observed once, when the run
+/// whose start appended it starts: right after `run_started`, projected from
+/// the entry row. A run start with nothing pending publishes no observation.
+#[tokio::test]
+async fn operator_instructions_applied_is_published_when_the_run_starts() {
+    let client = Arc::new(RecordingClient::default());
+    let mut agent = build_agent(
+        conversed_session(),
+        &client,
+        InstructionLowering::MidConversation,
+    )
+    .await;
+    agent
+        .session_mut()
+        .set_session_instruction(write("tone", 1, "Answer formally."))
+        .unwrap();
+    assert!(matches!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::Applied { .. }
+    ));
+    let events = run_collecting(&mut agent, "next").await;
+
+    let entry = entry_identities(agent.session().messages())
+        .pop()
+        .expect("the run start's entry row");
+    let applied = applied_observations(&events);
+    assert_eq!(applied.len(), 1, "one observation of the entry: {events:?}");
+    let (session_id, entry_sequence, kind, run_id, active, changes) = applied[0].clone();
+    assert_eq!(&session_id, agent.session().id());
+    assert_eq!(entry_sequence, entry.entry_sequence());
+    assert_eq!(kind, meerkat_core::InstructionEntryKind::Delta);
+    assert!(run_id.is_some(), "the delta names the run that applied it");
+    assert_eq!(run_id.as_ref(), entry.run_id());
+    assert_eq!(active.as_slice(), entry.active());
+    assert_eq!(changes.as_slice(), entry.changes());
+    let started = events
+        .iter()
+        .position(|event| matches!(event, meerkat_core::event::AgentEvent::RunStarted { .. }))
+        .expect("the run started");
+    let observed = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                meerkat_core::event::AgentEvent::OperatorInstructionsApplied { .. }
+            )
+        })
+        .expect("the entry was observed");
+    assert!(
+        started < observed,
+        "the observation follows the run's start"
+    );
+
+    agent
+        .conclude_run_start_operator_instructions()
+        .expect("the run start concludes");
+    assert_eq!(
+        agent
+            .apply_run_start_operator_instructions(InstructionRunStart::FreshRun, None)
+            .unwrap(),
+        RunStartInstructionOutcome::NotNeeded
+    );
+    let quiet = run_collecting(&mut agent, "again").await;
+    assert!(
+        applied_observations(&quiet).is_empty(),
+        "a run start with nothing pending publishes no observation"
+    );
+}

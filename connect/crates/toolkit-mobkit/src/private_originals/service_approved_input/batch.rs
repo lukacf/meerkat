@@ -113,7 +113,7 @@ impl InstalledServiceTask {
             .ok_or(PrivateOriginalError::Denied)?;
         if let Some(setup) = &mut self.setup {
             setup.expires_at_ms = setup.expires_at_ms.min(expiry);
-            let route = self.source.route(&self.parent.route)?;
+            let route = &self.source.route(&self.parent.route)?;
             body.insert("configured_setup".into(), serde_json::json!({
                 "selection": setup,
                 "authority": "fresh children for this task from the already configured agent setup policy",

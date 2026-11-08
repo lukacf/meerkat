@@ -713,13 +713,14 @@ pub trait MobPurposeSource: Send + Sync {
 
 /// The members private to a person, by the identity their memory scope
 /// names them by: a console side chat a signed-in person opened, and the
-/// members its own turn created or forked (their roster labels carry
+/// members it created or forked (their roster labels carry
 /// [`crate::access::PRIVATE_TO_LABEL`]). Their memory is theirs alone, so a
 /// dream covers none of it, as the Distiller distills none of their
-/// transcripts.
+/// transcripts. An error (the record of who they are is not read yet) fails
+/// the dream run, which the next one tries again.
 #[async_trait]
 pub trait PrivateMemberSource: Send + Sync {
-    async fn private_identities(&self) -> BTreeSet<String>;
+    async fn private_identities(&self) -> Result<BTreeSet<String>, String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1236,7 +1237,12 @@ impl StewardEngine {
     async fn private_identities(&self) -> Result<Arc<BTreeSet<String>>, AgentMemoryError> {
         let mut private = BTreeSet::new();
         if let Some(source) = self.private_members.as_ref() {
-            private.extend(source.private_identities().await);
+            private.extend(
+                source
+                    .private_identities()
+                    .await
+                    .map_err(AgentMemoryError::Io)?,
+            );
         }
         if let Some(source) = self.mob_context.as_ref() {
             for context in source.mob_contexts() {
@@ -1317,7 +1323,8 @@ impl StewardEngine {
     }
 
     /// [`Self::note_identity_retired`] for a retirement whose step was asked
-    /// at `retired_at_ms`, the key of its harvest: a repeat of the same
+    /// (or, when no step asked for it, that Core journaled) at
+    /// `retired_at_ms`, the key of its harvest: a repeat of the same
     /// retirement records nothing more. Answers the store's error, so a
     /// caller that owes the harvest at least once runs it again.
     pub async fn record_identity_retired_at(

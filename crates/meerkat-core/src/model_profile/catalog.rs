@@ -79,8 +79,9 @@ pub struct ProviderDefaults {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenAiImageGenerationRequestShape {
+    /// GPT Image request: size, quality, output format and the OpenAI image
+    /// provider params.
     GptImage,
-    DallE,
 }
 
 /// Whether a native image-generation model accepts an explicit image-size field.

@@ -36,7 +36,7 @@ async function stop(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 }
 
-async function startFixture({ mode = "member", stateDir, liveImages = false, liveModel = false, routineTools = false, diagnoseStreams = false, sharedAssets = path.join(__dirname, ".tmp/acceptance"), allowExtraMembers = false } = {}) {
+async function startFixture({ mode = "member", stateDir, liveImages = false, liveModel = false, routineTools = false, diagnoseStreams = false, sharedAssets = path.join(__dirname, ".tmp/acceptance"), allowExtraMembers = false, person = false } = {}) {
   // Freeze the built production UI for this fixture lifetime. UI-only iterations
   // reuse the real Rust backend without recompiling its embedded asset bytes.
   const consoleAssets = new Map(await Promise.all([
@@ -79,6 +79,19 @@ async function startFixture({ mode = "member", stateDir, liveImages = false, liv
     else assert.equal(readyIdentities, 2);
   } catch (error) { await stop(child); throw new Error(`${error.message}\n${logs}`); }
 
+  // Console approvals are decided only by a signed-in person. With `person`,
+  // every request through the proxy (the browser's and `rpc`'s) carries the
+  // fixture person's token unless it brings its own; the backend URL stays
+  // anonymous.
+  let personToken;
+  let personPrincipal;
+  if (person) {
+    const response = await fetch(`${backendUrl}/__fixture/person-token`);
+    const body = await response.json();
+    if (!response.ok || !body.token) { await stop(child); throw new Error(`fixture person token: ${JSON.stringify(body)}`); }
+    personToken = body.token; personPrincipal = body.principal;
+  }
+
   const observations = [];
   const streamDiagnostics = [];
   const streams = new Set();
@@ -111,7 +124,9 @@ async function startFixture({ mode = "member", stateDir, liveImages = false, liv
       res.writeHead(503, { "content-type": "application/json" });
       res.end('{"error":"fixture_unavailable"}'); return;
     }
-    const upstream = http.request(url, { method: req.method, headers: { ...req.headers, host: url.host } }, incoming => {
+    const upstreamHeaders = { ...req.headers, host: url.host };
+    if (personToken && !upstreamHeaders.authorization) upstreamHeaders.authorization = `Bearer ${personToken}`;
+    const upstream = http.request(url, { method: req.method, headers: upstreamHeaders }, incoming => {
       observation.status = incoming.statusCode;
       const drop = dropSend && req.method === "POST" && (url.pathname.endsWith("/send") || observation.request.includes('"method":"meta/console/send"'));
       if (drop) dropSend = false;
@@ -169,7 +184,7 @@ async function startFixture({ mode = "member", stateDir, liveImages = false, liv
   const port = await listen(proxy);
   const baseUrl = `http://127.0.0.1:${port}`;
   return {
-    baseUrl, backendUrl, observations, streamDiagnostics,
+    baseUrl, backendUrl, observations, streamDiagnostics, personPrincipal,
     async control(name, body) {
       const response = await fetch(`${backendUrl}/__fixture/${name}`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),

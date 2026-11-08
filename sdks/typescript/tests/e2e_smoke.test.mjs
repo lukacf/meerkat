@@ -51,7 +51,7 @@ function openaiStressModel() {
 }
 
 function openaiImageModel() {
-  return process.env.SMOKE_IMAGE_MODEL_OPENAI || "gpt-image-2";
+  return process.env.SMOKE_IMAGE_MODEL_OPENAI || "gpt-image-2.6-sunburst";
 }
 
 function geminiModel() {

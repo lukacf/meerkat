@@ -169,7 +169,7 @@ impl PrivateOriginals {
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let access = self.decode_access(&access_stored, grant)?;
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         let control = McpAttachmentControlRequest::from_trusted_ingress(
             task.original_task.origin_session_id.clone(),
             server,
@@ -277,7 +277,7 @@ impl PrivateOriginals {
         if control.effect_of(binding) != Some(McpAttachmentEffect::Apply) && !hydrate {
             return Err(PrivateOriginalError::Denied);
         }
-        let route = self.route(&held.grant.route)?;
+        let route = &self.route(&held.grant.route)?;
         let (AccessDecision::Mcp(decision), Some(selection)) =
             (&held.access.decision, &held.access.mcp)
         else {

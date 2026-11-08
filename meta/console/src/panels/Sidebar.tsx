@@ -1,4 +1,4 @@
-import { ApprovalAttention } from "../../../packages/console-components/src/conversation/approval-card";
+import { ApprovalAttention, useApprovalViewer } from "../../../packages/console-components/src/conversation/approval-card";
 import { CopyButton } from "../../../packages/console-components/src/copy-button";
 import { IconButton } from "../../../packages/console-components/src/panel-kit/button";
 import { RelativeTime } from "../../../packages/console-components/src/panel-kit/relative-time";
@@ -6,7 +6,7 @@ import { StatusMark } from "../../../packages/console-components/src/panel-kit/s
 import { SearchField } from "../../../packages/console-components/src/panel-kit/toolbar";
 import { ViewOptions, type ViewOptionsControl } from "../../../packages/console-components/src/panel-kit/view-options";
 import { Sparkline } from "../../../packages/console-components/src/viz/charts/sparkline";
-import type { PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
+import { approvalAudience, type ApprovalViewer, type PendingApprovalSnapshot } from "../../../packages/console-core/src/pending-approvals";
 import React from "react";
 import {
   DEFAULT_CONSOLE_SIDEBAR_VIEW,
@@ -340,11 +340,14 @@ function writeSidebarTime(storage: ConsoleSidebarStorageLike | null, key: string
   }
 }
 
-/** Approvals waiting for a decision, once the approvals have loaded. */
-function pendingApprovalCount(snapshot: PendingApprovalSnapshot | undefined): number {
+/** Approvals waiting for a decision, once the approvals have loaded, as
+ * "Needs you" counts them: a request routed to an approver the viewer does
+ * not hold waits for someone else. */
+function pendingApprovalCount(snapshot: PendingApprovalSnapshot | undefined, viewer: ApprovalViewer | undefined): number {
   if (!snapshot || snapshot.status !== "ready") return 0;
   return snapshot.requests.filter((request) =>
-    request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled").length;
+    request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled"
+    && (!viewer || approvalAudience(request, viewer).kind === "you")).length;
 }
 
 /** Agents whose health is a problem, by word ("1 stalled, 2 degraded"); crit when one is stuck. */
@@ -2798,7 +2801,8 @@ export const Sidebar = React.memo(function Sidebar({
   // that are not well, errors since the Logs were last seen, and what the
   // host counts (WorkGraph blocked, Memory waiting for review).
   const healthAttention = React.useMemo(() => healthNavAttention(agents), [agents]);
-  const pendingApprovals = pendingApprovalCount(approvals);
+  const approvalViewer = useApprovalViewer();
+  const pendingApprovals = pendingApprovalCount(approvals, approvalViewer);
   const attentionByKind = React.useMemo<Partial<Record<NavKind, SidebarNavAttention>>>(() => {
     const out: Partial<Record<NavKind, SidebarNavAttention>> = { ...navAttention };
     if (pendingApprovals > 0) {

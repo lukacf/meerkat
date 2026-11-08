@@ -34,6 +34,12 @@ the selected runtime; compatible platform runtimes are still required. start.py
 verifies the selected archive's size and hash before using its contents. See
 `python3.11 start.py --help` for explicit optional runtimes and acquisition.
 
+Use `--families official-github` to select only an official GitHub component
+present in the selected archive, or list the families to enable separated by
+commas. Without this option, the starter enables agno and services, plus
+activepieces when Node/npm is supplied. Official payloads are not enabled by
+their presence alone; the archived preparer checks each explicit selection.
+
 This prepares the local setup client and configuration. Register the reported
 mcp.json through your existing MCP host, then ask its agent for the original
 task. Preparation does not start an agent or authenticate an account. If it
@@ -78,8 +84,12 @@ def export(destination, *, manifest=None, manifest_sha256=None):
     if not destination.is_absolute():
         raise ExportError("destination must be an absolute fresh directory")
     source = ROOT / "sdk/consumer-setup"
-    if manifest is None and manifest_sha256 is None:
-        pointer = json.loads(read_regular(source / "current-distribution.json"))
+    default_selection = manifest is None and manifest_sha256 is None
+    if default_selection:
+        try:
+            pointer = json.loads(read_regular(source / "current-distribution.json"))
+        except FileNotFoundError as error:
+            raise ExportError("current distribution selection unavailable; use trusted --manifest and --manifest-sha256") from error
         if (not isinstance(pointer, dict)
                 or set(pointer) != {"schema_version", "manifest", "manifest_sha256"}
                 or type(pointer["schema_version"]) is not int or pointer["schema_version"] != 1
@@ -100,7 +110,12 @@ def export(destination, *, manifest=None, manifest_sha256=None):
         # retargeting the ordinary distribution or inspecting archive directories.
         pointer = {"schema_version": 1, "manifest": "release-manifest.json",
                    "manifest_sha256": manifest_sha256}
-    manifest = read_regular(manifest_path)
+    try:
+        manifest = read_regular(manifest_path)
+    except FileNotFoundError as error:
+        if default_selection:
+            raise ExportError("current distribution selection unavailable; use trusted --manifest and --manifest-sha256") from error
+        raise
     if hashlib.sha256(manifest).hexdigest() != pointer["manifest_sha256"]:
         raise ExportError("selected release manifest hash mismatch")
     payloads = {name: read_regular(source / name) for name in SOURCE_FILES}

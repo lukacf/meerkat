@@ -2100,6 +2100,46 @@ pub(crate) mod tests {
         assert_eq!(state.requester(), Some(&principal("caller-a")));
     }
 
+    /// An ungoverned keyed retry replays only for the requester its row was
+    /// admitted for. The same key, content and requester deduplicate to the
+    /// row; another requester's retry under that key is an
+    /// `InputIdempotencyConflict` naming the row, never that requester's
+    /// receipt.
+    #[tokio::test]
+    async fn a_keyed_retry_for_another_requester_is_an_idempotency_conflict() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("keyed-retry"));
+        let keyed = |requester: &str| {
+            let mut prompt = crate::input::PromptInput::new("the same request", None);
+            prompt.header.idempotency_key =
+                Some(crate::identifiers::IdempotencyKey::new("one-key"));
+            prompt.header.requester = Some(principal(requester));
+            Input::Prompt(prompt)
+        };
+        let AcceptOutcome::Accepted { state, .. } = driver
+            .accept_input(keyed("caller-a"))
+            .await
+            .expect("the original is admitted")
+        else {
+            panic!("the original is admitted");
+        };
+        let original = state.input_id.clone();
+        assert!(
+            matches!(
+                driver.accept_input(keyed("caller-a")).await,
+                Ok(AcceptOutcome::Deduplicated { existing_id, .. }) if existing_id == original
+            ),
+            "the same requester's retry replays the row"
+        );
+        assert!(
+            matches!(
+                driver.accept_input(keyed("caller-b")).await,
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == original
+            ),
+            "another requester's retry under the key is a conflict"
+        );
+    }
+
     /// The driver resolves its native replay lookup before the host
     /// authenticates, and hands the host the verdict on the ingress context:
     /// the first admission is a first authentication, and an exact retry

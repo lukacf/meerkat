@@ -27,7 +27,8 @@ pub use http_egress::HttpEgressRefusal;
 pub use lease::{
     AuthConstraints, AuthLease, AuthRefreshReason, HttpAuthorizationContent,
     HttpAuthorizationReceipt, HttpAuthorizationRequest, HttpAuthorizationResponse,
-    HttpAuthorizationResponseAction, HttpAuthorizer, ResolvedAuthEnvelope, ResolvedAuthKind,
+    HttpAuthorizationResponseAction, HttpAuthorizer, HttpRequestInitiator, ResolvedAuthEnvelope,
+    ResolvedAuthKind,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use lifecycle::{

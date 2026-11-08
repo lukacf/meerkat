@@ -115,6 +115,33 @@ test("declared Console credentials obey runtime rules without inferring them fro
   assert.deepEqual(deploymentFieldIssues(authenticatedConsole, { CONSOLE_LOGIN_PASSWORD: "" }), []);
 });
 
+test("a Console with named accounts checks the installation's own account like one shared account", () => {
+  const named = { ...authenticatedConsole, console_scope: { authentication: "local-accounts" } };
+  const values = { CONSOLE_USER_ID: "test reader", CONSOLE_LOGIN_PASSWORD: "short" };
+  assert.deepEqual(deploymentFieldIssues(named, values), deploymentFieldIssues(authenticatedConsole, values));
+  assert.equal(deploymentFieldIssues(named, values).length, 2);
+  assert.equal(deploymentCanSubmit(named, values), false);
+  const valid = { CONSOLE_USER_ID: "test-reader+one@example.test", CONSOLE_LOGIN_PASSWORD: "  exact secret  " };
+  assert.deepEqual(deploymentFieldIssues(named, valid), []);
+  assert.deepEqual(deploymentSettings(named, valid), valid);
+});
+
+test("an OIDC Console checks the operator's email and the people it admits", () => {
+  const oidc = { supported: true, current: true, console_scope: { authentication: "oidc" }, fields: [
+    { key: "CONSOLE_USER_ID", label: "Console operator email", required: true, secret: false },
+    { key: "CONSOLE_OIDC_CLIENT_SECRET", label: "OIDC client secret", required: true, secret: true },
+    { key: "CONSOLE_ALLOWED_EMAILS", label: "People who may sign in", required: false, secret: false },
+  ] };
+  const issues = deploymentFieldIssues(oidc, { CONSOLE_USER_ID: "operator", CONSOLE_ALLOWED_EMAILS: "not-an-email" });
+  assert.deepEqual(issues.map((issue) => issue.key), ["CONSOLE_USER_ID", "CONSOLE_ALLOWED_EMAILS"]);
+  const valid = { CONSOLE_USER_ID: "operator@example.test", CONSOLE_OIDC_CLIENT_SECRET: "private client secret",
+    CONSOLE_ALLOWED_EMAILS: "first@example.test, second@example.test" };
+  assert.deepEqual(deploymentFieldIssues(oidc, valid), []);
+  assert.deepEqual(deploymentSettings(oidc, valid), valid);
+  // The email checks belong to the OIDC Console; another scope keeps its own rules.
+  assert.deepEqual(deploymentFieldIssues({ ...oidc, console_scope: undefined }, { CONSOLE_ALLOWED_EMAILS: "not-an-email" }), []);
+});
+
 test("remote metadata constraints require bounded declarations", () => {
   for (const field of constrained.fields) assert.equal(deploymentFieldConstraintsValid(field), true);
   for (const field of [{ min_length: true }, { max_length: 32769 }, { min_length: 4, max_length: 3 },

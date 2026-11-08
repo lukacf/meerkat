@@ -114,10 +114,11 @@ impl PreparedInstalledToolPolicy {
         scope: toolkit_store::StoreScope,
         application: meerkat_core::PrincipalRef,
         participant: Option<Arc<dyn crate::private_originals::ApplicationServicePolicy>>,
+        classes: Vec<meerkat_toolkit::host_lifetime::policy::CompiledMemberClass>,
     ) -> Result<Arc<service_policy::ServicePolicyOwner>, HostLifetimeError> {
         let _initialization = self.service_owner_init.lock().await;
         if let Some(owner) = self.service_owner.get() {
-            if !owner.same_binding(&store, &scope, &application, &participant) {
+            if !owner.same_binding(&store, &scope, &application, &participant, &classes) {
                 return Err(HostLifetimeError::InvalidSelection);
             }
             owner.recover().await?;
@@ -137,12 +138,313 @@ impl PreparedInstalledToolPolicy {
             self.providers[0].clone(),
             String::from_utf8(bootstrap).map_err(|_| HostLifetimeError::InvalidSelection)?,
             participant,
+            classes,
         )
         .await?;
         self.service_owner
             .set(owner.clone())
             .map_err(|_| HostLifetimeError::InvalidSelection)?;
         Ok(owner)
+    }
+
+    /// Decorate the existing native customizer once before runtime assembly.
+    /// Every actual construction or restart resolves only the same owner's
+    /// current concrete admission and a trusted host implementation factory.
+    pub fn member_class_customizer(
+        &self,
+        inner: Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer>,
+        factory: Arc<dyn super::dynamic_members::MemberClassFactory>,
+    ) -> Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer> {
+        super::dynamic_members::customize_member_classes(self.clone(), inner, factory)
+    }
+    /// Validate the actual dispatcher produced by the trusted gateway callback
+    /// customizer. Declaration-only instances are bound during construction.
+    pub fn member_class_gateway_customizer(
+        &self,
+        inner: Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer>,
+    ) -> Arc<dyn meerkat_mobkit::identity_first::AgentCustomizer> {
+        super::dynamic_members::customize_gateway_member_classes(self.clone(), inner)
+    }
+    pub(crate) async fn bind_member_class_surface(
+        &self,
+        expected: &super::dynamic_members::MemberClassAdmission,
+        identities: &[meerkat_core::ToolIdentity],
+    ) -> Result<(), HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .bind_member_surface(expected, identities)
+            .await
+    }
+    pub(crate) fn member_class_build_admission(
+        &self,
+        identity: &meerkat_mobkit::identity_first::AgentIdentity,
+    ) -> Result<Option<super::dynamic_members::MemberClassAdmission>, HostLifetimeError> {
+        match self.service_owner.get() {
+            Some(owner) => owner.member_build_admission(identity),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn member_class_callback_bundle(
+        &self,
+        admission: &super::dynamic_members::MemberClassAdmission,
+    ) -> Result<String, HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .callback_bundle(admission)
+    }
+
+    /// Concrete instance admission on the same current application policy owner.
+    pub async fn admit_member_class(
+        &self,
+        request: super::dynamic_members::MemberClassAdmissionRequest,
+    ) -> Result<super::dynamic_members::AdmittedMemberClass, HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .admit_member(request)
+            .await
+    }
+    /// Atomic canonical observation; authorization is separate from the record
+    /// and does not make a retained predecessor usable for native work.
+    pub async fn observe_member_class(
+        &self,
+        member: &MobMemberBinding,
+    ) -> Result<super::dynamic_members::MemberClassObservation, HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .observe_member(member)
+            .await
+    }
+    pub async fn member_class_checkpoint(
+        &self,
+        member: &MobMemberBinding,
+    ) -> Result<super::dynamic_members::MemberClassCheckpoint, HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .member_checkpoint(member)
+            .await
+    }
+    /// Re-admit only the exact retired decision/revision the application read.
+    /// A new ID alone never revives an instance or preserves its old authority.
+    pub async fn readmit_member_class(
+        &self,
+        expected: super::dynamic_members::MemberClassCheckpoint,
+        request: super::dynamic_members::MemberClassAdmissionRequest,
+    ) -> Result<super::dynamic_members::AdmittedMemberClass, HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .readmit_member(expected, request)
+            .await
+    }
+    /// Reserve an exact packaged class and concrete destination before its
+    /// trusted gateway callback dispatcher exists. This grants no native entry.
+    pub async fn reserve_member_class(
+        &self,
+        id: toolkit_package::Id,
+        instance: meerkat_toolkit::host_lifetime::policy::CompiledMemberClassInstance,
+    ) -> Result<super::dynamic_members::AdmittedMemberClass, HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .admit_member_declaration(id, instance)
+            .await
+    }
+    /// Explicit conditional successor for the declaration-only Add path.
+    /// The supplied checkpoint never substitutes for current application approval.
+    pub async fn readmit_member_class_declaration(
+        &self,
+        expected: super::dynamic_members::MemberClassCheckpoint,
+        id: toolkit_package::Id,
+        instance: meerkat_toolkit::host_lifetime::policy::CompiledMemberClassInstance,
+    ) -> Result<super::dynamic_members::AdmittedMemberClass, HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .readmit_member_declaration(expected, id, instance)
+            .await
+    }
+    /// Narrow an exact retained admission even after its approval expires.
+    /// This never recreates approval or selects another member by name alone.
+    pub async fn retire_member_class(
+        &self,
+        id: &toolkit_package::Id,
+        member: &MobMemberBinding,
+    ) -> Result<(), HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .retire_member_exact(id, member)
+            .await
+    }
+    pub fn member_class_destination(
+        &self,
+        identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+    ) -> Result<Option<meerkat_mob::MemberDestinationSelection>, HostLifetimeError> {
+        match self.service_owner.get() {
+            Some(owner) => owner.member_destination(identity),
+            None => Ok(None),
+        }
+    }
+    pub(crate) async fn select_member_class_destination(
+        &self,
+        identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+    ) -> Result<Option<meerkat_mob::MemberDestinationSelection>, HostLifetimeError> {
+        match self.service_owner.get() {
+            Some(owner) => owner.select_member_destination(identity).await,
+            None => Ok(None),
+        }
+    }
+    pub(crate) async fn verify_member_class_registration(
+        &self,
+        identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+    ) -> Result<(), HostLifetimeError> {
+        self.service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .verify_member_registration(identity)
+            .await
+    }
+    /// Correlation capacity only; every destination still needs exact native identity validation.
+    pub fn member_class_registration_capacity(&self) -> Result<usize, HostLifetimeError> {
+        match self.service_owner.get() {
+            Some(owner) => owner.member_capacity(),
+            None => Ok(0),
+        }
+    }
+    /// Read this exact handle through its existing canonical policy owner.
+    /// This is current authorization evidence, not native activation or a grant.
+    pub fn current_member_class(
+        &self,
+        admitted: &super::dynamic_members::AdmittedMemberClass,
+    ) -> Result<super::dynamic_members::MemberClassAdmission, HostLifetimeError> {
+        let owner = self
+            .service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        if !Arc::ptr_eq(owner, &admitted.owner) {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        let current = owner
+            .observed_admission(&admitted.instance().member.member)?
+            .ok_or(HostLifetimeError::Denied)?;
+        if current.id != *admitted.admission_id()
+            || current.class != *admitted.class()
+            || current.instance != *admitted.instance()
+            || current.workflow.as_ref() != admitted.workflow()
+        {
+            return Err(HostLifetimeError::Denied);
+        }
+        Ok(current)
+    }
+    /// Select an existing Active shared admission through this process's
+    /// current application-policy owner. The supplied record is an equality
+    /// precondition, never permission. This issues no Add token, writes no
+    /// policy and restores no native registration, source or controller custody.
+    pub fn restore_workflow_member_class(
+        &self,
+        expected: &super::dynamic_members::MemberClassAdmission,
+    ) -> Result<super::dynamic_members::AdmittedMemberClass, HostLifetimeError> {
+        use super::dynamic_members::{AdmittedMemberClass, MemberClassAdmissionPhase};
+        use meerkat_toolkit::host_lifetime::policy::CompiledMemberClassPurpose;
+        let owner = self
+            .service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        let current = owner
+            .observed_admission(&expected.instance.member.member)?
+            .ok_or(HostLifetimeError::Denied)?;
+        let MemberClassAdmissionPhase::Active {
+            context,
+            context_generation,
+        } = &current.phase
+        else {
+            return Err(HostLifetimeError::Denied);
+        };
+        if &current != expected
+            || current.class.purpose != CompiledMemberClassPurpose::SharedWorkflow
+            || current.workflow.is_none()
+            || current.route.is_none()
+            || current.installed_surface.is_none()
+            || current.native_surface.is_none()
+            || current.destination.as_ref().is_none_or(|destination| {
+                &destination.context != context
+                    || destination.context_generation != *context_generation
+            })
+        {
+            return Err(HostLifetimeError::Denied);
+        }
+        Ok(AdmittedMemberClass {
+            owner: owner.clone(),
+            admission: current,
+            tools: None,
+            add_token: None,
+        })
+    }
+    /// Select the current shared admission by the native build's canonical
+    /// identity. This is the same read-only restoration as an exact record
+    /// selection; it never creates an Add token or a declaration.
+    pub fn restore_workflow_member_class_for_identity(
+        &self,
+        identity: &meerkat_mobkit::identity_first::AgentIdentity,
+    ) -> Result<Option<super::dynamic_members::AdmittedMemberClass>, HostLifetimeError> {
+        let owner = self
+            .service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        owner
+            .member_build_admission(identity)?
+            .as_ref()
+            .map(|current| self.restore_workflow_member_class(current))
+            .transpose()
+    }
+    /// Advance only an exact shared admission's host-resource selection.
+    /// The existing canonical slot owns the conditional write. This creates
+    /// no native admission, policy decision, grant or resource-use permission.
+    pub async fn retain_workflow_member_resource(
+        &self,
+        admitted: &super::dynamic_members::AdmittedMemberClass,
+        expected: &super::dynamic_members::MemberClassAdmission,
+        checkpoint: &super::dynamic_members::MemberClassCheckpoint,
+        selected: meerkat_toolkit::host_lifetime::control::SelectedHostArtifact,
+    ) -> Result<super::dynamic_members::MemberClassAdmission, HostLifetimeError> {
+        let owner = self
+            .service_owner
+            .get()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        if !Arc::ptr_eq(owner, &admitted.owner) {
+            return Err(HostLifetimeError::WrongOwner);
+        }
+        if self.current_member_class(admitted)? != *expected {
+            return Err(HostLifetimeError::Denied);
+        }
+        owner
+            .retain_workflow_resource(expected, checkpoint, selected)
+            .await
+    }
+    pub(crate) fn member_class_admission(
+        &self,
+        member: &MobMemberBinding,
+    ) -> Result<Option<super::dynamic_members::MemberClassAdmission>, HostLifetimeError> {
+        match self.service_owner.get() {
+            Some(owner) => owner.observed_admission(member),
+            None => Ok(None),
+        }
+    }
+    pub(crate) async fn prepare_member_class(
+        &self,
+        identity: &meerkat_mob::MemberRuntimeBuildIdentity,
+        surface: &PreparedToolSurface,
+    ) -> Result<bool, HostLifetimeError> {
+        match self.service_owner.get() {
+            Some(owner) => owner.prepare_member(identity, surface).await,
+            None => Ok(false),
+        }
     }
 
     /// A bound replacement may select only the exact current policy already
@@ -198,12 +500,15 @@ impl PreparedInstalledToolPolicy {
         member: &MobMemberBinding,
         surface: &PreparedToolSurface,
     ) -> Result<ToolSurfaceSelection, HostLifetimeError> {
-        if !self
-            .compiled
-            .members
-            .iter()
-            .any(|row| row.member_identity == member.member)
-        {
+        let contains = match self.service_owner.get() {
+            Some(owner) => owner.contains_current_member(&member.member)?,
+            None => self
+                .compiled
+                .members
+                .iter()
+                .any(|row| row.member_identity == member.member),
+        };
+        if !contains {
             return Err(HostLifetimeError::InvalidSelection);
         }
         self.registry

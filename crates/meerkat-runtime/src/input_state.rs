@@ -75,9 +75,9 @@ pub enum InputAbandonReason {
     /// like a recovered predecessor input.
     ToolProcessInterrupted,
     /// A graceful stop kept the input durably queued for the next start
-    /// ([`crate::UnregisterQueuedInputs::Requeue`]), and the next start found
-    /// it older than that stop's max age, so it ended without running.
-    /// Resubmitting it is now correct.
+    /// ([`crate::UnregisterQueuedInputs::Requeue`]), and the next start came
+    /// more than that stop's max age after the stop, so the input ended
+    /// without running. Resubmitting it is now correct.
     RequeueExpired,
     /// The input's resume was refused, so it ended without running. Either
     /// its run was left open when its host stopped and is not resumed (the
@@ -123,12 +123,16 @@ pub enum InputTerminalOutcome {
 
 /// The durable mark of an input a graceful stop kept queued for the next
 /// start ([`crate::UnregisterQueuedInputs::Requeue`]). The next start runs the
-/// input unless it is older than `max_age_ms`, measured from its admission;
-/// an older one ends as [`InputAbandonReason::RequeueExpired`].
+/// input unless more than `max_age_ms` has passed since `stopped_at`, the
+/// time the stop kept it, however long before the stop it was admitted; such
+/// an input ends as [`InputAbandonReason::RequeueExpired`]. The mark stays
+/// until the input runs or expires. A later graceful stop that keeps the
+/// input again before a start runs it replaces the mark with its own time and
+/// max age, so the input's age counts from the last stop that kept it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StopRequeueMark {
-    /// When the stop kept the input.
+    /// When the stop kept the input: the origin of its requeue age.
     pub stopped_at: DateTime<Utc>,
     /// The max age the stop's unregister began with, in milliseconds.
     pub max_age_ms: u64,
@@ -1738,8 +1742,9 @@ pub(crate) fn input_terminal_completion_outcome(
 ///   custody proved had started
 ///   (`PendingRuntimeExecutorAttachment::abandon_interrupted_run_inputs`).
 /// - `Abandoned { RequeueExpired }`: the same pre-serve settlement ends an
-///   input a graceful stop kept queued once it is older than the stop's max
-///   age (`PendingRuntimeExecutorAttachment::settle_expired_stop_requeued_inputs`).
+///   input a graceful stop kept queued once more than the stop's max age has
+///   passed since that stop
+///   (`PendingRuntimeExecutorAttachment::settle_expired_stop_requeued_inputs`).
 /// - `Abandoned { ResumeRefused }` (and the receipt-less `Cancelled` and
 ///   `RequeueExpired` of the same path), on rows 0.9.5 wrote: a run left open
 ///   by a restart that is settled instead of resumed. Since then the
@@ -2566,31 +2571,29 @@ impl Serialize for StoredInputState {
     }
 }
 
-/// Whether an input a graceful stop kept queued has expired: its age at `now`,
-/// measured from `admitted_at`, is over the mark's max age. An input without
-/// a mark never expires (it is not a kept input), and a negative age (the
-/// clock went back) is not expired.
+/// Whether an input a graceful stop kept queued has expired at `now`: more
+/// than the mark's max age has passed since `stopped_at`, the time the stop
+/// kept it. The input's admission does not count, so the max age bounds the
+/// outage after which kept work still runs, however long before the stop
+/// the input was admitted. An input without a mark never expires (it is not
+/// a kept input), and a negative age (the clock went back) is not expired.
 #[must_use]
-pub(crate) fn stop_requeue_expired(
-    mark: Option<&StopRequeueMark>,
-    admitted_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> bool {
+pub(crate) fn stop_requeue_expired(mark: Option<&StopRequeueMark>, now: DateTime<Utc>) -> bool {
     let Some(mark) = mark else {
         return false;
     };
-    let Ok(age_ms) = u64::try_from((now - admitted_at).num_milliseconds()) else {
+    let Ok(kept_for_ms) = u64::try_from((now - mark.stopped_at).num_milliseconds()) else {
         return false;
     };
-    age_ms > mark.max_age_ms
+    kept_for_ms > mark.max_age_ms
 }
 
 /// The active inputs an attachment at `now` ends as expired: every input an
-/// earlier graceful stop kept queued whose age at `now`, measured from its
-/// admission, is over its stop's max age ([`stop_requeue_expired`]). The
-/// stop's mark stays on a kept input until it runs or expires, so every
-/// attachment that still finds it queued checks it again: one that finds it
-/// within the bound leaves it queued and marked, and a later one can end it.
+/// earlier graceful stop kept queued for which more than that stop's max age
+/// has passed since the stop ([`stop_requeue_expired`]). The stop's mark
+/// stays on a kept input until it runs or expires, so every attachment that
+/// still finds it queued checks it again: one that finds it within the bound
+/// leaves it queued and marked, and a later one can end it.
 pub(crate) fn expired_stop_requeued_inputs(
     driver: &dyn crate::traits::RuntimeDriver,
     now: DateTime<Utc>,
@@ -2607,15 +2610,11 @@ pub(crate) fn expired_stop_requeued_inputs(
 }
 
 /// Whether the input carries a graceful stop's mark that has expired at
-/// `now` ([`stop_requeue_expired`]), its age measured from its admission:
-/// the payload's own timestamp, or the row's creation when the payload is
-/// gone.
+/// `now` ([`stop_requeue_expired`]): its age counts from the stop that kept
+/// it, never from the input's admission (its payload's timestamp or the
+/// row's creation).
 pub(crate) fn input_stop_requeue_expired(state: &InputState, now: DateTime<Utc>) -> bool {
-    let admitted_at = state
-        .persisted_input
-        .as_ref()
-        .map_or(state.created_at, |input| input.header().timestamp);
-    stop_requeue_expired(state.stop_requeue.as_ref(), admitted_at, now)
+    stop_requeue_expired(state.stop_requeue.as_ref(), now)
 }
 
 /// Whether the row carries a fact only stored input state v8 can hold: a
@@ -3872,59 +3871,62 @@ mod tests {
                 .contains("disagrees with the retained replay payload")
         );
     }
-    /// The expiry of an input a graceful stop kept queued is decided from its
-    /// admission age against the stop's max age alone: exactly at the bound
-    /// or just under it keeps the input, just over ends it, a negative age
-    /// (the clock went back) keeps it, and an input without a mark is not a
-    /// kept input and never expires.
+    /// The expiry of an input a graceful stop kept queued is decided from the
+    /// time since that stop against the stop's max age alone: exactly at the
+    /// bound or just under it keeps the input, just over ends it, a negative
+    /// age (the clock went back) keeps it, and an input without a mark is not
+    /// a kept input and never expires.
     #[test]
-    fn stop_requeue_expiry_is_the_admission_age_over_the_marks_max_age() {
-        let admitted_at = DateTime::parse_from_rfc3339("2026-10-22T12:00:00Z")
+    fn stop_requeue_expiry_is_the_time_since_the_stop_over_the_marks_max_age() {
+        let stopped_at = DateTime::parse_from_rfc3339("2026-10-22T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
         let mark = StopRequeueMark {
-            stopped_at: admitted_at,
+            stopped_at,
             max_age_ms: 60_000,
         };
-        let at = |offset_ms: i64| admitted_at + chrono::Duration::milliseconds(offset_ms);
-        assert!(!stop_requeue_expired(Some(&mark), admitted_at, at(60_000)));
-        assert!(!stop_requeue_expired(Some(&mark), admitted_at, at(59_999)));
-        assert!(stop_requeue_expired(Some(&mark), admitted_at, at(60_001)));
-        assert!(!stop_requeue_expired(Some(&mark), admitted_at, at(-5_000)));
-        assert!(!stop_requeue_expired(None, admitted_at, at(86_400_000)));
+        let at = |offset_ms: i64| stopped_at + chrono::Duration::milliseconds(offset_ms);
+        assert!(!stop_requeue_expired(Some(&mark), at(60_000)));
+        assert!(!stop_requeue_expired(Some(&mark), at(59_999)));
+        assert!(stop_requeue_expired(Some(&mark), at(60_001)));
+        assert!(!stop_requeue_expired(Some(&mark), at(-5_000)));
+        assert!(!stop_requeue_expired(None, at(86_400_000)));
     }
 
-    /// An input's expiry measures its age from the payload's own admission
-    /// timestamp, and from the row's creation once the payload is gone; an
-    /// unmarked row never expires. A run a graceful stop kept open is checked
-    /// input by input through the same reading.
+    /// An input's expiry measures its age from its mark's `stopped_at`, the
+    /// stop that kept it: neither the row's creation nor the payload's
+    /// admission timestamp moves it, however long before the stop either
+    /// lies. An unmarked row never expires. A run a graceful stop kept open
+    /// is checked input by input through the same reading.
     #[test]
-    fn an_inputs_stop_requeue_expiry_reads_its_admission_from_its_payload() {
+    fn an_inputs_stop_requeue_expiry_counts_from_the_stop_that_kept_it() {
         use crate::input::PromptInput;
 
         let mut state = InputState::new_accepted(InputId::new());
-        let created_at = state.created_at;
-        let at = |offset_ms: i64| created_at + chrono::Duration::milliseconds(offset_ms);
+        let stopped_at = state.created_at + chrono::Duration::minutes(20);
+        let at = |offset_ms: i64| stopped_at + chrono::Duration::milliseconds(offset_ms);
         assert!(
             !input_stop_requeue_expired(&state, at(86_400_000)),
             "an unmarked row never expires"
         );
         state.stop_requeue = Some(StopRequeueMark {
-            stopped_at: created_at,
+            stopped_at,
             max_age_ms: 60_000,
         });
-        assert!(!input_stop_requeue_expired(&state, at(60_000)));
+        assert!(
+            !input_stop_requeue_expired(&state, at(60_000)),
+            "the row's creation, 20 minutes before the stop, is not the age's origin"
+        );
         assert!(input_stop_requeue_expired(&state, at(60_001)));
 
         let mut prompt = PromptInput::new("kept across the stop", None);
-        prompt.header.timestamp = at(30_000);
+        prompt.header.timestamp = stopped_at - chrono::Duration::hours(2);
         state.persisted_input = Some(Input::Prompt(prompt));
         assert!(
-            !input_stop_requeue_expired(&state, at(60_001)),
-            "the payload's admission is the age's origin"
+            !input_stop_requeue_expired(&state, at(60_000)),
+            "nor is the payload's admission, two hours before the stop"
         );
-        assert!(!input_stop_requeue_expired(&state, at(90_000)));
-        assert!(input_stop_requeue_expired(&state, at(90_001)));
+        assert!(input_stop_requeue_expired(&state, at(60_001)));
     }
 
     /// A row carrying a requeue-across-stop fact (a stop's requeue mark or the

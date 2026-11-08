@@ -477,14 +477,15 @@ pub(crate) fn project_side_chat_lineage(
 pub(crate) struct SideChatCreatorViewer<'a> {
     /// The viewer's console principal, when the console identified them.
     principal: Option<&'a str>,
-    /// Whether the viewer administers access.
+    /// Whether the viewer administers an enforced access policy.
     access_admin: bool,
 }
 
 impl<'a> SideChatCreatorViewer<'a> {
     /// The viewer with console principal `principal` (`None` for an
-    /// anonymous caller) and access view `access` (`None` on a console
-    /// without an access controller, which has no access admins).
+    /// anonymous caller) and access view `access`. Only a policy that is
+    /// enforced has access admins: a console without an access controller,
+    /// or with one it does not enforce, shows a creator to that person only.
     pub(crate) fn new(
         principal: Option<&'a str>,
         access: Option<&crate::access::AccessView>,
@@ -493,11 +494,13 @@ impl<'a> SideChatCreatorViewer<'a> {
             principal: principal
                 .map(str::trim)
                 .filter(|principal| !principal.is_empty()),
-            access_admin: access.is_some_and(crate::access::AccessView::can_administer),
+            access_admin: access.is_some_and(|view| view.enforced() && view.can_administer()),
         }
     }
 
-    fn sees(&self, creator: &Value) -> bool {
+    /// Whether the viewer may see `creator`, a side chat's creator as a
+    /// console answer names it.
+    pub(crate) fn sees(&self, creator: &Value) -> bool {
         self.access_admin
             || creator
                 .as_str()
@@ -1534,6 +1537,31 @@ mod tests {
                 serde_json::json!({ "team": "ops" })
             );
         }
+    }
+
+    /// While access is not enforced nobody is an access admin for the
+    /// creator label: an admin the policy lists sees no other person's
+    /// creator.
+    #[test]
+    fn a_listed_admin_sees_no_creator_while_access_is_not_enforced() {
+        let controller = crate::access::AccessController::new(crate::access::AccessControlConfig {
+            enabled: false,
+            admins: vec!["root@example.test".to_string()],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("controller");
+        let admin = controller.view_for_subject(Some("root@example.test"));
+        let mut answer = serde_json::json!({
+            "labels": { "side_chat_of": "alpha", "side_chat_creator": "bob@example.test" }
+        });
+        clear_unseen_side_chat_creators(
+            &mut answer,
+            SideChatCreatorViewer::new(Some("root@example.test"), Some(&admin)),
+        );
+        assert_eq!(
+            answer,
+            serde_json::json!({ "labels": { "side_chat_of": "alpha" } })
+        );
     }
 
     #[test]

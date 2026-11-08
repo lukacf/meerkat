@@ -58,6 +58,114 @@ impl ToolkitOriginalOwner {
         receiver
     }
 
+    /// Have the next helper admission meet the source writer held for
+    /// `hold`, as another original's admission holds it across its durable
+    /// write. The fixture's holder takes the writer just before the admission
+    /// takes it, and releases it after `hold`.
+    #[cfg(test)]
+    pub(crate) fn hold_source_writer_at_next_helper_admission_for_test(
+        &self,
+        hold: std::time::Duration,
+    ) {
+        assert!(
+            self.helper_admission_writer_hold
+                .lock()
+                .unwrap()
+                .replace(hold)
+                .is_none()
+        );
+    }
+
+    /// The fixture hold set above, taken on a thread of its own once.
+    #[cfg(test)]
+    pub(crate) fn hold_source_writer_for_test(self: &Arc<Self>) {
+        let hold = self.helper_admission_writer_hold.lock().unwrap().take();
+        if let Some(hold) = hold {
+            let owner = self.clone();
+            let (held, holding) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let writer = owner.mutation.blocking_lock();
+                held.send(()).unwrap();
+                std::thread::sleep(hold);
+                owner.record_helper_admission_event_for_test("holder_released");
+                drop(writer);
+            });
+            holding.recv().unwrap();
+        }
+    }
+
+    /// Record one step of a helper admission, for a fixture's order check.
+    #[cfg(test)]
+    pub(crate) fn record_helper_admission_event_for_test(&self, event: &'static str) {
+        self.helper_admission_events.lock().unwrap().push(event);
+    }
+
+    /// Hold this owner's originals collection on a thread of its own for
+    /// `hold`, inside an owner change on its publication when `owner_change`,
+    /// as another helper's first binding write holds them (the publication
+    /// writer first, then the collection). Returns once both are held; the
+    /// returned thread releases them.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn hold_sources_for_test(
+        self: &Arc<Self>,
+        owner_change: bool,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let owner = self.clone();
+        let (held, holding) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let change = owner_change
+                .then(|| owner.publication.begin_owner_change())
+                .transpose();
+            let originals = owner
+                .originals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = held.send(change.is_ok());
+            std::thread::sleep(hold);
+            drop(originals);
+            drop(change);
+        });
+        assert_eq!(
+            holding.recv().ok(),
+            Some(true),
+            "the control's owner change began"
+        );
+        thread
+    }
+
+    /// Hold this owner's source writer on a thread of its own for `hold`, as
+    /// another writer holds it across its durable write. Returns once it is
+    /// held; the returned thread releases it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn hold_writer_for_test(
+        self: &Arc<Self>,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let owner = self.clone();
+        let (held, holding) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let writer = owner.mutation.blocking_lock();
+            let _ = held.send(());
+            std::thread::sleep(hold);
+            drop(writer);
+        });
+        assert!(holding.recv().is_ok(), "the control's writer hold began");
+        thread
+    }
+
+    /// This owner's publication, for a control's own owner change on it.
+    #[cfg(test)]
+    pub(crate) fn publication_for_test(&self) -> &LocalAuthorizationPublication {
+        &self.publication
+    }
+
+    /// The helper admission steps recorded so far, in order.
+    #[cfg(test)]
+    pub(crate) fn helper_admission_events_for_test(&self) -> Vec<&'static str> {
+        self.helper_admission_events.lock().unwrap().clone()
+    }
+
     /// Warm custody remains the existing native resume path, including source
     /// classes outside the narrow cold reconstruction. This is no permission
     /// check: native still checks the complete contributor closure and grants.
@@ -134,6 +242,32 @@ impl ToolkitOriginalOwner {
             sources,
             admitted,
             OriginalGrantBinding::Task { issuer: None },
+        )
+    }
+
+    /// Only the canonical, explicitly selected planning P restoration calls
+    /// this after native has verified its exact historical input. Keep its
+    /// ControllerOnly class; neither a task leaf nor a revoke issuer is added.
+    /// The caller resolves its controller before native B/M/D and checks that
+    /// observation atomically inside the callback. This method never resolves
+    /// grants or waits for their owner while native custody is held.
+    pub(crate) fn promote_historical_controller_only(
+        &self,
+        association: &InputAuthorityAssociation,
+        custody: AuthenticatedOriginal,
+        sources: &[OriginalCancellationSource],
+        admitted: &AdmittedOriginal<'_>,
+    ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
+        let claims = association.candidate();
+        if !controller_only_basis(&claims.authority_basis) || !claims.contributing_work.is_empty() {
+            return Err(OriginalWriterError::UnsupportedMandate);
+        }
+        self.promote_historical_source(
+            association,
+            custody,
+            sources,
+            admitted,
+            OriginalGrantBinding::ControllerOnly,
         )
     }
 
@@ -458,5 +592,31 @@ impl ToolkitOriginalOwner {
 
     pub(crate) fn lock_originals_for_test(&self) -> impl Drop + '_ {
         self.originals.lock().unwrap()
+    }
+}
+
+#[cfg(test)]
+impl ToolkitOriginalOwner {
+    pub(crate) fn forget_controller_custody_for_test(
+        &self,
+        association: &InputAuthorityAssociation,
+    ) {
+        let _publication = self.publication.begin_owner_change().unwrap();
+        let mut originals = self.originals.lock().unwrap();
+        let index = originals
+            .iter()
+            .position(|entry| {
+                entry
+                    .bound()
+                    .is_some_and(|held| held.association() == association)
+            })
+            .unwrap();
+        let held = originals[index].bound().unwrap();
+        assert!(matches!(
+            held.grant_binding,
+            OriginalGrantBinding::ControllerOnly
+        ));
+        assert!(held.source_custody != Some(SourceCustody::Candidate));
+        originals.remove(index);
     }
 }

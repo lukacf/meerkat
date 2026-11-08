@@ -216,12 +216,18 @@ pub struct UnifiedRuntimeBuilder {
     mob_announcements: Option<crate::mob_announcements::AnnouncementConfig>,
     persistent_metadata: Option<Arc<dyn PersistentMetadataStore>>,
     access_controller: Option<crate::access::AccessController>,
+    decision_ingresses: Option<crate::durable_decisions::DecisionIngressDeclarations>,
     /// Whether the runtime keeps the gating owner's state in its metadata
     /// store (see [`keep_gating_state`](Self::keep_gating_state)).
     keep_gating_state: bool,
     /// The console audit log's bounds, when not the default (see
     /// [`console_audit_limits`](Self::console_audit_limits)).
     console_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
+    /// The bounds of the log's MCP app tool calls, when set apart (see
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)).
+    console_tool_call_audit_limits: Option<crate::console_audit::ConsoleAuditLimits>,
+    /// See [`Self::mcp_accounts`].
+    mcp_accounts: Option<crate::McpAccountsConfig>,
     flow_editor_host_deploy: bool,
     topology_control_policy: crate::topology_control::TopologyControlPolicy,
     live: Option<super::live_compose::LiveOptions>,
@@ -1364,6 +1370,19 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
+    /// Declare the decision ingresses of this launch: the host channels
+    /// whose attested people decide durable decisions on the stdio host,
+    /// as `runtime_options.decisions` declares them on the gateway. The
+    /// approver map may list only declared ingresses (and the built-in
+    /// `operator`); the build refuses one that names another.
+    pub fn decision_ingresses(
+        mut self,
+        ingresses: crate::durable_decisions::DecisionIngressDeclarations,
+    ) -> Self {
+        self.decision_ingresses = Some(ingresses);
+        self
+    }
+
     /// Keep the gating owner's state (its pending approvals and its bounded
     /// gating audit) in the composition's metadata store across restarts:
     /// restored when the runtime is built, before anything evaluates a
@@ -1377,10 +1396,38 @@ impl UnifiedRuntimeBuilder {
         self
     }
 
-    /// Bound the console audit log (by default 20000 rows, none older than
-    /// 365 days). The log is kept in the composition's metadata store.
+    /// Bound the console audit log. Its two record sets, the console's
+    /// changes and MCP app tool calls, each keep their own budget of
+    /// `limits` (by default 20000 rows, none older than 365 days, each), so
+    /// tool calls never push a change row out;
+    /// [`console_tool_call_audit_limits`](Self::console_tool_call_audit_limits)
+    /// bounds the tool calls apart. The log is kept in the composition's
+    /// metadata store. [`Self::build`] refuses limits that keep no row
+    /// (`max_entries` 0).
     pub fn console_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
         self.console_audit_limits = Some(limits);
+        self
+    }
+
+    /// Bound the console audit log's MCP app tool calls apart from its
+    /// changes (by default as [`console_audit_limits`](Self::console_audit_limits)
+    /// bounds each record set). [`Self::build`] refuses limits that keep no
+    /// row (`max_entries` 0).
+    pub fn console_tool_call_audit_limits(mut self, limits: crate::ConsoleAuditLimits) -> Self {
+        self.console_tool_call_audit_limits = Some(limits);
+        self
+    }
+
+    /// Set the account modes of the MCP servers the members use
+    /// ([`crate::McpAccountsConfig`], as `config/mcp_accounts.toml` sets them
+    /// for `meta_gateway`). A server marked personal is used only in the
+    /// private members of the person who connected their account on it, and
+    /// only for that person; every other server keeps one account per server
+    /// and realm. A personal server that cannot use personal accounts, among
+    /// the MCP servers the definition's inline profiles declare, refuses the
+    /// build. Absent, every server's account is the system's.
+    pub fn mcp_accounts(mut self, config: crate::McpAccountsConfig) -> Self {
+        self.mcp_accounts = Some(config);
         self
     }
 
@@ -1430,6 +1477,19 @@ impl UnifiedRuntimeBuilder {
     pub async fn build(mut self) -> Result<UnifiedRuntime, UnifiedRuntimeBuilderError> {
         // --- Identity-first builder validation ---
 
+        if self
+            .console_audit_limits
+            .iter()
+            .chain(&self.console_tool_call_audit_limits)
+            .any(|limits| limits.max_entries == 0)
+        {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "console audit limits: max_entries must be at least 1; a log that keeps no row \
+                 would reuse its row numbers"
+                    .into(),
+            ));
+        }
+
         if self.mob_spec.is_some() && self.mob_storage.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
                 "mob_storage() and mob_spec() are mutually exclusive: the supplied spec already owns mob storage".into(),
@@ -1451,6 +1511,12 @@ impl UnifiedRuntimeBuilder {
         if self.mob_spec.is_some() && self.provider_auth_persistence.is_some() {
             return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
                 "a provider credential store (provider_auth_persistence()) requires builder-owned session services; mob_spec() is already erased".into(),
+            ));
+        }
+
+        if self.mob_spec.is_some() && self.mcp_accounts.is_some() {
+            return Err(UnifiedRuntimeBuilderError::ConflictingConfiguration(
+                "MCP account modes (mcp_accounts()) require builder-owned session services; mob_spec() is already erased: declare them with MobBootstrapSpec::with_personal_mcp_accounts on a spec whose member factories carry the owner check".into(),
             ));
         }
 
@@ -1509,6 +1575,13 @@ impl UnifiedRuntimeBuilder {
             })?;
 
         let has_persistent_state = self.persistent_state_path.is_some();
+        // The approver map may list only the decision ingresses this launch
+        // declares, and the built-in operator.
+        crate::durable_decisions::check_approver_ingresses(
+            self.access_controller.as_ref(),
+            &self.decision_ingresses.clone().unwrap_or_default(),
+        )
+        .map_err(|error| UnifiedRuntimeBuilderError::ConflictingConfiguration(error.to_string()))?;
         // Same-root pairing is a documented requirement of
         // `continuity_from_state_dir`; enforce it instead of letting two
         // different directories silently fork session authority from the
@@ -2156,14 +2229,12 @@ impl UnifiedRuntimeBuilder {
         } else {
             (None, None)
         };
-        // Each identity with a pending first-boot row or a rotation a crash
-        // interrupted waits for the roster pass's seat step: the mob
-        // materializes none of them at start, and refuses their wakes
-        // retryable until the seat step for each ends the mark. The identity
-        // runtime keeps the seeded set, so every seat step ends each mark.
-        let mut host_pending_seeded = Vec::new();
-        if let (Some(roster), Some(mob_id)) =
-            (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
+        // Each identity with a pending first-boot row waits for the roster
+        // pass's declaration of it: the mob materializes none of them at
+        // start, and refuses their wakes retryable until the declaration
+        // that carries the row out ends the mark. The mark is Core's: the
+        // identity runtime's door answers Core's typed refusal.
+        if let (Some(roster), Some(_)) = (identity_roster_specs.as_ref(), launch_mob_id.as_deref())
         {
             let first_boot = match self.host_store.as_ref() {
                 Some(host) => Some(
@@ -2178,16 +2249,16 @@ impl UnifiedRuntimeBuilder {
             };
             let host_pending = crate::identity_first::runtime::host_pending_members_before_build(
                 first_boot.as_ref(),
-                Some((persistent_metadata.as_ref(), mob_id)),
                 roster,
             )
             .await;
-            host_pending_seeded.clone_from(&host_pending);
             mob_spec = mob_spec.with_host_pending_members(host_pending);
         }
         // The identity runtime keeps its identity records (each build's tool
         // record, each rotation's intent) in the composition's metadata store.
         let identity_record_store = Arc::clone(&persistent_metadata);
+        // The durable decisions record their attested decide events there.
+        let decision_event_store = Arc::clone(&persistent_metadata);
         let module_agent_events = self.module_agent_events;
         let options = self.options;
         #[allow(unused_mut)]
@@ -2217,12 +2288,14 @@ impl UnifiedRuntimeBuilder {
 
         // The console audit log over the composition's metadata store, with
         // the host's bounds when it set them.
-        if let Some(limits) = self.console_audit_limits {
+        if self.console_audit_limits.is_some() || self.console_tool_call_audit_limits.is_some() {
+            let limits = self.console_audit_limits.unwrap_or_default();
+            let tool_call_limits = self.console_tool_call_audit_limits.unwrap_or(limits);
             runtime.console_audit = crate::console_audit::ConsoleAuditLog::over(
                 Arc::clone(&runtime.persistent_metadata),
                 limits,
             )
-            .map(Arc::new);
+            .map(|log| Arc::new(log.with_tool_call_limits(tool_call_limits)));
         }
         // Restored before anything can evaluate a gating action.
         if self.keep_gating_state {
@@ -2342,7 +2415,6 @@ impl UnifiedRuntimeBuilder {
                 .set_customizer_tool_registry(member_build_wiring.customizer_tool_registry())
                 .await;
             identity_runtime.set_identity_records(identity_record_store, runtime.mob_id());
-            identity_runtime.seed_host_pending(host_pending_seeded);
             // A candidate launch's mob build held every stored member's run
             // starts, and it releases none of them.
             if !runtime.mob_runtime.speaks_for_composition() {
@@ -2449,6 +2521,27 @@ impl UnifiedRuntimeBuilder {
             public_owner,
         );
         runtime.set_live_plan(live_plan);
+        // The durable decisions live in the persistent state directory; a
+        // runtime without one, or on a host store realm, keeps none.
+        if self.host_store.is_none()
+            && let Some(state_dir) = self.persistent_state_path.as_ref()
+        {
+            let realm = MetaStorageLayout::with_injected_roots(state_dir.clone(), None)
+                .meerkat_level_realm()?
+                .clone();
+            let mob_id = runtime.mob_id();
+            let speaks_for_composition = runtime.speaks_for_composition();
+            runtime.set_durable_decisions(
+                crate::durable_decisions::RuntimeDecisions::in_state_dir(
+                    state_dir,
+                    realm,
+                    self.decision_ingresses.clone().unwrap_or_default(),
+                    decision_event_store,
+                    mob_id,
+                    speaks_for_composition,
+                ),
+            );
+        }
         // The error hook lives in a late-bound shared slot created at
         // construction (runtime-owned tasks already hold it), so a
         // builder-supplied hook installs into the slot rather than
@@ -2568,6 +2661,14 @@ impl UnifiedRuntimeBuilder {
             .map_err(UnifiedRuntimeBuilderError::Io)?;
             if let Some(panel) = stack.panel.clone() {
                 runtime.set_memory_panel_store(panel);
+            }
+            // The retirements the memory store recorded as private are part
+            // of the private-owner record's durable reads.
+            if let Some(store) = stack.steward_store.clone() {
+                runtime
+                    .mob_runtime
+                    .private_owners()
+                    .bind_private_retirements(store, config.realm.clone());
             }
             // §10.1 dispatch-time taint join: bind the stack's tracker into
             // the member pre-build seam so every member's LLM client marks
@@ -3400,6 +3501,24 @@ impl UnifiedRuntimeBuilder {
         };
         caps.image_generation |=
             crate::mob_handle_runtime::mob_definition_may_use_image_generation(&definition);
+        // Personal accounts on MCP servers, checked against the MCP servers
+        // the definition's profiles declare: the owner check the spec's
+        // member factory installs below.
+        let personal_accounts = match self.mcp_accounts.as_ref() {
+            Some(config) => {
+                config
+                    .check_mob_definition(&definition)
+                    .map_err(|refusal| {
+                        UnifiedRuntimeBuilderError::ConflictingConfiguration(format!(
+                            "mcp_accounts(): {refusal}"
+                        ))
+                    })?;
+                config
+                    .has_personal_servers()
+                    .then(|| crate::PersonalMcpAccounts::new(config.clone()).owner_check())
+            }
+            None => None,
+        };
         // Declared-versus-resolved capability invariant. This is the ONLY
         // sound place for it: on the definition path `self.schedule_store`
         let max_sessions = self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS);
@@ -3527,6 +3646,7 @@ impl UnifiedRuntimeBuilder {
                 authority,
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
+                personal_accounts.clone(),
             )
             .await
             .map_err(storage_resolution_builder_error)?
@@ -3556,6 +3676,7 @@ impl UnifiedRuntimeBuilder {
                 self.operation_refusal_observer.clone(),
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
+                personal_accounts.clone(),
             )
             .map_err(storage_resolution_builder_error)?
         } else {
@@ -3583,6 +3704,7 @@ impl UnifiedRuntimeBuilder {
                 self.operation_refusal_observer.clone(),
                 self.session_identity_config_root.clone(),
                 self.provider_auth_persistence.clone(),
+                personal_accounts.clone(),
             )
             .map_err(storage_resolution_builder_error)?;
             spec._ephemeral_dir = Some(Arc::new(temp_dir));
@@ -3590,6 +3712,11 @@ impl UnifiedRuntimeBuilder {
         };
 
         spec = spec.with_mob_storage_provenance(mob_storage_provenance);
+        // Every member build classifies the personal servers it carries, with
+        // the owner check the composition installed on its member factory.
+        if let Some(check) = personal_accounts {
+            spec = spec.with_personal_mcp_accounts(check);
+        }
         // One place for all three compositions above.
         if let Some(policy) = self.fork_instruction_policy {
             spec = spec.with_fork_instruction_policy(policy);

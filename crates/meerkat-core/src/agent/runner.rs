@@ -5406,6 +5406,177 @@ mod skill_activation_effect_tests {
         assert!(!entered.load(Ordering::SeqCst));
     }
 
+    /// An ingress that names `0` as the caller it authenticated.
+    struct RequesterIngress(Option<crate::PrincipalRef>);
+    impl crate::ToolApplicationIngress for RequesterIngress {
+        fn revalidate(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
+        fn requester(&self) -> Option<crate::PrincipalRef> {
+            self.0.clone()
+        }
+        fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+            self
+        }
+    }
+
+    /// App tools that record the requester each app action's dispatch
+    /// context names.
+    struct RequesterAppTools {
+        seen: Arc<std::sync::Mutex<Vec<Option<crate::types::TurnRequester>>>>,
+    }
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for RequesterAppTools {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([
+                Arc::new(ToolDef::new(
+                    "show",
+                    "model source",
+                    serde_json::json!({"type":"object"}),
+                )),
+                Arc::new(
+                    ToolDef::new("action", "app action", serde_json::json!({"type":"object"}))
+                        .with_audience(crate::ToolAudience::App),
+                ),
+            ])
+        }
+        async fn resolve_tool_application(
+            &self,
+            _: &str,
+            _: &crate::ToolApplicationRequest,
+            _: &serde_json::Value,
+            _: &crate::ToolDispatchContext,
+        ) -> Result<crate::tool_application::ToolApplicationResolution, ToolError> {
+            Ok(crate::tool_application::ToolApplicationResolution::Call {
+                name: "action".into(),
+                binding: crate::tool_application::ToolApplicationBinding::new(
+                    "test.app",
+                    serde_json::json!({"bound":true}),
+                ),
+                project_result: |result| Ok(serde_json::json!({"text":result.text_content()})),
+            })
+        }
+        async fn dispatch(&self, _: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            panic!("app dispatch must retain its context")
+        }
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            self.seen
+                .lock()
+                .expect("requester log")
+                .push(context.requester().cloned());
+            Ok(crate::ToolResult::new(call.id.into(), "clicked".into(), false).into())
+        }
+    }
+
+    fn app_person(subject: &str) -> crate::PrincipalRef {
+        crate::PrincipalRef::in_domain(
+            crate::PrincipalKind::Human,
+            subject,
+            crate::TrustDomainId::new("oidc-issuer:https://issuer.example").expect("trust domain"),
+        )
+        .expect("qualified person")
+    }
+
+    /// An app action runs for the requester its trusted ingress names, as a
+    /// direct requester, never for the requester of the model run before it.
+    /// An ingress that names none dispatches with none, and an ingress that
+    /// names an unqualified principal is refused at submission.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn app_action_dispatch_carries_its_ingress_requester() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(RequesterAppTools {
+                    seen: Arc::clone(&seen),
+                }),
+                Arc::new(NoopStore),
+            )
+            .await;
+        agent
+            .session
+            .push(Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "original".into(),
+                    name: "show".into(),
+                    args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )));
+        let mut original = crate::ToolResult::new("original".into(), "text fallback".into(), false);
+        original
+            .host_metadata
+            .insert("test.app".into(), serde_json::json!({"original":true}));
+        agent.session.push(Message::ToolResults {
+            results: vec![original],
+            created_at: crate::types::message_timestamp_now(),
+        });
+        // The model run's own requester, which no app action borrows: the
+        // agent holds it, and the context each action is handed carries it
+        // too, as a host that clones its run's context would pass it.
+        let model_run = || Some(crate::types::TurnRequester::direct(app_person("model-run")));
+        agent.tool_dispatch_context =
+            crate::ToolDispatchContext::default().with_requester(model_run());
+        let request = crate::ToolApplicationRequest {
+            tool_call_id: "original".into(),
+            extension: "test.app".into(),
+            operation: crate::ToolApplicationOperation::CallTool {
+                name: "raw-action".into(),
+                arguments: serde_json::json!({}),
+            },
+        };
+        for (named, expected) in [
+            (
+                Some(app_person("alice")),
+                Some(crate::types::TurnRequester::direct(app_person("alice"))),
+            ),
+            (None, None),
+        ] {
+            let control = crate::ToolApplicationControlRequest::from_trusted_ingress(
+                agent.session.id().clone(),
+                request.clone(),
+                Arc::new(RequesterIngress(named)),
+            )
+            .expect("a current ingress submits");
+            let result = agent
+                .tool_application(
+                    request.clone(),
+                    crate::ToolDispatchContext::default()
+                        .with_requester(model_run())
+                        .with_tool_application_control(control),
+                )
+                .await
+                .expect("the app action runs");
+            assert_eq!(result, serde_json::json!({"text":"clicked"}));
+            assert_eq!(
+                seen.lock().expect("requester log").pop(),
+                Some(expected.clone()),
+                "the action's dispatch names its ingress's requester: {expected:?}"
+            );
+        }
+
+        let unqualified =
+            crate::PrincipalRef::new(crate::PrincipalKind::Human, "alice").expect("principal");
+        assert!(
+            matches!(
+                crate::ToolApplicationControlRequest::from_trusted_ingress(
+                    agent.session.id().clone(),
+                    request,
+                    Arc::new(RequesterIngress(Some(unqualified))),
+                ),
+                Err(crate::OperationAuthorizationError::Unavailable)
+            ),
+            "an ingress naming an unqualified requester is refused"
+        );
+    }
+
     struct AppActionHooks {
         deny: Option<HookPoint>,
         fail: Option<HookPoint>,

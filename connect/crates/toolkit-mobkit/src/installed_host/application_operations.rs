@@ -48,6 +48,31 @@ fn tuple(
     }
 }
 
+/// The native bundle owner supplies this exact target. Only the separately
+/// checked canonical class admission may select this callback operation.
+pub(crate) fn class_callback(
+    authority: &PrincipalRef,
+    executor: &PrincipalRef,
+    audience: &AudienceRef,
+    bundle: &str,
+    operation: &str,
+) -> LocalOperationValues {
+    LocalOperationValues {
+        action: ActionRef {
+            feature: "toolkit-class-callback".into(),
+            action: operation.into(),
+        },
+        resource_domain: ResourceDomain {
+            authority: authority.clone(),
+            namespace: bundle.into(),
+        },
+        processor: ProcessorRef::Principal {
+            principal: executor.clone(),
+        },
+        audience: audience.clone(),
+    }
+}
+
 /// Native canonical selected route. Credential identity is one fact in this
 /// coordinate, never proof of account permission. The exact reviewed grant
 /// still has to cover this resource, action, processor and audience together.
@@ -97,6 +122,69 @@ pub(crate) fn catalog_read(
         "catalog-read",
         format!("toolkit-session-catalog/{session}"),
     )
+}
+
+/// A native comms key selected from this installation's actual member roster.
+/// The caller supplies the selected recipient's audience, never the sender's
+/// audience as an implicit permission to disclose to another member.
+pub(crate) fn peer_operation(
+    authority: &PrincipalRef,
+    executor: &PrincipalRef,
+    audience: &AudienceRef,
+    peer: &meerkat_core::comms::PeerId,
+    request: bool,
+) -> LocalOperationValues {
+    tuple(
+        authority,
+        executor,
+        audience,
+        if request {
+            "peer-request"
+        } else {
+            "peer-message"
+        },
+        format!("toolkit-peer/{peer}"),
+    )
+}
+
+pub(crate) fn peer_directory(
+    authority: &PrincipalRef,
+    executor: &PrincipalRef,
+    audience: &AudienceRef,
+    session: &SessionId,
+) -> LocalOperationValues {
+    tuple(
+        authority,
+        executor,
+        audience,
+        "peer-directory-read",
+        format!("toolkit-peer-directory/{session}"),
+    )
+}
+
+/// Preserve the complete native scope coordinate. Canonical JSON is an
+/// injective local resource encoding, not a second memory scope parser.
+pub(crate) fn recorder_operation(
+    authority: &PrincipalRef,
+    executor: &PrincipalRef,
+    audience: &AudienceRef,
+    scope: &meerkat_core::MemoryScopeRef,
+    operation: meerkat_core::MemoryOperation,
+) -> Option<LocalOperationValues> {
+    let action = match operation {
+        meerkat_core::MemoryOperation::Read => "recorder-read",
+        meerkat_core::MemoryOperation::Write => "recorder-write",
+        meerkat_core::MemoryOperation::Delete => "recorder-delete",
+        _ => return None,
+    };
+    let encoded = String::from_utf8(toolkit_package::canonical_json(scope).ok()?).ok()?;
+    Some(tuple(
+        authority,
+        executor,
+        audience,
+        action,
+        format!("toolkit-recorder/{encoded}"),
+    ))
 }
 
 /// Explicit host selection for catalog reads by this helper's successors.

@@ -38,7 +38,7 @@ fn declared_inventory_uses_native_lowering_without_changing_roster_or_selecting_
             .unwrap()
             .to_string()
     );
-    assert_eq!(inventory.helper_identity, "helper:setup");
+    assert_eq!(inventory.helper_identity.as_deref(), Some("helper:setup"));
     assert_eq!(inventory.members.len(), input.roster.len());
     for (actual, declared) in inventory.members.iter().zip(&input.roster) {
         assert_eq!(actual.identity, declared.identity.as_str());
@@ -85,9 +85,9 @@ fn inventory_refuses_duplicate_missing_or_native_invalid_selections() {
     duplicate.roster.push(duplicate.roster[0].clone());
     assert!(duplicate.lower().unwrap_err().contains("repeats"));
     let mut missing = original.clone();
-    missing.helper_identity = "not-selected".into();
+    missing.helper_identity = Some("not-selected".into());
     assert!(missing.lower().unwrap_err().contains("absent"));
-    missing.helper_identity = roster_member_id_for_identity("helper:setup").to_string();
+    missing.helper_identity = Some(roster_member_id_for_identity("helper:setup").to_string());
     assert!(missing.lower().unwrap_err().contains("absent"));
     let mut empty = original.clone();
     empty.roster.clear();
@@ -140,4 +140,38 @@ fn inventory_command_uses_existing_dispatch_and_creates_no_owner_or_artifact() {
     assert!(!refused.effects_may_have_occurred);
     assert_eq!(std::fs::read(&path).unwrap(), invalid);
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+}
+
+#[test]
+fn helperless_inventory_has_no_helper_projection_and_empty_requires_declared_classes() {
+    let legacy = input();
+    let mut value = serde_json::to_value(&legacy).unwrap();
+    assert!(value.get("member_classes").is_none());
+    value.as_object_mut().unwrap().remove("helper_identity");
+    let mut selected: ApplicationInventoryInput = serde_json::from_value(value).unwrap();
+    let result = selected.lower().unwrap();
+    assert!(result.helper_identity.is_none());
+    assert_eq!(result.members.len(), legacy.roster.len());
+    assert!(
+        serde_json::to_value(&result)
+            .unwrap()
+            .get("helper_identity")
+            .is_none()
+    );
+    selected.roster.clear();
+    assert!(selected.lower().is_err());
+    selected.member_classes = vec![
+        serde_json::from_value(json!({"id":"project-owner","profile":"project-owner",
+        "factory":"host:project-owner","callbacks":[],"grants":[]}))
+        .unwrap(),
+    ];
+    let result = selected.lower().unwrap();
+    assert!(result.members.is_empty() && result.helper_identity.is_none());
+    selected.helper_identity = Some("invented-helper".into());
+    assert!(selected.lower().is_err());
+    selected.helper_identity = None;
+    selected
+        .member_classes
+        .push(selected.member_classes[0].clone());
+    assert!(selected.lower().is_err());
 }

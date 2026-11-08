@@ -232,7 +232,10 @@ impl ConfigRuntime {
     /// generation publication, and releases them only then: a caller that
     /// stops waiting neither releases them between the two nor abandons the
     /// settlement. Any failure after the admission is
-    /// [`EnteredConfigWriteError::OutcomeUnknown`].
+    /// [`EnteredConfigWriteError::OutcomeUnknown`]. An admission that states
+    /// its administrator is recorded by that task when it releases it
+    /// ([`crate::EnteredAdministration::administered_by`]): the patch and
+    /// the generation it publishes, committed or unknown.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn patch_entered(
         &self,
@@ -256,20 +259,40 @@ impl ConfigRuntime {
                 ConfigRuntimeError::GenerationConflict { expected, current },
             ));
         }
+        let next = current.saturating_add(1);
+        // The record names the store's realm as a realm id; a store that
+        // names none, or a name that is no realm id, names no realm.
+        let realm = self
+            .store
+            .metadata()
+            .and_then(|metadata| metadata.realm_id)
+            .and_then(|realm| crate::connection::RealmId::parse(realm).ok());
         let entered = entry
             .enter()
-            .map_err(EnteredConfigWriteError::NotAdmitted)?;
+            .map_err(EnteredConfigWriteError::NotAdmitted)?
+            .for_change(crate::AdministeredChange::ConfigPatch {
+                realm,
+                generation: next,
+            });
 
         // No await between the admission and handing the custody to its
         // settling owner.
         let store = Arc::clone(&self.store);
         let state_path = self.state_path.clone();
         let settlement = tokio::spawn(async move {
-            let _custody = (process_guard, file_lock, entered);
-            let updated = store.patch(delta).await?;
-            let next = current.saturating_add(1);
-            write_generation_at(&state_path, next).await?;
-            Ok::<_, ConfigRuntimeError>((updated, next))
+            let mut custody = (process_guard, file_lock, entered);
+            let written = async {
+                let updated = store.patch(delta).await?;
+                write_generation_at(&state_path, next).await?;
+                Ok::<_, ConfigRuntimeError>((updated, next))
+            }
+            .await;
+            custody.2.settle(if written.is_ok() {
+                crate::AdministrationOutcome::Committed
+            } else {
+                crate::AdministrationOutcome::Unknown
+            });
+            written
         });
         let (config, generation) = settlement
             .await
@@ -966,5 +989,225 @@ tier = \"r2\"\n";
             .await
             .expect("the next writer is admitted at the settled generation");
         assert_eq!(next.generation, 2);
+    }
+
+    /// The records a host's administration recorder received.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct RecordedAdministrations(std::sync::Mutex<Vec<crate::AdministrationRecord>>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl RecordedAdministrations {
+        fn take(&self) -> Vec<crate::AdministrationRecord> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl crate::AdministrationRecorder for RecordedAdministrations {
+        fn record(&self, record: crate::AdministrationRecord) {
+            self.0.lock().unwrap().push(record);
+        }
+    }
+
+    /// The administrator a host authenticated, in its own trust domain.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn administrator() -> crate::PrincipalRef {
+        crate::PrincipalRef::in_domain(
+            crate::PrincipalKind::Human,
+            "admin-7",
+            crate::TrustDomainId::new("example-idp").unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Admits its host's authenticated administrator, logged in at
+    /// `login`, stating them on the admission with the host's recorder.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct StatingAdmission {
+        recorder: Arc<RecordedAdministrations>,
+        login: &'static str,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl crate::AdministrationEntry for StatingAdmission {
+        fn enter(&self) -> Result<crate::EnteredAdministration, crate::AdministrationEntryRefusal> {
+            let administrator = crate::AdministeringPrincipal::new(administrator())
+                .unwrap()
+                .with_authentication_scope(
+                    &crate::approval::consent::HostAuthenticationScope::new(self.login),
+                );
+            Ok(crate::EnteredAdministration::admitted().administered_by(
+                administrator,
+                Arc::clone(&self.recorder) as Arc<dyn crate::AdministrationRecorder>,
+            ))
+        }
+    }
+
+    /// An admitted config write settles one typed record to the recorder on
+    /// its admission: the administrator, the digest of their login, the
+    /// patch and the generation it published, committed. The patched values
+    /// are not recorded.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn config_write_admission_settles_to_the_host_recorder() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = ConfigRuntime::new(
+            Arc::new(crate::config_store::FileConfigStore::new(
+                temp.path().join("config.toml"),
+                *crate::model_profile::test_catalog::TEST_CATALOG,
+            )),
+            temp.path().join("config_state.json"),
+        );
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let entry = StatingAdmission {
+            recorder: Arc::clone(&recorder),
+            login: "login-1",
+        };
+
+        let snapshot = runtime
+            .patch_entered(ConfigDelta(json!({ "max_tokens": 4321 })), Some(0), &entry)
+            .await
+            .expect("admitted write");
+        assert_eq!(snapshot.generation, 1);
+        let records = recorder.take();
+        assert_eq!(records.len(), 1, "one record per admission");
+        let record = &records[0];
+        assert_eq!(record.administrator, administrator());
+        assert_eq!(
+            record.authentication_scope_digest,
+            Some(crate::approval::consent::HostAuthenticationScope::new("login-1").digest())
+        );
+        assert_eq!(
+            record.change,
+            Some(crate::AdministeredChange::ConfigPatch {
+                realm: None,
+                generation: 1,
+            })
+        );
+        assert_eq!(record.outcome, crate::AdministrationOutcome::Committed);
+        assert!(
+            !serde_json::to_string(record).unwrap().contains("4321"),
+            "the patched value is not recorded"
+        );
+    }
+
+    /// An admitted write whose caller stops waiting before it settles still
+    /// settles its record, once the write settles, committed.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn config_write_admission_settles_to_the_host_recorder_after_the_caller_stopped_waiting()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let (published, on_published) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let runtime = Arc::new(ConfigRuntime::new(
+            Arc::new(HeldAfterPublish {
+                inner: crate::config_store::FileConfigStore::new(
+                    temp.path().join("config.toml"),
+                    *crate::model_profile::test_catalog::TEST_CATALOG,
+                ),
+                published: std::sync::Mutex::new(Some(published)),
+                release: std::sync::Mutex::new(Some(released)),
+            }),
+            temp.path().join("config_state.json"),
+        ));
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let caller = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let entry = StatingAdmission {
+                recorder: Arc::clone(&recorder),
+                login: "login-1",
+            };
+            async move {
+                runtime
+                    .patch_entered(ConfigDelta(json!({ "max_tokens": 512 })), Some(0), &entry)
+                    .await
+            }
+        });
+
+        on_published.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(
+            recorder.take().is_empty(),
+            "nothing is recorded before the write settles"
+        );
+
+        let _ = release.send(());
+        let records = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let records = recorder.take();
+                if !records.is_empty() {
+                    return records;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the settled write is recorded");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].change,
+            Some(crate::AdministeredChange::ConfigPatch {
+                realm: None,
+                generation: 1,
+            })
+        );
+        assert_eq!(records[0].outcome, crate::AdministrationOutcome::Committed);
+        assert_eq!(runtime.get().await.unwrap().generation, 1);
+    }
+
+    /// A config write's record names the realm its store's metadata names,
+    /// as a realm id: a store that names a valid realm id names it, and a
+    /// store that names none or an invalid one names no realm.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn config_write_record_names_the_store_realm_as_a_realm_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(RecordedAdministrations::default());
+        let entry = StatingAdmission {
+            recorder: Arc::clone(&recorder),
+            login: "login-1",
+        };
+        let cases = [
+            (
+                Some("team"),
+                json!({ "kind": "config_patch", "realm": "team", "generation": 1 }),
+            ),
+            (
+                Some("not a realm"),
+                json!({ "kind": "config_patch", "generation": 1 }),
+            ),
+            (None, json!({ "kind": "config_patch", "generation": 1 })),
+        ];
+        for (index, (named, expected)) in cases.into_iter().enumerate() {
+            let runtime = ConfigRuntime::new(
+                Arc::new(crate::config_store::TaggedConfigStore::new(
+                    Arc::new(crate::config_store::FileConfigStore::new(
+                        temp.path().join(format!("config-{index}.toml")),
+                        *crate::model_profile::test_catalog::TEST_CATALOG,
+                    )),
+                    ConfigStoreMetadata {
+                        realm_id: named.map(str::to_owned),
+                        instance_id: None,
+                        backend: None,
+                        resolved_paths: None,
+                    },
+                )),
+                temp.path().join(format!("config_state-{index}.json")),
+            );
+            runtime
+                .patch_entered(ConfigDelta(json!({ "max_tokens": 512 })), Some(0), &entry)
+                .await
+                .expect("admitted write");
+            let records = recorder.take();
+            assert_eq!(records.len(), 1, "one record per admission");
+            assert_eq!(
+                serde_json::to_value(&records[0].change).unwrap(),
+                expected,
+                "the store names {named:?}"
+            );
+        }
     }
 }

@@ -6,15 +6,16 @@ icon: "rocket"
 
 <Note>
 Download the complete CLI archive from the
-[Connect 0.9.0 release](https://github.com/lukacf/meerkat-connect/releases/tag/v0.9.0).
-Platforms: Apple Silicon macOS 13.5 or later and Linux x86_64
-with glibc 2.39. Verify the accompanying checksum before running it.
+[Connect 0.9.10 release](https://github.com/lukacf/meerkat/releases/tag/connect-v0.9.10).
+Platform: Linux x86_64 with glibc 2.39. The Apple Silicon macOS archive
+(macOS 13.5 or later) of 0.9.10 is not built yet and follows later. Verify the
+accompanying checksum before running it.
 See [platforms and installation options](/availability) for application integration.
 </Note>
 
 ## Standalone CLI
 
-Install [Meerkat Core 0.9.0](https://github.com/lukacf/meerkat/releases/tag/v0.9.0)
+Install [Meerkat Core 0.9.10](https://github.com/lukacf/meerkat/releases/tag/v0.9.10)
 for ordinary `rkat` agent work after setup. The Connect archive supplies its own Python, Node/npm, integration
 library and setup resources; you do not need to install those separately.
 
@@ -23,9 +24,9 @@ library and setup resources; you do not need to install those separately.
     Download the CLI archive and its `.sha256` companion:
 
     ```sh
-    platform=macos-arm64 # Use linux-x86_64 on Linux.
-    archive="meerkat-connect-0.9.0-$platform.tar.gz"
-    release=https://github.com/lukacf/meerkat-connect/releases/download/v0.9.0
+    platform=linux-x86_64 # 0.9.10 has no macos-arm64 archive yet.
+    archive="meerkat-connect-0.9.10-$platform.tar.gz"
+    release=https://github.com/lukacf/meerkat/releases/download/connect-v0.9.10
     curl -fLO "$release/$archive"
     curl -fLO "$release/$archive.sha256"
     ```
@@ -55,8 +56,13 @@ library and setup resources; you do not need to install those separately.
       </Tab>
     </Tabs>
 
-    Choose a stored realm or name a new one. You can instead pass `--realm work`
-    to select it explicitly. Review the setup helper's access, complete model
+    If stored realms are listed, enter a realm number, or enter `new` and then
+    a name. With no stored realms, enter the new name directly. Check the printed
+    realm name and storage path, especially if the same name appears more than
+    once. You can instead pass `--realm work` to select it explicitly. If that
+    name exists at multiple roots, also pass `--state-root "/exact/storage/root"`
+    using the chosen path, or select its numbered entry.
+    Review the setup helper's access, complete model
     setup if prompted, and review the assistant's model and tools. These startup
     reviews are separate from each integration's installation and access.
   </Step>
@@ -80,6 +86,9 @@ library and setup resources; you do not need to install those separately.
 
     Replace `work` with your selected realm and the quoted request with your
     actual task. This starts a fresh agent session using the realm's saved integration configuration and current permissions.
+    If the chooser listed that name at multiple storage roots, also pass
+    `--state-root "/exact/storage/root"` to `rkat`, using the path printed by
+    Connect. The realm name alone cannot select between those stored copies.
   </Step>
 </Steps>
 
@@ -101,6 +110,14 @@ Open your Connect-enabled application through its normal entrypoint and sign in.
 4. Read the setup result and the original agent's continuation. Follow the agent as it uses the integration to complete your request.
 
 The application retains the original conversation and setup progress, so you can return to the task after completing the required account and access steps.
+
+## Updating an existing application
+
+Connect 0.9.10 does not support in-place updates that change an application's
+tool policy, definition, instructions or runtime; Forge's Stage refuses them,
+so keep the existing installation and state. Do not extract a new archive over
+it. See [platforms and installation options](/availability) for the released
+scope.
 
 ## If setup stops or access changes
 

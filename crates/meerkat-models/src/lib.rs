@@ -27,7 +27,9 @@ pub use meerkat_core::model_profile::catalog::{
     CatalogEntry, ImageGenerationModelProfile, ModelTier, ProviderDefaults,
 };
 
-pub use capabilities::{all_capabilities, capabilities_for};
+pub use capabilities::{
+    ANTHROPIC_THINKING_BINDING_CONTROLS_BETA, all_capabilities, capabilities_for,
+};
 pub use catalog::{
     allowed_models, approximate_request_byte_cap, canonical, catalog, catalog_providers,
     default_image_generation_model, default_model, entry_for, global_default_model,

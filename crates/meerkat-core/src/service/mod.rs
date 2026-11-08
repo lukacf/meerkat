@@ -1282,6 +1282,18 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Opaque transport for this build's own MCP credential source, in place
+    /// of the one its factory holds (the `llm_client_override` type-erasure
+    /// precedent: the facade's `encode_mcp_auth_resolver_override_for_service`
+    /// erases an `Arc<dyn McpAuthResolver>`). Every MCP connection the build
+    /// opens reads its OAuth bearer and its stdio service secrets through it.
+    ///
+    /// Process-local: never serialized and never recovered, so a host that
+    /// needs it supplies it on every build of the session (a create, a
+    /// resume, a wake, a rebuild). Factory builders decode it fail-closed: a
+    /// payload that is not a credential source refuses every credential,
+    /// never falls back to the factory's.
+    pub mcp_auth_resolver_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
     /// Opaque transport for an optional per-session comms-runtime override
     /// (multi-host mobs, DEC-P3H-3 — the `llm_client_override` type-erasure
     /// precedent).
@@ -2259,6 +2271,15 @@ pub struct MobToolsBuildArgs {
     pub session_id: crate::SessionId,
     /// Model name of the owning agent — inherited by implicit mob helpers.
     pub model: String,
+    /// The provider the owning agent's build resolved for `model`. Implicit
+    /// mob helpers inherit it with the model, so they run on the agent's own
+    /// route and a model outside the catalog (a realm `[models.<id>]` entry,
+    /// a self-hosted model) names its provider.
+    pub provider: crate::Provider,
+    /// The self-hosted server the owning agent's build resolved for `model`
+    /// (`Some` only when `provider` is [`crate::Provider::SelfHosted`]),
+    /// inherited with the provider.
+    pub self_hosted_server_id: Option<String>,
     /// Runtime-injected mob operator authority context.
     ///
     /// The session factory only calls [`MobToolsFactory::build_mob_tools`]
@@ -2425,6 +2446,7 @@ impl Default for SessionBuildOptions {
             recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
+            mcp_auth_resolver_override: None,
             session_comms_runtime_override: None,
             prepared_controller: None,
             host_prompt_sections: HostPromptSections::Full,
@@ -2507,6 +2529,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
+            .field(
+                "mcp_auth_resolver_override",
+                &self.mcp_auth_resolver_override.is_some(),
+            )
             .field(
                 "session_comms_runtime_override",
                 &self.session_comms_runtime_override.is_some(),

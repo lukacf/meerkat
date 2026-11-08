@@ -2479,8 +2479,21 @@ async fn handle_inject(
     // preparation apply, and Core wakes it when it is dormant. The door takes
     // the identity's own lifecycle lock and checks a generated alias itself.
     let member_alias = crate::member_comms_id::runtime_alias_str(remote_member).into_owned();
+    // A name the identity runtime refuses (Core holds it for an identity the
+    // runtime has not registered, or its entry could not be read) is refused
+    // typed, never sent through the raw member door.
+    let identity = match identity_runtime {
+        Some(runtime) => match runtime.identity_for_member_mutation(&member_alias).await {
+            Ok(identity) => identity,
+            Err(error) => {
+                let (code, message) = control_identity_error(error);
+                return ControlResponse::Err { code, message };
+            }
+        },
+        None => None,
+    };
     if let Some(runtime) = identity_runtime
-        && let Some(identity) = runtime.identity_for_member_mutation(&member_alias).await
+        && let Some(identity) = identity
     {
         return match runtime
             .send_through_identity_door(&identity, &member_alias, &content_input)

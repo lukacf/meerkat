@@ -2,17 +2,25 @@
 //! `update`, `pause`, `resume` and `delete`, each naming its agent as
 //! `identity` (see `crate::console_schedules`).
 //!
-//! The list needs `agent.view` on the agent and every write `agent.send`
-//! (`console_rpc_access_requirements`): a schedule is a deferred send, so a
-//! write takes what `meta/console/send` takes on this route (a writable
-//! console, a valid public alias, `agent.send` under the live access
-//! policy) for the caller as the console resolves it, signed in or not. A
-//! create, update or resume records that caller as the Console caller the
-//! schedule fires as. The handler judges what the access table cannot: that
-//! the schedule is a console schedule of that agent, and that the agent
-//! takes the Console's sends. An update and a resume write at the revision
-//! they read, so neither reverts a change made meanwhile. Who a schedule
-//! sends as is shown only to a caller who may send to its agent.
+//! The list needs `agent.view` on the agent and every write `agent.send` and
+//! `schedule.manage` (`console_rpc_access_requirements`): a schedule is a
+//! deferred send, so a write takes what `meta/console/send` takes on this
+//! route (a writable console, a valid public alias, `agent.send` under the
+//! live access policy) for the caller as the console resolves it, signed in
+//! or not, and `schedule.manage` lets a deployment keep some who message the
+//! agent from changing its schedules. A create records that caller as the
+//! Console caller the schedule fires as; an update or a resume by its
+//! sender keeps it, and one by anyone else takes the schedule over only
+//! when it says so (`take_over_sender`), recording the replaced sender in
+//! the schedule's history. The handler judges what the access table cannot:
+//! that the schedule is a console schedule of that agent, and that the
+//! agent takes the Console's sends. An update and a resume are refused when
+//! the schedule moved past the revision they name (`expected_revision`),
+//! and write at the revision they read, so neither overwrites a change made
+//! meanwhile. A pause, a delete and a create take no `expected_revision`
+//! and no `take_over_sender`, and refuse them rather than ignore them. Each
+//! write answers the schedule as it left it. Who a schedule sends as is
+//! shown only to a caller who may send to its agent.
 //!
 //! [`ConsoleSendDoor`] is the Console's own send path for the fires: the
 //! Console's admission of the schedule's sender, then the very send
@@ -169,6 +177,7 @@ async fn create(
     schedules: &AttachedConsoleSchedules,
     identity: &str,
 ) -> Result<Value, JsonRpcError> {
+    refuse_unkept_preconditions(call.params, "meta/schedule/create")?;
     let sender = sender(call)?;
     let content = required_content(call.params)?;
     let trigger = trigger_param(call.params)?.ok_or_else(|| invalid("trigger is required"))?;
@@ -195,8 +204,9 @@ async fn create(
     Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
 }
 
-/// A changed schedule is the changer's send: the update records the caller
-/// as its sender, whatever it changes.
+/// A change is defined again as its caller: by the schedule's sender, it
+/// keeps the sender; by anyone else, it takes the schedule over, which the
+/// caller must confirm (`take_over_sender`).
 async fn update(
     call: &ScheduleCall<'_>,
     schedules: &AttachedConsoleSchedules,
@@ -207,14 +217,18 @@ async fn update(
     let content = optional_content(call.params)?;
     let trigger = trigger_param(call.params)?;
     let name = optional_string(call.params, "name")?;
+    let expected = expected_revision_param(call.params)?;
+    let take_over = take_over_sender_param(call.params)?;
     let (read, current) = console_schedule(call, schedules, identity, &schedule_id).await?;
+    unchanged_since(expected, &read)?;
+    takeover_confirmed(&current.sender, &sender, take_over)?;
     let target = sendable_target(call, schedules, &current.identity).await?;
     #[cfg(test)]
     schedules.wait_at_write_hold().await;
     caller_current(call)?;
-    let send = ConsoleScheduledSend::new(
+    let send = current.redefined(
         target,
-        content.unwrap_or(current.content),
+        content.unwrap_or_else(|| current.content.clone()),
         sender,
         now_epoch_seconds(),
     );
@@ -238,19 +252,31 @@ async fn pause(
     schedules: &AttachedConsoleSchedules,
     identity: &str,
 ) -> Result<Value, JsonRpcError> {
+    refuse_unkept_preconditions(call.params, "meta/schedule/pause")?;
     let schedule_id = schedule_id_param(call.params)?;
     let (_, send) = console_schedule(call, schedules, identity, &schedule_id).await?;
+    #[cfg(test)]
+    schedules.wait_at_write_hold().await;
     caller_current(call)?;
     let schedule = schedules
         .service
         .pause(&schedule_id)
         .await
         .map_err(schedule_error)?;
-    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
+    // Core pauses the schedule as it is then: a change made since the read
+    // above is the schedule's, so the answer names it.
+    Ok(schedule_item(
+        &schedules.service,
+        &schedule,
+        &as_left(&schedule, send),
+        true,
+    )
+    .await)
 }
 
-/// A resumed schedule is the resumer's send: the resume records the caller
-/// as its sender before it fires again.
+/// A resume is defined again as its caller, as an update is: the sender
+/// resumes its own schedule, and anyone else takes it over only when it
+/// says so.
 async fn resume(
     call: &ScheduleCall<'_>,
     schedules: &AttachedConsoleSchedules,
@@ -258,12 +284,16 @@ async fn resume(
 ) -> Result<Value, JsonRpcError> {
     let sender = sender(call)?;
     let schedule_id = schedule_id_param(call.params)?;
+    let expected = expected_revision_param(call.params)?;
+    let take_over = take_over_sender_param(call.params)?;
     let (paused, current) = console_schedule(call, schedules, identity, &schedule_id).await?;
+    unchanged_since(expected, &paused)?;
     if paused.phase != SchedulePhase::Paused {
         return Err(invalid(format!("schedule {schedule_id} is not paused")));
     }
+    takeover_confirmed(&current.sender, &sender, take_over)?;
     let target = sendable_target(call, schedules, &current.identity).await?;
-    let send = ConsoleScheduledSend::new(target, current.content, sender, now_epoch_seconds());
+    let send = current.redefined(target, current.content.clone(), sender, now_epoch_seconds());
     caller_current(call)?;
     // The sender is recorded while the schedule is still paused, so no fire
     // goes out as the earlier sender once it resumes, and at the revision the
@@ -278,12 +308,22 @@ async fn resume(
         },
     )
     .await?;
+    #[cfg(test)]
+    schedules.wait_at_resume_hold().await;
     let schedule = schedules
         .service
         .resume(&schedule_id)
         .await
         .map_err(schedule_error)?;
-    Ok(schedule_item(&schedules.service, &schedule, &send, true).await)
+    // Core resumes the schedule as it is then: a change made between the
+    // write above and the resume is the schedule's, so the answer names it.
+    Ok(schedule_item(
+        &schedules.service,
+        &schedule,
+        &as_left(&schedule, send),
+        true,
+    )
+    .await)
 }
 
 async fn delete(
@@ -291,6 +331,7 @@ async fn delete(
     schedules: &AttachedConsoleSchedules,
     identity: &str,
 ) -> Result<Value, JsonRpcError> {
+    refuse_unkept_preconditions(call.params, "meta/schedule/delete")?;
     let schedule_id = schedule_id_param(call.params)?;
     let (_, send) = console_schedule(call, schedules, identity, &schedule_id).await?;
     caller_current(call)?;
@@ -312,6 +353,88 @@ fn caller_current(call: &ScheduleCall<'_>) -> Result<(), JsonRpcError> {
     call.governance
         .refuse_unless_caller_current()
         .map_err(ConsoleCallerRefusal::json_rpc_error)
+}
+
+/// The revision a change was made against (`expected_revision`, the
+/// schedule's `revision` as its caller read it), when it names one.
+fn expected_revision_param(params: &Value) -> Result<Option<ScheduleRevision>, JsonRpcError> {
+    match params.get("expected_revision") {
+        None | Some(Value::Null) => Ok(None),
+        Some(revision) => revision
+            .as_u64()
+            .map(|revision| Some(ScheduleRevision(revision)))
+            .ok_or_else(|| invalid("expected_revision must be a non-negative integer")),
+    }
+}
+
+/// Whether a change confirms that it takes the schedule over from another
+/// sender (`take_over_sender`).
+fn take_over_sender_param(params: &Value) -> Result<bool, JsonRpcError> {
+    match params.get("take_over_sender") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(take_over)) => Ok(*take_over),
+        Some(_) => Err(invalid("take_over_sender must be a boolean")),
+    }
+}
+
+/// Refuse a precondition `method` would not keep: a pause and a delete act
+/// on the schedule as it is (Core's pause and delete take no revision), and
+/// neither they nor a create makes anyone the sender in another's place.
+/// Named, `expected_revision` or `take_over_sender` would read as a
+/// condition the call does not check, so it is refused, not ignored.
+fn refuse_unkept_preconditions(params: &Value, method: &str) -> Result<(), JsonRpcError> {
+    for param in ["expected_revision", "take_over_sender"] {
+        if params.get(param).is_some_and(|value| !value.is_null()) {
+            return Err(
+                JsonRpcError::new(-32602, format!("{method} takes no {param}"))
+                    .with_data(json!({ "kind": "unsupported_param", "param": param })),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The send `schedule` holds as a write left it, which is `send` unless a
+/// change made meanwhile replaced it.
+fn as_left(schedule: &Schedule, send: ConsoleScheduledSend) -> ConsoleScheduledSend {
+    ConsoleScheduledSend::of_target(&schedule.target).unwrap_or(send)
+}
+
+/// Refuse a change made against a revision the schedule moved past: its
+/// caller made it from a schedule that is no longer there, and writing it
+/// would overwrite the change made meanwhile.
+fn unchanged_since(
+    expected: Option<ScheduleRevision>,
+    read: &Schedule,
+) -> Result<(), JsonRpcError> {
+    match expected {
+        Some(expected) if expected != read.revision => {
+            Err(revision_conflict(expected, read.revision))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Refuse a change that would make its caller the sender in another
+/// caller's place unless it confirms the takeover: the schedule's later
+/// sends would go out as the caller.
+fn takeover_confirmed(
+    current: &ConsoleScheduleSender,
+    caller: &ConsoleScheduleSender,
+    take_over: bool,
+) -> Result<(), JsonRpcError> {
+    if take_over || current.is_same_caller(caller) {
+        return Ok(());
+    }
+    Err(JsonRpcError::new(
+        -32009,
+        "the console schedule sends as another caller; a change makes you its sender, so it \
+         needs take_over_sender",
+    )
+    .with_data(json!({
+        "kind": "sender_takeover_required",
+        "sender": current.principal(),
+    })))
 }
 
 /// The Console caller a create, update or resume records as the schedule's
@@ -429,9 +552,10 @@ async fn console_schedule(
     Ok((schedule, send))
 }
 
-/// One console schedule as the methods answer it. Who it sends as is shown
-/// only when `shows_sender`: to a caller who may send to its agent (every
-/// write's caller does; a list caller may only view the agent).
+/// One console schedule as the methods answer it. Who it sends as, and who
+/// it sent as before each takeover, is shown only when `shows_sender`: to a
+/// caller who may send to its agent (every write's caller does; a list
+/// caller may only view the agent).
 async fn schedule_item(
     service: &ScheduleService,
     schedule: &Schedule,
@@ -455,9 +579,23 @@ async fn schedule_item(
     } else {
         None
     };
-    let defined_at_utc = i64::try_from(send.defined_at)
-        .ok()
-        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0));
+    let defined_at_utc = epoch_seconds_utc(send.defined_at);
+    // Earlier senders are other callers' principals: shown with the sender,
+    // to a caller who may send to the agent.
+    let sender_history = if shows_sender {
+        send.sender_history
+            .iter()
+            .map(|former| {
+                json!({
+                    "sender": former.sender.principal(),
+                    "defined_at_utc": epoch_seconds_utc(former.defined_at),
+                    "replaced_at_utc": epoch_seconds_utc(former.replaced_at),
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     json!({
         "schedule_id": schedule.schedule_id.to_string(),
         "identity": send.identity,
@@ -468,11 +606,19 @@ async fn schedule_item(
         "revision": schedule.revision.0,
         "sender": if shows_sender { send.sender.principal() } else { None },
         "sender_hidden": !shows_sender,
+        "sender_history": sender_history,
         "defined_at_utc": defined_at_utc,
         "created_at_utc": schedule.config.created_at_utc,
         "updated_at_utc": schedule.config.updated_at_utc,
         "next_due_at_utc": next_due_at_utc,
     })
+}
+
+/// An instant held in whole seconds since the epoch, as UTC.
+fn epoch_seconds_utc(seconds: u64) -> Option<chrono::DateTime<chrono::Utc>> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
 }
 
 fn now_epoch_seconds() -> u64 {
@@ -534,7 +680,7 @@ fn schedule_id_param(params: &Value) -> Result<ScheduleId, JsonRpcError> {
 
 /// Write `request` to the schedule at `expected`, the revision the call
 /// read. A schedule that moved on meanwhile is answered as a conflict and
-/// left as it is: a write never reverts a change it did not see.
+/// left as it is: a write never overwrites a change it did not see.
 pub(super) async fn update_at(
     service: &ScheduleService,
     schedule_id: &ScheduleId,
@@ -729,16 +875,22 @@ impl crate::console_schedules::ConsoleScheduleDoor for ConsoleSendDoor {
 }
 
 /// Who a fire sends as: the sender the schedule recorded, named as that
-/// caller's live sends name it. A person's fire on a console that requires
-/// sign-in carries the person's qualified principal (its verified `sub` in
-/// its issuer's trust domain) to the agent's run as its requester, as the
-/// person's live send would; no other fire names one.
+/// caller's live sends are named now. A person's fire on a console that
+/// requires sign-in carries the person's qualified principal (its verified
+/// `sub` in its issuer's trust domain) to the agent's run as its requester,
+/// as the person's live send would; no other fire names one. A recorded
+/// person whose issuer's tokens are now classified as shared accounts
+/// (`shared_account_tokens`) is no person any more: a live token of theirs
+/// names an account, so the fire names a token principal and no requester.
 fn scheduled_sender(
     sender: &ConsoleScheduleSender,
     decisions: &RuntimeDecisionState,
 ) -> crate::console_aggregator::ConsoleSender {
     let kind = match sender {
         ConsoleScheduleSender::Anonymous => ConsoleActorKind::Anonymous,
+        ConsoleScheduleSender::Human { .. } if decisions.trusted_oidc.shared_account_tokens => {
+            ConsoleActorKind::TokenPrincipal
+        }
         ConsoleScheduleSender::Human { .. } => ConsoleActorKind::Person,
         ConsoleScheduleSender::Principal { provider, .. }
             if provider == console_provider_name(&crate::AuthProvider::ServiceIdentity) =>
@@ -750,7 +902,7 @@ fn scheduled_sender(
     let requester = match sender {
         ConsoleScheduleSender::Human {
             issuer, subject, ..
-        } if console_sends_name_requesters(decisions) => {
+        } if kind == ConsoleActorKind::Person && console_sends_name_requesters(decisions) => {
             crate::runtime::console_human_principal(issuer, subject).ok()
         }
         ConsoleScheduleSender::Human { .. }
@@ -763,6 +915,9 @@ fn scheduled_sender(
         display_name: sender.principal().map(ToString::to_string),
         caller_scope: console_caller_scope(&sender.scope()),
         requester,
+        // A schedule's fire is no human message: its turn carries no sender
+        // label, although it may act for the schedule's person.
+        model_label: None,
     }
 }
 

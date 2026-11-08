@@ -171,7 +171,16 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AppExecution<T> {
         control
             .bind_execution_guard(origin.clone())
             .map_err(|error| AgentError::tool(error.into()))?;
-        let context = fresh_context.with_operation_review(self.review.clone());
+        // The action runs for the requester its trusted ingress named, as a
+        // direct requester, and never for an earlier model run's.
+        let context = fresh_context
+            .with_operation_review(self.review.clone())
+            .with_requester(
+                control
+                    .requester()
+                    .cloned()
+                    .map(crate::types::TurnRequester::direct),
+            );
         let resolution = self
             .tools
             .resolve_tool_application(

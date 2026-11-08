@@ -204,6 +204,26 @@ async fn software_review_observation_does_not_query_history_or_accept_server_spo
             .is_err()
     );
     assert_eq!(fixture.count(), 0);
+    *fixture.package.readback_reply.lock().unwrap() = None;
+    fixture.owner.retire();
+    let before = fixture.package.calls.lock().unwrap().len();
+    assert!(
+        fixture
+            .start("state", "setup_state", json!({}), false)
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(fixture.package.calls.lock().unwrap().len(), before);
+    assert!(
+        fixture
+            .approvals
+            .shared
+            .service
+            .list(Default::default())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -363,24 +383,132 @@ async fn software_review_observation_cannot_bypass_current_native_state_authoriz
 }
 
 #[tokio::test]
+async fn software_review_observation_claimed_second_input_is_not_authorization() {
+    let mut fixture = Fixture::local(true, 0);
+    fixture.check().await;
+    let (_, context) = approve_without_entry(&mut fixture).await;
+    let args = serde_json::value::to_raw_value(&install(true)).unwrap();
+    let install_call = ToolCallView {
+        id: "install",
+        name: fixture.install_name(),
+        args: &args,
+    };
+    let _ = fixture.approvals.settle_service_result(
+        &fixture.owner,
+        install_call,
+        &context,
+        LiveBridgeEffectOutcome::Failed,
+        Err(ToolError::access_denied(install_call.name)),
+    );
+    // These are deliberately untrusted coordinate claims, not admitted native
+    // inputs. Only the installed two-caller journey proves the positive case.
+    let epoch = meerkat_core::RuntimeEpochId::new();
+    let scope = |input: meerkat_core::InputId| {
+        meerkat_core::exact_operation::OperationExecutionScope::RuntimeInput {
+            owner_session_id: fixture.session.clone(),
+            runtime_epoch_id: epoch.clone(),
+            submitted_input_id: input.clone(),
+            canonical_input_id: input,
+        }
+    };
+    let work = || {
+        meerkat_core::retained_work::RetainedWorkIdentity::new(
+            "claimed-runtime",
+            meerkat_core::RunId::new(),
+            Vec::new(),
+            Default::default(),
+            None,
+        )
+    };
+    let before = {
+        let mut state = fixture.approvals.shared.state().unwrap();
+        let attempt = state.attempt.as_mut().unwrap();
+        attempt.review_scope = Some(scope(meerkat_core::InputId::new()));
+        attempt.review_work = Some(work());
+        (
+            attempt.approval_id.clone(),
+            attempt.review_scope.clone(),
+            attempt.review_work.clone(),
+            attempt.custody,
+        )
+    };
+    let claimed = ToolDispatchContext::default()
+        .with_runtime_identity(fixture.session.clone(), None)
+        .with_work_authorization(Some(
+            meerkat_core::authorization::WorkAuthorizationContext::new(
+                Arc::new(RefusePreparedOperation),
+                scope(meerkat_core::InputId::new()),
+            )
+            .with_retained_work(work()),
+        ));
+    let empty = serde_json::value::to_raw_value(&json!({})).unwrap();
+    let call = ToolCallView {
+        id: "second-state",
+        name: "setup_state",
+        args: &empty,
+    };
+    let calls = fixture.package.calls.lock().unwrap().len();
+    let error = fixture
+        .owner
+        .dispatch_with_context(call, &claimed)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.primary_error(),
+        ToolError::AuthorizationRefused { .. }
+    ));
+    assert_eq!(fixture.package.calls.lock().unwrap().len(), calls);
+    let state = fixture.approvals.shared.state().unwrap();
+    let attempt = state.attempt.as_ref().unwrap();
+    assert!(
+        (
+            attempt.approval_id.clone(),
+            attempt.review_scope.clone(),
+            attempt.review_work.clone(),
+            attempt.custody
+        ) == before
+    );
+    drop(state);
+    assert_eq!(fixture.count(), 0);
+    assert_eq!(
+        fixture
+            .approvals
+            .shared
+            .service
+            .list(Default::default())
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn software_review_observation_refuses_owner_invalidation_during_inner_state_read() {
-    for change in ["publication", "retired", "closed"] {
+    for (has_review, change) in [
+        (true, "publication"),
+        (true, "retired"),
+        (true, "closed"),
+        (false, "retired"),
+        (false, "closed"),
+    ] {
         let mut fixture = Fixture::local(true, 6);
-        fixture.check().await;
-        let (_, context) = approve_without_entry(&mut fixture).await;
-        let args = serde_json::value::to_raw_value(&install(true)).unwrap();
-        let call = ToolCallView {
-            id: "install",
-            name: fixture.install_name(),
-            args: &args,
-        };
-        let _ = fixture.approvals.settle_service_result(
-            &fixture.owner,
-            call,
-            &context,
-            LiveBridgeEffectOutcome::Failed,
-            Err(ToolError::access_denied(call.name)),
-        );
+        if has_review {
+            fixture.check().await;
+            let (_, context) = approve_without_entry(&mut fixture).await;
+            let args = serde_json::value::to_raw_value(&install(true)).unwrap();
+            let call = ToolCallView {
+                id: "install",
+                name: fixture.install_name(),
+                args: &args,
+            };
+            let _ = fixture.approvals.settle_service_result(
+                &fixture.owner,
+                call,
+                &context,
+                LiveBridgeEffectOutcome::Failed,
+                Err(ToolError::access_denied(call.name)),
+            );
+        }
         let before = fixture.package.calls.lock().unwrap().len();
         let read = fixture.start("state", "setup_state", json!({}), false);
         tokio::time::timeout(Duration::from_secs(2), fixture.package.entered.notified())
@@ -404,7 +532,7 @@ async fn software_review_observation_refuses_owner_invalidation_during_inner_sta
             .unwrap();
         assert!(
             result.is_err(),
-            "{change}: no stale review projection may escape"
+            "{change}, retained review {has_review}: no stale review projection may escape"
         );
         assert_eq!(fixture.package.calls.lock().unwrap().len(), before + 1);
         assert_eq!(fixture.count(), 0);

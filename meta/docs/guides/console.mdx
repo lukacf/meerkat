@@ -194,6 +194,11 @@ permits neither. A model-only launch tool can still own a view. App actions use
 fresh native authorization, pre- and post-tool hooks and normal execution
 policy, including review when required. A post-hook refusal withholds the result
 while preserving already settled effects. View-only users cannot invoke them.
+An app action runs for the Console caller who makes it: on a console that
+requires sign-in, a person's action carries that person as its original
+requester, and on an open console, or for a service or a token principal, it
+carries none. It never borrows the requester of the model run whose result
+the app shows.
 
 App resource reads and tool execution can proceed while the model turn is still
 running. A response with no session effects or hook notices does not wait for
@@ -359,9 +364,11 @@ count. Reading it wakes no agent.
 The browser keeps these preferences in local storage, per signed-in user and
 console: the manual order, the Group and Sort choices and the pins follow the
 user and are kept when the `[agent_list]` configuration changes. The order of
-categories and subgroups and which of them are collapsed belong to that
-configuration and start over when it changes. Pins an earlier console kept
-carry over once.
+categories and subgroups and which of them are collapsed are kept per user too,
+for that configuration, and start over when it changes. Pins set in two tabs
+are both kept, and every tab shows them. Pins, and the category order and
+collapse an earlier console kept for every user of the runtime, carry over
+once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
@@ -391,7 +398,7 @@ counts.
 
 | Tab | What it shows |
 | --- | --- |
-| Pending | Current requests with Approve, Reject, and Escalate controls when decisions are available. |
+| Pending | Current requests, each marked **For you** or **Waiting for** its approver, with Approve, Reject, and Escalate controls when the caller can decide them; requests decided elsewhere stay, saying by whom. |
 | Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
 | Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. A decision whose record names its verified decider reads "Decided by" that principal, the approver label it decided as, and the assurance it was authenticated with (for example "alice@example.test (as Release manager) - person authenticated"); an older record keeps the approver label. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
@@ -410,9 +417,34 @@ confirm execution: the caller remains responsible for enforcing the returned
 outcome and carrying out any permitted action. See [Gating](/concepts/gating) for
 current tier, timeout, and decision behavior.
 
-The stock console submits decisions with `approver_id: "console-ops-lead"`. There
-is no approver selector in this inbox. A request pinned to a different approver
-needs a host-provided approval surface that authenticates and maps the approver.
+The stock console decides as the signed-in person: its decisions name no
+approver, and the console takes the approver from the connection (see
+[Gating](/concepts/gating)). When `meta/console/whoami` reports a caller that is
+not a person (no token on an open console, a service token, a token that names
+no human, or a shared-account token), the inbox shows requests read-only and
+says to sign in as yourself to decide: such a caller can read them but not
+decide them. A request pinned to an approver id is decided by a person who
+holds that id through the access configuration's `approvers` bindings.
+
+Approval cards are personal. A request pinned to an approver id the caller does
+not hold reads **Waiting for** that approver and offers no decision; for a
+signed-in person, a request pinned to an id they hold, or pinned to no one,
+reads **For you**. **Needs you** counts only the requests that are not waiting
+for someone else (with any host items), and the sidebar's **Approvals** count
+counts the same requests. A request for the caller that someone
+else decides keeps its card, which says how and by whom (for example
+"Approved by" the deciding person, read from the gating audit), or "Decided
+elsewhere" when the audit cannot say.
+
+The same holds for memory quarantine reviews and WorkGraph goal confirmations:
+the console offers them only to a signed-in person. A WorkGraph claim is owned
+by the caller who makes it, so the WorkGraph panel offers Claim only to a
+caller with a token, and Release on the caller's own claims and, to an access
+admin, on anyone's: the work graph records an admin's release with the admin
+and the claim released. Claims the stock console makes carry no lease, so
+someone else's claim ends when an access admin releases it, when the host
+releases it on its stdio RPC gateway (`rpc_gateway`; `meta_gateway` serves
+none), or when its item is closed.
 
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
@@ -447,21 +479,39 @@ as they were.
 - It records who opened it: your console principal, in its
   `side_chat_creator` label (nothing on an open console when you sent no
   token). The record grants nothing, and the console shows it only to you
-  and to access admins: other viewers of the side chat see it without the
-  label.
+  and to the admins of an enforced access policy: other viewers of the side
+  chat see it without the label.
 - On a console with sign-in, a side chat is private to the person who
   opened it: its audience is the agent's narrowed to that person, plus the
   access admins (`admins`). Everyone else meets it on no surface (sidebar,
-  member lists, topology, timeline, streams, inspection, memory) and is
-  answered as for a member the console does not hold when they read it,
-  send to it, close it or fork it (`-32001` `unknown identity`, or `404`
-  `unknown_identity` from `POST /console/send`). This holds with or
-  without an access configuration. Its header says who can see it:
+  member lists, topology, timeline, streams, events, flow runs, peer lists,
+  inspection, memory, the audit log, the runtime's routing, delivery,
+  reconcile and storage reads). A request of theirs that names it, to
+  read it, send to it, close it or fork it, gets the answer that method
+  gives a member that does not exist (for example `-32602` `member not
+  found` from `meta/get_member`, or `404` `unknown_identity` from
+  `POST /console/send`); a request that would record something for it (an
+  announcement subscription, a schedule, a remembered fact, a topology edge,
+  a WorkGraph goal, attention target or supervisor, whether it names the
+  member, its owner key or its session) is refused as naming an unknown
+  member (`-32001`). This holds with or without an access configuration
+  (the SDK gateway's stdio plane is the trusted host plane: see
+  [Known limitations](/concepts/access-control#known-limitations)). Its
+  header says who can see it:
   **Private: only you and access admins can see it.**, or, to an access
   admin, that it is private to the person who opened it. The members a
-  private side chat creates (a helper or member its turn spawns, a
-  `fork_off` child, a helper forked from it) are private to the same person
-  too, after the side chat is closed as well.
+  private side chat creates (a helper or member its turn spawns, the members
+  of a mob it creates and the helpers `delegate` runs for it, a `fork_off`
+  child, a helper forked from it) are private to the same person too, after
+  the side chat is closed as well. A private side chat convenes no council:
+  its `council` call is refused as a policy denial
+  (`private_member_council`), since the council's participants would carry
+  its conversation to members others share. The schedules its agent writes
+  are aimed at itself only (`private_member_schedule_target` refuses any
+  other target), and the schedule tools of an agent not private to you
+  neither list, read nor change them. A WorkGraph goal for it is refused for
+  you too (`private_member_workgraph_target`): it is built without WorkGraph
+  tools, so no binding can serve it.
 - On a console without sign-in, a side chat stays shared, and so does one
   opened by a caller who is not a signed-in person (a service token) or
   before side chats were private. A shared side chat's audience is exactly
@@ -473,14 +523,27 @@ as they were.
 - A side chat's memory is its own: its `memory` tool writes to the side
   chat's identity, never to the agent it was forked from. The memory
   distiller never reads a private side chat's conversation, and the memory
-  steward never dreams over its memory or promotes any of it.
+  steward never dreams over its memory or promotes any of it. A private
+  side chat's `memory` tool proposes nothing to its mob, and no one else is
+  shown a proposal it wrote.
+- A private side chat is where personal accounts on MCP servers are used:
+  a server the operator marked personal acts with the account of the person
+  who opened the side chat, for that person's own messages only (see
+  [Personal accounts on MCP servers](/reference/configuration#personal-accounts-on-mcp-servers)).
+  An access admin who revokes a person's sessions suspends that person's
+  accounts in the side chats they opened before the revocation, while a side
+  chat opened after a fresh sign-in uses them again and the credentials are
+  kept.
 - It is never wired to a peer, whatever the agent's role: no other agent can
   address it, and none lists it as a peer. The runtime seats it exempt from
   the mob definition's wiring rules (`auto_wire_orchestrator`,
   `role_wiring`), so no agent seated after it is wired to it either, and the
   definition-wiring reconcile and the topology's declared edges leave it
   out, as they leave out every member exempt from those rules. A host's own
-  edge discovery policy is never handed one either.
+  edge discovery policy is never handed one either. No role-wide flow step
+  dispatches to it: only a run that names it in its `role_targets` reaches
+  it. A durable fork of it (its `fork_off` child, a helper forked from it)
+  is seated exempt in the same way.
 - It is listed under its agent in the sidebar, marked **Side chat**, and is
   kept until you close it: across a console reload and a gateway restart. It
   never idle-retires. **Close side chat** in its pane retires it, which, as
@@ -579,16 +642,27 @@ which asks you to confirm. An edit keeps the timing unless you change it.
   policy at that time, a writable console, and an agent that takes console
   messages. A refused send fails that time only; the schedule keeps its
   later times.
-- Creating, editing or resuming a schedule makes you its sender. On a
-  console without sign-in the sender is the console's shared account, as it
-  is for a message you send there; once the console requires sign-in, such
-  schedules stop sending until someone signed in edits them.
-- A change that races another change of the same schedule is refused and
-  the list is read again: check the schedule and repeat the change.
+- Creating a schedule makes you its sender, and so does editing or resuming
+  one you send. Editing or resuming a schedule someone else sends takes it
+  over: the Console first says who it sends as and asks you to confirm, and
+  only then makes you its sender; keeping its sender changes nothing. The
+  schedule keeps the senders it was taken over from, and its details name
+  them. On a console without sign-in the sender is the console's shared
+  account, as it is for a message you send there; once the console requires
+  sign-in, such schedules stop sending until someone signed in edits them.
+- An edit or a resume names the version of the schedule the pane showed: one
+  made after someone else changed the same schedule is refused and the list
+  is read again: check the schedule and repeat the change. A pause and a
+  delete name no version: they act on the schedule as it is.
+- A deployment can let people message an agent without changing its
+  schedules: schedule changes also need `schedule.manage`, which an access
+  configuration that names no schedule action grants wherever it grants
+  `agent.send`.
 - A schedule repeats at most once a minute.
-- Viewers who may see the agent but not message it see its schedules
-  read-only, and so does everyone on a read-only console or on a gateway
-  that does not offer schedule changes; the pane says why.
+- Viewers who may see the agent but not message it, or message it but not
+  manage its schedules, see its schedules read-only, and so does everyone on
+  a read-only console or on a gateway that does not offer schedule changes;
+  the pane says why.
 - An agent whose input is governed takes no schedule (a governed send needs
   its human present, and a scheduled send has none), and an agent that
   takes no console messages cannot be scheduled.
@@ -1013,6 +1087,7 @@ interface ConsoleAgent {
   addressable?: boolean;
   affordances?: {
     can_send_message?: boolean;
+    can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
     runtime_mode?: string;
@@ -1065,8 +1140,20 @@ Identity-first status and inspect payloads use lowercase wire enums for addressa
     console that requires sign-in, a person's send carries the person's
     qualified principal to the agent's run as the run's original requester
     (Meerkat's `ToolDispatchContext::requester`); the stored frame keeps it
-    and no view returns it. Other callers' sends, and every send on an Open
-    console, carry none.
+    and no view returns it, neither on the send's frame nor on the run's
+    transcript identities that the session history's frames, the run's
+    event frames and the agent and mob event streams show. Other callers'
+    sends carry none, and so does
+    every ungoverned send on an Open console (see
+    [Access control](/concepts/access-control#requesters-on-an-open-console)).
+
+    On a console that requires sign-in, the agent's model also reads each
+    person's message with a sender label: an injected-context row "Message
+    from" and the person's display name, right before the message, a steer
+    included. The agent tells people apart from it without parsing the
+    message. A service's, a token principal's and an anonymous caller's
+    messages, a schedule's fire and every message on an Open console carry
+    no label.
 
     `idempotency_key` must be unique per send; the stock console mints one
     UUID per send. An idempotent retry reuses the same key in the same
@@ -1188,8 +1275,8 @@ Primary RPC methods on `/console/rpc`:
 - `meta/schedule/list`, `meta/schedule/create`, `meta/schedule/update`,
   `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete` -
   an agent's console schedules (see [Schedules](#schedules)); the list is
-  gated by `agent.view` and the writes by `agent.send` for the agent, and
-  each send is a Console send by the schedule's sender
+  gated by `agent.view` and the writes by `agent.send` and `schedule.manage`
+  for the agent, and each send is a Console send by the schedule's sender
 - `meta/console/attention` and `meta/console/attention/dismiss` - the
   caller's own attention items (see [Private replies](#private-replies)); a
   caller reads and dismisses only its own
@@ -1314,6 +1401,70 @@ host proxy converts console auth into cookies
 or another browser-ambient credential, that host must add origin and CSRF
 protection before exposing mutation routes such as `/console/rpc`,
 `/console/rpc/multipart`, or `/console/send`.
+
+### Who the console acts as
+
+The top bar names the caller the console acts as, from
+`meta/console/whoami`: the signed-in person, a shared account (a token that
+names no person), a service, or **Not signed in** on an open console. Its menu
+offers **Sign out** when the console configuration names `[sign_out]` (see
+[sign-out](/reference/configuration#sign-out)).
+
+The stock console reads `whoami` once for each console it loads and names that
+caller on every console request (`expected_caller_scope`, and
+`expectedCallerScope` on an MCP Apps tool call): the `caller_scope` that read
+reported. A later answer for someone else never changes whom it names. Its
+first change waits for that read. While no read has answered, no console
+request that names a caller leaves: a message sent then reads **Not sent**, a
+queued message stays queued, the console commands that read (approvals and the
+other panels that read through them) are refused too, and the top bar shows no
+identity chip, so **Sign out** is not offered. The console reads its caller
+again with its next read of the console experience, and loads again at once
+when another tab of the console learns it. The gateway refuses a change made
+for another caller (`caller_changed`), so a message queued by one person is
+never sent as another.
+
+When someone else signs in to the same browser, every tab of the console
+notices at once: a tab that learns its caller tells this browser's other tabs
+of the console, and a tab whose caller differs, or whose request was refused
+with `caller_changed` (a voice call, an MCP Apps tool call or a blob upload
+included), drops what it shows (transcripts, approvals, host items, the
+previous caller's queued messages and drafts), stops its streams and loads
+again as the new caller. A queued message the console sends on its own (an
+agent became idle) waits for a fresh read of the console experience first, so
+it is never sent under a login that changed meanwhile.
+
+A login that ends puts the console in one sign-in state: a 401,
+`caller_not_current`, or a front that redirects a console request to its
+sign-in page. No view of the ended login stays on screen. **Sign in** reloads
+the console page so the front can sign the browser in again, and signing in
+again in another tab, or coming back to the tab, brings the console back, with
+the message being written and the images attached to it. Console requests do
+not follow redirects, so a front's redirect to its sign-in page reads as "sign
+in", never as an unknown outcome: a send it stopped reads **Not sent**.
+Messages already queued stay saved in this browser.
+
+### What this browser keeps
+
+The browser keeps each signed-in user's console data apart. Queued messages
+(in local storage) and unsent drafts (in each tab's session storage) are kept
+under the user's storage scope, the `storage_scope` of `/console/experience`;
+a host that passes `storageNamespace` gets it combined with that scope. The
+display settings, the sidebar's and the activity rail's collapse and the agent
+list's arrangement are kept per user too, and each tab saves the panel layout
+only when it changes it, so a tab left open does not undo what another tab
+arranged.
+
+**Sign out** removes the user's queued messages and drafts from this browser,
+in every tab of the console; preferences stay. On an origin without Web Locks
+(plain HTTP), the queue's storage lock keeps a copy of each queue in IndexedDB;
+signing out removes those copies too, and the browser leaves for the sign-out
+once they are gone, or after at most 1.5 seconds. A queue an earlier console kept
+for everyone using the browser (one that named no user, or a host namespace
+alone) is offered once as **Older queued messages**: importing it moves it to
+the user who imported it and removes the earlier copy, so no other user of
+the browser is offered it. A preference an earlier console kept for everyone
+is read once in the same way, by the first user who loads the console.
 
 ## Build system
 

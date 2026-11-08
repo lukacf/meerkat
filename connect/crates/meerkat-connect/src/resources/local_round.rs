@@ -14,7 +14,8 @@ fn unavailable() -> ConnectError {
 }
 
 /// A move-only owner derived by the same verified resource preparation.
-/// It cannot be reconstructed from a model-visible path or saved descriptor.
+/// A saved descriptor cannot reconstruct it. Ordinary empty-round restore also
+/// requires this owner's consumed orderly-close evidence and current admission.
 /// Every new invocation reserves new preparation artifacts. A killed old owner
 /// may leave a dead locator there; its old descriptor stays recovery-only.
 /// The one process slot retains custody even when a wait or protocol fails.
@@ -23,11 +24,13 @@ pub struct LocalRoundOwner {
     artifacts: PathBuf,
     request: serde_json::Value,
     // The ordinary preparer's actual output, captured before any native use.
-    // Shared peer and completed-descriptor paths cannot construct this owner.
+    // Shared peers and unproven saved descriptors cannot construct this owner.
     #[cfg(feature = "console")]
     handoff_sha256: String,
     poisoned: bool,
     process: Option<RoundProcess>,
+    #[cfg(feature = "console")]
+    continuity: continuity::Continuity,
     #[cfg(test)]
     test_location: Option<(PathBuf, String)>,
 }
@@ -119,12 +122,17 @@ impl InstalledResources {
             )?),
             poisoned: false,
             process: None,
+            #[cfg(feature = "console")]
+            continuity: continuity::Continuity::default(),
             #[cfg(test)]
             test_location: None,
         };
         Ok((prepared, owner))
     }
 }
+
+#[cfg(feature = "console")]
+mod continuity;
 
 impl LocalRoundOwner {
     #[cfg(feature = "console")]
@@ -417,7 +425,36 @@ async fn read_ready(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> bool {
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod private_attempt;
+
+// A selected helper's normal exit follows its Controller close and join.
+// Reaped/stdout-closed alone also includes forced termination, which is not
+// evidence that the helper completed that owner cleanup.
+fn normal_close(process: &meerkat_mcp::McpAttemptProcessEnd) -> bool {
+    use meerkat_mcp::{McpAttemptProcessEnd, McpServerCloseOutcome, McpStdioLeaderOutcome};
+    let McpAttemptProcessEnd::Closed(receipt) = process else {
+        return false;
+    };
+    McpServerCloseOutcome::Stdio(receipt.clone()).is_settled()
+        && matches!(&receipt.leader, McpStdioLeaderOutcome::Reaped(status) if status.success())
+        && receipt.sigterm.is_none()
+        && receipt.sigkill.is_none()
+}
+
 #[cfg(feature = "console")]
 mod attempt;
 #[cfg(feature = "console")]
 pub use attempt::LocalRoundAttempts;
+
+#[cfg(target_os = "linux")]
+mod selected_input;
+
+#[cfg(all(test, feature = "console", target_os = "linux"))]
+impl LocalRoundOwner {
+    // Share the original inert resource/owner fixture with public-result and
+    // close controls. The opaque guard retains its temporary files until drop.
+    pub(crate) fn selected_input_test_preparation()
+    -> (impl Sized, Self, meerkat_core::McpServerConfig) {
+        tests::selected_input::preparation()
+    }
+}

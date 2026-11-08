@@ -4219,4 +4219,105 @@ mod tests {
             "settled reservations must never be evicted as queue overflow"
         );
     }
+
+    /// Whether `value` names a requester anywhere: a non-null `requester`
+    /// key, or a string holding the principal id `needle`.
+    fn names_requester(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::String(text) => text.contains(needle),
+            Value::Array(items) => items.iter().any(|item| names_requester(item, needle)),
+            Value::Object(map) => map.iter().any(|(key, item)| {
+                (key == "requester" && !item.is_null()) || names_requester(item, needle)
+            }),
+            _ => false,
+        }
+    }
+
+    /// A person's run reaches the console event store, which console event
+    /// frames show every viewer of the agent, without the requester the run
+    /// serves: not on its `run_started` and `run_completed` events, whose
+    /// transcript identity carries it, and not on the events that inherit the
+    /// run's lineage from them.
+    #[tokio::test]
+    async fn console_events_of_a_person_s_run_name_no_requester() {
+        use meerkat_core::AgentEvent;
+
+        let store = ConsoleEventStore::new();
+        store
+            .register_runtime_identity("rt:worker:1", "worker")
+            .await;
+        let person = meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            "alice-oidc-sub",
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("qualified person");
+        let mut lineage = typed_lineage(191, 291);
+        lineage["requester"] = serde_json::to_value(meerkat_core::TurnRequester::direct(person))
+            .expect("requester json");
+        let identity: meerkat_core::types::TranscriptMessageIdentity =
+            serde_json::from_value(lineage).expect("the run's transcript identity");
+        assert!(identity.requester.is_some(), "the run serves a requester");
+        let session_id = meerkat_core::types::SessionId::new();
+        let started = AgentEvent::RunStarted {
+            session_id: session_id.clone(),
+            identity: identity.clone(),
+            input: meerkat_core::types::RunInput::Content {
+                content: meerkat_core::ContentInput::Text("from alice".to_string()),
+            },
+            request_reasoning: None,
+        };
+        let completed = AgentEvent::RunCompleted {
+            assistant_message_id: None,
+            session_id,
+            identity,
+            result: "answered".into(),
+            structured_output: None,
+            extraction_required: false,
+            usage: Default::default(),
+            terminal_cause_kind: None,
+        };
+        let project_typed = |id: &str, event: &AgentEvent| {
+            agent_event_with_payload(
+                id,
+                "rt:worker:1",
+                meerkat_core::event::agent_event_type(event),
+                crate::mob_handle_runtime::console_agent_event_payload(event),
+            )
+        };
+        store
+            .project_unified_event(&project_typed("run-start", &started))
+            .await;
+        store
+            .project_unified_event(&agent_event_with_payload(
+                "run-delta",
+                "rt:worker:1",
+                "text_delta",
+                json!({ "type": "text_delta", "delta": "working" }),
+            ))
+            .await;
+        store
+            .project_unified_event(&project_typed("run-end", &completed))
+            .await;
+
+        let replay = store.replay_all(None).await.expect("replay");
+        let delta = replay
+            .iter()
+            .find(|event| event.event_id == "run-delta")
+            .expect("the delta is stored");
+        assert!(
+            delta.data.get("identity").is_some_and(Value::is_object),
+            "the delta inherits the run's lineage: {delta:?}"
+        );
+        let named: Vec<_> = replay
+            .iter()
+            .filter(|event| names_requester(&event.data, "alice-oidc-sub"))
+            .map(|event| (&event.event_id, &event.data))
+            .collect();
+        assert!(
+            named.is_empty(),
+            "console events name the run's requester: {named:#?}"
+        );
+    }
 }

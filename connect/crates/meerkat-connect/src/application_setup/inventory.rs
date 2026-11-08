@@ -19,7 +19,10 @@ pub struct ApplicationInventoryInput {
     pub schema: u32,
     pub mob_id: String,
     pub roster: Vec<DurableAgentSpec>,
-    pub helper_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_classes: Vec<meerkat_toolkit::host_lifetime::policy::CompiledMemberClass>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +41,8 @@ pub struct ApplicationInventory {
     pub schema: u32,
     pub mob_id: String,
     pub realm_id: String,
-    pub helper_identity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_identity: Option<String>,
     pub members: Vec<ApplicationInventoryMember>,
 }
 
@@ -47,9 +51,13 @@ impl ApplicationInventoryInput {
     /// The roster and all its backend, binding and application fields remain
     /// with the caller unchanged; only identity/profile facts are projected.
     pub fn lower(&self) -> Result<ApplicationInventory, String> {
-        if self.schema != 1 || self.roster.is_empty() {
-            return Err("inventory requires schema 1 and a nonempty declared roster".into());
+        if self.schema != 1 || (self.roster.is_empty() && self.member_classes.is_empty()) {
+            return Err(
+                "inventory requires schema 1 and a declared roster or member classes".into(),
+            );
         }
+        meerkat_toolkit::host_lifetime::policy::validate_member_classes(&self.member_classes)
+            .map_err(|error| error.to_string())?;
         let realm_id =
             meerkat_core::mob_realm_id(&self.mob_id).map_err(|error| error.to_string())?;
         let mut identities = BTreeSet::new();
@@ -66,13 +74,13 @@ impl ApplicationInventoryInput {
             if !identities.insert(row.identity.as_str()) || !members.insert(member.member.clone()) {
                 return Err("inventory repeats a durable identity or native member".into());
             }
-            helper_found |= row.identity.as_str() == self.helper_identity;
+            helper_found |= self.helper_identity.as_deref() == Some(row.identity.as_str());
             inventory.push(ApplicationInventoryMember {
                 identity: row.identity.to_string(),
                 member,
             });
         }
-        if !helper_found {
+        if self.helper_identity.is_some() && !helper_found {
             return Err("selected helper identity is absent from the declared roster".into());
         }
         Ok(ApplicationInventory {

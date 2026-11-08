@@ -89,6 +89,8 @@ fn make_runtime(store: Arc<dyn ContinuityStore>, lease: Arc<dyn LeaseProvider>) 
 mod core_bridge;
 #[path = "support/core_members.rs"]
 mod core_members;
+#[path = "support/declared_apply.rs"]
+mod declared_apply;
 
 /// [`make_runtime`] with a session bridge whose Core is the members fixture,
 /// for scenarios that need Core to seat members.
@@ -286,10 +288,16 @@ async fn identity_first_e2e_08_send_dispatch_addressability() {
     let runtime = make_runtime(store.clone(), lease_prov.clone());
 
     // Addressable identity
-    runtime.register(make_spec("public:main")).await;
+    runtime
+        .register(make_spec("public:main"))
+        .await
+        .expect("the identity registers");
 
     // InternalOnly identity
-    runtime.register(make_internal_spec("internal:main")).await;
+    runtime
+        .register(make_internal_spec("internal:main"))
+        .await
+        .expect("the identity registers");
 
     // This runtime has no session bridge, so no member exists to deliver to
     // (#306: Core holds members); addressability is judged before delivery.

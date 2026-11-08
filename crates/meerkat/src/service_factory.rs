@@ -1876,6 +1876,83 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         }
     }
 
+    async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        if projections.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(foreign) = projections
+            .iter()
+            .find(|projection| projection.session_id() != session_id)
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "finalizing the compaction stages of session {session_id} was asked for a projection of session {}",
+                    foreign.session_id()
+                )),
+            ));
+        }
+        #[cfg(all(feature = "memory-store-session", not(target_arch = "wasm32")))]
+        {
+            use meerkat_core::memory::MemoryStore;
+
+            // The canonical memory store the session's builds open: an owed
+            // projection's stage lives there, so a store that does not exist
+            // cannot hold it, and none is created for the read.
+            let memory_dir = self.factory.store_path.join("memory");
+            let memory_store_exists = memory_dir.try_exists().map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to inspect canonical memory store at {} before finalizing session {session_id}'s compaction stages: {error}",
+                    memory_dir.display()
+                )))
+            })?;
+            if !memory_store_exists {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id} owes {} compaction projections but no canonical memory store exists at {}",
+                        projections.len(),
+                        memory_dir.display()
+                    )),
+                ));
+            }
+            let store = meerkat_memory::HnswMemoryStore::open(&memory_dir).map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to open canonical memory store at {} to finalize session {session_id}'s compaction stages: {error}",
+                    memory_dir.display()
+                )))
+            })?;
+            let mut published = Vec::with_capacity(projections.len());
+            for projection in projections {
+                published.push(
+                    store
+                        .finalize_compaction_batch_reporting(projection)
+                        .await
+                        .map_err(|error| {
+                            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                                format!(
+                                    "failed to finalize compaction memory projection {} of session {session_id}: {error}",
+                                    projection.revision()
+                                ),
+                            ))
+                        })?,
+                );
+            }
+            return Ok(published);
+        }
+
+        #[cfg(not(all(feature = "memory-store-session", not(target_arch = "wasm32"))))]
+        {
+            // This concrete builder has no durable staged-memory backend in
+            // this build, so no stage can be owed to it.
+            Err(SessionError::Unsupported(format!(
+                "session {session_id} owes compaction projections, but this build has no durable staged memory store to finalize them"
+            )))
+        }
+    }
+
     async fn model_supports_inline_video(
         &self,
         identity: &meerkat_core::SessionLlmIdentity,
@@ -5542,6 +5619,9 @@ mod host_store_fence_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::expect_used, clippy::panic)]
 mod interrupt_tail_tests;
+#[cfg(all(test, feature = "mcp", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used)]
+mod mcp_auth_override_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::expect_used, clippy::panic)]
 mod run_tail_host_tests;

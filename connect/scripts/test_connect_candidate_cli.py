@@ -17,6 +17,9 @@ def load(name, path):
 
 p = load("candidate_cli", Path(__file__).with_name("connect-candidate.py"))
 f = load("inert_assembler_cli", Path(__file__).with_name("test_assemble_connect_product.py"))
+# Release mode scans the assembled product; these rules are synthetic test data (a made-up marker).
+PRIVACY = Path(__file__).with_name("fixtures") / "release-payload-privacy-scan"
+SCAN = {"rules": PRIVACY / "synthetic-rules.json", "exemptions": PRIVACY / "synthetic-exemptions.json"}
 
 
 def dump(path, value):
@@ -57,6 +60,13 @@ def ready(tmp_path, monkeypatch, request):
     monkeypatch.setattr(p, "cli_producer_inputs", lambda supplied: (value, original.source, resources)
                         if supplied == work else pytest.fail("wrong retained producer"))
     calls = []
+    # A versioned assembly also requires the monorepo source identity of the
+    # checkout it runs in (the assembler's own tests cover that check). This
+    # synthetic producer has no Git checkout, so a stand-in records the call.
+    released = []
+    monkeypatch.setattr(f.ASSEMBLER, "checked_release_source", lambda raw: released.append(raw) or {
+        "repository": "lukacf/meerkat", "revision": "a" * 40, "tree": "b" * 40,
+        "source_manifest_sha256": p.digest(original.source)})
 
     def run(self, name, argv, **kwargs):
         calls.append([str(v) for v in argv])
@@ -65,6 +75,7 @@ def ready(tmp_path, monkeypatch, request):
         original.record = Path(argv[argv.index("--build-record") + 1])
         destination = Path(argv[argv.index("--destination") + 1])
         original.assemble(destination=destination, release_version="1.2.3")
+        assert released == [original.record.read_bytes()]
         return {}, None
 
     monkeypatch.setattr(p.Recorder, "run", run)
@@ -79,7 +90,7 @@ def test_final_cli_reuses_original_records_and_owner_without_building(ready):
         except ValueError:
             pytest.skip("actual Linux archive owner requires a case-sensitive test filesystem")
     before = (cli / "build-record.json").read_bytes()
-    p.assemble_cli(work, original.shutdown, p.digest(original.shutdown), output)
+    p.assemble_cli(work, original.shutdown, p.digest(original.shutdown), output, **SCAN)
     assert len(calls) == 1
     assert (cli / "build-record.json").read_bytes() == before
     final = p.read_json(output / "assembled/assembly.json")
@@ -125,7 +136,7 @@ def test_missing_failed_or_different_review_never_assembles(ready, change):
     if change == "missing":
         review.unlink()
     with pytest.raises((ValueError, FileNotFoundError)):
-        p.assemble_cli(work, review, selected, output)
+        p.assemble_cli(work, review, selected, output, **SCAN)
     assert calls == []
     assert not output.exists()
 

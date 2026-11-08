@@ -14,7 +14,7 @@ use super::engine::{
 };
 use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
-    private_owner, validate_access_config,
+    check_declared_ingresses, private_owner, validate_access_config,
 };
 
 /// Cached resource attributes for one agent, keyed by console identity.
@@ -164,6 +164,10 @@ struct AccessControllerInner {
     /// The revision of the configuration last committed, sent after the
     /// commit is visible ([`AccessController::subscribe_revision`]).
     revision_signal: watch::Sender<u64>,
+    /// The decision ingresses the launch declared, once it declared them
+    /// ([`AccessController::declare_decision_ingresses`]): every edit may
+    /// name no other ingress in the approver map.
+    decision_ingresses: RwLock<Option<BTreeSet<String>>>,
 }
 
 /// These access facts already joined an authorization publication; they
@@ -213,7 +217,10 @@ impl AccessController {
         // §10.3 migration: memory-naive configs (written before the memory
         // read actions existed) get `agent.memory.read` alongside
         // `agent.view`; see `normalize_access_config_for_memory_actions`.
+        // Configs that name no schedule action get `schedule.manage`
+        // alongside `agent.send` the same way.
         super::model::normalize_access_config_for_memory_actions(&mut config);
+        super::model::normalize_access_config_for_schedule_actions(&mut config);
         validate_access_config(&config)?;
         Ok(Self {
             inner: Arc::new(AccessControllerInner {
@@ -231,6 +238,7 @@ impl AccessController {
                 mutation: Mutex::new(()),
                 publication: OnceLock::new(),
                 revision_signal: watch::Sender::new(0),
+                decision_ingresses: RwLock::new(None),
             }),
         })
     }
@@ -369,6 +377,34 @@ impl AccessController {
         self.mutate(AccessMutation::SetEnabled(enabled))
     }
 
+    /// Bind the decision ingresses the launch declares
+    /// (`runtime_options.decisions`): the approver map may name no other
+    /// ingress, the built-in `operator` aside, now and in every later edit,
+    /// which is refused [`AccessConfigError::UnknownIngress`] otherwise.
+    ///
+    /// # Errors
+    /// [`AccessConfigError::UnknownIngress`] when the current configuration
+    /// names another ingress; nothing is bound then.
+    pub fn declare_decision_ingresses<I, S>(&self, ingresses: I) -> Result<(), AccessConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let declared: BTreeSet<String> = ingresses.into_iter().map(Into::into).collect();
+        let _mutation = self
+            .inner
+            .mutation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        check_declared_ingresses(&self.snapshot().0, &declared)?;
+        *self
+            .inner
+            .decision_ingresses
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(declared);
+        Ok(())
+    }
+
     pub(crate) fn edit_identity(&self) -> Option<&str> {
         self.inner.owner_instance.as_deref()
     }
@@ -432,12 +468,13 @@ impl AccessController {
     }
 
     /// Every HTTP write reevaluates current administration under the same
-    /// mutex as trusted direct mutations. Only checked writes compare an
-    /// owner/revision precondition; legacy writes remain unconditional.
+    /// mutex as trusted direct mutations, and commits only against the
+    /// owner instance and revision its client read: no console write is
+    /// unconditional, so none overwrites an edit its client never saw.
     pub(crate) fn mutate_admin(
         &self,
         subject: Option<&str>,
-        expected: Option<AccessEditPrecondition>,
+        expected: AccessEditPrecondition,
         mutation: AccessMutation,
     ) -> Result<u64, AccessEditError> {
         #[cfg(test)]
@@ -450,17 +487,15 @@ impl AccessController {
         #[cfg(test)]
         self.observe_checked_mutation(CheckedMutationStage::Acquired);
         let (config, revision) = self.admin_config(subject)?;
-        if let Some(expected) = expected {
-            let instance = self.edit_identity().ok_or(AccessEditError::Unavailable)?;
-            if instance != expected.owner_instance {
-                return Err(AccessEditError::OwnerChanged);
-            }
-            if revision != expected.expected_revision {
-                return Err(AccessEditError::RevisionConflict {
-                    expected: expected.expected_revision,
-                    actual: revision,
-                });
-            }
+        let instance = self.edit_identity().ok_or(AccessEditError::Unavailable)?;
+        if instance != expected.owner_instance {
+            return Err(AccessEditError::OwnerChanged);
+        }
+        if revision != expected.expected_revision {
+            return Err(AccessEditError::RevisionConflict {
+                expected: expected.expected_revision,
+                actual: revision,
+            });
         }
         self.edit_and_commit((*config).clone(), mutation, subject)
             .map_err(AccessEditError::Config)
@@ -499,7 +534,17 @@ impl AccessController {
     ) -> Result<u64, AccessConfigError> {
         mutation.apply(&mut config)?;
         super::model::normalize_access_config_for_memory_actions(&mut config);
+        super::model::normalize_access_config_for_schedule_actions(&mut config);
         validate_access_config(&config)?;
+        if let Some(declared) = self
+            .inner
+            .decision_ingresses
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            check_declared_ingresses(&config, declared)?;
+        }
         self.commit(config, editor)
     }
 
@@ -820,7 +865,7 @@ impl AccessDecisionFence<'_> {
         // A runtime alias is judged as the member it names, as in
         // `AccessView::decide_agent`.
         let identity = match &alias {
-            RuntimeAliasMember::NotAnAlias => identity,
+            RuntimeAliasMember::NotAnAlias(member_key) => member_key.as_str(),
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
                 if super::engine::matching_deny_rule(
@@ -883,7 +928,10 @@ fn lineage_exceeds_walk(
 
 /// How an agent spelling relates to the runtime alias namespace.
 enum RuntimeAliasMember {
-    NotAnAlias,
+    /// Not a runtime alias: the member cache key the spelling names, decoded
+    /// from the roster's comms-safe encoding (`mk--...`), so that every
+    /// spelling of a member is judged as that member.
+    NotAnAlias(String),
     /// The current incarnation of a known identity: its member cache key.
     Current(String),
     /// A runtime alias that is stale, unknown or malformed: the member cache
@@ -894,11 +942,13 @@ enum RuntimeAliasMember {
 impl RuntimeAliasMember {
     /// The member cache key whose lineage the private-owner rule reads for
     /// `spelling`: the member a runtime alias names, current or not, else
-    /// the spelling itself.
+    /// the member the decoded spelling names.
     fn member_key<'a>(&'a self, spelling: &'a str) -> &'a str {
         match self {
-            Self::Current(member_key) | Self::NotCurrent(Some(member_key)) => member_key,
-            Self::NotAnAlias | Self::NotCurrent(None) => spelling,
+            Self::Current(member_key)
+            | Self::NotCurrent(Some(member_key))
+            | Self::NotAnAlias(member_key) => member_key,
+            Self::NotCurrent(None) => spelling,
         }
     }
 }
@@ -979,8 +1029,9 @@ impl AccessView {
     }
 
     /// The approver identities this principal holds in this snapshot of the
-    /// configuration's `approvers` bindings, directly or through a group. An
-    /// unauthenticated principal holds none.
+    /// configuration's `approvers` bindings, directly, through a group, or
+    /// as a person the binding's `people` names. An unauthenticated
+    /// principal holds none.
     pub fn held_approver_ids(&self) -> BTreeSet<String> {
         let Some(subject) = self.principal.subject.as_deref() else {
             return BTreeSet::new();
@@ -994,6 +1045,10 @@ impl AccessView {
                         .groups
                         .iter()
                         .any(|group| self.principal.groups.contains(group))
+                    || holders
+                        .people
+                        .iter()
+                        .any(|person| person.subjects.iter().any(|holder| holder == subject))
             })
             .map(|(approver, _)| approver.clone())
             .collect()
@@ -1058,7 +1113,7 @@ impl AccessView {
         // judged as a name no rule describes. An admin passes, as for any
         // resource.
         let identity = match &alias {
-            RuntimeAliasMember::NotAnAlias => identity,
+            RuntimeAliasMember::NotAnAlias(member_key) => member_key.as_str(),
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
                 if let Some(rule) = super::engine::matching_deny_rule(
@@ -1165,13 +1220,18 @@ impl AccessView {
     /// a known identity (with that member's cache key), or a runtime alias
     /// that is stale, unknown, or malformed.
     fn runtime_alias_member(&self, key: &str) -> RuntimeAliasMember {
-        let (namespace, alias) = match key.rfind("/rt:") {
+        // A console namespace (`<namespace>/<identity>`) keeps its prefix: an
+        // identity holds no `/`, so the last one ends the namespace.
+        let (namespace, alias) = match key.rfind('/') {
             Some(at) => (Some(&key[..at]), &key[at + 1..]),
             None => (None, key),
         };
         let alias = crate::member_comms_id::runtime_alias_str(alias);
         if !crate::member_comms_id::is_reserved_generated_alias(&alias) {
-            return RuntimeAliasMember::NotAnAlias;
+            return RuntimeAliasMember::NotAnAlias(match namespace {
+                Some(namespace) => format!("{namespace}/{alias}"),
+                None => alias.into_owned(),
+            });
         }
         let Some(durable) = crate::member_comms_id::durable_identity_from_runtime_alias(&alias)
         else {
@@ -1206,8 +1266,8 @@ impl AccessView {
     /// and as unknown otherwise.
     pub(crate) fn lineage_links(&self, identity: &str) -> usize {
         match self.runtime_alias_member(identity) {
-            RuntimeAliasMember::NotAnAlias => self.lineage_for(identity).len(),
-            RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
+            RuntimeAliasMember::NotAnAlias(member_key)
+            | RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
             RuntimeAliasMember::NotCurrent(_) => 0,
         }
     }
@@ -1487,6 +1547,8 @@ impl AccessView {
     /// the one-time subscribe prime and re-prime the cache before deciding, so
     /// the deny resolves against real attributes instead of failing open.
     pub fn knows_agent(&self, identity: &str) -> bool {
+        let alias = self.runtime_alias_member(identity);
+        let identity = alias.member_key(identity);
         let cache = self
             .inner
             .attributes
@@ -1496,6 +1558,17 @@ impl AccessView {
             || cache
                 .values()
                 .any(|attributes| attributes.agent_id.as_deref() == Some(identity))
+    }
+
+    /// Whether a console with sign-in withholds from this caller the member
+    /// `identity` names because the attribute cache does not know it: a
+    /// member that ended before this process read who it was private to may
+    /// have been private, so a signed-in caller who is not an admin is shown
+    /// no memory scope of it and attaches no session of it. An anonymous
+    /// caller of a console without sign-in, and an admin, are withheld
+    /// nothing for it.
+    pub(crate) fn withholds_unknown_member(&self, identity: &str) -> bool {
+        self.principal.subject.is_some() && !self.is_admin && !self.knows_agent(identity)
     }
 
     /// Can this principal read and edit the access configuration?
@@ -2036,8 +2109,10 @@ mod tests {
         controller.replace_config(config.clone()).expect("replace");
 
         // The accepted config is the §10.3-normalized one (this fixture is
-        // memory-naive, so `agent.memory.read` rides its view rule).
+        // memory-naive, so `agent.memory.read` rides its view rule), and
+        // names no schedule action, so `schedule.manage` rides its send rule.
         super::super::model::normalize_access_config_for_memory_actions(&mut config);
+        super::super::model::normalize_access_config_for_schedule_actions(&mut config);
         let reloaded = AccessController::load(&path).expect("reload");
         let (reloaded_config, _) = reloaded.snapshot();
         assert_eq!(*reloaded_config, config);
@@ -2785,7 +2860,9 @@ mod tests {
                 rules: vec![AccessRule {
                     id: "private-rule".into(),
                     description: Some(PRIVATE.into()),
-                    actions: vec!["agent.send".into()],
+                    // Names `schedule.manage` itself, so the owner takes it
+                    // literally and stores exactly this configuration.
+                    actions: vec!["agent.send".into(), "schedule.manage".into()],
                     subjects: vec![B.into()],
                     ..Default::default()
                 }],
@@ -2902,62 +2979,47 @@ mod tests {
 
         /// Trusted local setup names the first admin before the surface is
         /// exposed. Another authenticated subject still cannot write, and no
-        /// file appears; the named admin initializes the policy through the
-        /// checked or legacy write, and it persists.
+        /// file appears; the named admin's write without `checked_v1` is
+        /// refused as `revision_required`, and their checked write
+        /// initializes the policy, which persists.
         #[test]
         fn a_named_admin_initializes_the_policy_another_subject_cannot() {
-            for checked in [true, false] {
-                let dir = tempfile::tempdir().expect("directory");
-                let path = dir.path().join("access.toml");
-                let owner = AccessController::new(AccessControlConfig {
-                    admins: vec![A.into()],
-                    ..AccessControlConfig::default()
-                })
-                .expect("trusted local setup")
-                .with_persist_path(&path);
-                let route = app(&owner);
-                let initial = config();
-                let instance = owner.edit_identity().expect("owner instance").to_string();
-                let write = |revision| {
-                    if checked {
-                        payload(&instance, revision, &initial)
-                    } else {
-                        json!({"config": initial})
-                    }
-                };
+            let dir = tempfile::tempdir().expect("directory");
+            let path = dir.path().join("access.toml");
+            let owner = AccessController::new(AccessControlConfig {
+                admins: vec![A.into()],
+                ..AccessControlConfig::default()
+            })
+            .expect("trusted local setup")
+            .with_persist_path(&path);
+            let route = app(&owner);
+            let initial = config();
+            let instance = owner.edit_identity().expect("owner instance").to_string();
 
-                let refused = rpc(route.clone(), B, "meta/access/set", write(0));
-                assert_eq!(
-                    refused["error"]["data"]["kind"],
-                    json!("access_denied"),
-                    "checked={checked}: {refused}"
-                );
-                assert!(!path.exists(), "checked={checked}: no policy file");
-                assert_eq!(owner.snapshot().1, 0, "checked={checked}");
-
-                let read = rpc(route.clone(), A, "meta/access/get", json!({}));
-                assert_eq!(read["result"]["revision"], json!(0), "{read}");
-                let accepted = rpc(route, A, "meta/access/set", write(0));
-                assert_eq!(accepted["result"]["revision"], json!(1), "{accepted}");
-                let (stored, revision, _) = checkpoint(&owner, &path);
-                assert_eq!(revision, 1);
-                assert_eq!(stored, initial, "checked={checked}");
-                let reloaded = AccessController::load(&path).expect("persisted policy");
-                assert_eq!(*reloaded.snapshot().0, initial);
+            for (caller, body, kind) in [
+                (B, payload(&instance, 0, &initial), "access_denied"),
+                (B, json!({"config": initial}), "access_denied"),
+                (A, json!({"config": initial}), "revision_required"),
+            ] {
+                let refused = rpc(route.clone(), caller, "meta/access/set", body);
+                assert_eq!(refused["error"]["data"]["kind"], json!(kind), "{refused}");
+                assert!(!path.exists(), "{kind}: no policy file");
+                assert_eq!(owner.snapshot().1, 0, "{kind}");
             }
+
+            let read = rpc(route.clone(), A, "meta/access/get", json!({}));
+            assert_eq!(read["result"]["revision"], json!(0), "{read}");
+            let accepted = rpc(route, A, "meta/access/set", payload(&instance, 0, &initial));
+            assert_eq!(accepted["result"]["revision"], json!(1), "{accepted}");
+            let (stored, revision, _) = checkpoint(&owner, &path);
+            assert_eq!(revision, 1);
+            assert_eq!(stored, initial);
+            let reloaded = AccessController::load(&path).expect("persisted policy");
+            assert_eq!(*reloaded.snapshot().0, initial);
         }
 
         #[test]
         fn queued_revoked_administrator_is_denied_before_matching_checked_write() {
-            run_queued_revocation(true);
-        }
-
-        #[test]
-        fn queued_revoked_administrator_is_denied_before_legacy_write() {
-            run_queued_revocation(false);
-        }
-
-        fn run_queued_revocation(checked: bool) {
             let dir = tempfile::tempdir().expect("directory");
             let path = dir.path().join("access.toml");
             let initial = config();
@@ -2966,23 +3028,14 @@ mod tests {
             let owner = AccessController::load(&path).expect("stored owner");
             let route = app(&owner);
             let read = rpc(route.clone(), A, "meta/access/get", json!({}));
-            let instance = if checked {
-                read["result"]["owner_instance"]
-                    .as_str()
-                    .expect("instance")
-                    .to_string()
-            } else {
-                String::new()
-            };
+            let instance = read["result"]["owner_instance"]
+                .as_str()
+                .expect("instance")
+                .to_string();
             let revision = read["result"]["revision"].as_u64().expect("revision");
             assert_eq!(revision, 0);
-            let write = |revision, config: &AccessControlConfig| {
-                if checked {
-                    payload(&instance, revision, config)
-                } else {
-                    json!({"config": config})
-                }
-            };
+            let write =
+                |revision, config: &AccessControlConfig| payload(&instance, revision, config);
             let a_gate = Arc::new(Gate::default());
             let b_gate = Arc::new(Gate::default());
             let (tx, rx) = mpsc::channel();
@@ -3021,9 +3074,9 @@ mod tests {
             );
             assert_eq!(checkpoint(&owner, &path).0, initial);
             let a_route = route.clone();
-            // The checked case knows the future matching revision; legacy
-            // has no version condition. Neither captured view confers a
-            // post-revocation right after acquiring the actual owner lock.
+            // A's write names the revision B's commit produces, so only the
+            // administration reevaluated under the owner lock refuses it:
+            // the view captured before B's commit confers no right after.
             let a_body = write(revision + 1, &initial);
             workers.joins.push(std::thread::spawn(move || {
                 rpc(a_route, A, "meta/access/set", a_body)
@@ -3059,10 +3112,7 @@ mod tests {
                 PRIVATE,
                 instance.as_str(),
                 path.to_str().expect("path"),
-            ]
-            .into_iter()
-            .filter(|value| !value.is_empty())
-            {
+            ] {
                 assert!(!denied["error"].to_string().contains(private));
             }
             assert_eq!(checkpoint(&owner, &path), after_b);
@@ -3076,8 +3126,12 @@ mod tests {
             assert_eq!(final_state.1, revision + 2);
         }
 
+        /// Without an edit identity the console reads the policy and offers
+        /// no checked edit; its every write is refused, a checked one as
+        /// unavailable and one without `checked_v1` as `revision_required`,
+        /// while the trusted direct path still commits.
         #[test]
-        fn unavailable_edit_identity_keeps_reads_and_legacy_edits_without_false_capability() {
+        fn unavailable_edit_identity_keeps_reads_and_refuses_console_writes() {
             let dir = tempfile::tempdir().expect("directory");
             let path = dir.path().join("access.toml");
             let initial = config();
@@ -3133,18 +3187,21 @@ mod tests {
                 .expect("existing direct path");
             assert_eq!(checkpoint(&owner, &path).1, 1);
             assert!(owner.snapshot().0.groups.contains_key("legacy-direct"));
-            let legacy = rpc(
+            let unchecked = rpc(
                 route,
                 A,
                 "meta/access/groups/set",
                 json!({
-                    "name": "legacy-http", "group": {"members": [B]}
+                    "name": "unchecked-http", "group": {"members": [B]}
                 }),
             );
-            assert_eq!(legacy["error"], Value::Null, "{legacy}");
-            assert_eq!(legacy["result"]["revision"], json!(2));
-            assert_eq!(checkpoint(&owner, &path).1, 2);
-            assert!(owner.snapshot().0.groups.contains_key("legacy-http"));
+            assert_eq!(unchecked["error"]["code"], json!(-32602), "{unchecked}");
+            assert_eq!(
+                unchecked["error"]["data"],
+                json!({"kind":"revision_required"})
+            );
+            assert_eq!(checkpoint(&owner, &path).1, 1);
+            assert!(!owner.snapshot().0.groups.contains_key("unchecked-http"));
         }
 
         #[test]
@@ -3171,19 +3228,19 @@ mod tests {
                 Err(AccessConfigError::RevisionExhausted)
             );
             assert_eq!(checkpoint(&owner, &path), before);
-            for body in [
+            let response = rpc(
+                route.clone(),
+                A,
+                "meta/access/set",
                 payload(instance, u64::MAX, &changed),
-                json!({"config": changed}),
-            ] {
-                let response = rpc(route.clone(), A, "meta/access/set", body);
-                assert_eq!(response["error"]["code"], json!(-32004), "{response}");
-                assert_eq!(
-                    response["error"]["data"],
-                    json!({"kind":"access_mutation_unavailable"})
-                );
-                assert_eq!(checkpoint(&owner, &path), before);
-                assert!(!path.with_file_name("access.toml.tmp").exists());
-            }
+            );
+            assert_eq!(response["error"]["code"], json!(-32004), "{response}");
+            assert_eq!(
+                response["error"]["data"],
+                json!({"kind":"access_mutation_unavailable"})
+            );
+            assert_eq!(checkpoint(&owner, &path), before);
+            assert!(!path.with_file_name("access.toml.tmp").exists());
             // Revoked/non-admin callers learn no instance, conflict or exhaustion detail.
             let denied = rpc(
                 route,

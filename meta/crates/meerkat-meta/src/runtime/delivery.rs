@@ -322,6 +322,13 @@ impl MetaRuntimeHandle {
         Ok(record)
     }
 
+    /// Test seam: keep `record` in the delivery history, as a send that
+    /// produced it would.
+    #[cfg(test)]
+    pub(crate) fn record_delivery_for_test(&mut self, record: DeliveryRecord) {
+        self.delivery_history.push(record);
+    }
+
     pub fn delivery_history(&self, request: DeliveryHistoryRequest) -> DeliveryHistoryResponse {
         let recipient_filter = request
             .recipient

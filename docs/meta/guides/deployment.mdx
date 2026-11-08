@@ -4,7 +4,7 @@ description: "Why the gateways bind loopback, how to publish them behind a rever
 icon: "server"
 ---
 
-*Mirrored from Meerkat Meta main at [133d11d1bbf1](https://github.com/lukacf/meerkat/commit/133d11d1bbf16d302740ab999ab7224c45362a3a) on 2026-11-05; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 Both bundled gateways, the console/admin `meta_gateway` and the SDK-facing
 `rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
@@ -121,13 +121,23 @@ how clients reach the proxy in front of the gateway. The Python runtime exposes
 it as `rust_http_public_base_url` (falling back to the same-host base when
 none was declared) and TypeScript as `rustHttpPublicBaseUrl`.
 
+An open console (sign-in off) answers only requests whose `Host` names a
+loopback name, the listen address or the host of `http_public_base_url`;
+any other host gets 403 `host_not_served`. The plain health check
+(`/healthz`) answers any host; its JSON summary, which names members, answers
+only the hosts above. Declare `http_public_base_url` when a proxy or another
+name fronts an open console.
+
 ### Rust library host: serve the router on your own listener
 
 `UnifiedRuntime::run(listener, decisions, shutdown)` and `::serve(listener,
 decisions)` accept any `TcpListener`, and `GatewayHttpBinding::bind(addr)` is
 the shared admission type the binaries use. `examples/library_mode_reference.rs`
 (`META_REF_ADDR`) is the template. A library host owns its own exposure
-decision; run `validate_http_bind_policy` if you want the same gate.
+decision; run `validate_http_bind_policy` if you want the same gate. On an open
+console, `run` and `serve` answer only loopback names and the bound address,
+since they know no public base URL; a router you serve with a server of your
+own keeps your own `Host` policy.
 
 ## The exposure gate: auth or acknowledgement
 
@@ -143,8 +153,11 @@ is bootstrapped, unless one of two things is true in its admission-time state:
 2. **The launch acknowledges the exposure with `allow_remote`.** This is the
    same word and the same rule as `--allow-remote` on `rkat-rpc --tcp` and
    `rkat mob host --listen-tcp` in Meerkat: an explicit transport-exposure
-   opt-in, not an auth mechanism. Pass it only when an authenticating proxy
-   fronts the listener.
+   opt-in, not an auth mechanism. Without app auth the console treats every
+   caller as one anonymous caller, even behind a proxy that signs people in.
+   To tell people apart, configure `auth_config` so the console verifies each
+   person's token (a proxy can forward its sign-in token as
+   `Authorization: Bearer`).
 
 `rpc_gateway` applies its `runtime_options.auth_config` before this check.
 `meta_gateway` accepts the same JWT/OIDC shape as top-level `auth_config`,

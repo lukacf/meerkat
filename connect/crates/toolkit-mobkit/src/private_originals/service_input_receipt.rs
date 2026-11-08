@@ -3,11 +3,12 @@
 use super::*;
 use meerkat_core::{SessionId, lifecycle::InputId};
 use meerkat_runtime::{
+    SessionServiceRuntimeExt,
     completion::CompletionOutcome,
-    input_state::{InputLifecycleState, InputTerminalOutcome},
+    input_state::{InputLifecycleState, InputState, InputTerminalOutcome},
     terminal_status::{
-        InputTerminalReceiptRead, InputTerminalReceiptScope, InteractionSelector, Sourced,
-        TerminalWitnessSource,
+        InputTerminalReceiptObservation, InputTerminalReceiptRead, InputTerminalReceiptScope,
+        InteractionSelector, Sourced, TerminalWitnessSource,
     },
 };
 
@@ -150,6 +151,17 @@ struct ServiceInputReceiptSelection {
     input: InputId,
 }
 
+pub(in crate::private_originals) fn verify_service_input_state(
+    expected: &meerkat_runtime::Input,
+    actual: &InputState,
+) -> Result<(), PrivateOriginalError> {
+    if &actual.input_id != expected.id() {
+        return Err(PrivateOriginalError::Conflict);
+    }
+    meerkat_runtime::input_state::verify_exact_replay(actual, expected)
+        .map_err(|_| PrivateOriginalError::Conflict)
+}
+
 impl ServiceInputReceiptSelection {
     fn from_record(record: SourceRecord) -> Result<Option<Self>, PrivateOriginalError> {
         let task = record
@@ -213,6 +225,58 @@ impl ServiceInputReceiptSelection {
 }
 
 impl PrivateOriginals {
+    /// Historical completion of the exact already selected service input. This
+    /// body-free observation neither restores login nor reads a business result.
+    /// The caller supplies its authenticated canonical source snapshot; the
+    /// immutable selection is rechecked even when native observation fails.
+    pub(in crate::private_originals) async fn service_input_finalized(
+        &self,
+        reference: &PrivateOriginalRef,
+        record: SourceRecord,
+    ) -> Result<bool, PrivateOriginalError> {
+        let Some(selected) = ServiceInputReceiptSelection::from_record(record)? else {
+            return Ok(false);
+        };
+        let machine = self.machine()?;
+        let observed = async {
+            let Some(native) = machine
+                .input_state(&selected.session, &selected.input)
+                .await
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+            else {
+                return Ok(false);
+            };
+            let bound = selected
+                .record
+                .bound_service_input
+                .as_ref()
+                .ok_or(PrivateOriginalError::Conflict)?
+                .decode()?;
+            verify_service_input_state(&bound, &native.state)?;
+            let Some(receipt) = machine
+                .input_terminal_receipt_observation(
+                    &selected.session,
+                    InteractionSelector::InputId(selected.input.clone()),
+                )
+                .await
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+            else {
+                return Ok(false);
+            };
+            if receipt.report.input_id() != &selected.input {
+                return Err(PrivateOriginalError::Conflict);
+            }
+            Ok(matches!(
+                receipt.report,
+                InputTerminalReceiptObservation::Finalized(_)
+            ))
+        }
+        .await;
+        self.recheck_service_input_receipt(reference, &selected)
+            .await?;
+        observed
+    }
+
     /// Observe the exact canonical approved B through the machine already bound
     /// to this source owner. Namespace checks authenticate the read selection;
     /// later cancellation, grant revocation or expiry do not rewrite history.

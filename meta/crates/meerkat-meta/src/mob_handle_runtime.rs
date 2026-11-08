@@ -1372,6 +1372,54 @@ fn with_pre_build_hook(
     })
 }
 
+/// `factory` with the owner check of the composition's personal accounts on
+/// MCP servers, keeping the people's accounts in its own credential store
+/// below `realm` (see [`crate::personal_accounts`]). Without a credential
+/// store no member build keeps a personal server. Unchanged without
+/// personal accounts.
+fn with_personal_accounts(
+    factory: AgentFactory,
+    check: Option<&crate::personal_accounts::PersonalAccountOwnerCheck>,
+    runtime: &meerkat_runtime::MeerkatMachine,
+    realm: meerkat_core::RealmId,
+) -> AgentFactory {
+    let Some(check) = check else {
+        return factory;
+    };
+    if let Err(error) = check.keep_accounts_in(
+        &factory,
+        runtime.provider_auth_runtime_authority(),
+        realm,
+        None,
+    ) {
+        tracing::warn!(
+            %error,
+            "personal accounts on MCP servers have no credential store; no member build keeps a \
+             personal server"
+        );
+    }
+    check.install(factory, None)
+}
+
+/// `hook`, then the classification of the build's personal servers with
+/// `check`, the owner check of this constructor's own member factory (see
+/// [`crate::personal_accounts`]), for a stock constructor's own layer. Its
+/// hook (the host's session hook, its document bindings) runs after the
+/// spec's base layer has classified the build, so a personal server that
+/// hook adds is classified here too; classifying a build again changes
+/// nothing the first pass decided.
+fn classifying_personal_servers(
+    hook: PreBuildHook,
+    check: Option<&crate::personal_accounts::PersonalAccountOwnerCheck>,
+) -> PreBuildHook {
+    let Some(check) = check else {
+        return hook;
+    };
+    let slot = crate::personal_accounts::build::PersonalAccountsSlot::default();
+    slot.fill(check.clone());
+    slot.after_hook(hook)
+}
+
 /// `hook`, then the refusal of a marked document MCP descriptor it left
 /// unresolved ([`crate::document_mcp_marker`]). A host document binding
 /// resolves its descriptors in the hook, so the refusal runs after it, on
@@ -2186,6 +2234,61 @@ struct AutoWireParentMobToolsFactory {
     member_auth_binding_recorded: Option<meerkat_core::AuthBindingRef>,
     /// See [`AutoWireParentMobToolDispatcher::realm_profiles`].
     realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+    /// Who each member of the runtime's mobs is private to, and the agent mob
+    /// tool state a member's session resolves in (held weakly: the state
+    /// holds this factory): each tool surface's caller (see
+    /// [`MobToolCaller`]).
+    private_owners: crate::private_owners::PrivateOwners,
+    state: std::sync::Weak<meerkat_mob_mcp::MobMcpState>,
+}
+
+/// The member whose agent a tool surface serves, by its session, and what
+/// tells who that member, and a member its tools name, is private to.
+#[derive(Clone)]
+struct MobToolCaller {
+    session_id: meerkat_core::types::SessionId,
+    private_owners: crate::private_owners::PrivateOwners,
+    state: std::sync::Weak<meerkat_mob_mcp::MobMcpState>,
+}
+
+/// The policy denial code of a council a member private to a person asks
+/// for.
+const PRIVATE_MEMBER_COUNCIL: &str = "private_member_council";
+
+impl MobToolCaller {
+    /// The person the calling member is private to, when it is private to
+    /// one. A caller whose member cannot be read is refused: whom it acts
+    /// for is unknown.
+    async fn owner(&self, tool: &str) -> Result<Option<String>, meerkat_core::ToolError> {
+        let Some(state) = self.state.upgrade() else {
+            return Err(meerkat_core::ToolError::execution_failed(format!(
+                "tool '{tool}': the mob tool state of its caller is gone"
+            )));
+        };
+        match state.member_for_bridge_session(&self.session_id).await {
+            Ok(Some((mob_id, member))) => Ok(self
+                .private_owners
+                .owner_of(mob_id.as_str(), member.as_str())),
+            Ok(None) => Ok(None),
+            Err(error) => Err(meerkat_core::ToolError::execution_failed(format!(
+                "tool '{tool}' could not read its caller: {error}"
+            ))),
+        }
+    }
+
+    /// Whether member `member` of mob `mob_id` is hidden from the caller:
+    /// private to a person the caller is not private to.
+    async fn hides(
+        &self,
+        tool: &str,
+        mob_id: &str,
+        member: &str,
+    ) -> Result<bool, meerkat_core::ToolError> {
+        let Some(owner) = self.private_owners.owner_of(mob_id, member) else {
+            return Ok(false);
+        };
+        Ok(self.owner(tool).await?.as_deref() != Some(owner.as_str()))
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -2197,6 +2300,11 @@ impl meerkat_core::service::MobToolsFactory for AutoWireParentMobToolsFactory {
     ) -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>>
     {
         let spawner_comms_name = args.comms_name.clone();
+        let caller = MobToolCaller {
+            session_id: args.session_id.clone(),
+            private_owners: self.private_owners.clone(),
+            state: self.state.clone(),
+        };
         let inner = self.inner.build_mob_tools(args).await?;
         Ok(Arc::new(AutoWireParentMobToolDispatcher {
             inner,
@@ -2210,6 +2318,7 @@ impl meerkat_core::service::MobToolsFactory for AutoWireParentMobToolsFactory {
             member_auth_binding: self.member_auth_binding.clone(),
             member_auth_binding_recorded: self.member_auth_binding_recorded.clone(),
             realm_profiles: self.realm_profiles.clone(),
+            caller: Some(caller),
         }))
     }
 }
@@ -2241,6 +2350,11 @@ struct AutoWireParentMobToolDispatcher {
     /// child-definition realm profile off the binding is refused typed too
     /// ([`crate::native_realm::agent_tool_realm_profile_refusal`]).
     realm_profiles: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
+    /// The member whose agent this surface serves: a member private to a
+    /// person convenes no council, and a member hidden from it is checked
+    /// and retired as a name no member holds. `None` for a surface built for
+    /// no member.
+    caller: Option<MobToolCaller>,
 }
 
 /// Meta's agent mob tool wrapper around `inner` (standing in for meerkat's
@@ -2262,6 +2376,38 @@ pub(crate) fn agent_mob_tool_wrapper_for_test(
         member_auth_binding: None,
         member_auth_binding_recorded: None,
         realm_profiles: None,
+        caller: None,
+    })
+}
+
+/// [`agent_mob_tool_wrapper_for_test`] for the tool surface of the member
+/// of `runtime` whose session is `session`, as the runtime builds one for
+/// that member's agent.
+#[cfg(test)]
+pub(crate) fn agent_mob_tool_wrapper_as_member_for_test(
+    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    overrides: ImplicitDelegateRetirementOverrides,
+    runtime: &MobRuntime,
+    session: meerkat_core::types::SessionId,
+) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    Arc::new(AutoWireParentMobToolDispatcher {
+        inner,
+        implicit_delegate_retirement_overrides: overrides,
+        console_spawn_sink: new_console_spawn_sink_slot(),
+        identity_runtime: Arc::new(std::sync::RwLock::new(None)),
+        protected_mob_id: String::new(),
+        spawner_comms_name: None,
+        member_auth_binding: None,
+        member_auth_binding_recorded: None,
+        realm_profiles: None,
+        caller: Some(MobToolCaller {
+            session_id: session,
+            private_owners: runtime.private_owners().clone(),
+            state: runtime
+                .agent_mob_mcp_state()
+                .as_ref()
+                .map_or_else(std::sync::Weak::new, Arc::downgrade),
+        }),
     })
 }
 
@@ -2317,6 +2463,41 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        // A member private to a person convenes no council: its participants
+        // would be forks of shared members carrying that person's question.
+        if call.name == "council"
+            && let Some(caller) = self.caller.as_ref()
+            && caller.owner(call.name).await?.is_some()
+        {
+            return Err(meerkat_core::ToolError::policy_denied(
+                meerkat_core::ToolConsequenceDenial::new(
+                    PRIVATE_MEMBER_COUNCIL,
+                    "a member private to a person cannot convene a council: its participants \
+                     would carry that person's conversation into forks of shared members",
+                ),
+            ));
+        }
+        // A member private to a person the caller is not private to is
+        // checked and retired as a name no member holds: nothing tells the
+        // caller it exists, and nothing is done to it.
+        if matches!(call.name, "mob_check_member" | "mob_retire_member")
+            && let Some(caller) = self.caller.as_ref()
+        {
+            let args = serde_json::from_str::<Value>(call.args.get()).map_err(|error| {
+                meerkat_core::ToolError::invalid_arguments(call.name, error.to_string())
+            })?;
+            if let (Some(mob_id), Some(member)) = (
+                args.get("mob_id").and_then(Value::as_str),
+                args.get("member_id").and_then(Value::as_str),
+            ) && caller.hides(call.name, mob_id, member).await?
+            {
+                return Err(meerkat_mob::MemberTargetAbsence::NotFound.to_tool_error(
+                    call.name,
+                    &meerkat_mob::MobId::from(mob_id),
+                    &meerkat_mob::AgentIdentity::from(member),
+                ));
+            }
+        }
         if matches!(
             call.name,
             "delegate"
@@ -2364,17 +2545,28 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             if let Some(identity_runtime) = identity_runtime {
                 for (field, alias) in raw_member_tool_arguments(call.name, &args) {
                     let alias = crate::member_comms_id::runtime_alias_str(&alias).into_owned();
-                    if identity_runtime
-                        .identity_for_member_mutation(&alias)
-                        .await
-                        .is_some()
-                    {
-                        return Err(meerkat_core::ToolError::invalid_arguments(
-                            call.name,
-                            format!(
-                                "{field} '{alias}' is owned by the attached IdentityRuntime; use the identity lifecycle/topology authority"
-                            ),
-                        ));
+                    match identity_runtime.identity_for_member_mutation(&alias).await {
+                        Ok(Some(_)) => {
+                            return Err(meerkat_core::ToolError::invalid_arguments(
+                                call.name,
+                                format!(
+                                    "{field} '{alias}' is owned by the attached IdentityRuntime; use the identity lifecycle/topology authority"
+                                ),
+                            ));
+                        }
+                        Ok(None) => {}
+                        // Core holds the name for an identity the runtime has
+                        // not registered, or its entry could not be read:
+                        // never the raw member tool on a read that could not
+                        // tell.
+                        Err(error) => {
+                            return Err(meerkat_core::ToolError::invalid_arguments(
+                                call.name,
+                                format!(
+                                    "{field} '{alias}' is held for a durable identity of the attached IdentityRuntime: {error}"
+                                ),
+                            ));
+                        }
                     }
                 }
                 if call.name == "mob_destroy"
@@ -2487,6 +2679,7 @@ impl meerkat_core::AgentToolDispatcher for AutoWireParentMobToolDispatcher {
             member_auth_binding: owned.member_auth_binding,
             member_auth_binding_recorded: owned.member_auth_binding_recorded,
             realm_profiles: owned.realm_profiles,
+            caller: owned.caller,
         });
         Ok(if was_bound {
             meerkat_core::agent::BindOutcome::Bound(dispatcher)
@@ -3263,6 +3456,8 @@ fn install_agent_mob_tools(
     council_store: Option<Arc<dyn meerkat_mob::store::TemporaryCouncilStore>>,
     forked_participant_store: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
     delivery: MobRuntimeDelivery,
+    private_owners: &crate::private_owners::PrivateOwners,
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
 ) -> Result<InstalledAgentMobTools, MobRuntimeDeliveryError> {
     // Child mobs start process-bound: a durable child root is applied at the
     // bootstrap boundary, so a caller can still opt out before any path opens.
@@ -3276,6 +3471,8 @@ fn install_agent_mob_tools(
         council_store.clone(),
         forked_participant_store.clone(),
         restore,
+        private_owners,
+        personal_accounts,
     )?;
     let (state, overrides, llm_slot, console_spawn_sink, identity_runtime) =
         install_agent_mob_tools_with(
@@ -3287,6 +3484,8 @@ fn install_agent_mob_tools(
             None,
             &delivery,
             None,
+            private_owners,
+            personal_accounts,
         )?;
     let install = AgentMobToolsInstall {
         slot,
@@ -3311,8 +3510,35 @@ fn install_agent_mob_tools(
     ))
 }
 
+/// The host customizer of the members of the mobs the agent mob tools
+/// create: `first` (a member auth binding's, when there is one), then the
+/// private-owner propagation ([`crate::private_owners::PrivateOwners`]), then
+/// the refusal of a personal MCP server on a member placed on another host,
+/// which reads the composition's personal accounts when it is asked
+/// (`crate::personal_accounts::placement`), then the runtime-plane guard,
+/// which runs last as it must.
+fn child_spawn_member_customizer(
+    first: Option<Arc<dyn meerkat_mob::SpawnMemberCustomizer>>,
+    private_owners: &crate::private_owners::PrivateOwners,
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
+) -> Arc<dyn meerkat_mob::SpawnMemberCustomizer> {
+    let placement =
+        crate::personal_accounts::placement::PlacementGuard::customizer(personal_accounts.clone());
+    crate::identity_first::ComposedSpawnMemberCustomizer::over(
+        Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+            Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+                first,
+                private_owners.child_spawn_customizer(),
+            )),
+            placement,
+        )),
+        crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
+    )
+}
+
 /// The unshared agent mob-tool state with its explicit stores, before any
 /// child root, child policy or realm-profile overlay is applied.
+#[allow(clippy::too_many_arguments)]
 fn new_agent_mob_state(
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
@@ -3327,6 +3553,8 @@ fn new_agent_mob_state(
     council_store: Option<Arc<dyn meerkat_mob::store::TemporaryCouncilStore>>,
     forked_participant_store: Option<Arc<dyn meerkat_mob::store::ForkedParticipantStore>>,
     restore: AgentMobRestore,
+    private_owners: &crate::private_owners::PrivateOwners,
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
 ) -> Result<meerkat_mob_mcp::MobMcpState, MobRuntimeDeliveryError> {
     // Forward the workgraph service so agent-spawned child mobs
     // (delegate / mob_spawn_member) inherit apply-time attention overlays.
@@ -3340,12 +3568,16 @@ fn new_agent_mob_state(
     // root mob does.
     .with_member_restore_policy(restore.policy)
     .with_resume_restore_concurrency(restore.concurrency)
-    // Child mobs refuse runtime-plane member identities like the root mob.
-    // The child application tool policy, which runs after it, never changes
-    // a member's identity or labels.
-    .with_child_spawn_member_customizer(
-        crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
-    );
+    // Child mobs give every member a private member's mob seats that
+    // member's owner, refuse a personal MCP server on a member placed on
+    // another host, and refuse runtime-plane member identities, like the
+    // root mob. The child application tool policy, which runs after them,
+    // never changes a member's identity, labels or profile.
+    .with_child_spawn_member_customizer(child_spawn_member_customizer(
+        None,
+        private_owners,
+        personal_accounts,
+    ));
     // Explicit stores are installed before any persistent child root: the
     // native root upgrades only stores still at their default, so these stay
     // the host's choice.
@@ -3374,6 +3606,8 @@ fn install_agent_mob_tools_with(
     existing_slots: Option<(SharedConsoleSpawnSinkSlot, SharedIdentityRuntimeSlot)>,
     delivery: &MobRuntimeDelivery,
     replaced: Option<meerkat::ContinuationBindingGeneration>,
+    private_owners: &crate::private_owners::PrivateOwners,
+    personal_accounts: &crate::personal_accounts::build::PersonalAccountsSlot,
 ) -> Result<
     (
         Arc<meerkat_mob_mcp::MobMcpState>,
@@ -3400,22 +3634,22 @@ fn install_agent_mob_tools_with(
     if let Some(hook) = child_policy.registration_hook {
         state = state.with_member_runtime_registration_hook(hook);
     }
-    // The child mobs' one host customizer slot holds the runtime-plane guard
-    // every agent mob-tool state starts with (`new_agent_mob_state`). With a
-    // member auth binding it holds the binding's customizer, then the guard,
-    // which runs last as it must, so child-mob members build with the
-    // binding too.
+    // The child mobs' one host customizer slot holds the private-owner
+    // propagation, the placement guard and the runtime-plane guard every
+    // agent mob-tool state starts with (`new_agent_mob_state`). With a member
+    // auth binding it holds the binding's customizer first, then those
+    // three, the guard running last as it must, so child-mob members build
+    // with the binding too.
     if let Some(binding) = child_policy.member_auth_binding.clone() {
         let binding_customizer: Arc<dyn meerkat_mob::SpawnMemberCustomizer> = Arc::new(
             crate::native_realm::MemberAuthBindingCustomizer::new(binding)
                 .with_recorded_form(child_policy.member_auth_binding_recorded.clone()),
         );
-        state = state.with_child_spawn_member_customizer(
-            crate::identity_first::ComposedSpawnMemberCustomizer::over(
-                Some(binding_customizer),
-                crate::member_comms_id::RuntimePlaneIdentityGuard::customizer(),
-            ),
-        );
+        state = state.with_child_spawn_member_customizer(child_spawn_member_customizer(
+            Some(binding_customizer),
+            private_owners,
+            personal_accounts,
+        ));
     }
     // The definition overlay wraps whatever profile store the state holds:
     // with a durable child root that is the native durable store, so authored
@@ -3471,6 +3705,8 @@ fn install_agent_mob_tools_with(
         member_auth_binding: child_policy.member_auth_binding,
         member_auth_binding_recorded: child_policy.member_auth_binding_recorded,
         realm_profiles: state.realm_profile_store().cloned(),
+        private_owners: private_owners.clone(),
+        state: Arc::downgrade(&state),
     });
     *slot
         .write()
@@ -4444,6 +4680,17 @@ macro_rules! delegate_mob_session_service {
             ) -> Result<meerkat_mob::ColdStartTailSettlement, SessionError> {
                 self.inner
                     .settle_durable_tail_before_cold_start_reporting(session_id)
+                    .await
+            }
+            // The wrapped persistent service settles a session's owed
+            // compaction projections cold; the trait default refuses it
+            // for a service that keeps durable sessions.
+            async fn settle_owed_compaction_projections(
+                &self,
+                session_id: &meerkat_core::types::SessionId,
+            ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+                self.inner
+                    .settle_owed_compaction_projections(session_id)
                     .await
             }
 
@@ -5909,6 +6156,15 @@ impl MobSessionService for AfterCreateMobSessionService {
             .settle_durable_tail_before_cold_start_reporting(session_id)
             .await
     }
+    // Forwarded, as in `delegate_mob_session_service!`.
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<meerkat_session::OwedCompactionSettlement, SessionError> {
+        self.inner
+            .settle_owed_compaction_projections(session_id)
+            .await
+    }
     async fn observe_session_resume_authority(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -6796,8 +7052,7 @@ pub struct MobBootstrapSpec {
     /// `MobBuilder::with_member_restore_policy`.
     pub(crate) member_restore: crate::identity_first::MemberRestore,
     /// Members the mob leaves to Meta's preparation when it starts (pending
-    /// first-boot rows, interrupted rotations), forwarded to
-    /// `MobBuilder::with_host_pending_members`.
+    /// first-boot rows), forwarded to `MobBuilder::with_host_pending_members`.
     pub(crate) host_pending_members: Vec<meerkat_mob::AgentIdentity>,
     /// The user-global root the member factory keeps the members' session
     /// comms identities under (`<root>/.rkat/session_comms_identity`), when
@@ -6945,6 +7200,15 @@ pub struct MobBootstrapSpec {
     /// private member's owner to the members it asks for
     /// ([`crate::private_owners::PrivateOwners`]).
     pub(crate) private_owners: crate::private_owners::PrivateOwners,
+    /// The registry of the agent schedule tools a stock constructor attached
+    /// over an injected schedule store, which the runtime adopts once its
+    /// mobs exist, as a gateway composition adopts its own
+    /// ([`crate::gateway_composition::adopt_schedule_mob_targets`]).
+    pub(crate) schedule_target_registry: Option<crate::schedule_wiring::ScheduleMobTargetRegistry>,
+    /// Late-bound personal accounts the base session-service wrapper
+    /// classifies each member build's personal MCP servers with
+    /// (`crate::personal_accounts`); see [`Self::with_personal_mcp_accounts`].
+    pub(crate) personal_accounts_slot: crate::personal_accounts::build::PersonalAccountsSlot,
     /// The host's fork instruction policy for this mob's member forks
     /// ([`Self::with_fork_instruction_policy`]). The mob does not persist
     /// it, so bootstrap applies it on create and on resume.
@@ -7033,10 +7297,13 @@ impl MobBootstrapSpec {
         // layers around it, and records who each member is private to.
         let dispatch_taint_slot = crate::memory::dispatch_taint::DispatchTaintSlot::default();
         let side_chat_memory_slot = crate::memory::side_chat_memory::SideChatMemorySlot::default();
+        let personal_accounts_slot =
+            crate::personal_accounts::build::PersonalAccountsSlot::default();
         let private_owners = crate::private_owners::PrivateOwners::default();
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
-            hook: private_owners.after_hook(side_chat_memory_slot.after_hook(hook)),
+            hook: personal_accounts_slot
+                .after_hook(private_owners.after_hook(side_chat_memory_slot.after_hook(hook))),
             dispatch_taint: Some(dispatch_taint_slot.clone()),
             after_create_hook: None,
             runtime_adapter_override: None,
@@ -7114,7 +7381,9 @@ impl MobBootstrapSpec {
             controller_pin_source: None,
             dispatch_taint_slot,
             side_chat_memory_slot,
+            personal_accounts_slot,
             private_owners,
+            schedule_target_registry: None,
             fork_instruction_policy: meerkat_core::ForkInstructionPolicy::default(),
             #[cfg(test)]
             member_provider_auth_persistence: None,
@@ -7141,6 +7410,24 @@ impl MobBootstrapSpec {
         &self,
     ) -> crate::memory::side_chat_memory::SideChatMemorySlot {
         self.side_chat_memory_slot.clone()
+    }
+
+    /// Classify every member build of this spec's personal MCP servers with
+    /// `check` (see [`crate::personal_accounts`]): a member private to its
+    /// owner keeps them and carries its owner's credential source, every
+    /// other member gets none. `check` is the owner check of the member
+    /// factory the spec's session service builds with: installed there
+    /// ([`crate::PersonalAccountOwnerCheck::install`]) and keeping the
+    /// accounts in its credential store
+    /// ([`crate::PersonalAccountOwnerCheck::keep_accounts_in`]). Through a
+    /// check that does not do both, no member build keeps a personal server.
+    #[must_use]
+    pub fn with_personal_mcp_accounts(
+        self,
+        check: crate::personal_accounts::PersonalAccountOwnerCheck,
+    ) -> Self {
+        self.personal_accounts_slot.fill(check);
+        self
     }
 
     /// Bind the session builder's own default agent-LLM-client decorator
@@ -7294,6 +7581,8 @@ impl MobBootstrapSpec {
             None,
             self.storage.forked_participant_store().cloned(),
             delivery,
+            &self.private_owners,
+            &self.personal_accounts_slot,
         )?;
         self.agent_mob_mcp_state = Some(agent_mob_mcp_state);
         self.implicit_delegate_retirement_overrides = Some(implicit_delegate_retirement_overrides);
@@ -7624,6 +7913,8 @@ impl MobBootstrapSpec {
             council_store,
             forked_participant_store.clone(),
             restore,
+            &self.private_owners,
+            &self.personal_accounts_slot,
         )
         .map_err(MobRuntimeError::Delivery)?;
         if let Some(durable) = &durable {
@@ -7647,6 +7938,8 @@ impl MobBootstrapSpec {
                 existing_slots,
                 &install.delivery,
                 Some(replaced),
+                &self.private_owners,
+                &self.personal_accounts_slot,
             )
             .map_err(MobRuntimeError::Delivery)?;
         self.agent_mob_mcp_state = Some(state);
@@ -7803,7 +8096,7 @@ impl MobBootstrapSpec {
 
     /// Members the mob must leave to Meta's preparation when it starts: it
     /// materializes none of them and refuses each one's wake retryable until
-    /// Meta's seat step for it ends the mark.
+    /// the declaration that carries its first-boot row out ends the mark.
     #[must_use]
     pub(crate) fn with_host_pending_members(
         mut self,
@@ -8348,6 +8641,8 @@ impl MobBootstrapSpec {
             None,
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.private_owners,
+            &spec.personal_accounts_slot,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.agent_mob_mcp_state = Some(agent_mob_mcp_state);
@@ -8537,6 +8832,7 @@ impl MobBootstrapSpec {
             PersistentAuthority::StateDir,
             None,
             None,
+            None,
         )
         .await
     }
@@ -8564,6 +8860,11 @@ impl MobBootstrapSpec {
     /// when it names one: the factory holds it in place of the process
     /// default before the member builder takes it, so every agent of the
     /// composition resolves and persists provider credentials there.
+    ///
+    /// `personal_accounts` is the owner check of the composition's personal
+    /// accounts on MCP servers, when it has any: it is installed on the
+    /// factory, which keeps the accounts in its own credential store, and the
+    /// spec is given the same check.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn persistent_inner_with_provider_stores(
         definition: MobDefinition,
@@ -8588,6 +8889,7 @@ impl MobBootstrapSpec {
         authority: PersistentAuthority,
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
+        personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
     ) -> Result<Self, StorageResolutionError> {
         // The startup checks and the composition record need to know whether
         // the mob store outlives the process.
@@ -8775,6 +9077,12 @@ impl MobBootstrapSpec {
             factory = factory
                 .with_image_generation_machine(weak_image_generation_machine(&runtime_adapter));
         }
+        factory = with_personal_accounts(
+            factory,
+            personal_accounts.as_ref(),
+            &runtime_adapter,
+            meerkat_realm.clone(),
+        );
         let config = crate::compaction_policy::with_meta_compaction_defaults(
             agent_config.unwrap_or_default(),
         );
@@ -8829,9 +9137,11 @@ impl MobBootstrapSpec {
         // schedule tools over the caller's store. Library mode wires no
         // firing host — authored schedules become durable rows the embedder's
         // own driver (or a gateway pointed at the same store) fires.
+        let mut schedule_target_registry = None;
         let schedule_slot = schedule_store.map(|store| {
-            let _attached =
+            let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
                  attaches schedule tools without a firing host",
@@ -8932,6 +9242,7 @@ impl MobBootstrapSpec {
             concrete_session_service.clone();
         let session_service: Arc<dyn MobSessionService> = concrete_session_service;
         let hook = refusing_unresolved_document_markers(hook);
+        let hook = classifying_personal_servers(hook, personal_accounts.as_ref());
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
             hook,
@@ -8994,6 +9305,8 @@ impl MobBootstrapSpec {
             },
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.private_owners,
+            &spec.personal_accounts_slot,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.durable_runtime_store = Some(durable_runtime_store);
@@ -9036,6 +9349,7 @@ impl MobBootstrapSpec {
         if let Some(slot) = schedule_slot {
             slots.push(slot);
         }
+        spec.schedule_target_registry = schedule_target_registry;
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -9102,6 +9416,7 @@ impl MobBootstrapSpec {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -9111,7 +9426,8 @@ impl MobBootstrapSpec {
     ///
     /// `provider_auth_persistence` is the host's provider credential store
     /// when it names one, held in place of the process default as in
-    /// [`persistent_inner_with_provider_stores`](Self::persistent_inner_with_provider_stores).
+    /// [`persistent_inner_with_provider_stores`](Self::persistent_inner_with_provider_stores),
+    /// and `personal_accounts` is installed on the factory as there.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn ephemeral_runtime_backed_with_provider_stores(
         definition: MobDefinition,
@@ -9131,6 +9447,7 @@ impl MobBootstrapSpec {
         operation_refusal_observer: Option<Arc<dyn meerkat_core::OperationRefusalObserver>>,
         session_identity_config_root: Option<PathBuf>,
         provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
+        personal_accounts: Option<crate::personal_accounts::PersonalAccountOwnerCheck>,
     ) -> Result<Self, StorageResolutionError> {
         caps.image_generation |= mob_definition_may_use_image_generation(&definition);
         let config = crate::compaction_policy::with_meta_compaction_defaults(
@@ -9231,6 +9548,15 @@ impl MobBootstrapSpec {
             factory = factory
                 .with_image_generation_machine(weak_image_generation_machine(&runtime_adapter));
         }
+        factory = with_personal_accounts(
+            factory,
+            personal_accounts.as_ref(),
+            &runtime_adapter,
+            provider_meerkat_stores.as_ref().map_or_else(
+                crate::storage_provider::default_meerkat_level_realm,
+                |provider| provider.realm.clone(),
+            ),
+        );
         let member_model_config = Arc::new(config.clone());
         let mut builder = FactoryAgentBuilder::new(factory, config);
         // What the member builder's factory resolves provider credentials
@@ -9268,9 +9594,11 @@ impl MobBootstrapSpec {
         // otherwise-ephemeral local runtime whose durable schedule rows live
         // in a caller-supplied remote store. Library mode wires no firing
         // host (see `UnifiedRuntimeBuilder::schedule_store`).
+        let mut schedule_target_registry = None;
         let schedule_slot = schedule_store.map(|store| {
-            let _attached =
+            let attached =
                 crate::schedule_wiring::attach_schedule_tools_with_store(&builder, store);
+            schedule_target_registry = Some(attached.mob_target_registry);
             StorageSlotSummary::persistent("schedule", "custom schedule store").with_detail(
                 "caller-injected store; durability rides with the injector. Library mode \
                  attaches schedule tools without a firing host",
@@ -9347,6 +9675,7 @@ impl MobBootstrapSpec {
             after_create_hook,
         ));
         let hook = refusing_unresolved_document_markers(hook);
+        let hook = classifying_personal_servers(hook, personal_accounts.as_ref());
         let session_service = Arc::new(PreBuildMobSessionService {
             inner: session_service,
             hook,
@@ -9406,6 +9735,8 @@ impl MobBootstrapSpec {
             None,
             spec.storage.forked_participant_store().cloned(),
             delivery,
+            &spec.private_owners,
+            &spec.personal_accounts_slot,
         )
         .map_err(StorageResolutionError::Delivery)?;
         spec.agent_mob_mcp_state = Some(agent_mob_mcp_state);
@@ -9460,6 +9791,7 @@ impl MobBootstrapSpec {
         if let Some(slot) = schedule_slot {
             slots.push(slot);
         }
+        spec.schedule_target_registry = schedule_target_registry;
         slots.extend(scratch_ring_buffer_slots());
         spec.resolved_storage = Some(
             ResolvedStorageSummary::new(blob_durability, session_store_incremental)
@@ -10043,6 +10375,9 @@ pub struct MobRuntime {
     /// has read, shared by every clone (see
     /// [`crate::side_chat::SideChatLineageCache`]).
     side_chat_lineages: Arc<crate::side_chat::SideChatLineageCache>,
+    /// The members each flow run of this runtime's mob reached, shared by
+    /// every clone (see [`crate::run_members::RunMembersIndex`]).
+    run_members: Arc<crate::run_members::RunMembersIndex>,
     /// Who each member of this runtime's mob is private to, shared by every
     /// clone (see [`crate::private_owners::PrivateOwners`]).
     private_owners: crate::private_owners::PrivateOwners,
@@ -10050,6 +10385,8 @@ pub struct MobRuntime {
     /// gateway's schedule host attached it, shared by every clone (see
     /// [`crate::console_schedules::ConsoleSchedules`]).
     console_schedules: crate::console_schedules::ConsoleSchedules,
+    /// See [`MobBootstrapSpec::with_personal_mcp_accounts`].
+    personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot,
 }
 
 /// How long a boot waits for the Stop an earlier process placed, which
@@ -10509,11 +10846,22 @@ impl MobRuntime {
                 .set_after_destroy(Arc::clone(hook))
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
         }
-        #[cfg(feature = "extension-state")]
-        if let (Some(state), Some(hook)) = (&spec.agent_mob_mcp_state, &spec.before_create) {
+        // The agent mob tools' create admission: the host's own decides
+        // first, when there is one, then every mob a member creates records
+        // its creator's private owner, which the members seated in it take
+        // ([`crate::private_owners::PrivateOwners::before_create_hook`]).
+        if let Some(state) = &spec.agent_mob_mcp_state {
+            #[cfg(feature = "extension-state")]
+            let host_hook = spec.before_create.clone();
+            #[cfg(not(feature = "extension-state"))]
+            let host_hook = None;
             state
-                .set_before_create(Arc::clone(hook))
+                .set_before_create(
+                    spec.private_owners
+                        .before_create_hook(Arc::downgrade(state), host_hook),
+                )
                 .map_err(|error| MobRuntimeError::InvalidConfig(error.to_string()))?;
+            spec.private_owners.bind_child_mobs(state);
         }
         auto_mark_declared_resume_overrides(&mut spec.definition);
         let ephemeral_dir = spec._ephemeral_dir.clone();
@@ -10523,6 +10871,13 @@ impl MobRuntime {
         let member_model_config = spec.member_model_config.clone();
         let binary_blob_store = spec.binary_blob_store.clone();
         let mob_id = spec.definition.id.clone();
+        // A member placed on another host never carries a personal MCP
+        // server of this composition (`crate::personal_accounts::placement`).
+        let personal_placement_guard = spec.personal_accounts_slot.accounts().map(|_| {
+            crate::personal_accounts::placement::PlacementGuard::customizer(
+                spec.personal_accounts_slot.clone(),
+            )
+        });
         let agent_mob_mcp_state = spec.agent_mob_mcp_state.clone();
         let implicit_delegate_retirement_overrides =
             spec.implicit_delegate_retirement_overrides.clone();
@@ -10685,17 +11040,29 @@ impl MobRuntime {
             .with_fork_instruction_policy(spec.fork_instruction_policy);
 
         // Every mob this runtime builds refuses runtime-plane member
-        // identities, after the spec's own customizers have run, and last
-        // gives each member a private member asks for that member's owner.
+        // identities, after the spec's own customizers have run, and a
+        // composition with personal MCP servers refuses a member placed on
+        // another host that would carry one; last, it gives each member a
+        // private member asks for that member's owner.
+        let spawn_member_customizer = match personal_placement_guard {
+            Some(guard) => Some(crate::identity_first::ComposedSpawnMemberCustomizer::over(
+                spec.spawn_member_customizer.clone(),
+                guard,
+            )),
+            None => spec.spawn_member_customizer.clone(),
+        };
         builder = builder.with_spawn_member_customizer(
             crate::identity_first::ComposedSpawnMemberCustomizer::over(
                 crate::member_comms_id::runtime_plane_guarded_customizer(
                     &mob_id,
-                    spec.spawn_member_customizer.clone(),
+                    spawn_member_customizer,
                 ),
                 spec.private_owners.spawn_customizer(),
             ),
         );
+        // A member private to a person is known to no other member's own
+        // operator tools but those of the members private to the same person.
+        builder = builder.with_member_tool_audience(spec.private_owners.member_tool_audience());
         if let Some(hook) = spec.member_runtime_registration_hook.clone() {
             builder = builder.with_member_runtime_registration_hook(hook);
         }
@@ -10798,6 +11165,19 @@ impl MobRuntime {
             let handle = crate::boxed_future::boxed(|| builder.resume())
                 .await
                 .map_err(|error| root_mob_restore_failure(&mob_id, MobRuntimeError::Mob(error)))?;
+            // A candidate launch delivers no operator instruction: Meerkat
+            // keeps the delivery owner of a non-authoritative composition
+            // idle, so the members owed a snapshot stay owed for the
+            // authoritative launch, which delivers them at its start.
+            if !spec.composition_authority.speaks_for_composition() {
+                let owed = handle.operator_instruction_owed_members();
+                tracing::warn!(
+                    mob_id = %mob_id,
+                    owed,
+                    "candidate launch census: the members owed an operator-instruction \
+                     snapshot stay owed; the authoritative launch delivers them"
+                );
+            }
             // A Stop an earlier process placed and never finished is a durable
             // barrier: resume hands back a handle that still reads Running, and
             // Core's recovery finishes that Stop afterwards. The phase is read
@@ -10964,49 +11344,59 @@ impl MobRuntime {
         // A member created under one of the console's runtime-plane
         // identities before every creation path refused them still comes up.
         crate::member_comms_id::warn_reserved_identity_members(&handle).await;
-        Ok((
-            Self {
-                handle,
-                runtime_delivery,
-                session_service: Some(session_service),
-                member_model_config,
-                agent_mob_mcp_state,
-                implicit_delegate_retirement_overrides,
-                binary_blob_store,
-                baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-                console_spawn_sink_slot,
-                identity_runtime_slot,
-                composition_release: Some(spec.composition_release),
-                workgraph_service: spec.workgraph_service,
-                workgraph_admission,
-                workgraph_realm_migration,
-                resolved_storage: match (spec.resolved_storage, candidate_composition_slot) {
-                    (Some(mut summary), Some(slot)) => {
-                        summary.slots.push(slot);
-                        Some(summary)
-                    }
-                    (summary, _) => summary,
-                },
-                durable_runtime_store: spec.durable_runtime_store,
-                committed_boundary_recoverer: spec.committed_boundary_recoverer,
-                controller_pin_source: spec.controller_pin_source,
-                native_work_governed,
-                _ephemeral_dir: ephemeral_dir,
-                state_dir_claims: Arc::new(std::sync::Mutex::new(state_dir_claims)),
-                composition_authority: spec.composition_authority,
-                member_auth_binding: spec.member_auth_binding,
-                member_auth_binding_recorded: spec.member_auth_binding_recorded,
-                child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::new(
-                    child_mob_root_claim,
-                ),
-                #[cfg(not(target_arch = "wasm32"))]
-                member_mcp_custody: spec.member_mcp_custody,
-                side_chat_lineages: Arc::default(),
-                private_owners: spec.private_owners,
-                console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+        // Who the members of this runtime's mobs are private to is read from
+        // their durable records in the background from the start, and read
+        // again until it is read; no request waits for it.
+        spec.private_owners.seed_in_background(&handle);
+        let runtime = Self {
+            handle,
+            runtime_delivery,
+            session_service: Some(session_service),
+            member_model_config,
+            agent_mob_mcp_state,
+            implicit_delegate_retirement_overrides,
+            binary_blob_store,
+            baseline_member_specs: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            console_spawn_sink_slot,
+            identity_runtime_slot,
+            composition_release: Some(spec.composition_release),
+            workgraph_service: spec.workgraph_service,
+            workgraph_admission,
+            workgraph_realm_migration,
+            resolved_storage: match (spec.resolved_storage, candidate_composition_slot) {
+                (Some(mut summary), Some(slot)) => {
+                    summary.slots.push(slot);
+                    Some(summary)
+                }
+                (summary, _) => summary,
             },
-            pending_activation,
-        ))
+            durable_runtime_store: spec.durable_runtime_store,
+            committed_boundary_recoverer: spec.committed_boundary_recoverer,
+            controller_pin_source: spec.controller_pin_source,
+            native_work_governed,
+            _ephemeral_dir: ephemeral_dir,
+            state_dir_claims: Arc::new(std::sync::Mutex::new(state_dir_claims)),
+            composition_authority: spec.composition_authority,
+            member_auth_binding: spec.member_auth_binding,
+            member_auth_binding_recorded: spec.member_auth_binding_recorded,
+            child_mob_root: crate::child_mob_storage::ChildMobRootOwnership::new(
+                child_mob_root_claim,
+            ),
+            #[cfg(not(target_arch = "wasm32"))]
+            member_mcp_custody: spec.member_mcp_custody,
+            side_chat_lineages: Arc::default(),
+            run_members: Arc::default(),
+            private_owners: spec.private_owners,
+            console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+            personal_accounts: spec.personal_accounts_slot,
+        };
+        // Agent schedule tools attached over an injected schedule store
+        // judge their targets with this runtime's mobs and with who its
+        // members are private to.
+        if let Some(registry) = spec.schedule_target_registry {
+            registry.adopt_mob_runtime(&runtime);
+        }
+        Ok((runtime, pending_activation))
     }
 
     /// Adopt a handle built outside [`MobBootstrapSpec`]. Meta composes no
@@ -11057,8 +11447,10 @@ impl MobRuntime {
             #[cfg(not(target_arch = "wasm32"))]
             member_mcp_custody: None,
             side_chat_lineages: Arc::default(),
+            run_members: Arc::default(),
             private_owners: crate::private_owners::PrivateOwners::default(),
             console_schedules: crate::console_schedules::ConsoleSchedules::default(),
+            personal_accounts: crate::personal_accounts::build::PersonalAccountsSlot::default(),
         }
     }
 
@@ -11068,6 +11460,23 @@ impl MobRuntime {
         self.member_auth_binding.as_ref()
     }
 
+    /// The composition's personal accounts on MCP servers, when it has any
+    /// (see [`MobBootstrapSpec::with_personal_mcp_accounts`]).
+    pub(crate) fn personal_mcp_accounts(
+        &self,
+    ) -> Option<Arc<crate::personal_accounts::PersonalMcpAccounts>> {
+        self.personal_accounts.accounts()
+    }
+
+    /// The owner check the composition gave its spec, when it has personal
+    /// accounts on MCP servers.
+    #[cfg(test)]
+    pub(crate) fn personal_account_owner_check(
+        &self,
+    ) -> Option<crate::personal_accounts::PersonalAccountOwnerCheck> {
+        self.personal_accounts.check()
+    }
+
     /// The verified side chat lineages of this runtime's member incarnations,
     /// as the console reads them (see
     /// [`crate::side_chat::SideChatLineageCache`]).
@@ -11075,11 +11484,18 @@ impl MobRuntime {
         &self.side_chat_lineages
     }
 
-    /// Who each member of this runtime's mob is private to (see
-    /// [`crate::private_owners::PrivateOwners`]), once the mob's event log
-    /// has been read for the members this process did not build.
-    pub(crate) async fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
-        self.private_owners.seeded(&self.handle).await
+    /// The members each flow run of this runtime's mob reached, read from
+    /// the mob's per-target dispatch records (see [`crate::run_members`]).
+    pub(crate) fn run_members(&self) -> &crate::run_members::RunMembersIndex {
+        &self.run_members
+    }
+
+    /// Who each member of this runtime's mobs is private to (see
+    /// [`crate::private_owners::PrivateOwners`]), as far as it is known now:
+    /// the seed that reads the durable records runs in the background from
+    /// the runtime's start, and no caller waits for it.
+    pub(crate) fn private_owners(&self) -> &crate::private_owners::PrivateOwners {
+        &self.private_owners
     }
 
     /// The Steward's source of the members of this runtime's mob private to
@@ -12562,6 +12978,10 @@ pub async fn resolved_tools_for_member(
 ///   stable `reason_type` here, once; the report stays beside them.
 ///   `InteractionFailed` mirrors its typed reason's `Display` into `error`
 ///   the same way.
+/// - the requester a run serves (the person's qualified principal, on the
+///   transcript identity of the run's lifecycle events) is left out
+///   (`strip_transcript_requesters`): no view, stream or event log of an
+///   agent's events returns it.
 pub fn console_agent_event_payload(event: &meerkat_core::AgentEvent) -> Value {
     use meerkat_core::AgentEvent;
     use meerkat_core::event::agent_event_type;
@@ -12619,7 +13039,37 @@ pub fn console_agent_event_payload(event: &meerkat_core::AgentEvent) -> Value {
     {
         record.insert("error".to_string(), Value::String(reason.to_string()));
     }
+    strip_transcript_requesters(&mut payload);
     payload
+}
+
+/// Leave the requester out of every transcript identity in `value`: the
+/// `requester` of each `identity` object, at any depth (a run lifecycle
+/// event's own identity, a committed message's, the lineage a console event
+/// inherits, a nested frame's).
+///
+/// The requester is the person's qualified principal, which Core carries on
+/// a run's transcript identity (`TranscriptMessageIdentity::requester`). It
+/// stays privileged: a console send keeps it with its stored frame for a
+/// redispatch, and no view, stream or event log returns it. Every viewer
+/// reads the person's display name on the send's frame instead.
+pub(crate) fn strip_transcript_requesters(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Object(identity)) = map.get_mut("identity") {
+                identity.remove("requester");
+            }
+            for item in map.values_mut() {
+                strip_transcript_requesters(item);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_transcript_requesters(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn content_input_has_images(content: &meerkat_core::ContentInput) -> bool {
@@ -13029,8 +13479,9 @@ where
 /// Console-only local human submission pinned to the member snapshot resolved
 /// before accepting the request. External members retain the existing remote
 /// send protocol; that compatibility path makes no local transcript-role claim
-/// and carries no requester. `requester` is the sender's person principal,
-/// carried to the local member's run.
+/// and carries no requester or sender label. `attribution` is what the send
+/// carries for its person to the local member's run: the requester and the
+/// sender label its model reads.
 pub(crate) async fn send_console_human_on_mob(
     handle: &MobHandle,
     member: &meerkat_mob::runtime::MobMemberListEntry,
@@ -13038,7 +13489,7 @@ pub(crate) async fn send_console_human_on_mob(
     skill_references: &[meerkat_core::skills::SkillKey],
     handling_mode: meerkat_core::types::HandlingMode,
     accepted: &crate::console_aggregator::ConsoleInteractionAccepted,
-    requester: Option<&meerkat_core::PrincipalRef>,
+    attribution: &crate::console_aggregator::ConsoleHumanAttribution,
 ) -> Result<String, MobRuntimeError> {
     let (runtime_id, fence_token) = member.binding_atoms().ok_or(MobRuntimeError::InvalidInput(
         "console human target has no current runtime binding",
@@ -13087,8 +13538,11 @@ pub(crate) async fn send_console_human_on_mob(
     // origin preserves support for console-addressable internal workers.
     let mut spec = meerkat_mob::WorkSpec::new(content, meerkat_mob::WorkOrigin::Internal)
         .with_interaction_id(meerkat_core::interaction::InteractionId(interaction));
-    if let Some(requester) = requester {
+    if let Some(requester) = attribution.requester.as_ref() {
         spec = spec.with_requester(requester.clone());
+    }
+    if let Some(label) = attribution.sender_label.as_ref() {
+        spec = spec.with_sender_label(label.clone());
     }
     let options = if skill_references.is_empty() {
         meerkat_mob::MemberTurnOptions::new()
@@ -13703,6 +14157,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         }
@@ -14445,7 +14900,8 @@ mod tests {
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         *dispatcher
             .identity_runtime
             .write()
@@ -14561,6 +15017,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         };
@@ -14693,6 +15150,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         });
@@ -14765,6 +15223,7 @@ mod tests {
             protected_mob_id: "test-mob".to_string(),
             spawner_comms_name: None,
             realm_profiles: None,
+            caller: None,
             member_auth_binding: None,
             member_auth_binding_recorded: None,
         };
@@ -21773,6 +22232,7 @@ comms = true
                 PersistentAuthority::StateDir,
                 None,
                 None,
+                None,
             )
             .await
             .expect("persistent constructor")
@@ -21790,6 +22250,7 @@ comms = true
                 None,
                 None,
                 provider,
+                None,
                 None,
                 None,
                 None,
@@ -23502,6 +23963,7 @@ image_generation = true
                 protected_mob_id: "test-mob".to_string(),
                 spawner_comms_name: Some("ops/orchestrator/ops-lead".to_string()),
                 realm_profiles: None,
+                caller: None,
                 member_auth_binding: None,
                 member_auth_binding_recorded: None,
             }

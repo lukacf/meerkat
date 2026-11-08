@@ -78,6 +78,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -134,6 +135,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
@@ -200,6 +202,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -294,6 +297,7 @@ rust_binary(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -358,6 +362,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -449,6 +454,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -540,6 +546,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -632,6 +639,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -723,6 +731,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -815,6 +824,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -905,6 +915,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -997,6 +1008,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1089,6 +1101,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1184,6 +1197,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1279,6 +1293,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1370,6 +1385,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1462,6 +1478,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1554,6 +1571,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1646,6 +1664,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1737,6 +1756,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1828,6 +1848,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -1920,6 +1941,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -2011,6 +2033,7 @@ rust_test(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -2086,6 +2109,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -2132,6 +2156,7 @@ rust_binary(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -2193,6 +2218,7 @@ rust_library(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -2243,6 +2269,7 @@ rust_binary(
     rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
     compile_data = [
         "Cargo.toml",
+        "src/session_runtime.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],

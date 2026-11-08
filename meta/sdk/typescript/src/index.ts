@@ -116,6 +116,8 @@ export type {
 // Rich tool-result content blocks for callback tool handlers.
 export { textBlock, imageBlock, imageBlobBlock, toolContent, ToolResultContent } from "./tool-content.js";
 export type { ContentBlock } from "./tool-content.js";
+export { parseToolCallRequester } from "./tool-requester.js";
+export type { RequesterPrincipal, ToolCallRequester } from "./tool-requester.js";
 
 export {
   parseForkBuildSource,
@@ -168,8 +170,25 @@ export {
 
 // -- Agent builder --------------------------------------------------------
 
-export type { SessionAgentBuilder, ErrorCallback } from "./agent-builder.js";
+export type {
+  SessionAgentBuilder,
+  ErrorCallback,
+  DecisionNoticeHandler,
+} from "./agent-builder.js";
 export { CallbackDispatcher } from "./agent-builder.js";
+
+// -- Durable decisions ------------------------------------------------------
+
+export type {
+  DecisionAttestation,
+  DecisionDecideOptions,
+  DecisionIngressDeclaration,
+  DecisionListOptions,
+} from "./decisions.js";
+export {
+  DECIDE_INSIDE_TOOL_CALLBACK_KIND,
+  DecideInsideToolCallbackError,
+} from "./errors.js";
 
 // -- Errors ---------------------------------------------------------------
 

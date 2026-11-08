@@ -16,7 +16,7 @@ from uuid import UUID
 
 from .connect_installer_caller import (CustodyError, ExactFile, NativeApplicationInventory,
     _json, _path, _private_directory, _same_json_value, _preparation_helper_catalog_request, _selected_console_domains)
-from .forge_application_host import ApplicationPreparationInputs, ForgeApplicationHost
+from .forge_application_host import ApplicationPreparationInputs, ForgeApplicationHost, protected_source_matches
 from .runtime_selection import parse_candidate_selection
 
 
@@ -367,10 +367,14 @@ class LocalApplicationPreparationOwner:
 
         def files_current():
             lease.require_current()
+            # The projections hold the source as it was prepared; an update
+            # since may only have moved one shared console account to named
+            # accounts, the one change the owner accepts.
             if (_private_directory(projection) != projection_identity
-                    or any(pin.read() != content for pin, content in zip(sources, selected_bytes))
-                    or any(protected[name].read() != content for name, content in zip(names, selected_bytes)
-                        if name in protected)
+                    or any(not protected_source_matches(self.host, name, content, projected.read())
+                           for name, projected, content in zip(names, sources, selected_bytes))
+                    or any(not protected_source_matches(self.host, name, content, protected[name].read())
+                           for name, content in zip(names, selected_bytes) if name in protected)
                     or selected_bytes[0] != self.host._definition.encode()
                     or self._choices_pin.read() != self._choices_bytes
                     or entered != (entry.exists() or entry.is_symlink())):

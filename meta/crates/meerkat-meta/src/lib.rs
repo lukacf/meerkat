@@ -45,6 +45,7 @@ pub mod detached_completion;
 #[cfg(test)]
 mod detached_delivery_route_tests;
 pub(crate) mod document_mcp_marker;
+pub mod durable_decisions;
 #[cfg(feature = "extension-state")]
 pub mod extension_state;
 pub(crate) mod fallback_wake;
@@ -80,6 +81,7 @@ pub mod mobpack;
 pub mod mocks;
 pub(crate) mod native_realm;
 pub mod native_startup;
+pub mod personal_accounts;
 pub(crate) mod private_owners;
 pub mod process;
 pub mod protocol;
@@ -87,6 +89,7 @@ pub mod public_live_config;
 pub mod rpc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rpc_gateway;
+pub(crate) mod run_members;
 pub mod runtime;
 #[cfg(all(test, feature = "openai-live"))]
 #[allow(clippy::expect_used)]
@@ -124,10 +127,10 @@ pub(crate) mod workgraph_resume_gate;
 pub mod workgraph_wiring;
 
 pub use access::{
-    ACCESS_ACTIONS, AccessApprover, AccessConfigError, AccessControlConfig, AccessController,
-    AccessDecision, AccessEffect, AccessGroup, AccessPrincipal, AccessPublicationAlreadyJoined,
-    AccessResource, AccessRule, AccessView, AgentResourceAttributes, evaluate_access,
-    validate_access_config,
+    ACCESS_ACTIONS, AccessApprover, AccessApproverPerson, AccessConfigError, AccessControlConfig,
+    AccessController, AccessDecision, AccessEffect, AccessGroup, AccessIngressSubject,
+    AccessPrincipal, AccessPublicationAlreadyJoined, AccessResource, AccessRule, AccessView,
+    AgentResourceAttributes, evaluate_access, validate_access_config,
 };
 pub use actor_loop_health::{
     ActorLoopHealth, ActorLoopHealthKind, ActorLoopHealthReport, ActorLoopHealthState,
@@ -182,8 +185,8 @@ pub use console_config::{
     ConsoleAgentSectionConfig, ConsoleAppearanceConfig, ConsoleAttentionSourceConfig,
     ConsoleAttentionUiConfig, ConsoleBrandingConfig, ConsoleConfigError, ConsoleEnvironmentConfig,
     ConsoleLayoutConfig, ConsoleRailFilterPresetConfig, ConsoleRailUiConfig,
-    ConsoleSidebarButtonConfig, ConsoleSidebarUiConfig, ConsoleUiConfig,
-    load_console_ui_config_from_path_for_realm, load_console_ui_config_from_toml,
+    ConsoleSidebarButtonConfig, ConsoleSidebarUiConfig, ConsoleSignOutConfig, ConsoleSignOutMethod,
+    ConsoleUiConfig, load_console_ui_config_from_path_for_realm, load_console_ui_config_from_toml,
     load_console_ui_config_from_toml_for_realm,
 };
 pub use console_contracts::{
@@ -195,6 +198,12 @@ pub use decisions::{
     RuntimeOpsPolicy, enforce_console_route_access, load_trusted_meta_modules_from_toml,
     parse_release_metadata_json, validate_bigquery_naming, validate_release_metadata,
     validate_runtime_ops_policy,
+};
+pub use durable_decisions::{
+    DecisionAttestationRequest, DecisionIngressDeclaration, DecisionIngressDeclarations,
+    DecisionIngressError, DecisionNoticeSink, MetaDecisionDecideParams, MetaDecisionListResult,
+    MetaDecisionNotice, MetaDecisionNoticeEvent, MetaDecisionStatus, MetaDecisionView,
+    RuntimeDecisions, StdioDecisionConnection,
 };
 #[allow(deprecated)]
 pub use governance::validate_phase0_governance_contracts;
@@ -274,6 +283,12 @@ pub use mobpack::{
     with_host_path_skill_reads,
 };
 pub use mocks::{MockModuleProcess, MockProcessError};
+pub use personal_accounts::{
+    APPROVAL_BRANCH_LABEL, McpAccountMode, McpAccountsConfig, McpAccountsConfigError,
+    McpServerAccounts, PersonalAccountCredentials, PersonalAccountOwnerCheck,
+    PersonalAccountRefusal, PersonalMcpAccounts, UnsupportedPersonalServer, personal_server_shape,
+    private_owner_key, private_owner_key_of_principal,
+};
 pub use process::{ProcessBoundaryError, run_process_json_line};
 pub use protocol::{ProtocolParseError, parse_module_event_line, parse_unified_event_line};
 pub use rpc::{

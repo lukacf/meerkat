@@ -356,12 +356,34 @@ impl Opened {
         peer: &ModelPeer,
         client: Arc<ScriptedProvider>,
     ) -> Result<Self, ConnectError> {
+        Self::open_with_selected_mcp(forge, peer, client, MCP_PEER).await
+    }
+
+    async fn open_with_selected_mcp(
+        forge: Option<(crate::forge::ForgeFrontend, crate::forge::ForgePresenter)>,
+        peer: &ModelPeer,
+        client: Arc<ScriptedProvider>,
+        mcp_peer: &str,
+    ) -> Result<Self, ConnectError> {
+        Self::open_with_selected_mcp_in(forge, peer, client, mcp_peer, None).await
+    }
+
+    async fn open_with_selected_mcp_in(
+        forge: Option<(crate::forge::ForgeFrontend, crate::forge::ForgePresenter)>,
+        peer: &ModelPeer,
+        client: Arc<ScriptedProvider>,
+        mcp_peer: &str,
+        parent: Option<&std::path::Path>,
+    ) -> Result<Self, ConnectError> {
         // Forge recovery checks the setup artifact directory and its parent.
         // Declare this owned fixture root private instead of relying on umask.
-        let directory = tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .map_err(|e| ConnectError::native("fixture directory", e))?;
+        let mut builder = tempfile::Builder::new();
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+        let directory = match parent {
+            Some(parent) => builder.tempdir_in(parent),
+            None => builder.tempdir(),
+        }
+        .map_err(|e| ConnectError::native("fixture directory", e))?;
         let storage = crate::RealmOptions {
             context_root: directory.path().to_owned(),
             state_root: Some(directory.path().join("state")),
@@ -383,7 +405,7 @@ impl Opened {
         let descriptor = serde_json::to_vec(&serde_json::json!({
             "mcpServers": { "toolkit-setup": {
                 "command": "/bin/sh",
-                "args": ["-c", MCP_PEER, "stock-submission-control", mcp_calls.to_str().unwrap()]
+                "args": ["-c", mcp_peer, "stock-submission-control", mcp_calls.to_str().unwrap()]
             }}
         }))
         .map_err(|e| ConnectError::native("Encode actual fixture endpoint", e))?;
@@ -1061,3 +1083,10 @@ async fn native_setup_default_keeps_reading_and_existing_service_paired_host_too
 
 #[path = "stock_submission_tests/forge_finalization.rs"]
 mod forge_finalization;
+
+#[path = "stock_submission_tests/private_caller.rs"]
+mod private_caller;
+
+#[cfg(all(unix, feature = "console"))]
+#[path = "stock_submission_tests/routable_consent.rs"]
+mod routable_consent;

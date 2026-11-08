@@ -3,6 +3,11 @@
 //! constructs a replacement ContinuationOwnerService or borrows a prior turn.
 use super::*;
 
+pub(super) struct ReviewedHelperReview {
+    pub floor: Arc<dyn crate::installed_host::InstalledOperationReviewPolicy>,
+    pub review: Arc<meerkat_core::approval::review::BoundOperationReview>,
+}
+
 // Only selected files, canonical request and native roster coordinates survive
 // close. This carrier retains no source, machine, actor, controller or grant owner.
 pub(super) struct DurableHelperFixture {
@@ -26,6 +31,30 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         script: Arc<acquisition_denial::Script>,
     ) -> (Self, Arc<dyn meerkat_runtime::RuntimeStore>) {
         Self::for_acquisition_mode(script, None, false, None, None, None, None).await
+    }
+
+    pub(super) async fn for_reviewed_helper_roles(
+        script: Arc<acquisition_denial::Script>,
+        report: Arc<helper_report::Report>,
+        reviewed: ReviewedHelperReview,
+    ) -> (Self, Arc<dyn meerkat_runtime::RuntimeStore>) {
+        let (fixture, store, _) = Self::acquisition_mode_with_persistence(
+            script,
+            Some(report),
+            true,
+            None,
+            None,
+            Some(
+                crate::installed_host::controller_first_input_fixture::WarmHelperProfile::Standard,
+            ),
+            None,
+            false,
+            None,
+            None,
+            Some(reviewed),
+        )
+        .await;
+        (fixture, store)
     }
 
     pub(super) async fn for_helper_report(
@@ -89,7 +118,8 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         assert!(
             matches!(
                 fault.mode,
-                DeliveryMode::HoldHelperBeforeLookup
+                DeliveryMode::HoldHelperBeforeBind
+                    | DeliveryMode::HoldHelperBeforeLookup
                     | DeliveryMode::HoldHelperAcceptedReply
                     | DeliveryMode::PoisonPublicationAfterSecondAcceptance
             ) || fault.mode.helper_reprepare()
@@ -126,6 +156,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             false,
             None,
             None,
+            None,
         )
         .await;
         (fixture, store)
@@ -154,6 +185,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             true,
             retained,
             source_store,
+            None,
         )
         .await;
         (fixture, store, retained.unwrap())
@@ -174,6 +206,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         source_store: Option<
             crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
         >,
+        reviewed: Option<ReviewedHelperReview>,
     ) -> (
         Self,
         Arc<dyn meerkat_runtime::RuntimeStore>,
@@ -199,6 +232,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 durable,
                 retained,
                 source_store,
+                reviewed,
             )),
         ))
         .catch_unwind()
@@ -240,6 +274,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         source_store: Option<
             crate::installed_host::controller_first_input_fixture::PrepareOriginalSource,
         >,
+        reviewed: Option<ReviewedHelperReview>,
     ) -> (
         Self,
         Arc<dyn meerkat_runtime::RuntimeStore>,
@@ -311,6 +346,9 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 }
             }
         };
+        if let Some(reviewed) = &reviewed {
+            host.select_fixture_review_before_service(reviewed.floor.clone());
+        }
         *owners = Some((host.directory.clone(), host.lifetime.clone()));
         // Only the original direct-grant report mode waits until spawn. The
         // configured-parent mode binds the actual installed owner now, before
@@ -337,8 +375,12 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             }
         };
         let provider = Arc::new(ScriptedProvider::default());
-        let mut builder =
-            FactoryAgentBuilder::new(AgentFactory::minimal().comms(true), Config::default());
+        let factory = AgentFactory::minimal().comms(true);
+        let factory = match &reviewed {
+            Some(reviewed) => factory.with_operation_review(reviewed.review.clone()),
+            None => factory,
+        };
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
         let client = script.provider(provider.clone());
         let client = match &catalog {
             Some(probe) => probe.provider(client),
@@ -466,7 +508,28 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
                 .unwrap(),
             )
             .unwrap()
-            .register_tool_bundle(crate::FIND_AND_INSTALL_BUNDLE, script.dispatcher());
+            .register_tool_bundle(
+                crate::FIND_AND_INSTALL_BUNDLE,
+                if reviewed.is_some() {
+                    // Match the installed host's declaration for this exact Find
+                    // registration. Find admits local setup without a service account;
+                    // later helper operations keep their independently selected accounts.
+                    let find = Arc::new(
+                        meerkat_core::RegisteredToolBundleDispatcher::new(
+                            crate::FIND_AND_INSTALL_BUNDLE,
+                            script.dispatcher(),
+                        )
+                        .with_account(meerkat_core::OperationAccount::DeclaredNone),
+                    );
+                    assert!(matches!(
+                        find.operation_target(crate::FIND_AND_INSTALL).account(),
+                        Some(meerkat_core::OperationAccount::DeclaredNone)
+                    ));
+                    find
+                } else {
+                    script.dispatcher()
+                },
+            );
         if let Some(report) = &report {
             spec = spec.register_tool_bundle(
                 meerkat_toolkit::setup::SETUP_RESULTS_BUNDLE,
@@ -761,25 +824,40 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             materialized.push((helper_spec, helper, helper_session));
         } else if !durable {
             assert!(configured_report);
-            // Match Meta's lazy roster registration: the helper identity is
-            // owned but has no embodiment, session or lease yet. The actual
-            // governed dispatch below must still materialize it natively.
-            runtime.register(helper_spec).await;
+            // Meta's registration declares the helper identity in Core, which
+            // seats it Dormant: Core holds its member on a session, and nothing
+            // is embodied or leased yet. The actual governed dispatch below must
+            // still materialize it natively.
+            let answer = runtime
+                .register(helper_spec)
+                .await
+                .expect("the identity registers");
+            let seated_session = match &answer {
+                meerkat_mobkit::identity_first::DeclaredIdentityAnswer::Seated {
+                    session_id,
+                    ..
+                } => session_id.clone(),
+                other => panic!("Core seats the helper identity Dormant: {other:?}"),
+            };
             let status = runtime.status(&helper).await.unwrap();
-            assert_eq!(status.state, IdentityLifecycleState::Dormant);
-            assert!(status.session_id.is_none());
-            assert!(status.agent_runtime_id.is_none());
+            assert_eq!(status.session_id, Some(seated_session));
             assert_eq!(
                 runtime
                     .owned_identity_for_member_alias(helper.as_str())
                     .await,
                 Some(helper)
             );
-            assert!(handle.get_member(&helper_member).await.unwrap().is_none());
+            assert!(
+                handle.get_member(&helper_member).await.unwrap().is_some(),
+                "Core holds the helper's Dormant seat"
+            );
         }
         for (spec, selected_identity, selected_session) in materialized {
             // Core already owns this spawned member and session; registration adds its roster spec.
-            runtime.register(spec).await;
+            runtime
+                .register(spec)
+                .await
+                .expect("the identity registers");
             let status = runtime.status(&selected_identity).await.unwrap();
             assert_eq!(status.state, IdentityLifecycleState::Active);
             assert_eq!(status.session_id, Some(selected_session.clone()));
@@ -838,14 +916,21 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             if let Some(fault) = &fault {
                 assert!(fault.helper_session.set(sessions[1].clone()).is_ok());
             }
-            // The roster pass seats each identity without building it, so the
-            // first member is woken for its actor to exist.
-            native
+            // Created/Resumed names the durable seat, which may still be dormant.
+            // Wake this same controller through its actual owner before pinning;
+            // no prompt or synthetic input is submitted by materialization.
+            let controller = native
                 .identity_runtime()
                 .unwrap()
-                .materialize(&roster[0].identity)
+                .materialize_tracked(&identity)
                 .await
-                .unwrap();
+                .unwrap()
+                .expect("the fixture controller has a native session");
+            assert_eq!(
+                controller.session_id(),
+                &sessions[0],
+                "materialization preserves the selected durable session"
+            );
             Self::publish_fixture_controller(&service, &machine, &sessions[0]).await;
             (sessions[0].clone(), sessions)
         } else {

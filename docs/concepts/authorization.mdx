@@ -195,6 +195,19 @@ approval; `ToolDispatchContext::direct_requester` answers only for a direct
 one, which is the only one a host should act for in that person's name. Inputs
 of different requesters, or of a requester and none, never share a run.
 
+A host tool callback names the run's requester too, typed, so a host can
+refuse a person-scoped tool (one person's mail, documents or accounts) for
+anyone else: the JSON-RPC `tool/execute` request carries it as `requester`,
+and a detached callback job records the requester of the run that submitted
+it and names it on every `callback/job/start`. Only the runtime sets it; a
+`requester` inside a call's arguments is just an argument.
+
+An MCP App's action runs for the requester its host's trusted ingress names
+(`ToolApplicationIngress::requester`), as a direct requester, and never for
+the requester of the model run whose result the app shows. An ingress that
+names no one runs the action without a requester, and one that names an
+unqualified principal is refused.
+
 ## Information handling has an explicit limit
 
 Once an agent reads allowed information into a model context, this system cannot
@@ -260,7 +273,11 @@ owner then executes the held request at most once.
   an authenticated decision event and its evidence; the decider's eligibility is
   checked when the decision commits, the requester never decides its own
   request, and the first valid decision wins. A decision can name a reviewer
-  instead, whose verdict allows, denies or escalates to the human.
+  instead, whose verdict allows, denies or escalates to the human. The
+  evidence names the login the human decided in by its digest
+  (`HostAuthenticationScope::digest`), never the login itself;
+  [Human consent](/guides/authorization-integration#human-consent) says which
+  scopes that digest keeps private.
 - **Decided after it was shown.** A human decision event carries the time its
   trusted ingress observed it (`observed_at_ms`, such as a chat provider's
   message time), and its evidence records that time. An event observed before

@@ -64,6 +64,20 @@ impl RetainedInvocationOwner for PreparedApplicationPolicy {
 }
 
 impl AdmittedWorkPolicyOwner for PreparedApplicationPolicy {
+    fn review_mandate(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        now_ms: u64,
+    ) -> Result<Option<String>, OperationAuthorizationError> {
+        review_diagnostics::observe(
+            self.originals.review_observations(),
+            review_diagnostics::Stage::PreparedMandateOwner,
+            self.installed(),
+        )?
+        .review_mandate(association, binding, now_ms)
+    }
+
     fn authorize_mcp_attachment(
         &self,
         control: &meerkat_core::mcp_attachment_control::McpAttachmentControlRequest,
@@ -91,6 +105,20 @@ impl AdmittedWorkPolicyOwner for PreparedApplicationPolicy {
 }
 
 impl OperationPolicyOwner for PreparedApplicationPolicy {
+    fn review_action_account(
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        now_ms: u64,
+    ) -> Result<Option<String>, OperationAuthorizationError> {
+        review_diagnostics::observe(
+            self.originals.review_observations(),
+            review_diagnostics::Stage::PreparedAccountOwner,
+            self.installed(),
+        )?
+        .review_action_account(association, binding, now_ms)
+    }
+
     fn authorize_mcp_attachment(
         &self,
         control: &meerkat_core::mcp_attachment_control::McpAttachmentControlRequest,

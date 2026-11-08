@@ -26,7 +26,7 @@
 #     profile_check_dropped (the target predicate selects every member for a
 #       profile target) by AuditWriteOwesExactlyTheSelected;
 #     unborn_seat_delivered (the prepared delivery's born-session guard
-#       dropped) by AuditDeliversOnlyToBoundLocalBornMembers;
+#       dropped) by AuditDeliversOnlyToBoundBornMembers;
 #     seat_forgets_to_owe (a replayed seat owes nothing) by
 #       AuditSeatOwesTheGeneration;
 #     unseat_keeps_owed (a replayed retirement keeps the obligation) by
@@ -246,7 +246,7 @@ audit_properties="  AuditWriteOwesExactlyTheSelected
   AuditRegionWakesNothing"
 audit_invariants="  AuditRecordedWithinGeneration
   AuditOwedIsSeatedAndUnblocked
-  AuditDeliversOnlyToBoundLocalBornMembers"
+  AuditDeliversOnlyToBoundBornMembers"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
 # where <run> is write (AuditWriteSpec under AuditWriteConstraint) or seat
@@ -504,7 +504,7 @@ PY
     operator_instruction_target_applies 'member_profile = Some(profile)' \
     'operator_instruction_target_applies(kind, profile, member, member_profile, agent_identity) == ((kind = "Mob") \/ (kind = "Profile") \/ ((kind = "Member") /\ (member = Some(agent_identity))))'
   # A delivery is prepared for an unborn seat: the born-session guard dropped.
-  mutate seat unborn_seat_delivered Invariant AuditDeliversOnlyToBoundLocalBornMembers \
+  mutate seat unborn_seat_delivered Invariant AuditDeliversOnlyToBoundBornMembers \
     PrepareMemberInstructionDeliveryDeliverRunning 'member_seat_session_unborn' \
     '    /\ TRUE'
   # A replayed seat owes the member nothing.

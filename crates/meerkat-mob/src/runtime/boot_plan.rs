@@ -199,6 +199,9 @@ pub(crate) struct MemberResidencyConfig {
     /// The host's mint of a member's grant, for the reads that build nothing
     /// (`MobBuilder::with_member_grant_mint`).
     pub(crate) member_grant_mint: Option<std::sync::Arc<dyn super::MemberGrantMint>>,
+    /// The host's rule for the members a member's own operator tools may not
+    /// know of (`MobBuilder::with_member_tool_audience`).
+    pub(crate) member_tool_audience: Option<std::sync::Arc<dyn super::MemberToolAudience>>,
 }
 
 impl Default for MemberResidencyConfig {
@@ -221,6 +224,7 @@ impl Default for MemberResidencyConfig {
                 super::operator_instruction_delivery::DEFAULT_DORMANT_DELIVERY_CONCURRENCY,
             identity_changes_held: false,
             member_grant_mint: None,
+            member_tool_audience: None,
         }
     }
 }
@@ -242,7 +246,8 @@ impl std::fmt::Debug for MemberResidencyConfig {
                 &self.instruction_delivery_concurrency,
             )
             .field("identity_changes_held", &self.identity_changes_held)
-            .field("member_grant_mint", &self.member_grant_mint.is_some());
+            .field("member_grant_mint", &self.member_grant_mint.is_some())
+            .field("member_tool_audience", &self.member_tool_audience.is_some());
         #[cfg(feature = "runtime-adapter")]
         debug.field("build_preparer", &self.build_preparer.is_some());
         debug.finish()
@@ -1087,6 +1092,7 @@ pub(crate) fn verified_member_signal(
             bridge_session_id: Some(session_id.clone()),
             reason,
             hold: None,
+            cause_data: None,
             registration_refusal: None,
         },
     ))

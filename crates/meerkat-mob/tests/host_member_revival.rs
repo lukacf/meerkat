@@ -23,8 +23,8 @@ use meerkat_mob::MobError;
 use meerkat_mob::runtime::bridge_protocol::BridgeReply;
 use support::{
     HostFixtureOptions, REAL_COMMS_TEST_LOCK, bind_then_materialize, create_controlling_mob,
-    member_descriptor_from_ack, raw_host_status_command, spawn_host_daemon_fixture,
-    spawn_peer_comms_endpoint,
+    create_controlling_mob_with_customizer, member_descriptor_from_ack, raw_host_status_command,
+    spawn_host_daemon_fixture, spawn_peer_comms_endpoint,
 };
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -645,6 +645,128 @@ async fn failed_boot_revival_keeps_the_input_the_member_session_held() {
     assert!(
         row.state.stop_requeue.is_none(),
         "the held input is kept as the store holds it, with no requeue mark"
+    );
+
+    fixture.shutdown().await;
+}
+
+// ===========================================================================
+// Placed profile check on revival: the controlling side checks the stored
+// profile before a revival re-issues it, so a member placed before its
+// profile became one the host must not be given fails closed, typed, with
+// nothing sent
+// ===========================================================================
+
+/// Admits every placed profile until it is told to refuse, recording the
+/// source of each check.
+struct RevivalProfileJudge {
+    refuse: std::sync::atomic::AtomicBool,
+    seen: std::sync::Mutex<Vec<meerkat_mob::runtime::SpawnSource>>,
+}
+
+impl meerkat_mob::runtime::SpawnMemberCustomizer for RevivalProfileJudge {
+    fn customize_spawn(
+        &self,
+        _ctx: &meerkat_mob::runtime::SpawnCustomizationContext,
+        _spec: &mut meerkat_mob::runtime::SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        Ok(())
+    }
+
+    fn check_placed_profile(
+        &self,
+        ctx: &meerkat_mob::runtime::SpawnCustomizationContext,
+        _profile: &meerkat_mob::Profile,
+    ) -> Result<(), MobError> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ctx.spawn_source);
+        if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MobError::WiringError(
+                "refused by the revival judge".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_revival_checks_the_stored_profile_first() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let fixture = spawn_host_daemon_fixture(
+        HostFixtureOptions::named("rev-profile-host").with_member_build(),
+    )
+    .await
+    .expect("member-build fixture");
+    let judge = std::sync::Arc::new(RevivalProfileJudge {
+        refuse: std::sync::atomic::AtomicBool::new(false),
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let controlling =
+        create_controlling_mob_with_customizer("rev-profile", Some(judge.clone())).await;
+    let report = controlling.bind_fixture(&fixture).await;
+    controlling
+        .spawn_placed("worker", "b2", &report.host_id)
+        .await
+        .expect("placed spawn commits");
+    let row = fixture
+        .host_binding_record(controlling.mob_id.as_ref())
+        .await
+        .materialized
+        .get("b2")
+        .cloned()
+        .expect("materialized row");
+    let session_id = meerkat_core::SessionId::parse(&row.session_id).expect("session id");
+
+    // The member's profile becomes one the host must not be given, and its
+    // live runtime goes away: the next delivery asks for a revival.
+    judge
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture
+        .member_session_service()
+        .discard_live_session(&session_id)
+        .await
+        .expect("discard live member session");
+    let member = controlling
+        .handle
+        .member(&AgentIdentity::from("b2"))
+        .await
+        .expect("member handle");
+    let _ = member.send("first trigger", HandlingMode::Queue).await;
+    wait_until(
+        "the revival to fail closed with the judge's refusal",
+        || async {
+            matches!(
+                member.send("second trigger", HandlingMode::Queue).await,
+                Err(MobError::MemberRestoreFailed { ref reason, .. })
+                    if reason.contains("refused by the revival judge")
+            )
+        },
+    )
+    .await;
+
+    let seen = judge
+        .seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        seen.last(),
+        Some(&meerkat_mob::runtime::SpawnSource::Resume),
+        "the revival asks as a rebuild: {seen:?}"
+    );
+    // A revival re-sends the stored spec at the recorded tuple, so the host
+    // row cannot show a re-send; a re-sent spec would recompose the member,
+    // so its session stays down only when nothing was sent.
+    assert!(
+        !fixture
+            .member_session_service()
+            .has_live_session(&session_id)
+            .await
+            .unwrap_or(false),
+        "nothing was revived on the host"
     );
 
     fixture.shutdown().await;

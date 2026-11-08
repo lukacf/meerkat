@@ -1185,6 +1185,7 @@ impl MobActor {
                         reason.clone(),
                         None,
                         None,
+                        None,
                     )
                     .await;
                     // The explicit resume answers a member whose build the
@@ -1200,6 +1201,7 @@ impl MobActor {
                         session_id,
                         reason,
                         hold: None,
+                        cause_data: None,
                     });
                 }
             }
@@ -1479,6 +1481,7 @@ impl MobActor {
             attempt,
             error.to_string(),
             error.durable_resume_hold(),
+            error.structured_data(),
             registration_refusal,
         )
         .await;
@@ -1494,6 +1497,7 @@ impl MobActor {
         attempt: u64,
         reason: String,
         hold: Option<meerkat_core::service::DurableResumeHold>,
+        cause_data: Option<serde_json::Value>,
         registration_refusal: Option<crate::MemberRegistrationHookCall>,
     ) {
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
@@ -1533,6 +1537,7 @@ impl MobActor {
                         bridge_session_id: session_id,
                         reason,
                         hold,
+                        cause_data,
                         registration_refusal,
                     },
                 )

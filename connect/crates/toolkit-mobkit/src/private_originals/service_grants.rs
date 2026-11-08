@@ -370,9 +370,10 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Conflict);
         }
         if let (Some(mcp), AccessDecision::Mcp(decision)) = (&record.mcp, &record.decision) {
-            mcp.validate(self.route(&reference.route)?, decision)?;
+            let route = self.route(&reference.route)?;
+            mcp.validate(route.as_ref(), decision)?;
             if let Some(evidence) = &record.application_policy {
-                evidence.validate(self.route(&reference.route)?, decision, &self.scope.owner)?;
+                evidence.validate(route.as_ref(), decision, &self.scope.owner)?;
             }
         }
         if let IssuanceObservation::Issued { lineage } = &record.issuance
@@ -506,7 +507,7 @@ impl PrivateOriginals {
         presented: ServiceOperationCurrent,
         progress: Option<Arc<ServiceOperationProgress>>,
     ) -> Result<PrivateServiceGrantObservation, ServiceOperationError> {
-        let route = self.route(decision.route())?;
+        let route = &self.route(decision.route())?;
         if let Some(evidence) = &application_policy {
             let AccessDecision::Mcp(ref proposal) = decision else {
                 return Err(PrivateOriginalError::Denied.into());
@@ -634,7 +635,7 @@ impl PrivateOriginals {
         let represented = route.represented_subject.clone();
         let mcp_check = match (&record.mcp, &record.decision) {
             (Some(selection), AccessDecision::Mcp(decision)) => {
-                Some((selection.clone(), route.clone(), decision.clone()))
+                Some((selection.clone(), route.as_ref().clone(), decision.clone()))
             }
             _ => None,
         };
@@ -772,7 +773,7 @@ impl PrivateOriginals {
         reference: PrivateServiceGrantRef,
         record: &AccessRecord,
     ) -> Result<PrivateServiceGrantObservation, PrivateOriginalError> {
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         let state = match &record.issuance {
             IssuanceObservation::PendingNativeIssuance => {
                 PrivateServiceGrantState::PendingReconciliation
@@ -892,7 +893,7 @@ impl PrivateOriginals {
         if association.candidate().authority_basis != (meerkat_authorization_contracts::work_association::WorkAuthorityBasis::GrantLineage { lineage }) {
             return Err(PrivateOriginalError::Conflict);
         }
-        let route = self.route(&source.route)?;
+        let route = &self.route(&source.route)?;
         let task_issuer = matches!(
             &decision.decision.lifetime().scope,
             LifetimeScope::Task { .. }
@@ -985,7 +986,7 @@ impl PrivateOriginals {
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_access(&stored, reference)?;
-        let route = self.route(&reference.route)?;
+        let route = &self.route(&reference.route)?;
         if original.authority != route.source_authority
             || matches!(&record.decision.lifetime().scope, LifetimeScope::Task { task }
                 if task.as_str() != original.work.as_str())

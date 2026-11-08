@@ -2101,6 +2101,19 @@ pub(crate) async fn runtime_delivery_backlog_in(
     })
 }
 
+/// Whether `runtime_id` holds committed-but-unapplied deliveries in `store`:
+/// [`runtime_delivery_backlog_in`] for one runtime, from its own delivery
+/// authority. A runtime with no authority holds none.
+pub(crate) async fn runtime_delivery_pending_in(
+    store: &dyn RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+) -> Result<bool, RuntimeDeliveryError> {
+    let Some(record) = store.load_runtime_delivery_authority(runtime_id).await? else {
+        return Ok(false);
+    };
+    Ok(pending_delivery_count(runtime_id, &record)? > 0)
+}
+
 /// Refuse a store-wide answer while runtimes are unavailable: the typed
 /// refusal naming their scopes.
 fn refuse_unavailable(unavailable: &[UnavailableRuntime]) -> Result<(), RuntimeDeliveryError> {

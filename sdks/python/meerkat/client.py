@@ -52,6 +52,17 @@ from . import _rkat_rpc_digests
 from .errors import BinaryIntegrityError, CapabilityUnavailableError, MeerkatError
 from .event_envelope import parse_agent_event_envelope
 from .events import RealtimeMessageOrigin, Usage, _parse_usage
+from .instructions import (
+    InstructionTarget,
+    MobInstructionStatus,
+    MobInstructionWriteResult,
+    SessionInstructionStatus,
+    SessionInstructionWriteResult,
+    parse_mob_instruction_status,
+    parse_mob_instruction_write_result,
+    parse_session_instruction_status,
+    parse_session_instruction_write_result,
+)
 from .generated.rpc_contracts import RpcRequest
 from .generated.types import (
     CONTRACT_VERSION,
@@ -243,6 +254,7 @@ from .mob import (
     MobLifecycleAction,
     MobMember,
     MobMemberCustodyDeferral,
+    MobMemberPreviewUnavailableUnknown,
     MobMemberRef,
     MobMemberSnapshot,
     MobPeerConnectivity,
@@ -877,6 +889,17 @@ class MeerkatClient:
         A handler that declares a ``dedupe_key`` parameter also receives the
         call's :class:`ToolCallDedupeKey` (``None`` when the call has none). A
         resumed run that dispatches the same call again sends the same key.
+
+        A handler that declares a ``requester`` parameter receives the
+        :class:`ToolCallRequester` of the run the call serves (``None`` when
+        the run has none). The runtime sets it, never the arguments, so a tool
+        that acts in one person's name can refuse every other requester::
+
+            @client.tool("read_mail", description="Read the owner's mail")
+            async def read_mail(arguments: dict, requester=None) -> str:
+                if requester is None or requester.direct_principal != OWNER:
+                    raise PermissionError("this mailbox serves its owner only")
+                ...
         """
 
         def decorator(fn: Any) -> Any:
@@ -2270,6 +2293,157 @@ class MeerkatClient:
             params["offset"] = offset
         raw = await self._request("session/instruction_activations", params)
         return self._parse_instruction_activation_read_page(raw)
+
+    # -- Operator instructions ---------------------------------------------
+
+    async def set_session_instruction(
+        self,
+        session_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        *,
+        content_sha256: str | None = None,
+    ) -> SessionInstructionWriteResult:
+        """Record one session-owned operator instruction: the slot's body at
+        a revision, applied at the session's next fresh run start.
+
+        A mob member's session is refused ``owned_by_mob``: write to it with
+        :meth:`set_mob_instruction` and a member target. A refusal raises
+        :class:`MeerkatError`; :func:`meerkat.errors.instruction_set_code`
+        reads its closed code.
+        """
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "namespace": namespace,
+            "key": key,
+            "revision": revision,
+            "body": body,
+        }
+        if content_sha256 is not None:
+            params["content_sha256"] = content_sha256
+        raw = await self._request("session/set_instruction", params)
+        return parse_session_instruction_write_result(
+            raw, "Invalid session/set_instruction response"
+        )
+
+    async def revoke_session_instruction(
+        self,
+        session_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+    ) -> SessionInstructionWriteResult:
+        """Revoke one session-owned operator instruction at a higher revision."""
+        raw = await self._request(
+            "session/revoke_instruction",
+            {
+                "session_id": session_id,
+                "namespace": namespace,
+                "key": key,
+                "revision": revision,
+            },
+        )
+        return parse_session_instruction_write_result(
+            raw, "Invalid session/revoke_instruction response"
+        )
+
+    async def session_instruction_status(
+        self, session_id: str
+    ) -> SessionInstructionStatus:
+        """Read a session's committed operator-instruction state without
+        materializing the session."""
+        raw = await self._request(
+            "session/instruction_status", {"session_id": session_id}
+        )
+        return parse_session_instruction_status(
+            raw, "Invalid session/instruction_status response"
+        )
+
+    async def set_mob_instruction(
+        self,
+        mob_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        target: InstructionTarget,
+        *,
+        content_sha256: str | None = None,
+    ) -> MobInstructionWriteResult:
+        """Write one operator instruction for the members ``target`` selects:
+        ``{"kind": "mob"}``, ``{"kind": "profile", "profile": ...}`` or
+        ``{"kind": "member", "agent_identity": ...}``.
+
+        Returns once the record is in the mob's journal; delivery to the
+        members is asynchronous (see :meth:`mob_instruction_status`).
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "namespace": namespace,
+            "key": key,
+            "revision": revision,
+            "body": body,
+            "target": dict(target),
+        }
+        if content_sha256 is not None:
+            params["content_sha256"] = content_sha256
+        raw = await self._request("mob/set_instruction", params)
+        return parse_mob_instruction_write_result(
+            raw, "Invalid mob/set_instruction response"
+        )
+
+    async def revoke_mob_instruction(
+        self,
+        mob_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+    ) -> MobInstructionWriteResult:
+        """Revoke one operator instruction of a mob at a higher revision; the
+        record keeps its target."""
+        raw = await self._request(
+            "mob/revoke_instruction",
+            {
+                "mob_id": mob_id,
+                "namespace": namespace,
+                "key": key,
+                "revision": revision,
+            },
+        )
+        return parse_mob_instruction_write_result(
+            raw, "Invalid mob/revoke_instruction response"
+        )
+
+    async def mob_instruction_status(
+        self,
+        mob_id: str,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        agent_identity: str | None = None,
+        profile: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> MobInstructionStatus:
+        """Read a mob's operator-instruction records and one page of members
+        (``limit`` 1 to 200, 100 when absent), without waking a member."""
+        params: dict[str, Any] = {"mob_id": mob_id}
+        for name, value in (
+            ("namespace", namespace),
+            ("key", key),
+            ("agent_identity", agent_identity),
+            ("profile", profile),
+            ("offset", offset),
+            ("limit", limit),
+        ):
+            if value is not None:
+                params[name] = value
+        raw = await self._request("mob/instruction_status", params)
+        return parse_mob_instruction_status(
+            raw, "Invalid mob/instruction_status response"
+        )
 
     async def restore_session_transcript_revision(
         self,
@@ -8610,25 +8784,31 @@ class MeerkatClient:
     @staticmethod
     def _parse_member_preview_unavailable(
         raw: dict[str, Any], context: str
-    ) -> WireMemberPreviewUnavailable | None:
+    ) -> WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown | None:
         """Return the typed reason a status read carries no observed preview.
 
         Absent or ``null`` means ``output_preview``/``tokens_used`` are
-        observations; a value outside the closed vocabulary fails closed.
+        observations. The field is advisory and its vocabulary may grow: a
+        reason this SDK does not know is read as ``{"unknown": <the value>}``,
+        so a newer server never fails the read. A value that is not a string
+        is malformed and fails closed.
         """
         value = raw.get("preview_unavailable")
         if value is None:
             return None
-        if not isinstance(value, str) or value not in {
+        if not isinstance(value, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
+            )
+        if value in {
             "observation_deadline",
             "read_failed",
             "session_absent",
             "not_observed_while_retiring",
+            "store_refused",
         }:
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
-            )
-        return cast(WireMemberPreviewUnavailable, value)
+            return cast(WireMemberPreviewUnavailable, value)
+        return {"unknown": value}
 
     @staticmethod
     def _parse_member_registration_refusal(

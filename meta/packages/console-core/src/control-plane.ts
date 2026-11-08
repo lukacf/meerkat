@@ -194,9 +194,10 @@ export interface RoutingSectionView {
   }>;
 }
 
+/** A console decision request. It names no approver: the gateway decides as
+ * the signed-in person and refuses a request that carries `approver_id`. */
 export interface GatingActionRequest {
   pending_id: string;
-  approver_id: string;
   decision: "approve" | "reject" | "escalate";
   reason?: string;
 }
@@ -545,8 +546,7 @@ export function normalizeGatingActionRequest(value: unknown): GatingActionReques
     return null;
   }
   const pendingId = trimString(record.pending_id);
-  const approverId = trimString(record.approver_id);
-  if (!pendingId || !approverId) {
+  if (!pendingId) {
     return null;
   }
   if (record.decision !== "approve" && record.decision !== "reject" && record.decision !== "escalate") {
@@ -554,7 +554,6 @@ export function normalizeGatingActionRequest(value: unknown): GatingActionReques
   }
   return {
     pending_id: pendingId,
-    approver_id: approverId,
     decision: record.decision,
     ...(trimString(record.reason) ? { reason: trimString(record.reason) } : {}),
   };

@@ -198,7 +198,7 @@ pub use identity::{
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MobId, PlacedSpawnId, ProfileName, RespawnTopologyPeerId, RunId,
-    StepId, WorkOrigin, WorkRef, WorkSpec,
+    SenderLabel, StepId, WorkOrigin, WorkRef, WorkSpec,
 };
 pub use launch::{ForkContext, MemberLaunchMode};
 #[doc(hidden)]
@@ -338,7 +338,7 @@ pub use runtime::stop_report::{
     MemberStopOutcome, MemberStopRun, MobRunDrainReport, MobStopReport, NotHoldableReason,
     StopOptions,
 };
-pub use runtime::{AGENT_MOB_TOOL_NAMES, agent_mob_tool_names};
+pub use runtime::{AGENT_MOB_TOOL_NAMES, MemberToolAudience, agent_mob_tool_names};
 pub use runtime::{
     AdaptiveDriverCapability, AdaptiveLayerAdmission, AdaptiveLayerAdmissionRequest,
     AdaptiveLayerAttempt, AdaptiveLayerDisposition, AdaptiveLayerPhaseView,
@@ -365,23 +365,23 @@ pub use runtime::{
     LiveDurableSourceObservation, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
     MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain, MemberInputAdmission,
-    MemberLiveStatusDomain, MemberOperatorAuthorityCeiling, MemberPreviewUnavailable,
-    MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal, MemberRespawnReceipt,
-    MemberRunState, MemberSessionActivity, MemberShutdownOutcome, MemberStatusSessionView,
-    MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
-    MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState, MobActorTaskWait,
-    MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyMemberRefusal, MobDestroyReport,
-    MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig,
-    MobHandle, MobMachineStateChanges, MobMemberEndpointOwner, MobMemberEndpointStatus,
-    MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobSessionService, MobShutdownReport, MobSpawnManyFailure, MobState,
-    MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt,
-    PeerTarget, PreviousMemberCleanupReport, QueuedInputsOnShutdown, RequeueMaxAge,
-    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, ResumedMemberView,
-    RetirementSettlement, RetirementSettlementWatch, RetirementStage, SessionResumeAuthority,
-    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
-    SessionResumeRejection, SessionResumeVerdict, ShutdownOptions, ShutdownOptionsError,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
+    MemberLifecycleSettlement, MemberLiveStatusDomain, MemberOperatorAuthorityCeiling,
+    MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal,
+    MemberRespawnReceipt, MemberRunState, MemberSessionActivity, MemberShutdownOutcome,
+    MemberStatusSessionView, MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender,
+    MemberTurnHandle, MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState,
+    MobActorTaskWait, MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyMemberRefusal,
+    MobDestroyReport, MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription,
+    MobEventsSubscriptionConfig, MobHandle, MobMachineStateChanges, MobMemberEndpointOwner,
+    MobMemberEndpointStatus, MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus,
+    MobPeerConnectivitySnapshot, MobRespawnError, MobSessionService, MobShutdownReport,
+    MobSpawnManyFailure, MobState, MobUnreachablePeer, MobWireMembersBatchReport,
+    OwnedMemberTargetAdmission, PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport,
+    QueuedInputsOnShutdown, RequeueMaxAge, ResumeRejectionKind, ResumeSessionLoad,
+    ResumeVerdictTerminality, ResumedMemberView, RetirementSettlement, RetirementSettlementWatch,
+    RetirementStage, SessionResumeAuthority, SessionResumeLifecycle, SessionResumeMaterialization,
+    SessionResumePreparationReceipt, SessionResumeRejection, SessionResumeVerdict, ShutdownOptions,
+    ShutdownOptionsError, SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
     SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberCustomizerChain,
     SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
     SpawnToolAdmission, SupervisorRotationReport, WithheldToolBundle, WorkBoundedTurnResult,
@@ -404,8 +404,8 @@ pub use runtime::{
 };
 pub use runtime::{
     DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
-    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
-    NotAdoptedReason, UnlistedEntryOutcome,
+    DeclaredEntryRefusal, DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome,
+    FirstBootRequest, NotAdoptedReason, UnlistedEntryOutcome,
 };
 #[cfg(feature = "openai-live")]
 pub use runtime::{

@@ -56,6 +56,10 @@ export type ConsoleGatewayInteractionRejectedError = ConsoleInteractionRejectedE
 export interface ConsoleAgentAffordances {
   addressable?: boolean;
   can_send_message?: boolean;
+  /** Under enforced access: whether the viewer may change the agent's
+   * console schedules (`agent.send` and `schedule.manage`). Absent
+   * otherwise, where `can_send_message` decides. */
+  can_manage_schedules?: boolean;
   can_retire?: boolean;
   can_respawn?: boolean;
   runtime_mode?: string;
@@ -237,6 +241,13 @@ export interface ConsoleAttentionUiConfig {
   sources?: ConsoleAttentionSourceConfig[];
 }
 
+/** The host's sign-out (console configuration `[sign_out]`): a same-origin
+ * path, followed with a GET link or submitted as a POST form. */
+export interface ConsoleSignOutConfig {
+  href: string;
+  method?: "get" | "post";
+}
+
 export interface ConsoleUiConfig {
   /** Trusted same-origin ES modules exporting a ConsolePanel. */
   panel_modules?: string[];
@@ -252,6 +263,7 @@ export interface ConsoleUiConfig {
   agent_list?: ConsoleAgentListConfig;
   actions?: ConsoleActionsUiConfig;
   attention?: ConsoleAttentionUiConfig;
+  sign_out?: ConsoleSignOutConfig;
 }
 
 export interface ConsolePolicyConfig {

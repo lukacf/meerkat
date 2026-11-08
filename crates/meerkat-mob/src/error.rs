@@ -2054,6 +2054,23 @@ pub enum MobError {
         class: MobQuarantineClass,
         cause: Arc<MobError>,
     },
+
+    /// A resume of member `member_id` named session `session_id`, which is
+    /// durably bound to another member: its mob member binding, or the comms
+    /// name it was created under, names member `bound_member_id` of mob
+    /// `bound_mob_id`. The session stays that member's, and nothing is
+    /// seated. Structured data: `kind`
+    /// `resume_session_bound_to_another_member`, `session_id`, `member_id`,
+    /// `bound_mob_id` and `bound_member_id`.
+    #[error(
+        "session '{session_id}' is bound to member '{bound_member_id}' of mob '{bound_mob_id}', so member '{member_id}' cannot resume it"
+    )]
+    ResumeSessionBoundToAnotherMember {
+        session_id: meerkat_core::SessionId,
+        member_id: AgentIdentity,
+        bound_mob_id: MobId,
+        bound_member_id: AgentIdentity,
+    },
 }
 
 /// Why a member's operator authority ceiling was refused
@@ -2886,6 +2903,18 @@ impl MobError {
                 "max_bytes": max_bytes,
                 "required_bytes": required_bytes,
             })),
+            Self::ResumeSessionBoundToAnotherMember {
+                session_id,
+                member_id,
+                bound_mob_id,
+                bound_member_id,
+            } => Some(serde_json::json!({
+                "kind": "resume_session_bound_to_another_member",
+                "session_id": session_id.to_string(),
+                "member_id": member_id.as_str(),
+                "bound_mob_id": bound_mob_id.as_str(),
+                "bound_member_id": bound_member_id.as_str(),
+            })),
             // A restore failure that IS a typed resume hold projects the hold
             // under meerkat's own key, so a wire caller classifies the Broken
             // member exactly as it classifies meerkat's -32013 refusal.
@@ -3398,6 +3427,10 @@ impl MobError {
                     Some(meerkat_contracts::ErrorCode::ForkInstructionRefused)
                 }
                 Self::ForkContextTooLarge { .. } => {
+                    Some(meerkat_contracts::ErrorCode::InvalidParams)
+                }
+                // The caller named a session another member owns.
+                Self::ResumeSessionBoundToAnotherMember { .. } => {
                     Some(meerkat_contracts::ErrorCode::InvalidParams)
                 }
                 // The caller named a binding the session's live actor does

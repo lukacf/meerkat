@@ -643,15 +643,14 @@ async fn today_the_exact_prefix_member_fork_exists_only_in_process() {
     assert!(held.error.is_none(), "{:?}", held.error);
 }
 
-/// Today: the identity `main` cannot be re-seated on an in-process fork's
-/// session. The fork child and `main` are retired, and `mob/spawn` of `main`
-/// with `launch_mode = resume` on the child's session is refused: the
-/// session is durably bound to the child's identity.
-///
-/// Delete with the fix; [`a_member_session_forks_at_a_message_boundary`]
-/// is the intended behaviour (a new session for the same identity).
+/// The identity `main` cannot be re-seated on another member's session. The
+/// in-process fork child and `main` are retired, and `mob/spawn` of `main`
+/// with `launch_mode = resume` on the child's session is refused: the session
+/// is durably bound to the child's identity. The refusal is typed invalid
+/// params naming the session and the member it is bound to, and seats
+/// nothing.
 #[tokio::test]
-async fn today_main_cannot_be_reseated_on_an_in_process_fork_session() {
+async fn main_cannot_be_reseated_on_another_members_session() {
     let rig = rig();
     let source = rig.seat_main(None).await;
     for prompt in PROMPTS {
@@ -693,11 +692,21 @@ async fn today_main_cannot_be_reseated_on_an_in_process_fork_session() {
         .error
         .expect("`main` cannot be seated on the fork child's session");
     assert_eq!(error.code, meerkat_rpc::error::INVALID_PARAMS);
+    let data = error
+        .data
+        .as_ref()
+        .unwrap_or_else(|| panic!("the refusal is typed: {}", error.message));
+    assert_eq!(
+        data["kind"], "resume_session_bound_to_another_member",
+        "{data}"
+    );
+    assert_eq!(data["session_id"], child.as_str(), "{data}");
+    assert_eq!(data["member_id"], MAIN, "{data}");
+    assert_eq!(data["bound_mob_id"], MOB_ID, "{data}");
+    assert_eq!(data["bound_member_id"], "main-rewound", "{data}");
     assert!(
-        error.message.contains("persisted mob member binding")
-            && error.message.contains("main-rewound")
-            && error.message.contains("contradicts"),
-        "the child's session is bound to the child's identity: {}",
+        error.message.contains("main-rewound") && !error.message.contains("MobMemberBinding"),
+        "the message names the member the session is bound to, without a debug rendering: {}",
         error.message
     );
     assert!(rig.roster().await.is_empty(), "the refusal seats nothing");

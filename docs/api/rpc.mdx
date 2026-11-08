@@ -2440,6 +2440,12 @@ resume runs no kickoff and does not deliver `initial_message`; a first turn that
 started and was interrupted is not re-run. A placed member follows the same rule;
 a resume on a member host of 0.9.4 or earlier still runs the first turn.
 
+A resume of a session that is bound to another member (its member binding, or
+the comms name it was created under, names another mob or member) is refused
+with `-32602` and `data.kind` `resume_session_bound_to_another_member`
+(`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`), and nothing is
+seated.
+
 ### workgraph/get
 
 Read one WorkGraph item by id. Requires the `workgraph` feature and a

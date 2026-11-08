@@ -740,6 +740,16 @@ them.
   can spell, refused it `NameHeldByWorker`, and a host that labelled a raw
   member of that name could not have it adopted.
 
+- `meerkat-mob`, `meerkat-rpc`: a resume (`mob/spawn` with a `resume`
+  `launch_mode`) of a session that is bound to another member is refused
+  typed, with the new `MobError::ResumeSessionBoundToAnotherMember`
+  (`session_id`, `member_id`, `bound_mob_id`, `bound_member_id`): over RPC
+  invalid params with `data.kind` `resume_session_bound_to_another_member`.
+  It was an internal error whose message held a debug rendering of the
+  session's member binding. With a declared role migration the refusal stays
+  `MemberRoleMigrationRejected`, whose reason now names the session and the
+  member it is bound to. (#2117, thanks @zond)
+
 - `meerkat-mcp`: retained attachment controls are released when the
   router's close begins (`McpRouterAdapter::begin_close`), so a router whose
   shutdown never runs no longer keeps the controls it retains for a re-add

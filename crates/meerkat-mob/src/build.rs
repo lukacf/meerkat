@@ -666,7 +666,12 @@ pub async fn build_resumed_agent_config(
     let metadata = resumed_session
         .session_metadata()
         .ok_or_else(|| MobError::Internal("missing durable session metadata".to_string()))?;
-    apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, resume_from_role)?;
+    apply_resumed_session_metadata_with_role_migration(
+        &mut config,
+        &metadata,
+        resume_from_role,
+        expected_session_id,
+    )?;
     // Rematerialization authors nothing. Prompt configuration can be needed
     // to rebuild the disposable executor, but it is never new durable input.
     // New ordered System content enters through the typed admission API after
@@ -680,17 +685,26 @@ pub async fn build_resumed_agent_config(
     Ok(config)
 }
 
+/// [`apply_resumed_session_metadata_with_role_migration`] without a role
+/// migration, for a session that has no id of its own here (a fresh one
+/// stands in for it in a refusal).
 fn apply_resumed_session_metadata(
     config: &mut AgentBuildConfig,
     metadata: &SessionMetadata,
 ) -> Result<(), MobError> {
-    apply_resumed_session_metadata_with_role_migration(config, metadata, None)
+    apply_resumed_session_metadata_with_role_migration(
+        config,
+        metadata,
+        None,
+        &meerkat_core::SessionId::new(),
+    )
 }
 
 fn apply_resumed_session_metadata_with_role_migration(
     config: &mut AgentBuildConfig,
     metadata: &SessionMetadata,
     resume_from_role: Option<&ProfileName>,
+    session_id: &meerkat_core::SessionId,
 ) -> Result<(), MobError> {
     let Some(current_comms_name) = config.comms_name.clone() else {
         return Err(MobError::Internal(
@@ -710,6 +724,7 @@ fn apply_resumed_session_metadata_with_role_migration(
         }
     }
     let role_migrated = admit_resumed_member_identity(
+        session_id,
         &current_comms_name,
         &stored_comms_name,
         config.mob_member_binding.as_ref(),
@@ -858,6 +873,7 @@ pub(crate) fn resumed_comms_name_matches_current_or_legacy(current: &str, stored
 /// materialization restamps the current binding through the ordinary factory
 /// path.
 fn admit_resumed_member_identity(
+    session_id: &meerkat_core::SessionId,
     current_comms_name: &str,
     stored_comms_name: &str,
     current_binding: Option<&meerkat_core::MobMemberBinding>,
@@ -881,15 +897,17 @@ fn admit_resumed_member_identity(
     let canonical_member = current_binding
         .map(|binding| binding.member.as_str())
         .unwrap_or(current_member);
+    let rejection = ResumedIdentityRejection {
+        session_id,
+        member: canonical_member,
+        role: current_role,
+        resume_from_role,
+    };
 
     if current_mob != stored_mob {
-        return Err(role_migration_identity_rejection(
-            canonical_member,
-            current_role,
-            resume_from_role,
-            format!(
-                "persisted comms_name '{stored_comms_name}' does not prove the current mob/member identity '{current_comms_name}'"
-            ),
+        return Err(rejection.bound_to_another_member(
+            stored_mob,
+            stored_binding.map_or(stored_member_from_name, |binding| binding.member.as_str()),
         ));
     }
 
@@ -912,29 +930,22 @@ fn admit_resumed_member_identity(
             stored_mob,
             stored_role_from_name,
             stored_member_from_name,
-        ) || binding.mob_id != current_mob
+        ) {
+            // The session's own durable records disagree: its binding does not
+            // prove the comms name it was created under.
+            return Err(rejection.inconsistent_record(format!(
+                "persisted mob member binding '{binding:?}' contradicts persisted comms_name '{stored_comms_name}'"
+            )));
+        }
+        if binding.mob_id != current_mob
             || !member_segments_prove_same_identity(canonical_member, &binding.member)
         {
-            return Err(role_migration_identity_rejection(
-                canonical_member,
-                current_role,
-                resume_from_role,
-                format!(
-                    "persisted mob member binding '{binding:?}' contradicts persisted comms_name '{stored_comms_name}' or the requested mob/member identity"
-                ),
-            ));
+            return Err(rejection.bound_to_another_member(&binding.mob_id, &binding.member));
         }
         binding.role.as_str()
     } else {
         if !member_segments_prove_same_identity(canonical_member, stored_member_from_name) {
-            return Err(role_migration_identity_rejection(
-                canonical_member,
-                current_role,
-                resume_from_role,
-                format!(
-                    "persisted comms_name '{stored_comms_name}' does not prove the current mob/member identity '{current_comms_name}'"
-                ),
-            ));
+            return Err(rejection.bound_to_another_member(stored_mob, stored_member_from_name));
         }
         stored_role_from_name
     };
@@ -963,20 +974,50 @@ fn admit_resumed_member_identity(
     Ok(true)
 }
 
-fn role_migration_identity_rejection(
-    current_member: &str,
-    current_role: &str,
-    resume_from_role: Option<&ProfileName>,
-    reason: String,
-) -> MobError {
-    match resume_from_role {
-        Some(declared_predecessor_role) => MobError::MemberRoleMigrationRejected {
-            member_id: AgentIdentity::from(current_member),
-            declared_predecessor_role: declared_predecessor_role.clone(),
-            requested_role: ProfileName::from(current_role),
-            reason,
-        },
-        None => MobError::Internal(reason),
+/// The refusals of a resume whose session does not prove the identity being
+/// seated. With a declared role migration each is that migration's typed
+/// rejection.
+struct ResumedIdentityRejection<'a> {
+    session_id: &'a meerkat_core::SessionId,
+    member: &'a str,
+    role: &'a str,
+    resume_from_role: Option<&'a ProfileName>,
+}
+
+impl ResumedIdentityRejection<'_> {
+    /// The session is durably bound to member `bound_member` of mob
+    /// `bound_mob`, not to the member being seated.
+    fn bound_to_another_member(&self, bound_mob: &str, bound_member: &str) -> MobError {
+        match self.resume_from_role {
+            Some(declared_predecessor_role) => MobError::MemberRoleMigrationRejected {
+                member_id: AgentIdentity::from(self.member),
+                declared_predecessor_role: declared_predecessor_role.clone(),
+                requested_role: ProfileName::from(self.role),
+                reason: format!(
+                    "session '{}' is bound to member '{bound_member}' of mob '{bound_mob}'",
+                    self.session_id
+                ),
+            },
+            None => MobError::ResumeSessionBoundToAnotherMember {
+                session_id: self.session_id.clone(),
+                member_id: AgentIdentity::from(self.member),
+                bound_mob_id: MobId::from(bound_mob),
+                bound_member_id: AgentIdentity::from(bound_member),
+            },
+        }
+    }
+
+    /// The session's own durable records contradict each other.
+    fn inconsistent_record(&self, reason: String) -> MobError {
+        match self.resume_from_role {
+            Some(declared_predecessor_role) => MobError::MemberRoleMigrationRejected {
+                member_id: AgentIdentity::from(self.member),
+                declared_predecessor_role: declared_predecessor_role.clone(),
+                requested_role: ProfileName::from(self.role),
+                reason,
+            },
+            None => MobError::Internal(reason),
+        }
     }
 }
 
@@ -4880,9 +4921,13 @@ mod tests {
     #[test]
     fn resumed_role_drift_requires_an_explicit_one_request_declaration() {
         let (mut config, metadata) = role_migration_fixture();
-        let error =
-            apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, None)
-                .expect_err("role drift without authority must fail closed");
+        let error = apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            None,
+            &SessionId::new(),
+        )
+        .expect_err("role drift without authority must fail closed");
 
         assert!(matches!(
             error,
@@ -4904,6 +4949,7 @@ mod tests {
             &mut config,
             &metadata,
             Some(&declared),
+            &SessionId::new(),
         )
         .expect_err("a declaration cannot authorize a different predecessor");
 
@@ -4922,8 +4968,13 @@ mod tests {
     fn exact_role_migration_keeps_current_tooling_and_restamps_current_identity() {
         let (mut config, metadata) = role_migration_fixture();
         let declared = ProfileName::from("domain");
-        apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, Some(&declared))
-            .expect("exact predecessor declaration should authorize the restamp");
+        apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            Some(&declared),
+            &SessionId::new(),
+        )
+        .expect("exact predecessor declaration should authorize the restamp");
 
         assert!(
             config.resume_override_mask.comms_name && config.resume_override_mask.peer_meta,
@@ -4967,8 +5018,13 @@ mod tests {
         let expected_comms_name = config.comms_name.clone();
         let expected_binding = config.mob_member_binding.clone();
         let declared = ProfileName::from("domain");
-        apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, Some(&declared))
-            .expect("an already-consumed predecessor declaration must be inert");
+        apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            Some(&declared),
+            &SessionId::new(),
+        )
+        .expect("an already-consumed predecessor declaration must be inert");
 
         assert_eq!(config.comms_name, expected_comms_name);
         assert_eq!(config.mob_member_binding, expected_binding);
@@ -5002,8 +5058,13 @@ mod tests {
                 .with_label("durable_annotation", "retained"),
         );
 
-        apply_resumed_session_metadata_with_role_migration(&mut config, &metadata, None)
-            .expect("same-role identity admission should succeed");
+        apply_resumed_session_metadata_with_role_migration(
+            &mut config,
+            &metadata,
+            None,
+            &SessionId::new(),
+        )
+        .expect("same-role identity admission should succeed");
 
         assert!(
             config.resume_override_mask.comms_name && config.resume_override_mask.peer_meta,

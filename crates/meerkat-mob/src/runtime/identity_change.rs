@@ -729,11 +729,14 @@ pub enum NotAdoptableReason {
     Placed,
     /// The member is bound to no session.
     NoSession,
-    /// The roster-owned identity is hosted on its first use.
+    /// The roster-owned identity is hosted on its first use: retryable
+    /// once its first use seated it.
     HostedOnFirstUse,
-    /// The roster-owned identity awaits its held creation.
+    /// The roster-owned identity awaits its held creation: retryable once
+    /// its host released the held creation.
     AwaitingHeldCreation,
-    /// The roster-owned identity awaits its host's preparation.
+    /// The roster-owned identity awaits its host's preparation: retryable
+    /// once its host's preparation settled.
     AwaitingHostPreparation,
     /// The worker member was spawned with a profile or model override,
     /// which a store-owned identity's spec does not carry.
@@ -761,7 +764,10 @@ impl NotAdoptableReason {
     /// Whether an adoption refused for this reason may commit later
     /// unchanged: a roster-owned identity its host still settles (hosted
     /// on its first use, awaiting its held creation or its host's
-    /// preparation) is adopted once its host settled it.
+    /// preparation) is adopted once its host settled it. Only the host's
+    /// own action settles it (the first use, the held creation's release,
+    /// the preparation), so a caller retries after it and bounds its
+    /// retries.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(

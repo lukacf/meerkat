@@ -618,7 +618,10 @@ them.
   and the end's next seat wires it again. An unlisting of an end leaves the
   edge owned and out of force: a worker that takes the end's free name is no
   end of it (the edge wires nothing for it, and the worker's own wiring takes
-  a plain unwire), and the end's re-listing brings the edge back in force. An
+  a plain unwire), and the end's re-listing brings the edge back in force. The
+  edge belongs to the end's name: an identity created or adopted under a name
+  that was unlisted brings that name's owned edges back in force too, so end
+  the edge when that is not wanted. An
   owned edge ends only by its owner's change (another identity's change naming
   it is refused `invalid_request`), by the host's policy reload that denies it
   (`MobHandle::end_denied_identity_edge`, naming its owner, answering an
@@ -646,7 +649,9 @@ them.
   `IdentityChangeRefusal::NotAdoptable` (`not_adoptable`, with a
   `NotAdoptableReason` MobMachine decides: a worker spawned with a profile or
   model override is `ProfileOverride`, and a roster-owned identity its host
-  still settles is retryable, `NotAdoptableReason::is_retryable`),
+  still settles is retryable, `NotAdoptableReason::is_retryable`: after its
+  first use, its held creation's release or its host's preparation, the
+  host's own action, so a caller bounds its retries),
   `PredecessorMismatch` (`predecessor_mismatch`), and the retryable
   `AdmissionUnsettled` (`admission_unsettled`) and `DeclaredApplyOpen`
   (`declared_apply_open`). No start, reconcile or declared apply adopts.

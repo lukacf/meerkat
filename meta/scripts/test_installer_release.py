@@ -785,13 +785,53 @@ class WorkflowGraphTests(unittest.TestCase):
         self.assertFalse(release_tests.evaluate_condition(job_condition("collect"), **current))
 
 
+# The targets the committed inputs pin: a target without pins is not built, so these are the
+# packages this release builds.
+COMMITTED_TARGETS = ("linux-x86_64",)  # macOS arm64 follows in Forge 0.3.2
+
+
 class InputsTests(unittest.TestCase):
     def test_the_committed_inputs_file_is_valid(self):
         value = forge.validate_inputs(json.loads((ROOT / forge.INPUTS).read_text()))
         skeleton = json.loads((ROOT / forge.INPUTS_DIR / "forge-release-inputs.skeleton.json").read_text())
-        # The Guide is the skeleton's published release, and every target is pinned.
+        # The Guide is the skeleton's published release, and the inputs pin exactly the targets
+        # this release builds.
         self.assertEqual(value["guide"], skeleton["guide"])
-        self.assertEqual(sorted(value["targets"]), sorted(forge.TARGETS))
+        self.assertEqual(sorted(value["targets"]), sorted(COMMITTED_TARGETS))
+        # Every committed input file is the file its pin names.
+        for target, entry in value["targets"].items():
+            for name, pinned in entry["files"].items():
+                if "path" in pinned:
+                    with self.subTest(target=target, name=name):
+                        data = (ROOT / pinned["path"]).read_bytes()
+                        self.assertEqual((len(data), sha256(data)), (pinned["size"], pinned["sha256"]))
+
+    def test_a_partially_pinned_target_is_refused(self):
+        committed = json.loads((ROOT / forge.INPUTS).read_text())
+        guide = next(iter(committed["targets"].values()))
+        # A target that holds only its guide gateway, as the skeleton does before the owner's
+        # selection, is refused, whichever target it is.
+        for target in forge.TARGETS:
+            with self.subTest(target=target, partial="guide gateway only"):
+                value = copy.deepcopy(committed)
+                value["targets"][target] = {"files": {guide["gateway"]: guide["files"][guide["gateway"]]},
+                                            "gateway": guide["gateway"], "selection": None, "paths": None}
+                with self.assertRaisesRegex(forge.ProtocolError, "owner's product selection"):
+                    forge.validate_inputs(value)
+        # A committed target that loses any pin its selection, its gateways or its native programs
+        # name is refused.
+        for target, entry in committed["targets"].items():
+            paths = entry["paths"]
+            named = [paths[key] for key in paths if key not in ("artifact_root", "dependency_wheels")]
+            named += paths["dependency_wheels"] + [entry["gateway"]]
+            named += [entry["ordinary_gateway"]] if "ordinary_gateway" in entry else []
+            named += [name for pins in entry.get("native_programs", {}).values() for name in pins.values()]
+            for name in named:
+                with self.subTest(target=target, missing=name):
+                    value = copy.deepcopy(committed)
+                    del value["targets"][target]["files"][name]
+                    with self.assertRaises(forge.ProtocolError):
+                        forge.validate_inputs(value)
 
     def test_the_guide_skeleton_is_refused_until_every_pending_value_is_filled(self):
         selected = guide_sdk.SELECTED_VERSION

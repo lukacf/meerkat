@@ -93231,7 +93231,7 @@ mob_ObserveRespawnTopologyAbandonedTerminalRecoveredFresh(arg_agent_identity, ar
        /\ observed_inputs' = observed_inputs
        /\ pending_routes' = pending_routes
        /\ delivered_routes' = delivered_routes
-       /\ emitted_effects' = emitted_effects
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "mob", variant |-> "IdentityEnded", payload |-> [agent_identity |-> packet.payload.agent_identity], effect_id |-> (model_step_count + 1), source_transition |-> "ObserveRespawnTopologyAbandonedTerminalRecoveredFresh"] }
        /\ observed_transitions' = observed_transitions \cup {[machine |-> "mob", transition |-> "ObserveRespawnTopologyAbandonedTerminalRecoveredFresh", actor |-> "mob_kernel", step |-> (model_step_count + 1), from_phase |-> mob_phase, to_phase |-> "Running"]}
        /\ UnchangedFrame_d2e65ac0b2ee17fd
        /\ model_step_count' = model_step_count + 1

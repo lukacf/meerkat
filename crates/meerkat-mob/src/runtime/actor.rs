@@ -502,6 +502,70 @@ pub(super) fn tool_grant_end_failure(
     }
 }
 
+/// The sessions `state` holds for `identity`: its member's session binding
+/// and its identity entry's archived session record.
+pub(super) fn held_sessions_of(
+    state: &mob_dsl::MobMachineState,
+    identity: &mob_dsl::AgentIdentity,
+) -> Result<BTreeSet<SessionId>, MobError> {
+    state
+        .member_session_bindings
+        .get(identity)
+        .into_iter()
+        .chain(state.identity_entry_archived_sessions.get(identity))
+        .map(|session| {
+            SessionId::parse(&session.0).map_err(|error| {
+                MobError::Internal(format!(
+                    "'{}' holds an invalid session: {error}",
+                    identity.0
+                ))
+            })
+        })
+        .collect()
+}
+
+/// End every live scoped tool grant of `identity` in the mob `mob_id`'s
+/// `incarnation`, and of each of `sessions` (the sessions MobMachine held for
+/// it when it ended), recording `reason`: its identity ended. Each grant ends
+/// with its subject, so it explains no later refusal; a grant that already
+/// ended is left as it stands, so an end repeated changes nothing.
+///
+/// # Errors
+/// As [`tool_grant_end_failure`] maps them: a concurrent writer that changed
+/// one of the grants twice answers the busy class, any other failure is
+/// internal.
+#[cfg(feature = "runtime-adapter")]
+pub(super) async fn end_member_identity_tool_grants(
+    runtime: &meerkat_runtime::MeerkatMachine,
+    mob_id: &str,
+    incarnation: &meerkat_core::service::LiveMobIncarnation,
+    identity: &AgentIdentity,
+    sessions: &BTreeSet<SessionId>,
+    reason: &str,
+) -> Result<(), MobError> {
+    let identity_subject =
+        meerkat_core::tool_grant::ToolGrantSubject::member(mob_id, incarnation, identity.as_str());
+    let subjects = std::iter::once(identity_subject).chain(
+        sessions
+            .iter()
+            .cloned()
+            .map(meerkat_core::tool_grant::ToolGrantSubject::session),
+    );
+    for subject in subjects {
+        runtime
+            .end_tool_grants_of(
+                &subject,
+                meerkat_runtime::tool_grant::ToolGrantRevocation {
+                    actor: None,
+                    reason: Some(reason.to_string()),
+                },
+            )
+            .await
+            .map_err(|error| tool_grant_end_failure(identity, error))?;
+    }
+    Ok(())
+}
+
 /// Whether a member's session is still present, live or durable, as read by
 /// a step that decides whether the member's session archive is still owed.
 ///
@@ -65193,30 +65257,15 @@ impl MobActor {
         let Some(runtime) = self.runtime_adapter.as_ref() else {
             return Ok(());
         };
-        let identity_subject = meerkat_core::tool_grant::ToolGrantSubject::member(
+        end_member_identity_tool_grants(
+            runtime,
             self.definition.id.as_str(),
             &self.incarnation,
-            identity.as_str(),
-        );
-        let subjects = std::iter::once(identity_subject).chain(
-            sessions
-                .iter()
-                .cloned()
-                .map(meerkat_core::tool_grant::ToolGrantSubject::session),
-        );
-        for subject in subjects {
-            runtime
-                .end_tool_grants_of(
-                    &subject,
-                    meerkat_runtime::tool_grant::ToolGrantRevocation {
-                        actor: None,
-                        reason: Some(reason.clone()),
-                    },
-                )
-                .await
-                .map_err(|error| tool_grant_end_failure(identity, error))?;
-        }
-        Ok(())
+            identity,
+            sessions,
+            &reason,
+        )
+        .await
     }
 
     /// The sessions `state` holds for `identity`: its member's session
@@ -65226,20 +65275,7 @@ impl MobActor {
         state: &mob_dsl::MobMachineState,
         identity: &mob_dsl::AgentIdentity,
     ) -> Result<std::collections::BTreeSet<SessionId>, MobError> {
-        state
-            .member_session_bindings
-            .get(identity)
-            .into_iter()
-            .chain(state.identity_entry_archived_sessions.get(identity))
-            .map(|session| {
-                SessionId::parse(&session.0).map_err(|error| {
-                    MobError::Internal(format!(
-                        "'{}' holds an invalid session: {error}",
-                        identity.0
-                    ))
-                })
-            })
-            .collect()
+        held_sessions_of(state, identity)
     }
 
     /// End the scoped tool grants of every identity a prepared MobMachine

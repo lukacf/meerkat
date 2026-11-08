@@ -11033,6 +11033,11 @@ macro_rules! mob_catalog_machine_dsl {
                 self.abandoned_respawn_topology.insert(agent_identity, generation);
             }
             to Running
+            // The abandoned incarnation is the identity's last and nothing
+            // holds the name: the replayed abandonment ends the identity, as
+            // the live terminal abandonment does, so a resume that abandons
+            // a respawn ends its grants (0.9.11).
+            emit IdentityEnded { agent_identity: agent_identity }
         }
 
         transition ObserveRespawnTopologyAbandonedStaleSuccessor {

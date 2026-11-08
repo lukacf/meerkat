@@ -5323,21 +5323,33 @@ async fn ensure_recovered_respawn_topology_abandonments(
     Ok(())
 }
 
+/// An identity a replayed respawn abandonment ended (MobMachine names the
+/// end, `IdentityEnded`), with the sessions MobMachine held for it before
+/// that step: the resume ends their scoped tool grants before the mob
+/// serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RecoveredIdentityEnd {
+    pub(super) identity: AgentIdentity,
+    pub(super) sessions: BTreeSet<SessionId>,
+}
+
 /// Replay only still-pending retirement anchors and their exact remote
 /// checkpoints after every member's placement/session carrier has been
 /// restored. A completed generation does not need these markers re-applied:
 /// `RecoverRosterMemberRetired` already folded the terminal carrier during the
-/// general lifecycle pass.
+/// general lifecycle pass. Answers the identities the replayed respawn
+/// abandonments ended, for the resume to end their grants.
 fn recover_pending_member_retirements(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     events: &[crate::event::MobEvent],
-) -> Result<(), MobError> {
+) -> Result<Vec<RecoveredIdentityEnd>, MobError> {
     use crate::machines::mob_machine as mob_dsl;
 
     // Validate the full stream here as well as in the general seeding pass.
     // Unit-level recovery callers and future alternate resume entrypoints must
     // never regain last-write-wins semantics for the durable preservation bit.
     let ledger = respawn_topology_ledger(events)?;
+    let mut ended = Vec::new();
 
     let completed = events
         .iter()
@@ -5428,16 +5440,31 @@ fn recover_pending_member_retirements(
                         "pending RespawnTopologyAbandoned for '{agent_identity}' omitted fence_token"
                     ))
                 })?;
-                apply_seeded_mob_signal(
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+                // Read before the step, as the live end reads them.
+                let sessions = super::actor::held_sessions_of(authority.state(), &dsl_identity)?;
+                let transition = apply_seeded_mob_signal_transition(
                     authority,
                     mob_dsl::MobMachineSignal::ObserveRespawnTopologyAbandoned {
-                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        agent_identity: dsl_identity.clone(),
                         agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
                         fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                         generation: mob_dsl::Generation::from_domain(*generation),
                     },
                     "recover_pending_respawn_topology_abandoned",
                 )?;
+                if transition.effects().iter().any(|effect| {
+                    matches!(
+                        effect,
+                        mob_dsl::MobMachineEffect::IdentityEnded { agent_identity: ended_identity }
+                            if *ended_identity == dsl_identity
+                    )
+                }) {
+                    ended.push(RecoveredIdentityEnd {
+                        identity: agent_identity.clone(),
+                        sessions,
+                    });
+                }
             }
             MobEventKind::RemoteMemberRuntimeRetired {
                 agent_identity,
@@ -5547,7 +5574,7 @@ fn recover_pending_member_retirements(
             "converge_recovered_respawn_topology_after_carriers",
         )?;
     }
-    Ok(())
+    Ok(ended)
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -9410,10 +9437,36 @@ impl MobBuilder {
                 resumed_state,
                 MobState::Running | MobState::Stopped | MobState::Completed
             ) {
-                recover_pending_member_retirements(
+                let recovered_ends = recover_pending_member_retirements(
                     initial_dsl_authority.as_mut(),
                     &mob_events[repaired_epoch_start..],
                 )?;
+                // An identity a replayed respawn abandonment ended loses its
+                // scoped tool grants, and those of the sessions MobMachine
+                // held for it, before the mob serves. A failure fails the
+                // resume; the next resume replays the abandonment and ends
+                // them again (a grant already ended is left as it stands).
+                #[cfg(feature = "runtime-adapter")]
+                if let Some(runtime) = runtime_adapter.as_deref() {
+                    let live_incarnation =
+                        meerkat_core::service::LiveMobIncarnation::witnessed(incarnation);
+                    for end in &recovered_ends {
+                        super::actor::end_member_identity_tool_grants(
+                            runtime,
+                            definition.id.as_str(),
+                            &live_incarnation,
+                            &end.identity,
+                            &end.sessions,
+                            &format!(
+                                "the identity '{}' ended: a resume abandoned its respawn",
+                                end.identity
+                            ),
+                        )
+                        .await?;
+                    }
+                }
+                #[cfg(not(feature = "runtime-adapter"))]
+                let _ = recovered_ends;
             }
             let repaired_epoch_events = &mob_events[repaired_epoch_start..];
             // The identity store's created entry rows, after the replay and

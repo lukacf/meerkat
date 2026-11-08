@@ -1,4 +1,33 @@
+use toolkit_catalog::owed_read::{
+    CoreReads, DurableReadAnswer, LiveReadAnswer, LiveReadState, owed_read,
+};
 use toolkit_catalog::*;
+
+/// Core's two reads by key, answering from queues and counting the calls on each port.
+#[derive(Default)]
+struct CountingCore {
+    live: Vec<LiveReadAnswer>,
+    durable: Vec<DurableReadAnswer>,
+    live_calls: usize,
+    durable_calls: usize,
+}
+
+impl CoreReads for CountingCore {
+    fn live_read(&mut self, _offer_key: &str) -> LiveReadAnswer {
+        self.live_calls += 1;
+        assert!(!self.live.is_empty(), "a live read the test did not expect");
+        self.live.remove(0)
+    }
+
+    fn durable_read(&mut self, _offer_key: &str) -> DurableReadAnswer {
+        self.durable_calls += 1;
+        assert!(
+            !self.durable.is_empty(),
+            "a durable read the test did not expect"
+        );
+        self.durable.remove(0)
+    }
+}
 
 fn source() -> ToolkitSourceRecordMachineAuthority {
     let mut owner = ToolkitSourceRecordMachineAuthority::new();
@@ -623,6 +652,114 @@ fn a_live_read_counts_this_process_lost_dispatch_and_a_durable_read_never_does()
     assert_eq!(owner.state().absence_through, 2);
     assert!(owner.state().unresolved_dispatches.contains(&first));
     assert_eq!(owner.state().offer_phase, ToolkitOfferPhase::Offered);
+}
+
+/// A held claim: a lost dispatch of this process, then Core's re-offer met a verdict over it
+/// and was answered without native submission.
+fn held_claim() -> ToolkitOriginalOfferMachineAuthority {
+    let mut owner = sent_offer();
+    let first = start(&mut owner, 1);
+    owner
+        .apply(answer(&owner, first, ToolkitDispatchAnswer::Unresolved, ""))
+        .unwrap();
+    let reoffer = start(&mut owner, 1);
+    owner
+        .apply(answer(
+            &owner,
+            reoffer,
+            ToolkitDispatchAnswer::NotSubmitted,
+            "",
+        ))
+        .unwrap();
+    owner
+}
+
+#[test]
+fn a_held_claim_on_a_live_session_is_settled_by_the_live_read_with_no_durable_read() {
+    let mut owner = held_claim();
+    let mut core = CountingCore {
+        live: vec![LiveReadAnswer::NotAdmitted],
+        ..CountingCore::default()
+    };
+    let input = owed_read(&mut core, LiveReadState::Answers, owner.state(), 1)
+        .expect("the live read's absence is an owner input");
+    owner.apply(input).unwrap();
+    assert_eq!(owner.state().absence_through, 2);
+    assert_eq!((core.live_calls, core.durable_calls), (1, 0));
+}
+
+#[test]
+fn with_its_write_in_flight_the_driver_reads_durably_then_live_once_the_session_reloads() {
+    let mut owner = held_claim();
+    let mut core = CountingCore {
+        live: vec![LiveReadAnswer::NotAdmitted],
+        durable: vec![DurableReadAnswer::NotAdmitted],
+        ..CountingCore::default()
+    };
+    // The live read cannot answer: the durable read's absence is not final, the read stays owed.
+    let durable = owed_read(&mut core, LiveReadState::WriteInFlight, owner.state(), 1)
+        .expect("the durable read's absence is an owner input");
+    let before = owner.state().clone();
+    assert!(owner.apply(durable).is_err());
+    assert_eq!(owner.state(), &before);
+    // The session reloaded once the store answered: the live read settles it.
+    let live = owed_read(&mut core, LiveReadState::Answers, owner.state(), 1)
+        .expect("the live read's absence is an owner input");
+    owner.apply(live).unwrap();
+    assert_eq!(owner.state().absence_through, 2);
+    assert_eq!((core.live_calls, core.durable_calls), (1, 1));
+}
+
+#[test]
+fn core_answers_that_are_never_an_absence_are_no_owner_input() {
+    let owner = held_claim();
+    let mut core = CountingCore {
+        live: vec![LiveReadAnswer::Unavailable, LiveReadAnswer::Conflict],
+        durable: vec![
+            DurableReadAnswer::Unavailable,
+            DurableReadAnswer::Conflict,
+            DurableReadAnswer::UnknownRuntime,
+        ],
+        ..CountingCore::default()
+    };
+    for _ in 0..2 {
+        assert!(owed_read(&mut core, LiveReadState::Answers, owner.state(), 1).is_none());
+    }
+    for _ in 0..3 {
+        assert!(owed_read(&mut core, LiveReadState::NotLive, owner.state(), 1).is_none());
+    }
+    assert_eq!((core.live_calls, core.durable_calls), (2, 3));
+}
+
+#[test]
+fn a_read_started_before_a_later_lost_answer_is_refused_by_the_revision() {
+    let mut owner = sent_offer();
+    let first = start(&mut owner, 1);
+    owner
+        .apply(answer(&owner, first, ToolkitDispatchAnswer::Unresolved, ""))
+        .unwrap();
+    // The read starts from the record as it stands, and Core's live read answers absent.
+    let mut core = CountingCore {
+        live: vec![LiveReadAnswer::NotAdmitted],
+        ..CountingCore::default()
+    };
+    let read = owed_read(&mut core, LiveReadState::Answers, owner.state(), 1)
+        .expect("the live read's absence is an owner input");
+    // Meanwhile another dispatch of the record is started and its answer is lost: it may have
+    // admitted after the read.
+    let second = start(&mut owner, 1);
+    owner
+        .apply(answer(
+            &owner,
+            second,
+            ToolkitDispatchAnswer::Unresolved,
+            "",
+        ))
+        .unwrap();
+    let before = owner.state().clone();
+    assert!(owner.apply(read).is_err());
+    assert_eq!(owner.state(), &before);
+    assert_eq!(owner.state().absence_through, 0);
 }
 
 fn close(owner: &ToolkitOriginalOfferMachineAuthority, epoch: u64) -> ToolkitOfferInput {

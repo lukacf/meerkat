@@ -710,11 +710,16 @@ def build_model(root, output):
     # read is Core's live read, which takes the session's mutation gate and then its driver lock:
     # it waits for an admission write still in flight on the session and is ordered after it
     # (the live-read-as-durable mutant feeds it to the owner as durable). With late landings
-    # (env late) the driver may also use Core's durable read, which takes no gate: it can answer
-    # Absent while such a write is still in flight.
+    # (env late), and only while an admission write is in flight on the record's session (the
+    # live read cannot answer then: Core degrades the session until it reloads), the driver
+    # reads Core's durable read instead, which takes no gate: it can answer Absent while that
+    # write is still in flight, and a durable read that is not final owes a live read. So a
+    # held claim with no write in flight is settled by the live read and never loops on durable
+    # reads (the durable-read-anytime mutant reads durably at any time).
     for name, kind, guards in [('B_ReadCore', 'IF Fault = "live-read-as-durable" THEN "Durable" ELSE "Live"',
                                 ['WritesInFlight(OInc(i)) = {}']),
-                               ('B_ReadDurable', '"Durable"', ['"late" \\in Env'])]:
+                               ('B_ReadDurable', '"Durable"',
+                                ['"late" \\in Env', 'WritesInFlight(OInc(i)) # {} \\/ Fault = "durable-read-anytime"'])]:
         action(name, ['alive', 'scanned', '~joined', 'read_slot = 0', 'OPhase(i) = "Offered"', 'jr[i].read_owed',
                       *guards,
                       '\\E available \\in AvailChoices :\n'
@@ -940,7 +945,7 @@ def build_model(root, output):
         '\\* restart after a stop, or after a fail-stop once the close had begun).',
         'LPhase == IF life_cur = 2 THEN life2_phase ELSE life_phase',
         'NewLifetime == \\/ "stop" \\in Env /\\ life_phase = "Closed"\n'
-        '               \\/ fatal # "" /\\ life_phase # "Open"',
+        '               \\/ fatal # "" /\\ life_phase # "Open" /\\ Fault # "failstop-keeps-closing-lifetime"',
         'Admission == LPhase = "Open" \\/ (Fault = "admit-after-close" /\\ LPhase = "Closing")',
         'SourceOpen == src_phase = "Open" /\\ src_readiness = "Ready"',
         'Offer1Vars == <<' + ', '.join(offer_vars) + '>>',
@@ -1474,6 +1479,15 @@ def build_model(root, output):
                                            '    /\\ ~jr[1].fifo /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].pc = "Done"\n'
                                            '                                         /\\ sp[p].out = "Refused" /\\ sp[p].cause = "PolicyDenied"\n'
                                            '                                         /\\ sp[p].d > OAbsenceThrough(1))'),
+        # The entry fence's held branch: Core's re-offer of a claim over a lost dispatch passes the
+        # decision and meets the revoked authority at the entry fence: NotReady, held, a read owed;
+        # Core's live read finds the key absent and the evidence covers both dispatches; Core's
+        # next re-offer, a dispatch after the evidence, is denied at the decision, no restart
+        # between (the fence-denied-over-ambiguity mutant denies at the fence).
+        'NotRowFenceHeldReleased': ('~(stage = "B" /\\ door = "Peer" /\\ epoch = 1 /\\ ~auth_ok /\\ native = {}\n'
+                                    '    /\\ <<1, 2, "EntryRefused">> \\in refusals /\\ OAbsenceThrough(1) >= 2 /\\ ~jr[1].fifo\n'
+                                    '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].pc = "Done" /\\ sp[p].out = "Refused"\n'
+                                    '                       /\\ sp[p].cause = "PolicyDenied" /\\ sp[p].d > OAbsenceThrough(1))'),
         # Core's drain binds the FIFO head first: a second delivery begins only after the
         # first delivery's queued claim was re-offered (here admitted); it finds the admission.
         'NotRowPeerHeadFirst': ('~(stage = "B" /\\ door = "Peer" /\\ ObservedAdmitted(1) /\\ Cardinality(native) = 1 /\\ begun = 2\n'
@@ -1572,6 +1586,15 @@ def build_model(root, output):
         'I9_AdmittedReofferNotFenced':
             "[][\\A p \\in Procs : (sp[p].pc = \"Entry\" /\\ sp[p].kind = \"core\" /\\ ObservedAdmitted(sp[p].slot))\n"
             "       => sp'[p].ans # \"EntryRefused\"]_vars",
+        # The driver reads durably only while an admission write is in flight on the record's
+        # session, when the live read cannot answer; otherwise it reads live.
+        'I13_DurableReadOnlyWhileWriteInFlight':
+            "[][\\A i \\in Slots : (read_slot = 0 /\\ read_slot' = i /\\ read_kind' = \"Durable\")\n"
+            "       => WritesInFlight(OInc(i)) # {}]_vars",
+        # The restart after a fail-stop: the next process's lifetime is open, the one it had (it was
+        # open) or a new one (the failstop-keeps-closing-lifetime mutant keeps a closing lifetime).
+        'I11_FailStopNewLifetime':
+            "[][(~alive /\\ alive' /\\ fatal # \"\") => (LPhase' = \"Open\" \\/ life_cur' = 2)]_vars",
     }
     text = '\n\n'.join([
         '---- MODULE combined_composition ----\nEXTENDS TLC, Naturals, Sequences, FiniteSets',
@@ -1814,7 +1837,8 @@ def config_text(spec, checked, properties):
 
 SAFETY_PROPERTIES = ['I8_MachineOnlyLifecycle', 'I8_OwnerFieldsByTransition', 'I5_NotNowOnlyOverOpenSource',
                      'I13_FinalAbsenceSound', 'I5_RefusalNeedsItsCause', 'I6_PeerHeadFirst',
-                     'I6_ClaimEndsOnlyForVerdict', 'I9_AdmittedReofferNotFenced']
+                     'I6_ClaimEndsOnlyForVerdict', 'I9_AdmittedReofferNotFenced',
+                     'I13_DurableReadOnlyWhileWriteInFlight', 'I11_FailStopNewLifetime']
 
 
 def main():
@@ -1962,6 +1986,10 @@ PROFILES = {
     'live-peer-stop': lb('LiveSpec', door=['Peer'], env=['hold', 'lost', 'close', 'stop'], **LIVE2),
     # A claim held for a verdict over a lost dispatch, released in the process (LV7).
     'live-peer-held': lb('LiveSpec', door=['Peer'], env=['lost', 'revoke'], **LIVE2),
+    # The same with late landings: the durable read only while a write is in flight, so a held
+    # claim is released and every record driven (LV7, LV1).
+    'live-peer-held-late': lb('LiveSpec', door=['Peer'], env=['lost', 'revoke', 'late'], **LIVE2),
+    'live-find-late': lb('LiveSpec', door=['Find'], env=['lost', 'late', 'crash'], **LIVE2),
     'live-driver-only': lb('LiveSpecDriverOnly', live=DRIVER_ONLY_HOLDS, door=['Find'], env=['hold', 'lost', 'crash'],
                            **LIVE2),
     'live-no-dispatch-fairness': lm('none', 'LV1_OfferDisposition', 'LiveSpecNoDispatch', **ONE),
@@ -1979,6 +2007,10 @@ PROFILES = {
     # The driver's live read fed to the owner as durable: a held claim is never released.
     'live-read-as-durable': lm('live-read-as-durable', 'LV7_PeerClaimReoffered', 'LiveSpec', door=['Peer'],
                                env=['lost', 'revoke'], **ONE),
+    # The driver reads durably whenever a read is owed: with late landings a held claim loops on
+    # durable reads, which never count its lost dispatch.
+    'live-durable-read-anytime': lm('durable-read-anytime', 'LV7_PeerClaimReoffered', 'LiveSpec', door=['Peer'],
+                                    env=['lost', 'revoke', 'late'], **ONE),
     'live-driver-only-disposition': lm('none', 'LV1_OfferDisposition', 'LiveSpecDriverOnly', env=['hold'], **ONE),
     'live-driver-only-rebind': lm('none', 'LV2_FreedWaitRebinds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
     'live-driver-only-send-ends': lm('none', 'LV6_SendEnds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
@@ -2068,6 +2100,11 @@ PROFILES = {
     # The durable read's absence counts a lost dispatch of this process whose write is still in
     # flight (owner mutant).
     'durable-read-counts': m('durable-read-counts', 'I13_FinalAbsenceAfterWrites', env=['lost', 'late']),
+    # The driver reads durably whenever a read is owed, with no write in flight too.
+    'durable-read-anytime': m('durable-read-anytime', 'I13_DurableReadOnlyWhileWriteInFlight', env=['lost', 'late']),
+    # The fail-stop's next process keeps the closing lifetime.
+    'failstop-keeps-closing-lifetime': m('failstop-keeps-closing-lifetime', 'I11_FailStopNewLifetime', door=['Peer'],
+                                         env=['poison', 'close']),
     # The close's record blocks every later dispatch start (owner mutant): after a stop and
     # restart, the re-drive cannot record its dispatch.
     'close-blocks-later-process': m('close-blocks-later-process', 'I11_CallRecordsItsDispatch',
@@ -2201,6 +2238,7 @@ PROFILES = {
     'row-held-claim-denied-after-restart': r('NotRowHeldClaimDeniedAfterRestart', door=['Peer'],
                                              env=['lost', 'revoke', 'crash']),
     'row-held-claim-denied-in-process': r('NotRowHeldClaimDeniedInProcess', door=['Peer'], env=['lost', 'revoke']),
+    'row-fence-held-released': r('NotRowFenceHeldReleased', door=['Peer'], env=['lost', 'revoke']),
     'row-peer-head-first': r('NotRowPeerHeadFirst', door=['Peer'], procs=2, sends=2, env=['hold']),
     'row-noclaim-dropped-kept': r('NotRowNoClaimDroppedKept', door=['Peer'], claims=False, env=['hold']),
     'row-noclaim-retry-admitted': r('NotRowNoClaimRetryAdmitted', door=['Peer'], claims=False, procs=2, sends=2,

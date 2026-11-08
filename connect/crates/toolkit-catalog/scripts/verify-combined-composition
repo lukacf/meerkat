@@ -387,6 +387,12 @@ def stage_b_checks(f, actions):
         'durable-read-counts': b and last == 'B_ObserveRead' and f.get('epoch') == '1'
             and num(1, 'absence_through') >= 1 and 'B_ReadDurable' in actions
             and any(t[1] == 'k1' and int(t[3]) <= num(1, 'absence_through') for t in tuples(f.get('landing'))),
+        # A durable read started with no admission write in flight.
+        'durable-read-anytime': b and last == 'B_ReadDurable' and f.get('read_kind') == '"Durable"'
+            and tuples(f.get('landing')) == [],
+        # The fail-stop's next process kept the closing (or closed) lifetime.
+        'failstop-keeps-closing-lifetime': b and last == 'B_Restart' and f.get('fatal') == '"PublicationPoisoned"'
+            and f.get('life_cur') == '1' and f.get('life_phase') in ('"Closing"', '"Closed"') and 'B_FailStop' in actions,
         'no-relookup-b': b and f.get('prep_refused') == 'TRUE' and proc(out='Refused', cause='PreparationRefused')
             and 'controller_grant' in strings(f.get('dup_arts')) and issue_once,
         'row-class-first-send-b': b and f.get('door') == '"ClassInput"' and admitted(1)
@@ -542,6 +548,15 @@ def stage_b_checks(f, actions):
                     and int(q(p.get('d'))) > num(1, 'absence_through') for p in procs)
             and 'B_Crash' not in actions and 'B_Stop' not in actions and 'B_ReadCore' in actions
             and before_last('B_ObserveRead', 'B_CoreReoffer'),
+        # The entry fence's held branch released in the same process: the re-offer refused at the
+        # fence over the lost dispatch, the live read's evidence over both, the next re-offer denied.
+        'row-fence-held-released': b and last == 'B_Settle' and f.get('door') == '"Peer"' and f.get('epoch') == '1'
+            and f.get('auth_ok') == 'FALSE' and native == [] and ['1', '2', 'EntryRefused'] in refused
+            and num(1, 'absence_through') >= 2 and jr(1, 'fifo') == 'FALSE'
+            and any(q(p.get('kind')) == 'core' and q(p.get('pc')) == 'Done' and q(p.get('out')) == 'Refused'
+                    and q(p.get('cause')) == 'PolicyDenied' and q(p.get('d')).isdigit()
+                    and int(q(p.get('d'))) > num(1, 'absence_through') for p in procs)
+            and 'B_Crash' not in actions and 'B_ReadCore' in actions,
         # The drain's FIFO head first: the queued claim's re-offer before the second delivery.
         'row-peer-head-first': b and f.get('door') == '"Peer"' and admitted(1) and len(native) == 1
             and f.get('begun') == '2' and proc(kind='core', out='Admitted') and proc(kind='caller', n='2', out='Admitted')
@@ -691,6 +706,9 @@ def live_witness(name, states, loop):
         'live-no-reoffer-fairness': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE',
         # The live read fed as durable: the claim stays held and queued, the reads go on.
         'live-read-as-durable': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE' and jr(1, 'held') == 'TRUE',
+        # Durable reads at any time: the held claim loops on durable reads.
+        'live-durable-read-anytime': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE' and jr(1, 'held') == 'TRUE'
+            and any(s.get('read_kind') == '"Durable"' for s in states),
         # Without the declared wait assumption a send waits forever.
         'live-driver-only-disposition': f('offer_phase') == '"Offered"'
             and (proc(pc='MetaWait') or proc(pc='PeerWait')),

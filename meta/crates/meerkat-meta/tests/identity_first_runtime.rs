@@ -267,6 +267,10 @@ struct CoreMembers {
             ),
         >,
     >,
+    /// Identities whose member a host made directly on the mob under the
+    /// identity's member id: it carries neither the durable-identity marker
+    /// nor the identity-first label.
+    host_made: Mutex<std::collections::BTreeSet<AgentIdentity>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -526,6 +530,20 @@ impl CoreMembers {
         self.adopted.lock().unwrap().insert(identity.clone());
     }
 
+    /// Core holds a member of `identity` live at `generation` on `session`
+    /// that a host made directly on the mob under the identity's member id:
+    /// it carries neither the durable-identity marker nor the identity-first
+    /// label.
+    fn bind_live_host_made(
+        &self,
+        identity: &AgentIdentity,
+        generation: u64,
+        session: meerkat_core::types::SessionId,
+    ) -> AgentRuntimeId {
+        self.host_made.lock().unwrap().insert(identity.clone());
+        self.bind_live_unmarked(identity, "default", generation, Some(session))
+    }
+
     /// A host adopted `identity` with an intent row that declares a live
     /// member (`present`) or none, and Core's convergence of it stands at
     /// `decision`.
@@ -644,7 +662,7 @@ impl CoreMembers {
     }
 
     fn binding(&self, identity: &AgentIdentity, member: &CoreMember) -> meerkat_mob::MemberBinding {
-        meerkat_mob::MemberBinding::for_test(
+        let binding = meerkat_mob::MemberBinding::for_test(
             meerkat_meta::member_comms_id::roster_member_id_for_identity(identity.as_str()),
             meerkat_mob::Generation::new(member.generation),
             member.session_id.clone(),
@@ -662,10 +680,14 @@ impl CoreMembers {
                 meerkat_mob::SpawnContinuityIntent::Ephemeral
             },
             self.management(identity),
-        )
+        );
+        // A member the host made directly carries no label.
+        if self.host_made.lock().unwrap().contains(identity) {
+            return binding;
+        }
         // Every identity-first spawn labels its member with the identity,
         // Meta 0.9.3's unmarked ones included.
-        .with_labels(std::collections::BTreeMap::from([(
+        binding.with_labels(std::collections::BTreeMap::from([(
             "agent_identity".to_owned(),
             identity.as_str().to_owned(),
         )]))
@@ -6876,6 +6898,36 @@ async fn dormant_identity_owing_a_compaction_with(
     let session = core_member(&bridge, &make_identity(name))
         .session_id
         .expect("the seat binds a session");
+    let (events, memory_store, memory_dir) =
+        wire_recording_distiller(&runtime, discards, failing_harvests, hang_transcripts).await;
+    bridge.owe_compaction(owed_compaction_batch(&session));
+    (
+        runtime,
+        bridge,
+        session,
+        events,
+        memory_store,
+        context,
+        memory_dir,
+    )
+}
+
+/// Give `runtime` agent memory over a fresh store with a distiller whose
+/// extractions and scope drops land in the returned event order, reading
+/// `discards` from the session's memory and failing the first
+/// `failing_harvests` harvest requests, and whose model never answers a
+/// transcript extraction when `hang_transcripts` is set. The memory store
+/// and its directory are returned with the events.
+async fn wire_recording_distiller(
+    runtime: &Arc<IdentityRuntime>,
+    discards: OwedDiscards,
+    failing_harvests: usize,
+    hang_transcripts: bool,
+) -> (
+    Arc<Mutex<Vec<String>>>,
+    Arc<meerkat_meta::SqliteAgentMemoryStore>,
+    tempfile::TempDir,
+) {
     let memory_dir = tempfile::tempdir().unwrap();
     let memory_store =
         Arc::new(meerkat_meta::SqliteAgentMemoryStore::open(memory_dir.path()).unwrap());
@@ -6914,16 +6966,7 @@ async fn dormant_identity_owing_a_compaction_with(
                 .with_distiller(engine),
         ))
         .await;
-    bridge.owe_compaction(owed_compaction_batch(&session));
-    (
-        runtime,
-        bridge,
-        session,
-        events,
-        memory_store,
-        context,
-        memory_dir,
-    )
+    (events, memory_store, memory_dir)
 }
 
 /// Wait, bounded, until `events` holds an event `done` names; answer the
@@ -8153,6 +8196,122 @@ async fn an_unlisting_core_fails_to_retire_hands_its_settled_batch_to_the_ordina
         bridge.settles(),
         vec![(id.clone(), false)],
         "Core's settle is asked once, before Core's seal"
+    );
+    drop(runtime);
+}
+
+/// An identity the roster dropped while the process was down: the
+/// restarted process never registered it, and its first roster pass is a
+/// complete declaration whose seal retires the member Core still holds. The
+/// declaration settles the compaction projection that member's session
+/// owes before Core is asked, and the lifecycle projection's retirement
+/// harvests the batch before it distills the retired session's transcript.
+/// Without that settle the batch stays owed in Core, and nothing distills
+/// it.
+#[tokio::test]
+async fn an_identity_dropped_while_down_has_its_owed_compaction_distilled_at_the_restart() {
+    let (first, bridge, _session, _first_events, _first_store, first_context, _first_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-dropped").await;
+    let id = make_identity("triage:owed-dropped");
+    // The process stops, and the roster drops the identity meanwhile.
+    drop(first_context);
+    drop(first);
+    let runtime = make_runtime_with_bridge_no_store(bridge.clone());
+    let context = meerkat_meta::identity_first::IdentityFirstRuntimeContext::new(
+        runtime.clone(),
+        Arc::new(StaticRosterProvider::new(Vec::new())),
+        None,
+        None,
+        None,
+    );
+    let (events, _memory_store, _memory_dir) =
+        wire_recording_distiller(&runtime, OwedDiscards::Answered, 0, false).await;
+
+    context
+        .bootstrap_roster(&[])
+        .await
+        .expect("the restart's first roster pass");
+    assert_eq!(
+        bridge.retire_calls.load(Ordering::SeqCst),
+        1,
+        "Core's seal retires the member of the identity the roster dropped"
+    );
+
+    let events = events_once(&events, |event| event == "transcript").await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!("the owed compaction's discards reach the distiller as harvest evidence: {events:?}")
+    });
+    let transcript =
+        at("transcript").expect("the unlisting distills the retired session's transcript");
+    assert!(
+        harvest < transcript,
+        "the harvest comes before the transcript distillation: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's seal"
+    );
+    drop(runtime);
+}
+
+/// A complete roster's unlisting of a registered identity whose member id
+/// holds a live member a host made directly on the mob, with neither the
+/// durable-identity marker nor the identity-first label: that member is not
+/// the identity's, so the declaration settles nothing of its session, and
+/// nothing of it is handed to the identity's memory when Core leaves the
+/// member live.
+#[tokio::test]
+async fn a_host_made_member_under_an_unlisted_identity_s_id_is_not_settled_or_handed_back() {
+    let (runtime, bridge, session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-host-made").await;
+    let id = make_identity("triage:owed-host-made");
+    // A host made a member directly under the identity's member id, on the
+    // session that owes the projection; Core's seal leaves it live.
+    let generation = core_member(&bridge, &id).generation + 1;
+    bridge
+        .core
+        .bind_live_host_made(&id, generation, session.clone());
+    bridge.fail_retire_of(&id);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert!(
+        bridge.settles().is_empty(),
+        "nothing of the host-made member's session is settled: {:?}",
+        bridge.settles()
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let events = events.lock().unwrap().clone();
+    assert!(
+        !events.iter().any(|event| event == "harvest"),
+        "nothing of the host-made member's session reaches the identity's memory: {events:?}"
+    );
+    drop(runtime);
+}
+
+/// A complete roster's unlisting of a registered identity a host adopted
+/// (Core holds its identity intent row): the identity is read-only to
+/// Meta, so the declaration settles nothing of its session, and nothing of
+/// it is handed back when Core's seal leaves the identity as it is.
+#[tokio::test]
+async fn a_host_adopted_identity_the_roster_unlists_is_not_settled_or_handed_back() {
+    let (runtime, bridge, _session, events, _memory_store, context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-adopted").await;
+    let id = make_identity("triage:owed-adopted");
+    bridge.core.adopt(&id);
+
+    let _ = context.bootstrap_roster(&[]).await;
+    assert!(
+        bridge.settles().is_empty(),
+        "nothing of the adopted identity's session is settled: {:?}",
+        bridge.settles()
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let events = events.lock().unwrap().clone();
+    assert!(
+        !events.iter().any(|event| event == "harvest"),
+        "nothing of the adopted identity's session is harvested: {events:?}"
     );
     drop(runtime);
 }

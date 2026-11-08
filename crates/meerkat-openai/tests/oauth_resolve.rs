@@ -562,7 +562,10 @@ async fn resolve_after_refresh_failure(
     };
     let (expired, auth_lease) =
         mark_tokens_and_auth_lease_handle_for_test(&expired, 1, Some(1_000));
-    store.save(&key, &expired).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &expired)
+        .await
+        .unwrap();
     let realm = openai_realm("chatgpt_backend", "managed_chatgpt_oauth");
     let env = ResolverEnvironment::testing()
         .with_provider_auth_persistence(ProviderAuthPersistence::new(

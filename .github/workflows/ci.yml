@@ -82,10 +82,12 @@ name: CI
 #                     (scripts/pre-push-unit.sh) for the test scope
 #   closure-check   - cargo check --all-features (lib and bin targets) over
 #                     the reverse-dependency closure of the changed packages
-#   rustdoc         - (x2) cargo doc --workspace --no-deps with rustdoc's
-#                     lints denied (RUSTDOCFLAGS=-Dwarnings), one leg with
-#                     default features and one with --all-features: every
-#                     crate's documentation and its intra-doc links
+#   rustdoc         - (x2 per row) cargo doc --no-deps with rustdoc's lints
+#                     denied (RUSTDOCFLAGS=-Dwarnings), one leg with
+#                     default features and one with --all-features, over
+#                     Core's members and each product's packages the change
+#                     reaches: every crate's documentation and its
+#                     intra-doc links
 #   feature-check   - (xN, two per clippy shard) compile-only checks of the
 #                     shard's packages under their Bazel feature sets (tests
 #                     included) and the `make test-minimal` /
@@ -390,7 +392,7 @@ jobs:
       feature_check_rest_matrix: ${{ steps.plan.outputs.feature_check_rest_matrix }}
       core_changed: ${{ steps.plan.outputs.core_changed }}
       core_paths_changed: ${{ steps.plan.outputs.core_paths_changed }}
-      rustdoc_flags: ${{ steps.plan.outputs.rustdoc_flags }}
+      rustdoc_rows: ${{ steps.plan.outputs.rustdoc_rows }}
       products_changed: ${{ steps.plan.outputs.products_changed }}
       floor_check_count: ${{ steps.plan.outputs.floor_check_count }}
       floor_check_matrix: ${{ steps.plan.outputs.floor_check_matrix }}
@@ -2441,25 +2443,33 @@ jobs:
           retention-days: 3
 
   rustdoc:
-    name: Rustdoc (${{ matrix.features }} features)
+    name: Rustdoc (${{ matrix.row.name }}, ${{ matrix.features }} features)
     needs: changes
     # Push only, like the closure check: every crate documented with
     # rustdoc's lints denied, in two parallel legs, default features and
     # --all-features (feature-gated docs included). A broken, private or
     # redundant intra-doc link, a bare URL or an unclosed HTML tag fails it.
-    # It documents the whole workspace, where Cargo unifies features across
-    # members, so an error that only a crate documented alone shows
-    # (`cargo doc -p <crate>`, the way docs.rs builds a published crate) is
-    # outside it. A pull request names it in deferred_to_push: it documents
-    # meerkat-mob and every crate built on it, which does not fit the
-    # pull-request budget.
+    # The plan's rustdoc_rows: Core's members when the change reaches Core,
+    # and each product's packages in the reverse-dependency closure, in as
+    # few rows of their own as hold no bin name twice (Cargo refuses to
+    # document two bins of one name at once), so a Core change that breaks a
+    # product's link into a Core item fails here. Each row documents its
+    # packages together, where Cargo unifies features across them, so an
+    # error that only a crate documented alone shows (`cargo doc -p
+    # <crate>`, the way docs.rs builds a published crate) is outside it. A
+    # pull request names it in deferred_to_push: it documents meerkat-mob
+    # and every crate built on it, which does not fit the pull-request
+    # budget.
     if: ${{ needs.changes.outputs.rustdoc == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    # A product's row compiles the product's whole dependency graph under
+    # its own features, as the closure check's part does (60 minutes).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         features: [default, all]
+        row: ${{ fromJSON(needs.changes.outputs.rustdoc_rows) }}
     env:
       RUSTC_WRAPPER: sccache
     steps:
@@ -2487,15 +2497,14 @@ jobs:
           cache-on-failure: true
 
       # --keep-going reports every crate that fails, not only the first.
-      # The plan's rustdoc_flags name what it documents: Core's members
-      # (`--workspace` without the products' packages) when the change
-      # reaches Core, the changed products' packages otherwise
-      # (scripts/ci-cargo-lanes.mjs).
-      - name: Document the plan's packages with rustdoc's lints denied (${{ matrix.features }} features)
+      # The row's flags name what it documents: Core's members
+      # (`--workspace` without the products' packages) or a product's
+      # packages, `-p` each (rustdoc_rows in scripts/ci-cargo-lanes.mjs).
+      - name: Document the row's packages with rustdoc's lints denied (${{ matrix.features }} features)
         env:
           RUSTDOCFLAGS: -Dwarnings
           FEATURES: ${{ matrix.features }}
-          RUSTDOC_FLAGS: ${{ needs.changes.outputs.rustdoc_flags }}
+          RUSTDOC_FLAGS: ${{ matrix.row.flags }}
         run: |
           set -euo pipefail
           if [[ -z "${RUSTDOC_FLAGS}" ]]; then echo "::error::the plan names no rustdoc packages"; exit 1; fi
@@ -2512,7 +2521,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: sccache-log-rustdoc-${{ matrix.features }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sccache-log-rustdoc-${{ matrix.row.key }}-${{ matrix.features }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: /home/runner/work/_temp/sccache.log
           if-no-files-found: ignore
           retention-days: 3

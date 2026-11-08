@@ -54,9 +54,9 @@
 // so no pull request fits the 20-minute cap from the start of the pre-push
 // hook to a green CI gate with them. The plan lists what a pull request left
 // to the push (deferred_to_push), and the push plan runs all of it.
-// The workspace rustdoc (`doc --workspace --no-deps` with rustdoc's lints
-// denied) is left to the push the same way: it documents meerkat-mob and
-// every crate built on it.
+// The workspace rustdoc (`doc --no-deps` with rustdoc's lints denied, over
+// Core's members and the products' packages the change reaches) is left to
+// the push the same way: it documents meerkat-mob and every crate built on it.
 //
 // A push runs no unit lane of its own: the rows a pull request's unit lane
 // would run (the same shards, so the same `-p` sets, because Cargo unifies
@@ -3097,12 +3097,57 @@ function plan(args) {
   // Every crate's documentation, with rustdoc's lints denied: the push
   // runs it on a Rust change, like the closure check.
   result.rustdoc = result.rust_changed && !deferToPush;
-  // What the rustdoc lane documents: Core's members (every workspace member
-  // but the products') when the plan reaches Core, the changed products'
-  // packages otherwise. Products keep their own rustdoc rules.
-  result.rustdoc_flags = result.core_changed
-    ? selections.selections.get(CORE).flags
-    : result.packages.map((name) => `-p ${name}`).join(" ");
+  // What the rustdoc lane documents (rustdoc_rows; no row mixes products,
+  // as one cargo invocation unifies features across its packages): Core's
+  // members (every workspace member but the products') when the plan
+  // reaches Core, and each product's packages in the reverse-dependency
+  // closure. A product's docs link into Core's crates, so a Core change that
+  // renames, removes or hides an item they link to breaks the product's
+  // documentation: the product's rows document exactly the packages the
+  // change reaches, and a product it does not reach gets no row. Cargo
+  // documents each bin into a directory named after it and refuses two bins
+  // of one name in one invocation ("document output filename collision"),
+  // and the all-features leg builds every bin (Connect's two
+  // toolkit_gateway bins, in meerkat-connect and toolkit-mobkit), so a
+  // product's packages fill as few rows as hold no bin name twice, in
+  // order. `key` names a row's artifacts.
+  const binNames = (name) =>
+    byName.get(name).targets.filter((target) => target.kind.includes("bin")).map((target) => target.name);
+  const docGroups = (names) => {
+    const groups = [];
+    for (const name of names) {
+      const bins = binNames(name);
+      const group = groups.find((candidate) => bins.every((bin) => !candidate.bins.has(bin)));
+      if (group) {
+        group.names.push(name);
+        for (const bin of bins) group.bins.add(bin);
+      } else {
+        groups.push({ names: [name], bins: new Set(bins) });
+      }
+    }
+    return groups.map((group) => group.names);
+  };
+  result.rustdoc_rows = !result.rustdoc
+    ? []
+    : [
+      ...(result.core_changed
+        ? [{ name: CORE, key: CORE, product: CORE, flags: selections.selections.get(CORE).flags }]
+        : []),
+      ...byProduct(result.closure)
+        .filter(([product]) => product !== CORE)
+        .flatMap(([product, names]) => {
+          const groups = docGroups(names);
+          return groups.map((group, index) => {
+            const part = groups.length > 1 ? ` ${index + 1}/${groups.length}` : "";
+            return {
+              name: `${product}${part}, ${group.length} ${group.length === 1 ? "crate" : "crates"}`,
+              key: groups.length > 1 ? `${product}-${index + 1}` : product,
+              product,
+              flags: group.map((name) => `-p ${name}`).join(" "),
+            };
+          });
+        }),
+    ];
   result.governed_jsonl = guardRuns("governed_jsonl");
   result.mcp_confinement_positive = guardRuns("mcp_confinement_positive");
   deferred.closure_check = result.rust_changed && deferToPush;
@@ -3531,7 +3576,14 @@ function githubOutput(result) {
     }),
   );
   scalar("rustdoc", String(result.rustdoc));
-  scalar("rustdoc_flags", result.rustdoc_flags ?? "");
+  // The rustdoc job's rows (each runs in both feature legs); a placeholder
+  // keeps fromJSON well-formed for a plan without rustdoc, whose job `if:`
+  // skips it.
+  const rustdocRows = result.rustdoc_rows ?? [];
+  scalar(
+    "rustdoc_rows",
+    JSON.stringify(rustdocRows.length > 0 ? rustdocRows : [{ name: "none", key: "none", product: "none", flags: "" }]),
+  );
   scalar("core_changed", String(result.core_changed));
   scalar("core_paths_changed", String(result.core_paths_changed));
   scalar("governed_jsonl", String(result.governed_jsonl));

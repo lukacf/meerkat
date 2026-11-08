@@ -651,11 +651,15 @@ and its CI must be green before a release tag (`require_ci_green`):
   and with the first wave.
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
   `RUSTDOCFLAGS=-Dwarnings`, in two parallel legs (default features and
-  `--all-features`), over Core's members (`--workspace` excluding the
-  products' packages) when the plan reaches Core, else over the changed
-  products' packages (`rustdoc_flags` in the plan), so a broken or private
-  intra-doc link fails the push. It documents those packages together, so
-  an error that only `cargo doc -p <crate>` shows is outside it.
+  `--all-features`) for each row of the plan's `rustdoc_rows`: Core's
+  members (`--workspace` excluding the products' packages) when the plan
+  reaches Core, and each product's packages in the reverse-dependency
+  closure, `-p` each, in rows of that product (as few as hold no bin name
+  twice: Cargo refuses to document two bins of one name at once), so a
+  Core change that breaks a product's link into a Core item fails the push
+  that makes it, and a broken or private intra-doc link fails the push.
+  Each row documents its packages together, so an error that only `cargo
+  doc -p <crate>` shows is outside it.
 - `governed-jsonl` and `mcp-confinement-positive` (push; a pull request
   runs a lane when it touches the lane's inputs, `GUARD_LANE_INPUTS` in
   `scripts/ci-cargo-lanes.mjs` (the files that define its selected cases,

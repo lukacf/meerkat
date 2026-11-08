@@ -396,8 +396,9 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
             "{job} runs exactly when the plan selects it"
         );
     }
-    // The workspace rustdoc runs two parallel legs: default features and
-    // --all-features.
+    // The workspace rustdoc runs two parallel legs, default features and
+    // --all-features, for each of the plan's rows (Core's members and each
+    // product's packages the change reaches).
     let rustdoc_legs = jobs
         .get("rustdoc")
         .and_then(|job| job.pointer("/strategy/matrix/features"))
@@ -410,6 +411,13 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
             serde_json::Value::from("all")
         ],
         "the rustdoc lane runs a default-features leg and an all-features leg"
+    );
+    assert_eq!(
+        jobs.get("rustdoc")
+            .and_then(|job| job.pointer("/strategy/matrix/row"))
+            .and_then(serde_json::Value::as_str),
+        Some("${{ fromJSON(needs.changes.outputs.rustdoc_rows) }}"),
+        "each leg runs every rustdoc row the plan names"
     );
     // Each of these lanes runs in two waves (long rows first): the job holds
     // the first wave, its -rest copy the rest.
@@ -459,11 +467,10 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
         "a push plan left lanes to a later push",
         "forbid_failure \"Closure check\" \"${CLOSURE_CHECK_RESULT}\"",
         "forbid_failure \"Rustdoc\" \"${RUSTDOC_RESULT}\"",
-        // Every crate the plan names (Core's members, or the changed
-        // products' packages) documented with rustdoc's lints denied, once per
-        // leg.
+        // Every crate of the row (Core's members, or a product's packages)
+        // documented with rustdoc's lints denied, once per leg.
         "RUSTDOCFLAGS: -Dwarnings",
-        "RUSTDOC_FLAGS: ${{ needs.changes.outputs.rustdoc_flags }}",
+        "RUSTDOC_FLAGS: ${{ matrix.row.flags }}",
         "default) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going ;;",
         "all) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going --all-features ;;",
         "forbid_failure \"Governed JSONL\" \"${GOVERNED_JSONL_RESULT}\"",

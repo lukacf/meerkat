@@ -3575,6 +3575,43 @@ for (const path of [
       assert.equal(products.size, 1, `${label}: ${row.name} mixes products ${[...products].join(", ")}`);
       assert.equal(row.product, [...products][0], `${label}: ${row.name} names its product`);
     }
+    // The rustdoc rows: Core's selection, or `-p` each of one product's
+    // packages in the closure. A product's rows together hold exactly its
+    // part of the closure; no row holds a bin name twice (Cargo refuses to
+    // document two bins of one name at once), and a product's later row
+    // starts with a package whose bin an earlier row holds, so it splits
+    // only for that; every row's key is its own.
+    const binNames = (name) =>
+      WORKSPACE_BY_NAME.get(name).targets.filter((target) => target.kind.includes("bin")).map((target) => target.name);
+    const productRows = new Map();
+    for (const row of plan.rustdoc_rows) {
+      if (row.product === CORE) {
+        assert.equal(row.flags, SELECTIONS.selections.get(CORE).flags, `${label}: Core's rustdoc row selects Core's members`);
+        continue;
+      }
+      const names = row.flags.split(" ").filter((token) => token !== "-p");
+      assert.equal(row.flags, names.map((name) => `-p ${name}`).join(" "), `${label}: rustdoc row ${row.name} is \`-p\` each`);
+      const bins = names.flatMap(binNames);
+      assert.equal(new Set(bins).size, bins.length, `${label}: rustdoc row ${row.name} documents a bin name twice (${bins.join(", ")})`);
+      const earlier = productRows.get(row.product) ?? [];
+      for (const prior of earlier) {
+        assert.ok(
+          binNames(names[0]).some((bin) => prior.bins.has(bin)),
+          `${label}: rustdoc row ${row.name} splits from ${prior.name} without a bin name in common`,
+        );
+      }
+      productRows.set(row.product, [...earlier, { name: row.name, names, bins: new Set(bins) }]);
+    }
+    for (const product of new Set(plan.closure.map((name) => productOf(plan, name)))) {
+      if (product === CORE || !plan.rustdoc) continue;
+      assert.deepEqual(
+        (productRows.get(product) ?? []).flatMap((row) => row.names).sort(),
+        plan.closure.filter((name) => productOf(plan, name) === product).sort(),
+        `${label}: ${product}'s rustdoc rows document exactly its part of the closure`,
+      );
+    }
+    const keys = plan.rustdoc_rows.map((row) => row.key);
+    assert.equal(new Set(keys).size, keys.length, `${label}: every rustdoc row has a key of its own (${keys.join(", ")})`);
   };
   const workspacePlan = planFor(["Cargo.toml"]);
   for (const product of productNames) {
@@ -3598,6 +3635,13 @@ for (const path of [
       assert.ok(plan.products.floor_checks.includes(product), `${label}: the product's floor check runs`);
       assert.deepEqual(plan.reader_rows, [], `${label}: no Core reader row`);
       if (event === "push") {
+        // The push documents the product's packages the change reaches, in
+        // rows of its own, and no Core row.
+        assert.deepEqual(
+          [...new Set(plan.rustdoc_rows.map((row) => row.product))],
+          [product],
+          `${label}: the product's rustdoc rows only`,
+        );
         assert.deepEqual(
           unitLanesOf(plan.main_unit_shards, label).flatMap((shard) => shard.packages).sort(),
           [...plan.closure].sort(),
@@ -3715,7 +3759,31 @@ for (const path of [
     for (const product of reached) {
       assert.ok(push.closure.some((name) => productOf(push, name) === product), `the push's closure holds ${product}`);
     }
+    // A product's docs link into Core's items: the push documents Core's
+    // members and, in rows of its own, every product the change reaches.
+    const pushReached = productNames.filter((product) => product !== CORE && push.closure.some((name) => productOf(push, name) === product));
+    assert.ok(pushReached.length > 0, "meerkat-core reaches a product");
+    assert.deepEqual(
+      [...new Set(push.rustdoc_rows.map((row) => row.product))],
+      [CORE, ...pushReached],
+      "the meerkat-core push documents Core and each product it reaches",
+    );
     assertRowsSingleProduct(push, "meerkat-core push");
+    // Two packages of one product with a bin of one name are documented in
+    // different rows: the all-features leg builds both bins.
+    const binsOf = (name) =>
+      WORKSPACE_BY_NAME.get(name).targets.filter((target) => target.kind.includes("bin")).map((target) => target.name);
+    const sharedBin = push.closure.flatMap((first, index) =>
+      push.closure.slice(index + 1)
+        .filter((second) => productOf(push, first) === productOf(push, second) && productOf(push, first) !== CORE)
+        .filter((second) => binsOf(first).some((bin) => binsOf(second).includes(bin)))
+        .map((second) => [first, second]));
+    for (const [first, second] of sharedBin) {
+      const rowOf = (name) =>
+        push.rustdoc_rows.find((row) => row.product !== CORE && row.flags.split(" ").includes(name))?.key;
+      assert.ok(rowOf(first) && rowOf(second), `${first} and ${second} are documented`);
+      assert.notEqual(rowOf(first), rowOf(second), `${first} and ${second} share a bin name and a rustdoc row`);
+    }
   }
   // The root manifest and lock feed every floor check; a global path that
   // changes no product's published dependencies (the Makefile) runs none.
@@ -3731,7 +3799,22 @@ for (const path of [
     assert.equal(out.floor_check_count, String(lock.products.floor_checks.length));
     assert.deepEqual(JSON.parse(out.floor_check_matrix).include.map((row) => row.product), lock.products.floor_checks);
     assert.equal(out.core_changed, "true");
-    assert.match(out.rustdoc_flags, /^--workspace( --exclude \S+)+$/, "the rustdoc lane documents Core's members");
+    // A pull request leaves the rustdoc lane to the push: its rows output is
+    // the placeholder the job's fromJSON needs.
+    assert.equal(out.rustdoc, "false");
+    assert.deepEqual(JSON.parse(out.rustdoc_rows).map((row) => row.name), ["none"]);
+    const pushOut = Object.fromEntries(
+      run(["--format", "github", "--event", "push", "--", "Cargo.toml"]).stdout.trim().split("\n")
+        .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]),
+    );
+    const rows = JSON.parse(pushOut.rustdoc_rows);
+    assert.equal(rows[0].product, CORE);
+    assert.match(rows[0].flags, /^--workspace( --exclude \S+)+$/, "the rustdoc lane documents Core's members");
+    assert.deepEqual(
+      [...new Set(rows.slice(1).map((row) => row.product))],
+      productNames.filter((product) => members(lock, product).length > 0),
+      "and every product, in rows of its own, on a whole-workspace push",
+    );
   }
 }
 
@@ -3803,7 +3886,11 @@ for (const path of [
     assert.equal(row.package_flags, core.testFlags, `${row.name} selects Core with its members' test features`);
   }
   // A build of no test target (the rustdoc lane) selects Core without them.
-  assert.equal(plan.rustdoc_flags, core.flags, "the rustdoc lane passes no test feature");
+  assert.equal(
+    plan.rustdoc_rows.find((row) => row.product === CORE)?.flags,
+    core.flags,
+    "the rustdoc lane passes no test feature",
+  );
 
   // The workspace's test aliases (no package flag: Core's default members)
   // pass exactly Core's test features.

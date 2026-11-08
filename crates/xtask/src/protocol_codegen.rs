@@ -3329,9 +3329,12 @@ fn generate_auth_lease_durable_lifecycle_marker_contract(
         "// Composition: {}, Producer: {}, Protocol: {}",
         composition.name, protocol.producer_instance, protocol.name
     )?;
+    // The marker's generation is the lease's marker generation: the adopted
+    // marker generation when the lease records one, else the lifecycle
+    // event's field the contract binds.
     writeln!(
         &mut out,
-        "// Durable marker source fields: {}->{}, {}->{}, {}->{}, {}->{}, identity fields: {}, {}, {}, {}, {}",
+        "// Durable marker source fields: {}->{}, {}->{}, {}->adopted_marker_generation (else {}), {}->{}, identity fields: {}, {}, {}, {}, {}",
         contract.phase.marker_field,
         contract.phase.obligation_field,
         contract.expires_at.marker_field,

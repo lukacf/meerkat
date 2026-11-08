@@ -1270,6 +1270,35 @@ fn enforced_with_owners(approver: &str) -> AccessControlConfig {
     config
 }
 
+/// A Console access save in the checked form every Console access write
+/// takes: `config` with the owner instance and the revision `subject` reads
+/// from `meta/access/get`.
+async fn checked_access_set(
+    app: &axum::Router,
+    subject: &str,
+    config: &AccessControlConfig,
+) -> Value {
+    let read = rpc(app, Some(subject), "meta/access/get", json!({})).await;
+    assert!(read["error"].is_null(), "{read}");
+    let owner_instance = read["result"]["owner_instance"].clone();
+    let expected_revision = read["result"]["revision"].clone();
+    assert!(
+        owner_instance.is_string() && expected_revision.is_u64(),
+        "{read}"
+    );
+    rpc(
+        app,
+        Some(subject),
+        "meta/access/set",
+        json!({"checked_v1": {
+            "config": config,
+            "owner_instance": owner_instance,
+            "expected_revision": expected_revision,
+        }}),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn an_identity_in_two_people_entries_of_one_binding_is_refused() {
     // At load: the operator, an ingress subject and a Console subject, each
@@ -1342,13 +1371,7 @@ people = [
 ]
 "#,
     );
-    let saved = rpc(
-        &app,
-        Some(ADMIN),
-        "meta/access/set",
-        json!({"config": config}),
-    )
-    .await;
+    let saved = checked_access_set(&app, ADMIN, &config).await;
     assert_eq!(saved["error"]["code"], json!(-32602), "{saved}");
     assert_eq!(
         saved["error"]["data"]["kind"],
@@ -1380,13 +1403,7 @@ subjects = ["alice@example.test"]
 ingress_subjects = [{ ingress = "sms", subject = "+15550100" }]
 "#,
     );
-    let refused = rpc(
-        &app,
-        Some(ADMIN),
-        "meta/access/set",
-        json!({"config": undeclared}),
-    )
-    .await;
+    let refused = checked_access_set(&app, ADMIN, &undeclared).await;
     assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
     assert_eq!(
         refused["error"]["data"]["kind"],
@@ -1414,13 +1431,7 @@ subjects = ["alice@example.test"]
 ingress_subjects = [{ ingress = "chat", subject = "U123" }]
 "#,
     );
-    let saved = rpc(
-        &app,
-        Some(ADMIN),
-        "meta/access/set",
-        json!({"config": declared}),
-    )
-    .await;
+    let saved = checked_access_set(&app, ADMIN, &declared).await;
     assert!(saved["error"].is_null(), "{saved}");
     let saved_revision = runtime
         .access_controller()

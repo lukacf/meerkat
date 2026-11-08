@@ -441,7 +441,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and the top-level `tool_grants` init param on `meta_gateway`: the longest
   window a grant may have (24 hours by default), set as the runtime's grant
   policy at init. An invalid maximum refuses init (`-32602`,
-  `tool_grant_lifetime_invalid` on the stdio gateway).
+  `tool_grant_lifetime_invalid`, on the init's id, on both gateways).
 - Python `MetaRuntime.grant_tool`, `revoke_tool_grant`, `list_tool_grants`
   and `tool_grant_audit`, TypeScript `grantTool`, `revokeToolGrant`,
   `listToolGrants` and `toolGrantAudit`, with `ToolGrantRequestRefusedError`
@@ -803,6 +803,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   final refusal (a retiring incarnation, a host-owned member, a
   composition that is not authoritative) answers `AdmissionFailed`
   instead of `IdentityWakeRetryable`.
+
+- `meta_gateway` answers an init its parse refuses (an option this binary
+  does not implement, an invalid declaration) on the init's id; it answered
+  with a `null` id.
 
 ### Known limitations
 

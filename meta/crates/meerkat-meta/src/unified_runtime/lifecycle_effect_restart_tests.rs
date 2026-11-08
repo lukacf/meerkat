@@ -43,8 +43,8 @@ use crate::identity_first::{
 };
 use crate::memory::StewardStore;
 use crate::memory::distiller::{
-    DistillerClientHandle, DistillerConfig, DistillerEngine, DistillerError, DistillerProfile,
-    TranscriptSlice, TranscriptSource,
+    CompactionDiscardSource, DiscardEntry, DistillerClientHandle, DistillerConfig, DistillerEngine,
+    DistillerError, DistillerProfile, TranscriptSlice, TranscriptSource,
 };
 use crate::memory::steward::{
     StewardClientHandle, StewardConfig, StewardEngine, StewardError, StewardProfile,
@@ -386,12 +386,102 @@ impl TranscriptSource for RecordingTranscripts {
     }
 }
 
+/// A compaction discard source that ends the process when a session's
+/// discards are read or its scope is dropped: the kill lands inside the
+/// retirement's side effects.
+struct ExitOnDiscards;
+
+#[async_trait::async_trait]
+impl CompactionDiscardSource for ExitOnDiscards {
+    async fn read_discards(
+        &self,
+        _session_key: &str,
+        _limit: usize,
+    ) -> Result<Vec<DiscardEntry>, DistillerError> {
+        exit_now()
+    }
+
+    async fn drop_scope(&self, _session_key: &str) -> Result<usize, DistillerError> {
+        exit_now()
+    }
+}
+
+/// A transcript source and a compaction discard source that record, in one
+/// order, each read of a session's transcript (`transcript <session>`) and
+/// of its compaction discards (`discards <session>`), and each drop of its
+/// scope (`drop <session>`). They hold no such session and no discards, so
+/// no model is called.
+#[derive(Default)]
+struct OrderedReads {
+    order: Mutex<Vec<String>>,
+}
+
+impl OrderedReads {
+    fn note(&self, what: &str, session_key: &str) {
+        self.order
+            .lock()
+            .unwrap()
+            .push(format!("{what} {session_key}"));
+    }
+
+    /// What was read or dropped of `session`, in order.
+    fn of(&self, session: &SessionId) -> Vec<String> {
+        let session = session.to_string();
+        self.order
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|read| read.ends_with(&format!(" {session}")))
+            .cloned()
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl TranscriptSource for OrderedReads {
+    async fn read(
+        &self,
+        session_key: &str,
+        _from_index: u64,
+    ) -> Result<Option<TranscriptSlice>, DistillerError> {
+        self.note("transcript", session_key);
+        Ok(None)
+    }
+}
+
+#[async_trait::async_trait]
+impl CompactionDiscardSource for OrderedReads {
+    async fn read_discards(
+        &self,
+        session_key: &str,
+        _limit: usize,
+    ) -> Result<Vec<DiscardEntry>, DistillerError> {
+        self.note("discards", session_key);
+        Ok(Vec::new())
+    }
+
+    async fn drop_scope(&self, session_key: &str) -> Result<usize, DistillerError> {
+        self.note("drop", session_key);
+        Ok(0)
+    }
+}
+
 /// Agent memory over the store in `dir`, with a distiller that reads
 /// sessions through `transcripts` and a steward that keeps the exit-interview
 /// queue in the same store, and that store.
 fn memory_over(
     dir: &Path,
     transcripts: Arc<dyn TranscriptSource>,
+) -> (AgentMemoryRuntimeInjector, Arc<SqliteAgentMemoryStore>) {
+    memory_with_discards(dir, transcripts, None)
+}
+
+/// [`memory_over`], with a distiller that reads sessions' compaction
+/// discards, and drops their scopes, through `discards`.
+fn memory_with_discards(
+    dir: &Path,
+    transcripts: Arc<dyn TranscriptSource>,
+    discards: Option<Arc<dyn CompactionDiscardSource>>,
 ) -> (AgentMemoryRuntimeInjector, Arc<SqliteAgentMemoryStore>) {
     std::fs::create_dir_all(dir).expect("memory dir");
     let store = Arc::new(SqliteAgentMemoryStore::open(dir).expect("open the memory store"));
@@ -405,7 +495,7 @@ fn memory_over(
         store.clone(),
         store.clone(),
         Arc::clone(&transcripts),
-        None,
+        discards,
         None,
         REALM,
     ));
@@ -790,6 +880,175 @@ async fn a_kill_inside_a_reset_s_distillation_distills_the_retired_session_after
         boot.session_of(&alpha.identity).await,
         retired,
         "the fresh life runs on a fresh session"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A reset's fresh life commits in Core, and the process is killed right
+/// after Core answered, before the retirement's side effects ran (and with
+/// them anything the step kept in process of the session's compactions).
+/// The next start replays the retirement from Core's journal: it harvests
+/// the compactions the retired session's memory holds, then distills the
+/// session's transcript, once each.
+///
+/// RED before the harvest was planned from the retirement's cause: only a
+/// batch the step kept in process was harvested, so the restart harvested
+/// nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_after_a_reset_harvests_the_retired_session_before_its_transcript_after_the_restart()
+{
+    const NAME: &str =
+        "a_kill_after_a_reset_harvests_the_retired_session_before_its_transcript_after_the_restart";
+    const MOB: &str = "lifecycle-effect-reset-harvest";
+    let alpha = member(ALPHA);
+    if let Some(state) = child_state() {
+        let (memory, _store) = memory_with_discards(
+            &state.join("memory"),
+            Arc::new(ExitOnRead),
+            Some(Arc::new(ExitOnDiscards)),
+        );
+        let boot = boot(
+            &state,
+            MOB,
+            vec![alpha.clone()],
+            Wiring {
+                memory: Some(memory),
+                ..Wiring::default()
+            },
+        )
+        .await;
+        let retired = boot.session_of(&alpha.identity).await;
+        std::fs::write(state.join("retired-session"), retired.to_string())
+            .expect("note the session the reset retires");
+        // The kill lands right after Core answered the reset's rotation.
+        boot.identities
+            .set_fresh_life_answered_hook(Box::new(move || {
+                Box::pin(async move { exit_now::<()>() })
+            }));
+        let _ = boot.identities.reset_tracked(&alpha.identity).await;
+        std::future::pending::<()>().await;
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_child(NAME, temp.path()).await;
+    let retired = SessionId::parse(
+        &std::fs::read_to_string(temp.path().join("retired-session"))
+            .expect("the child noted the retired session"),
+    )
+    .expect("a session id");
+
+    let reads = Arc::new(OrderedReads::default());
+    let (memory, _store) = memory_with_discards(
+        &temp.path().join("memory"),
+        Arc::clone(&reads) as Arc<dyn TranscriptSource>,
+        Some(Arc::clone(&reads) as Arc<dyn CompactionDiscardSource>),
+    );
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            memory: Some(memory),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let transcript = format!("transcript {retired}");
+    eventually("the retired session's distillation", || {
+        reads.of(&retired).contains(&transcript).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        reads.of(&retired),
+        vec![format!("discards {retired}"), transcript],
+        "the replayed retirement harvests the retired session's compactions, then distills its \
+         transcript, once each"
+    );
+    let _ = boot.runtime.shutdown().await;
+}
+
+/// A delete's fresh life commits in Core, and the process is killed right
+/// after Core answered, before the retirement's side effects ran. The next
+/// start replays the retirement from Core's journal: it harvests the
+/// compactions the retired session's memory holds before it drops that
+/// session's scope, once each.
+///
+/// RED before the harvest was planned from the retirement's cause: only a
+/// batch the step kept in process was harvested, so the restart dropped the
+/// scope with nothing harvested.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_after_a_delete_harvests_the_retired_session_before_its_scope_drop_after_the_restart()
+ {
+    const NAME: &str = "a_kill_after_a_delete_harvests_the_retired_session_before_its_scope_drop_after_the_restart";
+    const MOB: &str = "lifecycle-effect-delete-harvest";
+    let alpha = member(ALPHA);
+    if let Some(state) = child_state() {
+        let (memory, _store) = memory_with_discards(
+            &state.join("memory"),
+            Arc::new(RecordingTranscripts::default()),
+            Some(Arc::new(ExitOnDiscards)),
+        );
+        let boot = boot(
+            &state,
+            MOB,
+            vec![alpha.clone()],
+            Wiring {
+                memory: Some(memory),
+                ..Wiring::default()
+            },
+        )
+        .await;
+        let retired = boot.session_of(&alpha.identity).await;
+        std::fs::write(state.join("retired-session"), retired.to_string())
+            .expect("note the session the delete retires");
+        // The kill lands right after Core answered the delete's rotation.
+        boot.identities
+            .set_fresh_life_answered_hook(Box::new(move || {
+                Box::pin(async move { exit_now::<()>() })
+            }));
+        let _ = boot
+            .identities
+            .delete_identity_tracked(&alpha.identity)
+            .await;
+        std::future::pending::<()>().await;
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    run_child(NAME, temp.path()).await;
+    let retired = SessionId::parse(
+        &std::fs::read_to_string(temp.path().join("retired-session"))
+            .expect("the child noted the retired session"),
+    )
+    .expect("a session id");
+
+    let reads = Arc::new(OrderedReads::default());
+    let (memory, _store) = memory_with_discards(
+        &temp.path().join("memory"),
+        Arc::clone(&reads) as Arc<dyn TranscriptSource>,
+        Some(Arc::clone(&reads) as Arc<dyn CompactionDiscardSource>),
+    );
+    let boot = boot(
+        temp.path(),
+        MOB,
+        vec![alpha.clone()],
+        Wiring {
+            memory: Some(memory),
+            ..Wiring::default()
+        },
+    )
+    .await;
+    let drop = format!("drop {retired}");
+    eventually("the retired session's scope drop", || {
+        reads.of(&retired).contains(&drop).then_some(())
+    })
+    .await;
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        reads.of(&retired),
+        vec![format!("discards {retired}"), drop],
+        "the replayed retirement harvests the retired session's compactions, then drops its \
+         scope, once each"
     );
     let _ = boot.runtime.shutdown().await;
 }

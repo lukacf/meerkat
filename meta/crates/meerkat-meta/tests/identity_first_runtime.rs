@@ -6786,14 +6786,16 @@ async fn events_once(events: &Arc<Mutex<Vec<String>>>, done: impl Fn(&str) -> bo
 }
 
 /// A delete of a dormant identity whose member owes a compaction's
-/// projection settles it in the delete's own pre-Core distillation: the
-/// compaction's discards reach the distiller as harvest evidence before the
-/// transcript distillation, and before the lifecycle projection drops the
-/// session's semantic-memory scope (which would tombstone them). Core's
+/// projection settles it before Core is asked, and the retirement's side
+/// effects harvest the settled batch: the compaction's discards reach the
+/// distiller as harvest evidence before the lifecycle projection drops the
+/// session's semantic-memory scope (which would tombstone them). The
+/// delete's own transcript distillation, before Core, is not ordered
+/// against the harvest: the discards are not in the transcript. Core's
 /// settle is asked before its rotation. RED before: nothing settled the
 /// projection, so the discards never reached the distiller.
 #[tokio::test]
-async fn a_delete_harvests_an_owed_compaction_before_its_transcript_and_scope_drop() {
+async fn a_delete_harvests_an_owed_compaction_before_its_scope_drop() {
     let (runtime, bridge, session, events, _memory_store, _context, _memory_dir) =
         dormant_identity_owing_a_compaction("triage:owed-delete").await;
     let id = make_identity("triage:owed-delete");
@@ -6810,13 +6812,11 @@ async fn a_delete_harvests_an_owed_compaction_before_its_transcript_and_scope_dr
     let harvest = at("harvest").unwrap_or_else(|| {
         panic!("the owed compaction's discards reach the distiller as harvest evidence: {events:?}")
     });
-    let transcript = at("transcript")
-        .unwrap_or_else(|| panic!("the delete distills the session's transcript: {events:?}"));
-    let dropped = at(&drop).expect("the projection drops the session's scope");
     assert!(
-        harvest < transcript,
-        "the harvest comes before the transcript distillation: {events:?}"
+        at("transcript").is_some(),
+        "the delete distills the session's transcript: {events:?}"
     );
+    let dropped = at(&drop).expect("the projection drops the session's scope");
     assert!(
         harvest < dropped,
         "the harvest comes before the scope drop: {events:?}"
@@ -6914,9 +6914,8 @@ async fn an_unlisting_harvests_an_owed_compaction_before_its_transcript_distilla
 /// finalization already published (Core's settle acknowledges the row and
 /// answers the projection with no entries) still gets that compaction's
 /// discards to the distiller, read from the session's memory as the live
-/// path's `CompactionCompleted` harvest reads them, before the transcript
-/// distillation and before the scope drop. RED before: an answer with no
-/// entries was harvested as nothing.
+/// path's `CompactionCompleted` harvest reads them, before the scope drop.
+/// RED before: an answer with no entries was harvested as nothing.
 #[tokio::test]
 async fn a_delete_harvests_an_owed_compaction_an_earlier_finalization_published() {
     let (runtime, bridge, session, events, _memory_store, _context, _memory_dir) =
@@ -6941,13 +6940,7 @@ async fn a_delete_harvests_an_owed_compaction_an_earlier_finalization_published(
     let harvest = at("harvest").unwrap_or_else(|| {
         panic!("the owed compaction's discards reach the distiller as harvest evidence: {events:?}")
     });
-    let transcript = at("transcript")
-        .unwrap_or_else(|| panic!("the delete distills the session's transcript: {events:?}"));
     let dropped = at(&drop).expect("the projection drops the session's scope");
-    assert!(
-        harvest < transcript,
-        "the harvest comes before the transcript distillation: {events:?}"
-    );
     assert!(
         harvest < dropped,
         "the harvest comes before the scope drop: {events:?}"
@@ -7955,20 +7948,14 @@ async fn a_refused_reset_harvests_a_compaction_an_earlier_finalization_published
     );
 }
 
-/// A delete whose own harvest of the settled batch fails, and which Core
-/// then refuses, leaves the session going on with the batch published and
-/// nothing owed in Core: the batch still reaches the distiller, read from
-/// the session's memory. RED before: the refused step dropped the fallback
-/// it owed.
+/// A delete Core refuses (its rotation fails before anything of it reaches
+/// Core) keeps the identity's session: the batch the step settled is
+/// harvested as the session's live compaction's would have been, and
+/// nothing of the retirement runs.
 #[tokio::test]
-async fn a_refused_delete_whose_harvest_failed_harvests_the_settled_batch() {
-    let (runtime, bridge, _session, events, _memory_store, _context, _memory_dir) =
-        dormant_identity_owing_a_compaction_over(
-            "triage:owed-refused-delete",
-            OwedDiscards::Published,
-            1,
-        )
-        .await;
+async fn a_delete_core_refuses_hands_its_settled_batch_to_the_ordinary_harvest() {
+    let (runtime, bridge, session, events, _memory_store, _context, _memory_dir) =
+        dormant_identity_owing_a_compaction("triage:owed-refused-delete").await;
     let id = make_identity("triage:owed-refused-delete");
     bridge.fail_create.store(true, Ordering::SeqCst);
 
@@ -7978,34 +7965,26 @@ async fn a_refused_delete_whose_harvest_failed_harvests_the_settled_batch() {
         .expect_err("Core refuses the delete's rotation");
 
     let events = events_once(&events, |event| event == "harvest").await;
-    let failed = events
-        .iter()
-        .position(|event| event == "harvest-failed")
-        .unwrap_or_else(|| panic!("the delete's own harvest is attempted first: {events:?}"));
-    let harvest = events
-        .iter()
-        .position(|event| event == "harvest")
-        .unwrap_or_else(|| panic!("the batch reaches the distiller: {events:?}"));
     assert!(
-        failed < harvest,
-        "the failed harvest, then its retry: {events:?}"
+        !events.contains(&format!("drop {session}")),
+        "nothing of the retirement runs: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's rotation"
     );
 }
 
 /// A delete refused before anything of it reaches Core (the head of Core's
-/// journal does not read), after its own harvest of the settled batch
-/// failed, leaves the session going on with the batch published: the batch
-/// still reaches the distiller, read from the session's memory, and Core's
-/// rotation is never asked.
+/// journal does not read) settles nothing: the compaction stays owed in
+/// Core, for the session's next settle or wake, nothing of it is
+/// harvested, and Core's rotation is never asked. RED before: the delete
+/// settled the projection before the step that refused it.
 #[tokio::test]
-async fn a_delete_refused_before_core_harvests_the_batch_its_own_harvest_missed() {
+async fn a_delete_refused_before_core_settles_nothing() {
     let (runtime, bridge, _session, events, _memory_store, _context, _memory_dir) =
-        dormant_identity_owing_a_compaction_over(
-            "triage:owed-early-refusal",
-            OwedDiscards::Published,
-            1,
-        )
-        .await;
+        dormant_identity_owing_a_compaction("triage:owed-early-refusal").await;
     let id = make_identity("triage:owed-early-refusal");
     bridge.core.fail_journal_head();
 
@@ -8014,30 +7993,25 @@ async fn a_delete_refused_before_core_harvests_the_batch_its_own_harvest_missed(
         .await
         .expect_err("the delete is refused before Core is asked");
 
-    let events = events_once(&events, |event| event == "harvest").await;
-    let at = |name: &str| events.iter().position(|event| event == name);
-    let failed = at("harvest-failed")
-        .unwrap_or_else(|| panic!("the delete's own harvest is attempted first: {events:?}"));
-    let harvest =
-        at("harvest").unwrap_or_else(|| panic!("the batch reaches the distiller: {events:?}"));
+    let events = events_once(&events, |event| event == "transcript").await;
     assert!(
-        failed < harvest,
-        "the failed harvest, then its read of the session's memory: {events:?}"
+        !events.iter().any(|event| event.starts_with("harvest")),
+        "nothing of the compaction is harvested: {events:?}"
+    );
+    assert!(
+        bridge.settles().is_empty(),
+        "Core's settle is never asked: {:?}",
+        bridge.settles()
     );
     assert!(
         bridge.rotations().is_empty(),
         "Core's rotation is never asked"
     );
-    assert_eq!(
-        bridge.settles(),
-        vec![(id.clone(), false)],
-        "Core's settle is asked once"
-    );
 }
 
-/// A delete whose own harvest of the settled batch fails (the model answers
-/// the extraction with an error) owes one fallback harvest of the session's
-/// memory to the retirement's side effects: the fallback runs before the
+/// A delete whose harvest of the settled batch fails (the model answers the
+/// extraction with an error) is recorded and owes one fallback harvest of
+/// the session's memory: the retirement's side effects run it before the
 /// scope drop, and once it harvested the discards no record says a harvest
 /// is owed.
 #[tokio::test]
@@ -8061,7 +8035,7 @@ async fn a_delete_whose_harvest_failed_retries_it_before_the_scope_drop() {
     let events = events_once(&events, |event| event == drop).await;
     let at = |name: &str| events.iter().position(|event| event == name);
     let failed = at("harvest-failed")
-        .unwrap_or_else(|| panic!("the delete's own harvest is attempted first: {events:?}"));
+        .unwrap_or_else(|| panic!("the settled batch's harvest is attempted first: {events:?}"));
     let harvest = at("harvest").unwrap_or_else(|| {
         panic!("the owed compaction's discards reach the distiller as harvest evidence: {events:?}")
     });
@@ -8119,5 +8093,156 @@ async fn a_reset_harvests_a_settled_batch_once_though_its_memory_holds_it() {
         bridge.settles(),
         vec![(id.clone(), false)],
         "Core's settle is asked once, before Core's rotation"
+    );
+}
+
+/// A delete of an identity whose member Core hosts live (the settle answers
+/// `Live`: the live agent owns the finalization) still harvests the
+/// compactions the session's memory holds, in the retirement's side
+/// effects and before the scope drop: Core's rotation stopped the live
+/// member and, after its archive, published into that memory a batch the
+/// agent never finalized. RED before: a `Live` answer left nothing to
+/// harvest, and the scope drop tombstoned the discards.
+#[tokio::test]
+async fn a_delete_of_a_live_identity_harvests_its_session_s_compactions_before_the_scope_drop() {
+    let (runtime, bridge, session, events, _memory_store, _context, _memory_dir) =
+        dormant_identity_owing_a_compaction_over(
+            "triage:owed-live-delete",
+            OwedDiscards::Published,
+            0,
+        )
+        .await;
+    let id = make_identity("triage:owed-live-delete");
+    bridge.owe_compaction(meerkat_session::OwedCompactionSettlement::Live);
+
+    runtime
+        .delete_identity(&id)
+        .await
+        .expect("delete")
+        .expect("Core held the identity");
+
+    let drop = format!("drop {session}");
+    let events = events_once(&events, |event| event == drop).await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!(
+            "the session's compaction discards reach the distiller as harvest evidence: {events:?}"
+        )
+    });
+    let dropped = at(&drop).expect("the projection drops the session's scope");
+    assert!(
+        harvest < dropped,
+        "the harvest comes before the scope drop: {events:?}"
+    );
+    assert_eq!(
+        events.iter().filter(|event| *event == "harvest").count(),
+        1,
+        "the compaction is harvested once: {events:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's rotation"
+    );
+}
+
+/// A reset of an identity whose member Core hosts live (the settle answers
+/// `Live`) still harvests the compactions the session's memory holds, in
+/// the retirement's side effects: after the reset marks, so the harvested
+/// distillate lands quarantined over the outgoing session, and before the
+/// transcript distillation. RED before: a `Live` answer left nothing to
+/// harvest.
+#[tokio::test]
+async fn a_reset_of_a_live_identity_harvests_its_session_s_compactions_before_its_transcript() {
+    let (runtime, bridge, session, events, memory_store, _context, _memory_dir) =
+        dormant_identity_owing_a_compaction_over(
+            "triage:owed-live-reset",
+            OwedDiscards::Published,
+            0,
+        )
+        .await;
+    let id = make_identity("triage:owed-live-reset");
+    bridge.owe_compaction(meerkat_session::OwedCompactionSettlement::Live);
+
+    runtime.reset(&id).await.expect("reset");
+
+    let events = events_once(&events, |event| event == "transcript").await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!(
+            "the session's compaction discards reach the distiller as harvest evidence: {events:?}"
+        )
+    });
+    let transcript = at("transcript").expect("the reset distills the session's transcript");
+    assert!(
+        harvest < transcript,
+        "the harvest comes before the transcript distillation: {events:?}"
+    );
+    let quarantined = memory_store
+        .quarantined_records("default", 10)
+        .await
+        .unwrap();
+    assert!(
+        quarantined.iter().any(|record| record
+            .provenance
+            .evidence
+            .first()
+            .is_some_and(|evidence| evidence.session_id == session.to_string())),
+        "the harvested distillate lands quarantined over the outgoing session: {quarantined:?}"
+    );
+    assert_eq!(
+        bridge.settles(),
+        vec![(id.clone(), false)],
+        "Core's settle is asked once, before Core's rotation"
+    );
+}
+
+/// A rotation a host starts directly on the mob, with no Meta verb behind
+/// it (the lifecycle projection reads it from Core's journal alone), still
+/// harvests the compactions the retired session's memory holds (Core's
+/// rotation published there what the session owed as it ended it) before
+/// it distills the retired session's transcript. No Meta step settled
+/// anything. RED before: only a step of Meta's own owed a harvest, so the
+/// discards were never distilled.
+#[tokio::test]
+async fn a_host_s_own_rotation_harvests_the_retired_session_s_compactions_before_its_transcript() {
+    let (_runtime, bridge, _session, events, _memory_store, _context, _memory_dir) =
+        dormant_identity_owing_a_compaction_over(
+            "triage:owed-host-rotation",
+            OwedDiscards::Published,
+            0,
+        )
+        .await;
+    let id = make_identity("triage:owed-host-rotation");
+    let member = core_member(&bridge, &id);
+
+    // The host's own rotation onto a fresh session, as Core journals it.
+    bridge.core.rotate(
+        &id,
+        &meerkat_meta::identity_first::MemberRuntimeBinding {
+            agent_runtime_id: AgentRuntimeId::parse(&format!("rt:{id}:{}", member.generation + 1))
+                .expect("a runtime id"),
+            session_id: Some(meerkat_core::types::SessionId::new()),
+        },
+        &member.profile,
+    );
+
+    let events = events_once(&events, |event| event == "transcript").await;
+    let at = |name: &str| events.iter().position(|event| event == name);
+    let harvest = at("harvest").unwrap_or_else(|| {
+        panic!(
+            "the session's compaction discards reach the distiller as harvest evidence: {events:?}"
+        )
+    });
+    let transcript =
+        at("transcript").expect("the rotation's retirement distills the session's transcript");
+    assert!(
+        harvest < transcript,
+        "the harvest comes before the transcript distillation: {events:?}"
+    );
+    assert!(
+        bridge.settles().is_empty(),
+        "no Meta step settled anything: {:?}",
+        bridge.settles()
     );
 }

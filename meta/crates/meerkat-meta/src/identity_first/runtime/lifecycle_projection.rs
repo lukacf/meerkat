@@ -1092,6 +1092,9 @@ struct RetirementMemory {
     /// Bind the retired generation to its session for the distiller's
     /// evidence.
     generation_mark: bool,
+    /// Harvest the compactions the retired session's memory holds before
+    /// the session is distilled or its scope dropped.
+    harvest_compaction: bool,
     /// Distill the retired session, with this cause.
     distill: Option<DistillCause>,
     /// Drop the retired session's semantic-memory scope: the identity never
@@ -3924,6 +3927,12 @@ impl IdentityRuntime {
                 if let Some(owed_compaction) = self
                     .lifecycle_projection
                     .take_owed_compaction(identity, retirement.generation)
+                    .or_else(|| {
+                        owes.harvest_compaction.then_some(OwedCompaction::Fallback {
+                            failed: None,
+                            published: None,
+                        })
+                    })
                 {
                     self.harvest_owed_compaction(
                         identity,
@@ -4391,6 +4400,32 @@ mod tests {
         assert!(RetirementMemory::of(Cause::Reset).reset_boundary);
         assert!(!RetirementMemory::of(Cause::RoleMove).reset_boundary);
         assert!(!RetirementMemory::of(Cause::Rotated).reset_boundary);
+    }
+
+    /// The harvest of the compactions a retired session holds is planned
+    /// from the retirement's cause alone, as every other memory side effect
+    /// is: each retirement that distills the session it ends, or drops its
+    /// scope, harvests them first; a release owes none.
+    #[test]
+    fn each_retirement_that_distills_or_drops_its_session_harvests_its_compactions() {
+        use RetiredIdentityCause as Cause;
+        for (cause, harvests) in [
+            (Cause::Unlisted, true),
+            (Cause::Reset, true),
+            (Cause::RoleMove, true),
+            (Cause::Rotated, true),
+            (Cause::Delete, true),
+            (Cause::Retire, false),
+            (Cause::Scoped, false),
+        ] {
+            let owes = RetirementMemory::of(cause);
+            assert_eq!(owes.harvest_compaction, harvests, "{cause:?}");
+            assert_eq!(
+                owes.harvest_compaction,
+                owes.distill.is_some() || owes.drop_scope,
+                "{cause:?}: the harvest goes with a distillation or a scope drop"
+            );
+        }
     }
 
     /// A fresh life owes the incarnation it follows the memory side effects

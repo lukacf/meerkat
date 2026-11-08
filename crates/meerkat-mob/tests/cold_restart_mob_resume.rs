@@ -13348,6 +13348,7 @@ fn memory_compacting_service(
 /// What the first process start left: member `w-1`'s session, the open run
 /// its provisional tail belongs to, and that run's input.
 #[cfg(feature = "test-support")]
+#[derive(Clone)]
 struct CompactedMemberRun {
     w1_sid: meerkat_core::types::SessionId,
     run_id: meerkat_core::RunId,
@@ -13356,21 +13357,82 @@ struct CompactedMemberRun {
     intents: Vec<meerkat_core::CompactionProjectionId>,
 }
 
+/// Where a member run's compaction stands, as one read finds it: the run's
+/// provisional tail, the session's pending outbox rows, and the outbox rows
+/// and the memory stage of each of the run's compaction intents.
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
+struct RunCompactionState {
+    tail: Option<meerkat_core::RunId>,
+    pending: usize,
+    intents: Vec<(Vec<String>, Option<String>)>,
+}
+
+#[cfg(feature = "test-support")]
+impl RunCompactionState {
+    async fn read(
+        paths: &Paths,
+        runtime_store: &dyn meerkat_runtime::RuntimeStore,
+        run: &CompactedMemberRun,
+    ) -> Self {
+        Self {
+            tail: provisional_tail_run(runtime_store, &run.w1_sid, true).await,
+            pending: runtime_store
+                .load_pending_compaction_projections(&run.runtime_id)
+                .await
+                .expect("read the compaction outbox")
+                .len(),
+            intents: run
+                .intents
+                .iter()
+                .map(|projection| {
+                    (
+                        compaction_outbox_states(paths, projection),
+                        compaction_stage_state(paths, projection),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The run's compaction is settled: no tail stands, nothing is owed,
+    /// and each of the run's intents has one outbox row, acknowledged, and
+    /// a finalized memory stage.
+    fn settled(&self) -> bool {
+        self.tail.is_none()
+            && self.pending == 0
+            && !self.intents.is_empty()
+            && self.intents.iter().all(|(rows, stage)| {
+                rows.as_slice() == ["finalized"] && stage.as_deref() == Some("finalized")
+            })
+    }
+}
+
+/// What the first process start holds while member `w-1`'s run is held
+/// after its compaction: the mob, its session service, the member's handle,
+/// weak handles on the process's session runtimes, and the run.
+#[cfg(feature = "test-support")]
+struct HeldCompactedRun {
+    handle: MobHandle,
+    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    member: meerkat_mob::MemberHandle,
+    runtime_release_witnesses: Vec<std::sync::Weak<dyn meerkat_core::agent::CommsRuntime>>,
+    run: CompactedMemberRun,
+}
+
 /// The first process start: member `w-1`, with durable memory and a
 /// compaction threshold every boundary crosses, answers one ordinary turn,
 /// then runs a tool loop. The loop run's boundaries compact (a compaction
 /// stages its memory projection and the session carries its intent; the
 /// ordinary turn before the run gives its first boundary something to fold),
 /// and its tool rounds' commits carry the rewrite and the intent into the
-/// run's provisional tail; the loop's third model call is held. Nothing has committed the tail, so the compaction outbox holds
-/// no row for the intent. The host then stops the mob, leaving the run
-/// running, and shuts it down with `queued_inputs`.
+/// run's provisional tail; the loop's third model call is held. Nothing has
+/// committed the tail, so the compaction outbox holds no row for the intent.
 #[cfg(feature = "test-support")]
-async fn stop_over_a_member_run_that_compacted(
+async fn hold_a_member_run_that_compacted(
     paths: &Paths,
     runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
-    queued_inputs: meerkat_mob::QueuedInputsOnShutdown,
-) -> CompactedMemberRun {
+) -> HeldCompactedRun {
     let mut definition = mob_definition(MobRuntimeMode::TurnDriven);
     match definition.profiles.get_mut(&ProfileName::from("worker")) {
         Some(ProfileBinding::Inline(profile)) => {
@@ -13459,26 +13521,49 @@ async fn stop_over_a_member_run_that_compacted(
             .is_empty(),
         "nothing committed the tail, so the outbox holds no row for the intent"
     );
+    HeldCompactedRun {
+        handle: handle_1,
+        service: service_1,
+        member,
+        runtime_release_witnesses,
+        run: CompactedMemberRun {
+            w1_sid,
+            run_id,
+            runtime_id,
+            intents,
+        },
+    }
+}
 
-    handle_1
+/// [`hold_a_member_run_that_compacted`]; the host then stops the mob,
+/// leaving the run running, and shuts it down with `queued_inputs`.
+#[cfg(feature = "test-support")]
+async fn stop_over_a_member_run_that_compacted(
+    paths: &Paths,
+    runtime_store: Arc<dyn meerkat_runtime::RuntimeStore>,
+    queued_inputs: meerkat_mob::QueuedInputsOnShutdown,
+) -> CompactedMemberRun {
+    let held = hold_a_member_run_that_compacted(paths, runtime_store).await;
+    held.handle
         .stop_with_options(meerkat_mob::StopOptions::default().leave_runs_running())
         .await
         .expect("the mob stops");
-    handle_1
+    held.handle
         .shutdown_with_report(
             meerkat_mob::ShutdownOptions::default().with_queued_inputs(queued_inputs),
         )
         .await
         .expect("the mob shuts down");
-    service_1
+    held.service
         .try_shutdown()
         .await
         .expect("shutdown first session service");
-    drop(member);
-    drop(handle_1);
-    drop(service_1);
+    drop(held.member);
+    drop(held.handle);
+    drop(held.service);
     tokio::time::timeout(Duration::from_secs(5), async {
-        while runtime_release_witnesses
+        while held
+            .runtime_release_witnesses
             .iter()
             .any(|runtime| runtime.upgrade().is_some())
         {
@@ -13487,12 +13572,7 @@ async fn stop_over_a_member_run_that_compacted(
     })
     .await
     .expect("every old session runtime is released before the next start");
-    CompactedMemberRun {
-        w1_sid,
-        run_id,
-        runtime_id,
-        intents,
-    }
+    held.run
 }
 
 /// The states of the member's durable compaction memory stages, read from
@@ -14244,6 +14324,102 @@ async fn a_rotation_of_a_dormant_member_settles_its_owed_compaction_projection()
     );
     start.assert_no_model_request("rotation");
     let _ = start.handle.shutdown().await;
+}
+
+/// A rotation of a live member onto a fresh session while the member's run
+/// is in flight after a compaction (the run's round commits carried the
+/// compaction's intent into its provisional tail): the rotation's
+/// retirement cancels the run, which closes the tail as an interrupted run
+/// and so commits the intent, and the agent never finalizes it; the
+/// rotation's settle of the session it leaves, after the archive, finalizes
+/// the compaction's memory stage into that session's memory and
+/// acknowledges its outbox row before the rotation's terminal step journals
+/// the retirement. A host that reads the retirement from the journal finds
+/// the batch published in the old session's memory, and nothing owed.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotation_of_a_live_member_settles_the_compaction_its_cancelled_run_carried() {
+    // A refused settle is logged, not returned: show it.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> = Arc::new(
+        meerkat_runtime::store::SqliteRuntimeStore::new_head_canonical(&paths.realm_db_path)
+            .expect("open the durable runtime store"),
+    );
+    let held = hold_a_member_run_that_compacted(&paths, runtime_store.clone()).await;
+    let identity = AgentIdentity::from("w-1");
+    assert!(
+        held.service
+            .live_session_actor_registered(&held.run.w1_sid)
+            .await,
+        "an actor hosts the member's session while its run is held"
+    );
+
+    // Where the run's compaction stands when the retirement of the
+    // incarnation the rotation ends is first read from the journal.
+    let at_retirement = {
+        let handle = held.handle.clone();
+        let paths = paths.clone();
+        let runtime_store = runtime_store.clone();
+        let identity = identity.clone();
+        let run = held.run.clone();
+        tokio::spawn(async move {
+            let mut after = meerkat_mob::MobJournalCursor::START;
+            loop {
+                let page = handle
+                    .member_lifecycle_events(after, meerkat_mob::IDENTITY_ENTRY_PAGE_MAX)
+                    .await
+                    .expect("Core's member lifecycle journal reads");
+                let retired = page.records.iter().any(|record| {
+                    matches!(
+                        &record.event,
+                        meerkat_mob::MemberLifecycleEvent::Retired {
+                            agent_identity,
+                            session_id: Some(retired_session),
+                            ..
+                        } if *agent_identity == identity && *retired_session == run.w1_sid
+                    )
+                });
+                if retired {
+                    return RunCompactionState::read(&paths, runtime_store.as_ref(), &run).await;
+                }
+                after = page.next;
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
+
+    let mut spec = SpawnMemberSpec::new("worker", identity.clone());
+    spec.runtime_mode = Some(MobRuntimeMode::TurnDriven);
+    let fresh = tokio::time::timeout(Duration::from_mins(1), held.handle.rotate_member(spec))
+        .await
+        .expect("the rotation answers")
+        .expect("the rotation of the live member succeeds");
+    assert_ne!(fresh, held.run.w1_sid, "the rotation seats a fresh session");
+    let at_retirement = tokio::time::timeout(Duration::from_secs(30), at_retirement)
+        .await
+        .expect("the retirement is journaled")
+        .expect("the journal watch ends");
+    // Whatever the rotation's end did after the journal has landed by now.
+    sleep(Duration::from_secs(2)).await;
+    let after = RunCompactionState::read(&paths, runtime_store.as_ref(), &held.run).await;
+    assert!(
+        at_retirement.settled() && after.settled(),
+        "the run's compaction is finalized into the old session's memory, and its outbox row \
+         acknowledged, when Core journals the retirement: at the retirement {at_retirement:?}, \
+         after it {after:?}"
+    );
+    let (records, published) = published_compaction_entries(&paths, &held.run.w1_sid);
+    assert!(published > 0, "the finalized stages published entries");
+    assert_eq!(
+        records, published,
+        "every finalized stage's entries are in the old session's memory exactly once"
+    );
+    let _ = held.handle.shutdown().await;
 }
 
 /// A second settle of a settled session owes nothing and changes nothing:

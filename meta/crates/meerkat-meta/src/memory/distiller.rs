@@ -2385,6 +2385,56 @@ mod tests {
         Ok(())
     }
 
+    /// A scope that holds more compaction records than a harvest reads
+    /// yields its newest ones, in durable order: a compaction's batch is the
+    /// newest its session's scope holds, so a harvest finds the batch it is
+    /// owed however long the scope grew, never only the oldest records.
+    #[tokio::test]
+    async fn hnsw_discard_source_reads_the_newest_records_of_a_long_scope()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::memory::{
+            MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySource, MemoryStore,
+            MessageRange,
+        };
+        use meerkat_core::types::{MemoryIndexableContent, SessionId};
+
+        let dir = tempfile::tempdir()?;
+        let session = SessionId::new();
+        let limit = COMPACTION_HARVEST_LIMIT as u64;
+        let seeded = limit + 6;
+        {
+            let store = meerkat_memory::HnswMemoryStore::open(dir.path())?;
+            let scope = MemoryIndexScope::for_session(session.clone());
+            for index in 0..seeded {
+                let request = MemoryIndexRequest::new(
+                    scope.clone(),
+                    MemoryIndexableContent::Indexable(format!("discarded message {index}")),
+                    MemoryMetadata {
+                        session_id: session.clone(),
+                        source: MemorySource::Compaction {
+                            source_range: MessageRange::new(index, index + 1)?,
+                        },
+                        indexed_at: meerkat_core::time_compat::SystemTime::now(),
+                    },
+                )?;
+                store.index_scoped(request).await?;
+            }
+        }
+
+        let discards = HnswDiscardSource::new(dir.path())
+            .read_discards(&session.to_string(), COMPACTION_HARVEST_LIMIT)
+            .await?;
+        let ranges = discards
+            .iter()
+            .map(|discard| discard.range)
+            .collect::<Vec<_>>();
+        let newest = (seeded - limit..seeded)
+            .map(|index| Some((index, index + 1)))
+            .collect::<Vec<_>>();
+        assert_eq!(ranges, newest, "the newest records, in durable order");
+        Ok(())
+    }
+
     // -- scripted LLM -------------------------------------------------------
 
     struct ScriptedLlm {
@@ -3319,6 +3369,51 @@ mod tests {
         assert_eq!(engine.distilled_cursor("identity:never", "sess-x"), 0);
         engine.with_window("identity:a", "sess-1", |state| state.cursor = 7);
         assert_eq!(engine.distilled_cursor("identity:a", "sess-1"), 7);
+    }
+
+    /// The harvest a retirement runs of the compactions the session it ends
+    /// holds fires no compaction follow-up: no life resumes that session,
+    /// so a hygiene pass over it would revise a transcript nobody reads.
+    #[tokio::test]
+    async fn a_retirement_s_compaction_harvest_runs_no_follow_up() {
+        let provider = Arc::new(CapturingProvider::default());
+        let (engine, _client) = engine_with(
+            vec![ONE_OP_REPLY],
+            provider,
+            Some(slice(&[("user", "hello")])),
+            Vec::new(),
+            None,
+            enabled_config(),
+        );
+        let seen: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink = seen.clone();
+        engine.set_compaction_follow_up(Arc::new(move |_identity, session, _outcome| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(session.to_string());
+        }));
+
+        let outcome = engine
+            .harvest_compaction_within_bound(
+                "identity:a",
+                "sess-retired",
+                Some(vec![DiscardEntry {
+                    content: "discarded: wrapper reminder".to_string(),
+                    range: Some((0, 2)),
+                }]),
+            )
+            .await
+            .expect("the harvest ends within its bound");
+        assert!(
+            matches!(outcome, DistillOutcome::Completed { written: 1, .. }),
+            "{outcome:?}"
+        );
+        assert!(
+            seen.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a retirement's harvest runs no compaction follow-up"
+        );
     }
 
     struct StaticDiscards(Vec<DiscardEntry>);

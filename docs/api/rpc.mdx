@@ -172,6 +172,7 @@ of this full catalog.
 | `session/peer_response_terminal` | Session | `SessionPeerResponseTerminalParams` | `RuntimeAcceptResult` | Admit a correlated terminal peer response through the typed runtime ingress |
 | `session/inject_context` | Session | `InjectSystemContextParams` | `InjectSystemContextResult` | Append one ordinary durable ordered System message at the admitted transcript boundary |
 | `session/input_status` | Session | `SessionInputStateParams` | `SessionInputStateResult` | Read an input's stored runtime state (terminal outcome, run association) by input id or idempotency key |
+| `session/compact` | Session | `CompactSessionParams` | `CompactSessionResult` | Ask a live session's next compaction check to compact, without a rebuild |
 | `turn/start` | Turn | `StartTurnParams` | `WireRunResult` | Start a new turn on existing session |
 | `turn/interrupt` | Turn | `InterruptParams` | `InterruptResult` | Cancel in-flight turn |
 | `turn/stop_run` | Turn | `StopRunParams` | `StopRunResult` | Stop one exact run and terminalize every contributor bound to it |
@@ -251,6 +252,7 @@ of this full catalog.
 | `mob/revoke_host` | Mob | `MobRevokeHostParams` | `MobRevokeHostResult` | Revoke a bound (or bind-requested) member host (mob feature) |
 | `mob/hard_cancel_member` | Mob | `MobHardCancelParams` | `MobHardCancelResult` | Hard-cancel a mob member; immediate user-interrupt authority (mob feature) |
 | `mob/stop_member_run` | Mob | `MobStopMemberRunParams` | `MobStopMemberRunResult` | Stop one exact run of a mob member and terminalize its contributors (mob feature) |
+| `mob/compact_member` | Mob | `MobCompactMemberParams` | `MobCompactMemberResult` | Ask a live mob member's next compaction check to compact, without a respawn (mob feature) |
 | `mob/member_live_open` | Mob | `MobMemberLiveOpenParams` | `LiveOpenResult` | Open a live realtime channel on a mob member by identity (mob feature) |
 | `mob/member_live_close` | Mob | `MobMemberLiveChannelParams` | `LiveCloseResult` | Close one named live channel on a mob member (mob feature) |
 | `mob/member_live_status` | Mob | `MobMemberLiveStatusParams` | `LiveStatusResult` | Read live channel status for a mob member; omit channel_id to discover (mob feature) |
@@ -1341,6 +1343,73 @@ Remove a session from the runtime.
 
 <ParamField body="session_id" type="string" required>
   Session ID to archive.
+</ParamField>
+
+### session/compact
+
+Ask a live session's next compaction check to compact. The session is not
+rebuilt and no compaction threshold changes: the check that precedes the
+session's next model request (in its running turn, once that turn's tool
+results are in, or in its next turn) consumes the request and runs a
+compaction whatever the thresholds and their cadence would decide. The
+compaction publishes the ordinary `compaction_started`, then
+`compaction_completed` or `compaction_failed`. Its own rules still hold: a
+turn in flight keeps its request and newest round, and before a session's
+first model request there is nothing to compact. When the check that
+consumes the request compacts nothing, it publishes
+`requested_compaction_skipped` instead, with the `run_id` of the run whose
+check it was and the `reason`: `first_model_request` (the check came before
+the session's first model request) or `nothing_to_fold` (the turn in flight
+keeps its request and newest round, and nothing else was left to fold).
+A `nothing_to_fold` skip records a compaction attempt like any other, so the
+ordinary trigger may then wait up to `min_turns_between_compactions` checks.
+If a store fence gap stops the run at the check that consumed the request,
+the request is dropped: nothing is compacted or published for it, and a host
+asks again.
+
+The request lives in the session's runtime registration only. It is never
+persisted: a restart of the server, an unload or a reload of the session
+drops it, and a per-build threshold override is neither read nor changed. A
+session whose agent has no compactor (a server built without the
+`session-compaction` feature, or a host that composes its agents without
+one) never consumes a request: it stays requested, and every later request
+answers `already_requested`.
+
+<CodeGroup>
+```json Request
+{"jsonrpc":"2.0","id":9,"method":"session/compact","params":{"session_id":"01936f8a-7b2c-7000-8000-000000000001"}}
+```
+
+```json Response
+{"jsonrpc":"2.0","id":9,"result":{"session_id":"01936f8a-7b2c-7000-8000-000000000001","outcome":"requested"}}
+```
+</CodeGroup>
+
+The `outcome` is `requested`, or `already_requested` when a request that no
+check consumed yet was already recorded (nothing changes, and the next check
+compacts once). A request never loads or wakes a session. Refusals:
+
+- an unknown or archived session: `-32001` (session not found);
+- a session with no live runtime in this server (not opened since the server
+  started, unloaded, a deferred session before its first turn, or a mob
+  member's session its mob has not woken): `-32003` (session not running);
+- a session runtime that is initializing, retired or stopped: `-32600`;
+- a session runtime that is being unregistered: `-32002` (session busy,
+  retryable; `data.code` is `SESSION_BUSY`);
+- a session runtime that needs a durability reload: `-32603`.
+
+A request that races the session's unregister can answer `-32600` where a
+later one answers `-32003`: the runtime went between the server's check and
+the request. No refusal records anything.
+
+`mob/compact_member` (`mob_id`, `agent_identity`) asks the same of a live mob
+member, without a respawn, and answers the same `outcome` with the member's
+`mob_id` and `agent_identity`. A member that is dormant or waking, or whose
+runtime is retired or stopped, is refused as not live and is never woken; a
+member placed on a member host is refused as unsupported.
+
+<ParamField body="session_id" type="string" required>
+  Session ID.
 </ParamField>
 
 ## Turn methods
@@ -3831,6 +3900,7 @@ live transport's realtime observations. See
 | `compaction_started` | Context compaction began |
 | `compaction_completed` | Compaction finished. Since 0.9.4 it carries `summary_source` (who wrote the summary: `{"kind": "provider_call", "source_bound": ...}` with bound `whole`, `trimmed` (`through`) or `requests_only` (`kept`, `of`), `{"kind": "host_curator"}` or `{"kind": "mechanical_fallback"}`) and optional `estimated_history_tokens_after`, in the unit of `compaction_started`'s `estimated_history_tokens` |
 | `compaction_failed` | Compaction failed |
+| `requested_compaction_skipped` | Since 0.9.11: the compaction check that consumed a host's compaction request (`session/compact`, `mob/compact_member`) compacted nothing. Carries `run_id` (the run whose check it was) and `reason`: `first_model_request` (the check came before the session's first model request) or `nothing_to_fold` (the run in flight keeps its request and newest round, and nothing else was left to fold). A check that compacts at the request publishes `compaction_started` instead |
 | `tool_results_bounded_for_request` | A model request carried some of its run's own tool results shortened, for that request only: with them whole it was over the provider's request-body cap, or its forecast was over the model's context window, and no compaction made room (a compaction inside a run keeps the run's request and newest round). Carries `run_id`, `results` (each `tool_use_id`, `tool_name`, `kept_bytes` and `total_bytes`) and `axis` (`request_bytes` or `context_window`). Published before the request is sent; the stored transcript keeps every result whole. With the default compactor the next run's first check then compacts the whole transcript once; with compaction off the request is still bounded and nothing is recorded |
 | `budget_warning` | Approaching resource limits |
 | `retrying` | Retrying after transient error; the retry reuses `assistant_message_id`, so discard that id's live buffer |

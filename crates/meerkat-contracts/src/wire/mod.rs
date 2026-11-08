@@ -4,6 +4,7 @@ mod approval;
 mod artifact;
 mod auth;
 mod comms;
+pub mod compaction_request;
 mod config;
 mod connection;
 mod decision;
@@ -56,6 +57,10 @@ pub use comms::{
     PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
     PeerName as WireCommsPeerName, PeerSendability, PeerTransport,
     ResponseStatus as WireCommsResponseStatus, SendTaintOverride, SenderContentTaint,
+};
+pub use compaction_request::{
+    CompactSessionParams, CompactSessionResult, MobCompactMemberParams, MobCompactMemberResult,
+    WireCompactionRequestOutcome,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::ConfigWriteResult;

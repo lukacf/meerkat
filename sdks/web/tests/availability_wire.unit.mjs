@@ -101,3 +101,15 @@ test('a request bound notice survives session polling with its whole payload', (
   assert.deepEqual(session.pollEvents(), [bound, control]);
   assert.deepEqual(session.subscribe().poll(), [bound, control]);
 });
+
+test('a requested compaction skip survives session polling with its whole payload', () => {
+  const skipped = {
+    type: 'requested_compaction_skipped',
+    run_id: '00000000-0000-4000-8000-000000000003',
+    reason: 'first_model_request',
+  };
+  const control = { type: 'text_delta', delta: 'ordinary text' };
+  const session = sessionWith([skipped, control]);
+  assert.deepEqual(session.pollEvents(), [skipped, control]);
+  assert.deepEqual(session.subscribe().poll(), [skipped, control]);
+});

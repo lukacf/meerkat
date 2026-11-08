@@ -12487,6 +12487,55 @@ impl SessionRuntime {
             .map_err(runtime_driver_error_to_rpc)
     }
 
+    /// Ask the session's next compaction check to compact, without a
+    /// rebuild ([`meerkat_runtime::MeerkatMachine::request_compaction`]).
+    ///
+    /// The request needs the session's live runtime registration in this
+    /// process, and is never a reason to load or wake one: a session that
+    /// has none (dormant, a member's session its mob has not woken, or one
+    /// this process has not opened since it started) is refused as not
+    /// running. An unknown or archived session is not found; a retired or
+    /// stopped registration keeps the runtime's refusal.
+    pub async fn request_compaction(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, RpcError> {
+        let staged = self
+            .staged_sessions
+            .info(session_id)
+            .await
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("staged session lifecycle error: {err}"),
+                data: None,
+            })?
+            .is_some();
+        if !staged {
+            match committed_source_archived(&self.service, session_id)
+                .await
+                .map_err(session_error_to_rpc)?
+            {
+                None => return Err(Self::session_not_found_rpc(session_id)),
+                Some(true) => return Err(Self::archived_session_not_found_rpc(session_id)),
+                Some(false) => {}
+            }
+        }
+        if !self.runtime_adapter.contains_session(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_NOT_RUNNING,
+                message: format!(
+                    "session {session_id} has no live runtime in this process; a compaction \
+                     request never loads or wakes a session"
+                ),
+                data: None,
+            });
+        }
+        self.runtime_adapter
+            .request_compaction(session_id)
+            .await
+            .map_err(runtime_driver_error_to_rpc)
+    }
+
     /// Interrupt a running turn on the given session.
     ///
     /// If the session is idle, this is a no-op.

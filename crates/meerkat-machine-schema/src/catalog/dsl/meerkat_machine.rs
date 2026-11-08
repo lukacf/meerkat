@@ -2918,6 +2918,19 @@ pub enum RetainedRunSettleVerdict {
     NotRetained,
 }
 
+/// The verdict for a host's request that the session's next compaction check
+/// compact (`RequestCompaction`): requested (the registration serves and now
+/// holds the request), already requested (it already held one, not yet
+/// consumed: nothing changed), or not serving (the registration is
+/// initializing, retired, stopped or destroyed: nothing changed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum CompactionRequestVerdict {
+    Requested,
+    AlreadyRequested,
+    #[default]
+    NotServing,
+}
+
 /// What an unregister does with inputs still queued behind the session's
 /// running turn when it stops the runtime. `BeginUnregisterSession` records
 /// it with the unregister; `ClassifyStopInputDisposition` reads it.
@@ -4803,6 +4816,14 @@ macro_rules! meerkat_catalog_machine_dsl {
             mob_overlay_peer_endpoints: Set<PeerEndpoint>,
             peer_projection_epoch: u64,
             mob_overlay_epoch: u64,
+
+            // A host's request that the session's next compaction check
+            // compact (`RequestCompaction`), consumed by that check
+            // (`ConsumeCompactionRequest`). A one-shot fact of this
+            // registration: never persisted, and no threshold changes with
+            // it. A re-registration of the same session keeps it, as it keeps
+            // the session's run-start holds; a new session binding clears it.
+            compaction_requested: bool,
         }
 
         init(Initializing) {
@@ -5299,6 +5320,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             mob_overlay_peer_endpoints = EmptySet,
             peer_projection_epoch = 0,
             mob_overlay_epoch = 0,
+            compaction_requested = false,
         }
 
         terminal [Destroyed]
@@ -7488,6 +7510,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 #[redacted]
                 authority_batch_key: String,
             },
+            // A host asks the session's next compaction check to compact
+            // (`MeerkatMachine::request_compaction`): the machine records the
+            // request or answers why not.
+            RequestCompaction,
+            // The agent's compaction check of `run_id` consumes a recorded
+            // request: the machine answers whether this check compacts at
+            // the host's request.
+            ConsumeCompactionRequest { run_id: RunId },
         }
 
         surface_only [
@@ -8876,6 +8906,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             // cancel could never reach this run, and an executor-wide cancel
             // there would meet no run, or another one.
             ExactRunBoundaryCancel { run_id: RunId, reason: String },
+            // The verdict for a host's compaction request.
+            CompactionRequestResolved { verdict: Enum<CompactionRequestVerdict> },
+            // The compaction check of `run_id` consumed the host's request:
+            // the check compacts without asking the compactor's trigger, or,
+            // with nothing to compact, skips and says so.
+            CompactionRequestConsumed { run_id: RunId },
         }
 
         // =====================================================================
@@ -9163,6 +9199,12 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Only the executor's exact-run boundary handle realizes a run-bound
         // boundary cancel.
         disposition ExactRunBoundaryCancel => local seam NoOwnerRealization,
+        // The host's compaction request answers the verdict of its own
+        // transition.
+        disposition CompactionRequestResolved => local seam SurfaceResultAlignment,
+        // The agent's compaction check reads the consumption from its own
+        // transition, as it reads TurnCheckCompaction.
+        disposition CompactionRequestConsumed => local seam NoOwnerRealization,
 
         // =====================================================================
         // Helpers
@@ -12037,6 +12079,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // A compaction request belongs to the session it was made
+                // for.
+                self.compaction_requested = false;
             }
             to Idle
         }
@@ -12277,6 +12322,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.session_llm_reconfigure_committed_visible_set_changed = false;
                 self.session_llm_reconfigure_revision_bumped = false;
                 self.session_llm_reconfigure_active_visibility_revision = 0;
+                // A compaction request belongs to the session it was made
+                // for.
+                self.compaction_requested = false;
             }
             to Idle
             emit RuntimeNotice { kind: RuntimeNoticeKind::Recover, detail: "stopped session re-registered under a new session binding" }
@@ -41490,6 +41538,121 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.resumed_run_admission_hold = None;
             }
+            to Idle
+        }
+
+        // A host asks the session's next compaction check to compact
+        // (`MeerkatMachine::request_compaction`), without a rebuild and
+        // without changing any threshold. The request is a one-shot fact of
+        // this registration, consumed by the next compaction check of a run
+        // (`ConsumeCompactionRequest`). The machine owns the verdict, one arm
+        // per case, total over every phase:
+        //
+        // - Requested: the registration serves (idle, attached, or running a
+        //   turn, which keeps running) and holds no request: it now holds
+        //   one. A running turn's next check consumes it; a turn that makes
+        //   no further model request leaves it to the next run's first
+        //   check.
+        // - AlreadyRequested: the registration serves and already holds a
+        //   request no check consumed yet: nothing changes, so two requests
+        //   before a check give one compaction.
+        // - NotServing: the registration is initializing, retired, stopped
+        //   or destroyed: nothing changes.
+        transition RequestCompactionRecorded {
+            per_phase [Idle, Attached, Running]
+            on input RequestCompaction
+            guard "no_compaction_requested" { self.compaction_requested == false }
+            update {
+                self.compaction_requested = true;
+            }
+            to Idle
+            emit CompactionRequestResolved {
+                verdict: CompactionRequestVerdict::Requested
+            }
+        }
+
+        transition RequestCompactionAlreadyRecorded {
+            per_phase [Idle, Attached, Running]
+            on input RequestCompaction
+            guard "compaction_requested" { self.compaction_requested == true }
+            update {}
+            to Idle
+            emit CompactionRequestResolved {
+                verdict: CompactionRequestVerdict::AlreadyRequested
+            }
+        }
+
+        transition RequestCompactionNotServing {
+            per_phase [Initializing, Retired, Stopped, Destroyed]
+            on input RequestCompaction
+            update {}
+            to Idle
+            emit CompactionRequestResolved {
+                verdict: CompactionRequestVerdict::NotServing
+            }
+        }
+
+        // The agent's compaction check of `run_id` consumes the host's
+        // request. The machine emits the check on the current run's entry
+        // into CallingLlm (`TurnCheckCompaction`), and the agent asks at the
+        // moment it evaluates that check, before the model request. A run
+        // is current while the registration runs it, or drains it once
+        // retired. Total over every phase:
+        //
+        // - Taken: the run is current, its turn calls the model and a
+        //   request is held: the request is consumed, and the check compacts
+        //   without asking the compactor's trigger (its thresholds and
+        //   cadence), or, with nothing to compact (before the session's first
+        //   model request, or nothing to fold), skips and says so.
+        // - None: the same with no request held: nothing changes, and the
+        //   compactor's trigger decides as before.
+        // - Every other case (another run is current, the turn is not
+        //   calling the model, or no run can be current): nothing changes,
+        //   and a held request waits for the next check.
+        transition ConsumeCompactionRequestTaken {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
+            guard "compaction_requested" { self.compaction_requested == true }
+            update {
+                self.compaction_requested = false;
+            }
+            to Idle
+            emit CompactionRequestConsumed { run_id: run_id }
+        }
+
+        transition ConsumeCompactionRequestNone {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            guard "turn_calling_llm" { self.turn_phase == TurnPhase::CallingLlm }
+            guard "no_compaction_requested" { self.compaction_requested == false }
+            update {}
+            to Idle
+        }
+
+        transition ConsumeCompactionRequestStaleRun {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_not_current" { self.current_run_id != Some(run_id) }
+            update {}
+            to Idle
+        }
+
+        transition ConsumeCompactionRequestOutsideCheck {
+            per_phase [Running, Retired]
+            on input ConsumeCompactionRequest { run_id }
+            guard "run_matches_current" { self.current_run_id == Some(run_id) }
+            guard "turn_not_calling_llm" { self.turn_phase != TurnPhase::CallingLlm }
+            update {}
+            to Idle
+        }
+
+        transition ConsumeCompactionRequestInert {
+            per_phase [Initializing, Idle, Attached, Stopped, Destroyed]
+            on input ConsumeCompactionRequest { run_id }
+            update {}
             to Idle
         }
     }

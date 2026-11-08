@@ -100,6 +100,9 @@ impl MobCommand {
             // Retrying a build preparation the host asked to retry lets the
             // member's next wake be built.
             | Self::ResolveMemberBuildPreparation { .. }
+            // A compaction request changes how the member's next model
+            // request is made: the authority class of driving the member.
+            | Self::RequestMemberCompaction { .. }
             // A dormant seat creates members (and spawns the fresh ones that
             // owe a kickoff): the authority class of a spawn.
             | Self::PlanDormantSeats { .. }
@@ -466,7 +469,8 @@ impl MobCommand {
             | Self::ForceCancel { agent_identity, .. }
             | Self::HardCancelMember { agent_identity, .. }
             | Self::StopMemberRun { agent_identity, .. }
-            | Self::SettleMemberRetainedRun { agent_identity, .. } => {
+            | Self::SettleMemberRetainedRun { agent_identity, .. }
+            | Self::RequestMemberCompaction { agent_identity, .. } => {
                 AgentLaneAdmission::Members(vec![agent_identity])
             }
             Self::CancelAllWork { runtime_id, .. } => {
@@ -882,6 +886,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::SettleMemberRetainedRun { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::RequestMemberCompaction { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::MemberHistory { reply_tx, .. } => {

@@ -73,6 +73,9 @@ import {
   type InterruptResult,
   type MobStopMemberRunResult,
   type StopRunResult,
+  type CompactSessionResult,
+  type MobCompactMemberResult,
+  type WireCompactionRequestOutcome,
   type WireRunStopReceipt,
   type JobsArtifactsParams,
   type JobsArtifactsResult,
@@ -3593,6 +3596,31 @@ export class MeerkatClient {
   }
 
   /**
+   * Ask a live mob member's next compaction check to compact. The member is
+   * not respawned and its compaction thresholds do not change. The outcome
+   * is `requested`, or `already_requested` when a request no check consumed
+   * yet was already recorded. A dormant member is refused, never woken.
+   */
+  async compactMobMember(
+    mobId: string,
+    agentIdentity: string,
+  ): Promise<MobCompactMemberResult> {
+    const result = await this.request("mob/compact_member", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+    });
+    const context = "Invalid mob/compact_member response";
+    if (typeof result.mob_id !== "string" || typeof result.agent_identity !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing mob_id or agent_identity`);
+    }
+    return {
+      mob_id: result.mob_id,
+      agent_identity: result.agent_identity,
+      outcome: MeerkatClient.parseCompactionRequestOutcome(result.outcome, context),
+    };
+  }
+
+  /**
    * Open a live realtime channel on a mob member. The member's mob checks
    * the member first, and the member's own live host serves the transport
    * or refuses it typed. A WebRTC bootstrap's offer is answered with
@@ -4924,6 +4952,35 @@ export class MeerkatClient {
       session_id: result.session_id,
       receipt: MeerkatClient.parseRunStopReceipt(result.receipt, context),
     };
+  }
+
+  /** @internal Ask the session's next compaction check to compact. */
+  async _compact(sessionId: string): Promise<CompactSessionResult> {
+    const result = await this.request("session/compact", {
+      session_id: sessionId,
+    });
+    const context = "Invalid session/compact response";
+    if (typeof result.session_id !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing session_id`);
+    }
+    return {
+      session_id: result.session_id,
+      outcome: MeerkatClient.parseCompactionRequestOutcome(result.outcome, context),
+    };
+  }
+
+  /** Validate a compaction request's outcome (a closed vocabulary). */
+  private static parseCompactionRequestOutcome(
+    raw: unknown,
+    context: string,
+  ): WireCompactionRequestOutcome {
+    if (raw !== "requested" && raw !== "already_requested") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: outcome must be 'requested' or 'already_requested'`,
+      );
+    }
+    return raw;
   }
 
   /**

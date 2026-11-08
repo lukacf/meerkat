@@ -1500,6 +1500,12 @@ class ReasoningLoweringOutcomeNotApplied(TypedDict, total=False):
 ReasoningLoweringOutcome = ReasoningLoweringOutcomeApplied | ReasoningLoweringOutcomeNotApplied
 
 
+# Why the compaction check that consumed a host's compaction request
+# compacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports
+# it. The vocabulary may grow.
+RequestedCompactionSkipReason = Literal['first_model_request', 'nothing_to_fold']
+
+
 class RunInputContent(TypedDict, total=False):
     """The run starts from caller-provided content (text or blocks).
     """
@@ -2736,10 +2742,28 @@ class AgentEventToolResultsBoundedForRequest(TypedDict, total=False):
     type: Required[Literal['tool_results_bounded_for_request']]
 
 
+class AgentEventRequestedCompactionSkipped(TypedDict, total=False):
+    """The compaction check that consumed a host's compaction request
+    (`MeerkatMachine::request_compaction`: JSON-RPC `session/compact` and
+    `mob/compact_member`) compacted nothing.
+
+    A check that compacts at the request publishes the ordinary
+    `compaction_started`, then `compaction_completed` or
+    `compaction_failed`. When the check has nothing to compact, it
+    publishes this event instead, so the host can tell that the request
+    was consumed and that nothing was compacted. Published at that check,
+    before its model request is sent. A check that consumed no request
+    publishes nothing new.
+    """
+    reason: Required[RequestedCompactionSkipReason]
+    run_id: Required[RunId]
+    type: Required[Literal['requested_compaction_skipped']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed | AgentEventToolResultsBoundedForRequest | AgentEventRequestedCompactionSkipped
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

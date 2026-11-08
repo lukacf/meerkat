@@ -1110,6 +1110,60 @@ them.
   `DetachedJobError::SubmissionConflict`, and a compare-and-swap that would
   change a stored job's requester is refused.
 
+- `meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-runtime`:
+  the MeerkatMachine records a host's compaction request and its
+  consumption by the agent's compaction check (see Added).
+  `MeerkatMachineState` (meerkat-machine-schema and meerkat-runtime) and the
+  kernel `State` gain `compaction_requested`. `MeerkatMachineInput` and
+  `MeerkatMachineInputVariant` (meerkat-runtime `meerkat_machine::dsl` and
+  meerkat-machine-schema `catalog::dsl::meerkat_machine`),
+  `MeerkatMachineRuntimeInternalInput` (meerkat-runtime) and the kernel
+  `generated::meerkat::Input` and `InputKind` gain `RequestCompaction` and
+  `ConsumeCompactionRequest { run_id }`, and
+  `MeerkatMachineFieldlessRuntimeInternalInput` (meerkat-runtime) gains
+  `RequestCompaction`. `MeerkatMachineEffect` and
+  `MeerkatMachineEffectVariant` (the same two modules) and the kernel
+  `Effect` and `EffectKind` gain `CompactionRequestResolved { verdict }`
+  and `CompactionRequestConsumed { run_id }`. The kernel
+  `generated::meerkat::TransitionId` gains the request's and the
+  consumption's 23 arms: `RequestCompactionRecordedIdle`,
+  `RequestCompactionRecordedAttached`, `RequestCompactionRecordedRunning`,
+  `RequestCompactionAlreadyRecordedIdle`,
+  `RequestCompactionAlreadyRecordedAttached`,
+  `RequestCompactionAlreadyRecordedRunning`,
+  `RequestCompactionNotServingInitializing`,
+  `RequestCompactionNotServingRetired`, `RequestCompactionNotServingStopped`,
+  `RequestCompactionNotServingDestroyed`,
+  `ConsumeCompactionRequestTakenRunning`,
+  `ConsumeCompactionRequestTakenRetired`,
+  `ConsumeCompactionRequestNoneRunning`, `ConsumeCompactionRequestNoneRetired`,
+  `ConsumeCompactionRequestStaleRunRunning`,
+  `ConsumeCompactionRequestStaleRunRetired`,
+  `ConsumeCompactionRequestOutsideCheckRunning`,
+  `ConsumeCompactionRequestOutsideCheckRetired`,
+  `ConsumeCompactionRequestInertInitializing`,
+  `ConsumeCompactionRequestInertIdle`, `ConsumeCompactionRequestInertAttached`,
+  `ConsumeCompactionRequestInertStopped` and
+  `ConsumeCompactionRequestInertDestroyed`. Every new variant is appended
+  last, so no existing variant's implicit discriminant moves. Every enum
+  named here is exhaustive, so a downstream exhaustive match needs the new
+  arms, or a wildcard arm; a `MeerkatMachineState` literal that ends with
+  `..Default::default()` keeps compiling.
+
+- `meerkat-core`: `AgentEvent` gains the variant
+  `RequestedCompactionSkipped { run_id, reason }`, wire type
+  `requested_compaction_skipped`, with the new enum
+  `RequestedCompactionSkipReason` (`first_model_request`,
+  `nothing_to_fold`; non-exhaustive). The compaction check that consumes a
+  host's compaction request and compacts nothing publishes it (see Added):
+  the run whose check it was, and why. `AgentEvent` is non-exhaustive, so a
+  Rust match already has a wildcard arm; the published event catalog
+  (`meerkat_contracts::KNOWN_AGENT_EVENT_TYPES`) lists the new type, and the
+  generated SDK inventories with it. An SDK of this version surfaces the
+  event as its unknown-event form with the whole payload (Python,
+  TypeScript) or as its generated event type (Web); an SDK of 0.9.10 or
+  earlier refuses the unknown type, as for any newer contract.
+
 - `meerkat`, `meerkat-core`, `meerkat-mcp`: MCP service-secret write
   witnesses (see Added). `meerkat`: `set_mcp_service_secret` and
   `set_mcp_service_secret_entered` return the write's
@@ -1303,6 +1357,41 @@ them.
   two fields.
 
 ### Added
+
+- `meerkat-runtime`, `meerkat-core`, `meerkat-mob`, `meerkat-mob-mcp`,
+  `meerkat-rpc`, `meerkat-contracts`, the Python and TypeScript SDKs: a host
+  can ask a live session to compact now, without a rebuild and without
+  changing any compaction threshold. `MeerkatMachine::request_compaction`
+  records the request on the session's runtime registration (MeerkatMachine
+  `RequestCompaction`) and answers `CompactionRequestReceipt::Requested`, or
+  `AlreadyRequested` when a request no check consumed yet was already
+  recorded. The session's next compaction check consumes it
+  (`ConsumeCompactionRequest`, through the new provided method
+  `TurnStateHandle::consume_compaction_request`): the check before the next
+  model request, in the running turn once its tool results are in or in the
+  next turn, compacts without asking the compactor's trigger (its
+  thresholds and cadence). The compaction's own rules hold (a turn in
+  flight keeps its request and newest round; a check with nothing to fold
+  compacts nothing, and so does the session's first model request), and it
+  publishes the ordinary compaction events. A check that consumes the
+  request and compacts nothing says so: it publishes the new
+  `requested_compaction_skipped` event with the run and the reason
+  (`first_model_request` or `nothing_to_fold`; see Breaking). The request
+  is never persisted, a per-build threshold override is neither read nor
+  changed, and a registration that is initializing, retired, stopped or
+  gone refuses it with `RuntimeDriverError::NotReady`. Nothing is woken or
+  loaded for a request.
+  JSON-RPC `session/compact` (`CompactSessionParams`, `CompactSessionResult`)
+  answers `outcome` `requested` or `already_requested`
+  (`WireCompactionRequestOutcome`); a session with no live runtime in the
+  server is refused `-32003`. `mob/compact_member` (`MobCompactMemberParams`,
+  `MobCompactMemberResult`, `MobHandle::compact_member`,
+  `MobMcpState::mob_compact_member`, `SendCommand`-scoped)
+  asks the same of a live mob member without a respawn: a dormant or waking
+  member is refused `MemberSessionNotLive` and never woken, a placed member
+  `UnsupportedForMode`. Python `Session.compact()` and `Mob.compact_member()`,
+  TypeScript `session.compact()` and `mob.compactMember()`. (#2113, thanks
+  @zond)
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
   identity's member build (`DeclaredEntry::build`, set with
@@ -3809,6 +3898,10 @@ them.
   admission from the host's customizer, and with none the fork is refused
   with `MobError::DispatchAdmissionRequired`.
 
+- Upgrade the SDKs with the server before a host asks for compactions
+  (`session/compact`, `mob/compact_member`): a Python, TypeScript or Web SDK
+  of 0.9.10 or earlier refuses the new `requested_compaction_skipped` event
+  type, as it does any event type newer than its contract (see Breaking).
 
 ### Known limitations
 

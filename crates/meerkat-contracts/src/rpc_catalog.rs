@@ -322,6 +322,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "StopRunParams",
             "StopRunResult",
         ),
+        RpcMethodDescriptor::typed(
+            "session/compact",
+            "Ask a live session's next compaction check to compact, without a rebuild",
+            "CompactSessionParams",
+            "CompactSessionResult",
+        ),
         RpcMethodDescriptor::result_only("config/get", "Read config", "ConfigEnvelope"),
         RpcMethodDescriptor::typed(
             "config/set",
@@ -1226,6 +1232,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "MobStopMemberRunResult",
             ),
             RpcMethodDescriptor::typed(
+                "mob/compact_member",
+                "Ask a live mob member's next compaction check to compact, without a respawn",
+                "MobCompactMemberParams",
+                "MobCompactMemberResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "mob/member_live_open",
                 "Open a live realtime channel on a mob member by identity",
                 "MobMemberLiveOpenParams",
@@ -1664,6 +1676,7 @@ mod tests {
             "turn/start",
             "turn/interrupt",
             "turn/stop_run",
+            "session/compact",
         ] {
             let descriptors: Vec<_> = methods
                 .iter()
@@ -2203,6 +2216,11 @@ mod tests {
                 "mob/stop_member_run",
                 Some("MobStopMemberRunParams"),
                 Some("MobStopMemberRunResult"),
+            ),
+            (
+                "mob/compact_member",
+                Some("MobCompactMemberParams"),
+                Some("MobCompactMemberResult"),
             ),
             (
                 "mob/member_live_open",

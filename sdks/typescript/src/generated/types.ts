@@ -670,6 +670,8 @@ export type WireRunStopCompletion = "completed" | "completed_without_result" | "
 
 export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
 
+export type WireCompactionRequestOutcome = "requested" | "already_requested";
+
 export interface WireDeviceCompleteResultPending {
   state: "pending";
 }
@@ -1506,6 +1508,15 @@ export interface WireRunStopContributor {
   completion: WireRunStopCompletion;
   input_id: string;
   terminal?: WireInputTerminalOutcome | null;
+}
+
+export interface CompactSessionParams {
+  session_id: string;
+}
+
+export interface CompactSessionResult {
+  outcome: WireCompactionRequestOutcome;
+  session_id: string;
 }
 
 export interface ListSessionTranscriptRevisionsParams {
@@ -3207,6 +3218,17 @@ export interface MobStopMemberRunResult {
   agent_identity: string;
   mob_id: string;
   receipt: WireRunStopReceipt;
+}
+
+export interface MobCompactMemberParams {
+  agent_identity: string;
+  mob_id: string;
+}
+
+export interface MobCompactMemberResult {
+  agent_identity: string;
+  mob_id: string;
+  outcome: WireCompactionRequestOutcome;
 }
 
 export interface MobMemberLiveOpenParams {

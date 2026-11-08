@@ -87,6 +87,7 @@ pub mod coalescing;
 pub mod comms_bridge;
 pub mod comms_drain;
 pub mod comms_trust_reconcile;
+pub mod compaction_request;
 pub mod completion;
 pub mod composition;
 pub(crate) mod control_plane;
@@ -605,6 +606,7 @@ pub use coalescing::{
     AggregateDescriptor, CoalescingResult, SupersessionScope, check_supersession,
     create_aggregate_input, is_coalescing_eligible,
 };
+pub use compaction_request::CompactionRequestReceipt;
 pub use completion::{
     CompletionClass, CompletionCleanupObservation, CompletionHandle, CompletionOutcome,
     CompletionWaitError,

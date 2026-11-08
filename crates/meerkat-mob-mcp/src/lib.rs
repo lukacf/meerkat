@@ -8522,6 +8522,20 @@ impl MobMcpState {
             .await
     }
 
+    /// Ask a member's next compaction check to compact, as the console
+    /// principal, without a respawn. Never wakes the member: a dormant
+    /// member is refused as not live.
+    pub async fn mob_compact_member(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .compact_member(self.console_principal.clone(), identity)
+            .await
+    }
+
     /// Open a live realtime channel on a member (§16.4). The returned
     /// [`meerkat_contracts::wire::LiveOpenResult`] carries the owning
     /// host's bootstrap (a URL + single-use token, or a WebRTC token)

@@ -306,6 +306,7 @@ sidecars remain complete. The server rejects zero.
 | `mob.grantScopes(...)` / `mob.revokeScopes(...)` / `mob.grants()` | Manage trusted operator control grants |
 | `mob.memberHistory(...)` / `mob.hardCancel(...)` | Read remote/local history or perform an immediate hard cancel |
 | `mob.stopMemberRun(agentIdentity, runId, reason)` | Stop one exact member run and terminalize its contributors |
+| `mob.compactMember(agentIdentity)` | Ask a live member's next compaction check to compact, without a respawn |
 | `mob.memberLiveOpen/status/control/close(...)` | Control a live channel on a local or remote member |
 
 Multi-host placement and host/grant mutation are trusted JSON-RPC operator
@@ -618,6 +619,23 @@ run, including durable steers that joined it. `receipt.outcome` is `stopped`
 (with `contributors`), `not_current` (the run is no longer current; nothing
 was touched), or `not_stoppable`. `mob.stopMemberRun(agentIdentity, runId,
 reason)` does the same for one mob member.
+
+### compact()
+
+```typescript
+async compact(): Promise<CompactSessionResult>
+```
+
+Sends `session/compact`. It asks the live session's next compaction check to
+compact, without a rebuild and without changing any compaction threshold:
+the check before its next model request compacts. `outcome` is `requested`,
+or `already_requested` when a request no check consumed yet was already
+recorded. A check that consumes the request and has nothing to compact
+(before the session's first model request, or with nothing to fold)
+publishes the `requested_compaction_skipped` event with its `reason` instead
+of `compaction_started`. A session with no live runtime is refused, never
+woken. `mob.compactMember(agentIdentity)` does the same for one live mob
+member, without a respawn.
 
 ### archive()
 

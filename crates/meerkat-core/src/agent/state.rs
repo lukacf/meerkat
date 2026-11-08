@@ -4589,6 +4589,52 @@ where
         Box::pin(self.execute_turn_effects_unboxed(transition, turn_count, event_tx))
     }
 
+    /// Consume a host's compaction request at the compaction check being
+    /// evaluated, and answer the run whose check consumed it.
+    ///
+    /// MeerkatMachine owns the request (`RequestCompaction`) and decides
+    /// whether this check consumes it (`ConsumeCompactionRequest`): only the
+    /// current run's check, while its turn calls the model. An agent with no
+    /// turn-state authority or no started run holds no request.
+    fn consume_compaction_request(&self) -> Result<Option<crate::lifecycle::RunId>, AgentError> {
+        let (Some(handle), Some(run_id)) = (
+            self.turn_state_handle.as_deref(),
+            self.runtime_started_run_id.clone(),
+        ) else {
+            return Ok(None);
+        };
+        let consumed = handle
+            .consume_compaction_request(run_id.clone())
+            .map_err(|err| {
+                AgentError::InternalError(format!(
+                    "runtime turn-state handle rejected ConsumeCompactionRequest: {err}"
+                ))
+            })?;
+        Ok(consumed.then_some(run_id))
+    }
+
+    /// Publish that the compaction check which consumed a host's compaction
+    /// request (for the run `run_id`) compacted nothing, and why, so the
+    /// host can tell its request was answered without a compaction.
+    async fn publish_requested_compaction_skipped(
+        &self,
+        run_id: crate::lifecycle::RunId,
+        reason: crate::event::RequestedCompactionSkipReason,
+        event_tx: &Option<mpsc::Sender<AgentEvent>>,
+    ) {
+        if !crate::event_tap::tap_emit(
+            &self.event_tap,
+            event_tx.as_ref(),
+            AgentEvent::RequestedCompactionSkipped { run_id, reason },
+        )
+        .await
+        {
+            tracing::warn!(
+                "compaction event stream receiver dropped before RequestedCompactionSkipped"
+            );
+        }
+    }
+
     /// Execute side effects from a transition. Handles CheckCompaction
     /// effects emitted on CallingLlm entry.
     ///
@@ -4707,9 +4753,32 @@ where
                                 Some(crate::agent::compact::CompactionScope::Whole)
                             )
                         });
-                    if compactor.should_compact(&ctx) {
+                    // A host's compaction request is consumed by this check:
+                    // the machine answers whether this check compacts at the
+                    // host's request, without asking the compactor's trigger
+                    // (its thresholds and cadence). The compaction's own
+                    // rules below still hold, and the session's first-ever
+                    // check has nothing to compact: a request it consumes
+                    // compacts nothing. A check that consumes a request and
+                    // compacts nothing publishes `RequestedCompactionSkipped`
+                    // with the reason; one that compacts publishes the
+                    // ordinary compaction events.
+                    let request_consumed_by = self.consume_compaction_request()?;
+                    let compact_on_request =
+                        request_consumed_by.is_some() && current_boundary_index > 0;
+                    if let Some(run_id) = request_consumed_by.as_ref() {
+                        tracing::info!(
+                            ?run_id,
+                            compacts = compact_on_request,
+                            "a compaction request of the session's host was consumed at this check"
+                        );
+                    }
+                    if compact_on_request || compactor.should_compact(&ctx) {
                         // A writer past its self-fence window sends no
-                        // summarization request either.
+                        // summarization request either. A host's request
+                        // this check consumed goes with a refusal here: the
+                        // run stops (or is suspended) at this check, and
+                        // nothing is compacted or published for it.
                         self.check_dispatch_fence().await?;
                         // A run in flight keeps its request and its newest
                         // round verbatim: the rows before it are folded
@@ -4725,6 +4794,17 @@ where
                                 run_id = ?self.runtime_started_run_id,
                                 "compaction skipped: nothing to fold outside the open run's request and newest round"
                             );
+                            // A host's request this check consumed is
+                            // answered first, so a failed cadence save below
+                            // still reports it: nothing was compacted.
+                            if let Some(run_id) = request_consumed_by {
+                                self.publish_requested_compaction_skipped(
+                                    run_id,
+                                    crate::event::RequestedCompactionSkipReason::NothingToFold,
+                                    event_tx,
+                                )
+                                .await;
+                            }
                             self.compaction_cadence
                                 .last_compaction_attempt_boundary_index =
                                 Some(current_boundary_index);
@@ -5558,6 +5638,17 @@ where
                                 }
                             }
                         }
+                    } else if let Some(run_id) = request_consumed_by {
+                        // The check consumed a host's request and, before the
+                        // session's first model request, has nothing to
+                        // compact: the request is answered without a
+                        // compaction.
+                        self.publish_requested_compaction_skipped(
+                            run_id,
+                            crate::event::RequestedCompactionSkipReason::FirstModelRequest,
+                            event_tx,
+                        )
+                        .await;
                     }
                 }
                 let cadence = self.compaction_cadence.clone();

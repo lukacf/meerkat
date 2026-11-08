@@ -553,6 +553,11 @@ function handleEvent(event: AgentEvent): string {
       return `${event.type}:${event.run_id}:${event.axis}:${event.results
         .map((result) => `${result.tool_name}/${result.tool_use_id}:${result.kept_bytes}/${result.total_bytes}`)
         .join(',')}`;
+    case 'requested_compaction_skipped':
+      // The compaction check that consumed a host's compaction request
+      // compacted nothing: the run whose check it was, and why
+      // (`first_model_request` or `nothing_to_fold`).
+      return `${event.type}:${event.run_id}:${event.reason}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

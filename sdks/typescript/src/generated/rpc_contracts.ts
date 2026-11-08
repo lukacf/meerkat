@@ -28,6 +28,8 @@ import type {
   CommsPeersResult,
   CommsSendParams,
   CommsSendResult,
+  CompactSessionParams,
+  CompactSessionResult,
   ConfigEnvelope,
   ConfigPatchParams,
   ConfigSetParams,
@@ -138,6 +140,8 @@ import type {
   MobCancelWorkResult,
   MobClaimCallbackRouteParams,
   MobClaimCallbackRouteResult,
+  MobCompactMemberParams,
+  MobCompactMemberResult,
   MobConcludeObjectiveParams,
   MobConcludeObjectiveResult,
   MobCreateParams,
@@ -457,6 +461,10 @@ export interface RpcMethodContracts {
   "turn/stop_run": {
     params: StopRunParams;
     result: (StopRunResult) & Record<string, unknown>;
+  };
+  "session/compact": {
+    params: CompactSessionParams;
+    result: (CompactSessionResult) & Record<string, unknown>;
   };
   "config/get": {
     params: Record<string, never>;
@@ -1021,6 +1029,10 @@ export interface RpcMethodContracts {
   "mob/stop_member_run": {
     params: MobStopMemberRunParams;
     result: (MobStopMemberRunResult) & Record<string, unknown>;
+  };
+  "mob/compact_member": {
+    params: MobCompactMemberParams;
+    result: (MobCompactMemberResult) & Record<string, unknown>;
   };
   "mob/member_live_open": {
     params: MobMemberLiveOpenParams;

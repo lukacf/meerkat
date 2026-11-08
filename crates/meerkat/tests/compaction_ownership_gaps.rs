@@ -1,20 +1,20 @@
-//! Compaction ownership gaps on the runtime-backed facade path.
+//! Compaction ownership gaps on the runtime-backed facade path, now closed.
 //!
 //! The runtime owns the compaction trigger, the transcript rewrite commit and
-//! the memory projection. These tests pin three places where a host cannot
-//! get what it needs from that ownership today:
+//! the memory projection. These tests pin what a host gets from that
+//! ownership in three places that were gaps:
 //!
 //! - the `CompactionCompleted` observation of a compaction whose durable
-//!   memory projection is finalized by a later actor never reaches a session
-//!   event stream;
-//! - a per-build `auto_compact_threshold_override` is not recorded with the
-//!   session, so the runtime's recovery lowering rebuilds the session without
-//!   it;
-//! - there is no typed request to compact a session now.
-//!
-//! Each gap is an `#[ignore]`d test stating the intended behaviour and, where
-//! today's behaviour is observable, a passing `today_` sibling pinning it. The
-//! siblings are deleted with the fix and the ignored tests un-ignored.
+//!   memory projection the runtime finalizes after the run reaches the
+//!   session's event stream after the run, also when the actor that ran it
+//!   is replaced before the session's next run;
+//! - a per-build `auto_compact_threshold_override` holds for the build that
+//!   names it and is not recorded with the session, a documented contract
+//!   (the session contracts reference, "Persistent mode"): the runtime's
+//!   recovery lowering rebuilds the session without it;
+//! - a host asks the runtime to compact a live session now, without a
+//!   rebuild and without changing its thresholds
+//!   (`MeerkatMachine::request_compaction`).
 //!
 //! Every "host lifetime" here is reconstructed inside one OS process and ends
 //! with `stand_down`, as in `cold_restart_resume_after_compaction.rs`.
@@ -576,22 +576,20 @@ mod tests {
         );
     }
 
-    /// The typed compact-now request this test needs. No such request
-    /// exists: the proposal is `SessionService::compact_session(id)` (RPC
-    /// `session/compact`), admitted like a turn and run at the session's next
-    /// pre-LLM boundary, or as its own runtime primitive when idle. The fix
-    /// replaces this body with that call.
-    #[allow(clippy::unused_async)]
-    async fn request_compaction_now(_host: &Host, _id: &SessionId) -> Result<(), String> {
-        Err(
-            "no typed compact-now request exists (proposed: SessionService::compact_session / \
-             RPC session/compact)"
-                .to_string(),
-        )
+    /// The typed compact-now request: `MeerkatMachine::request_compaction`
+    /// (RPC `session/compact`) records a one-shot request on the session's
+    /// registration, and the session's next compaction check consumes it.
+    async fn request_compaction_now(host: &Host, id: &SessionId) -> Result<(), String> {
+        match host.adapter.request_compaction(id).await {
+            Ok(meerkat_runtime::CompactionRequestReceipt::Requested) => Ok(()),
+            other => Err(format!(
+                "the idle session's registration did not record the request: {other:?}"
+            )),
+        }
     }
 
-    /// INTENDED (missing API): a host asks the runtime to compact an idle
-    /// session now, without a rebuild and without lowering its threshold.
+    /// A host asks the runtime to compact an idle session now, without a
+    /// rebuild and without lowering its threshold.
     /// The test asserts each part of that contract:
     ///
     /// - order: the summary call is served before the next ordinary model
@@ -606,13 +604,10 @@ mod tests {
     ///   default policy still does not compact over
     ///   `TURNS_AFTER_RECOVERY` further turns, which is enough for
     ///   threshold 1 to compact again past `min_turns_between_compactions`
-    ///   (the control in `today_recovered_session_loses_its_compaction_threshold`
-    ///   shows it).
-    ///
-    /// There is no `today_` sibling: today there is nothing to call, which is
-    /// what `request_compaction_now` returns.
+    ///   (the control in
+    ///   `recovery_does_not_restore_a_per_build_compaction_threshold` shows
+    ///   it).
     #[tokio::test]
-    #[ignore = "no typed compact-now request (SessionService::compact_session / session/compact); see the PR"]
     async fn compact_now_compacts_before_the_next_model_call_without_a_rebuild() {
         let temp = tempfile::tempdir().expect("tempdir");
         let client = Arc::new(SummarizingClient::new());

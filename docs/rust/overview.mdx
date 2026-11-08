@@ -476,6 +476,8 @@ match event {
     AgentEvent::CompactionFailed { reason } => {}
     // A request carried the run's own tool results shortened for it only
     AgentEvent::ToolResultsBoundedForRequest { run_id, results, axis } => {}
+    // The check that consumed a host's compaction request compacted nothing
+    AgentEvent::RequestedCompactionSkipped { run_id, reason } => {}
 
     // Budget
     AgentEvent::BudgetWarning { budget_type, used, limit, percent } => {}

@@ -2072,6 +2072,29 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "The compaction check that consumed a host's compaction request\n(`MeerkatMachine::request_compaction`: JSON-RPC `session/compact` and\n`mob/compact_member`) compacted nothing.\n\nA check that compacts at the request publishes the ordinary\n`compaction_started`, then `compaction_completed` or\n`compaction_failed`. When the check has nothing to compact, it\npublishes this event instead, so the host can tell that the request\nwas consumed and that nothing was compacted. Published at that check,\nbefore its model request is sent. A check that consumed no request\npublishes nothing new.",
+            "properties": {
+              "reason": {
+                "$ref": "#/components/schemas/RequestedCompactionSkipReason",
+                "description": "Why the check compacted nothing."
+              },
+              "run_id": {
+                "$ref": "#/components/schemas/RunId",
+                "description": "The run whose compaction check consumed the request."
+              },
+              "type": {
+                "const": "requested_compaction_skipped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "reason"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -17062,6 +17085,21 @@
           "urgent"
         ],
         "type": "string"
+      },
+      "RequestedCompactionSkipReason": {
+        "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
+        "oneOf": [
+          {
+            "const": "first_model_request",
+            "description": "The check came before the session's first model request, when the\nsession has nothing to compact yet.",
+            "type": "string"
+          },
+          {
+            "const": "nothing_to_fold",
+            "description": "A run in flight keeps its request and its newest round, and nothing\nelse was left to fold.",
+            "type": "string"
+          }
+        ]
       },
       "ResponseStatus": {
         "description": "Typed status for response interactions.\n\nMirrors `CommsStatus` from `meerkat-comms` — the comms runtime converts at the boundary.",

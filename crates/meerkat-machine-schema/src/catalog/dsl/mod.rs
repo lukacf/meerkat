@@ -2053,6 +2053,10 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Accepted", "Busy", "NotRetained"],
             ),
             NamedTypeBinding::string_enum(
+                "CompactionRequestVerdict",
+                &["Requested", "AlreadyRequested", "NotServing"],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputPhase",
                 &[
                     "Queued",
@@ -3558,6 +3562,12 @@ runtime_internal_inputs!(
         // channel's exact binding, so nothing is admitted on it past the
         // close. No caller can ask for it.
         CloseLiveDelegationIntake,
+        // A host's compaction request, applied directly by
+        // `MeerkatMachine::request_compaction`, which answers the machine's
+        // verdict, and its consumption by the agent's compaction check
+        // through the session's turn-state handle.
+        RequestCompaction,
+        ConsumeCompactionRequest,
     ]
 );
 

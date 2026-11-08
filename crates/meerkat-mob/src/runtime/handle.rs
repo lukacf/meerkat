@@ -11759,6 +11759,46 @@ impl MobHandle {
         .await?
     }
 
+    /// Ask `identity`'s next compaction check to compact, without a respawn
+    /// and without changing its thresholds: the member runtime's machine
+    /// decides ([`meerkat_runtime::MeerkatMachine::request_compaction`]). The
+    /// answer is [`meerkat_runtime::CompactionRequestReceipt::Requested`]
+    /// when the member's registration now holds the request, or
+    /// [`meerkat_runtime::CompactionRequestReceipt::AlreadyRequested`] when
+    /// it already held one no check consumed yet. The check that consumes it
+    /// precedes the member's next model request, in its running turn or in
+    /// its next run, and compacts whatever the member's compaction
+    /// thresholds would decide; the member publishes its ordinary
+    /// compaction events, or `RequestedCompactionSkipped` with the reason
+    /// when that check has nothing to compact. The request is
+    /// never persisted: a respawn, a reload or the end of the process drops
+    /// it.
+    ///
+    /// The verb never wakes a member. A member the mob does not hold is
+    /// [`MobError::MemberNotFound`]; one not materialized in this process
+    /// (dormant, or waking), or whose registration is gone, leaving through
+    /// its unregister, or not serving (retired or stopped), is
+    /// [`MobError::MemberSessionNotLive`]: the request needs a live member.
+    /// A member whose runtime needs a durability reload is
+    /// [`MobError::MemberReloadRequired`]. A placed member is refused with
+    /// [`MobError::UnsupportedForMode`]. `SendCommand`-scoped at chokepoint
+    /// (a).
+    pub async fn compact_member(
+        &self,
+        caller: crate::control_policy::MobControlPrincipal,
+        identity: AgentIdentity,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, MobError> {
+        self.clone()
+            .with_command_authority(crate::control_policy::CommandAuthority::principal(caller))
+            .send_actor_command(
+                |reply_tx| super::state::MobCommand::RequestMemberCompaction {
+                    agent_identity: identity,
+                    reply_tx,
+                },
+            )
+            .await?
+    }
+
     /// Placement-switched member transcript read (phase 6, DEC-P6E-21):
     /// `ReadHistory`-scoped at chokepoint (a); local and remote pages share
     /// ONE wire projection. RPC/REST/MCP exposure is phase 7 (the DTOs

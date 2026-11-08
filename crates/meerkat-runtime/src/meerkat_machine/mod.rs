@@ -1221,6 +1221,7 @@ pub use boot_obligations::{
     RuntimeBootObligations, RuntimeRecoveryWork, RuntimeRecoveryWorkUnobserved, SessionDurableWork,
     SessionWorkState,
 };
+mod compaction_request;
 pub mod composition;
 mod dispatch_control;
 mod dispatch_drain;

@@ -3574,6 +3574,35 @@ pub async fn handle_stop_member_run(
     }
 }
 
+/// Handle `mob/compact_member`: ask a live member's next compaction check to
+/// compact, without a respawn. A dormant member is refused, never woken.
+pub async fn handle_compact_member(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobCompactMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let identity = AgentIdentity::from(params.agent_identity.as_str());
+    match state.mob_compact_member(&mob_id, identity).await {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            meerkat_contracts::MobCompactMemberResult {
+                mob_id: params.mob_id,
+                agent_identity: params.agent_identity,
+                outcome: receipt.wire_outcome(),
+            },
+        ),
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
 /// `mob/member_live_open` without an execution-identity authority: a
 /// request that names an `execution_identity` refuses as a strict
 /// `live/open` does on a host that composes no authority.

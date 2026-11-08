@@ -1471,6 +1471,34 @@ pub async fn handle_archive(
     }
 }
 
+/// Handle `session/compact`: ask a live session's next compaction check to
+/// compact, without a rebuild. A session with no live runtime in this
+/// process is refused, never loaded or woken.
+pub async fn handle_compact(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let params: meerkat_contracts::CompactSessionParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(sid) => sid,
+        Err(resp) => return resp,
+    };
+    match runtime.request_compaction(&session_id).await {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            meerkat_contracts::CompactSessionResult {
+                session_id: session_id.to_string(),
+                outcome: receipt.wire_outcome(),
+            },
+        ),
+        Err(rpc_err) => RpcResponse::from_error(id, rpc_err),
+    }
+}
+
 /// Handle `session/inject_context`.
 pub async fn handle_inject_context(
     id: Option<RpcId>,

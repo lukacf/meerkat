@@ -13445,6 +13445,100 @@ async fn a_host_settle_of_a_dormant_member_is_refused_and_wakes_nothing() {
     let _ = held.handle.shutdown().await;
 }
 
+/// A host's compaction request on mob members (`MobHandle::compact_member`).
+/// A member the mob does not hold is refused `MemberNotFound`. A member the
+/// start left dormant (the lead: it holds no work) is refused
+/// `MemberSessionNotLive`, and the request wakes nothing: the lead stays
+/// unmaterialized and its session unregistered. A live member (the worker,
+/// materialized and held by its host) records the request on its runtime
+/// registration, once, without a respawn and without a model request.
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compaction_request_wakes_no_dormant_member_and_is_recorded_on_a_live_one() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let paths = Paths::new(temp.path());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(PowerCutRuntimeStore::new(&paths.realm_db_path));
+    let run = stop_gracefully_over_an_open_member_run(&paths, runtime_store.clone(), true).await;
+    let held = start_held_for_recovery(&paths, runtime_store.clone(), &run).await;
+    let owner = || meerkat_mob::MobControlPrincipal::Owner;
+
+    let nobody = AgentIdentity::from("nobody");
+    let refused = held.handle.compact_member(owner(), nobody.clone()).await;
+    assert!(
+        matches!(&refused, Err(meerkat_mob::MobError::MemberNotFound(identity)) if identity == &nobody),
+        "a member the mob does not hold is refused typed: {refused:?}"
+    );
+
+    let lead = AgentIdentity::from("lead-1");
+    let lead_sid = held
+        .handle
+        .resolve_bridge_session_id(&lead)
+        .await
+        .expect("the lead's session");
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "the start leaves the lead, which holds no work, dormant"
+    );
+    let refused = held.handle.compact_member(owner(), lead.clone()).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(meerkat_mob::MobError::MemberSessionNotLive { agent_identity, session_id })
+                if agent_identity == &lead && session_id == &lead_sid
+        ),
+        "a dormant member is refused typed: {refused:?}"
+    );
+    sleep(Duration::from_millis(500)).await;
+    assert!(
+        held.handle.member_unmaterialized(&lead),
+        "the request wakes no dormant member"
+    );
+    assert!(
+        held.runtime
+            .current_session_registration_witness(&lead_sid)
+            .await
+            .is_none(),
+        "the request registers no dormant member's session"
+    );
+
+    let worker_registration = held
+        .runtime
+        .current_session_registration_witness(&run.w1_sid)
+        .await
+        .expect("the held worker is live");
+    assert_eq!(
+        held.handle
+            .compact_member(owner(), held.worker.clone())
+            .await
+            .expect("a live member records the request"),
+        meerkat_runtime::CompactionRequestReceipt::Requested
+    );
+    assert_eq!(
+        held.handle
+            .compact_member(owner(), held.worker.clone())
+            .await
+            .expect("a live member answers a repeat"),
+        meerkat_runtime::CompactionRequestReceipt::AlreadyRequested,
+        "a held request is not recorded twice"
+    );
+    assert_eq!(
+        held.runtime
+            .current_session_registration_witness(&run.w1_sid)
+            .await,
+        Some(worker_registration),
+        "the request respawns nothing: the worker keeps its registration"
+    );
+    assert_eq!(
+        held.client
+            .loop_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a request makes no model request"
+    );
+    let _ = held.handle.shutdown().await;
+}
+
 /// A host's settle whose reply is lost, then a retry: the settle went
 /// through (the kept run's tail is closed), and the retry finds nothing
 /// retained. Its proof is the kept run's input, whose receipt reads

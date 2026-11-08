@@ -48,6 +48,7 @@ import type {
   WireNonPortableResourceKind,
   WireReachability,
   MobStopMemberRunResult,
+  MobCompactMemberResult,
 } from "./generated/types.js";
 import type { MeerkatClient, MobMemberEventsOptions, MobMemberLiveOpenOptions } from "./client.js";
 import type { Usage } from "./events.js";
@@ -456,6 +457,14 @@ export class Mob {
     reason: string,
   ): Promise<MobStopMemberRunResult> {
     return this.client.stopMobMemberRun(this.mobId, agentIdentity, runId, reason);
+  }
+
+  /**
+   * Ask a live member's next compaction check to compact. No respawn and no
+   * threshold change; a dormant member is refused, never woken.
+   */
+  async compactMember(agentIdentity: string): Promise<MobCompactMemberResult> {
+    return this.client.compactMobMember(this.mobId, agentIdentity);
   }
 
   /**

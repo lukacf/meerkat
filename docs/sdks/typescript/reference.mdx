@@ -184,6 +184,7 @@ The `Session` methods are thin conveniences over canonical runtime calls:
 - `await session.archive()`
 - `await session.interrupt()`
 - `await session.stopRun(runId, reason)`
+- `await session.compact()`
 - `await session.invokeSkill(...)`
 - `await session.subscribeEvents()`
 
@@ -546,8 +547,8 @@ use the raw-preserving `UnknownEvent` path, as do `reasoning_delta`,
 `reasoning_complete`, `assistant_image_appended`,
 `turn_usage_accounting_unmeasured`,
 `turn_usage_accounting_identity_disputed`, `interaction_callback_pending`,
-`peer_content_ingested`, `provider_cache_breakpoints_discarded`, and
-`tool_results_bounded_for_request`. See the
+`peer_content_ingested`, `provider_cache_breakpoints_discarded`,
+`tool_results_bounded_for_request`, and `requested_compaction_skipped`. See the
 [RPC event reference](/api/rpc#notifications) for their wire contracts.
 
 `live_channel_closed` has a handwritten parser and arrives as a typed

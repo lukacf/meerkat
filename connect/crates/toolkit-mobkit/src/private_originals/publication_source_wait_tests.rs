@@ -188,6 +188,8 @@ pub(super) async fn finds_with_hold_at(
         }
         Some(hold)
     }));
+    // The production shape: the source's custody recovery runs.
+    start_custody_recovery(&fixture);
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
         WAIT,
         Box::pin(async {
@@ -260,11 +262,17 @@ pub(super) async fn finds_with_hold_at(
     ))
     .catch_unwind()
     .await;
+    fixture.source.stop_custody_recovery();
     source_hold_probe::clear();
     report.release();
     report.leaf.context.lock().unwrap().take();
     let cleanup = fixture.shutdown().await;
+    let recovery = fixture.source.join_custody_recovery().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
+    assert!(
+        recovery.is_ok(),
+        "the custody recovery joined: {recovery:?}"
+    );
     match checked {
         Ok(Ok(found)) => Found {
             concurrent_change: *concurrent.lock().unwrap(),

@@ -355,6 +355,7 @@ async fn helper_first_attempt_refused_after_its_write_admits_nothing() {
     let report = Report::new(script.tools().result_tool());
     let (fixture, _runtime_store) =
         Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
+    super::start_custody_recovery(&fixture);
     let owner = fixture.source.owner.clone();
     let submissions = Arc::new(AtomicUsize::new(0));
     let seen = submissions.clone();
@@ -432,11 +433,17 @@ async fn helper_first_attempt_refused_after_its_write_admits_nothing() {
     ))
     .catch_unwind()
     .await;
+    fixture.source.stop_custody_recovery();
     crate::source_hold_probe::clear();
     report.release();
     report.leaf.context.lock().unwrap().take();
     let cleanup = fixture.shutdown().await;
+    let recovery = fixture.source.join_custody_recovery().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
+    assert!(
+        recovery.is_ok(),
+        "the custody recovery joined: {recovery:?}"
+    );
     match checked {
         Ok(Ok(())) => (),
         Ok(Err(_)) => panic!("the Find did not settle before the fixture deadline"),

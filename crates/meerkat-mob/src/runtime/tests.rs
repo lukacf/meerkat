@@ -44148,9 +44148,22 @@ async fn test_attach_existing_session_rejects_comms_name_mismatch() {
         )
         .await
         .expect_err("comms_name mismatch should be rejected for explicit resume");
+    // The session was created under member `not-w-resume`'s comms name, so it
+    // is that member's: the refusal is typed and names it.
     assert!(
-        error.to_string().contains("persisted comms_name"),
-        "explicit member resume should fail with the comms_name mismatch"
+        matches!(
+            &error,
+            MobError::ResumeSessionBoundToAnotherMember {
+                session_id: bound_session,
+                member_id,
+                bound_mob_id,
+                bound_member_id,
+            } if bound_session == &session_id
+                && member_id.as_str() == "w-resume"
+                && bound_mob_id == &test_mob_id()
+                && bound_member_id.as_str() == "not-w-resume"
+        ),
+        "explicit member resume should fail with the typed comms_name mismatch: {error:?}"
     );
 }
 
@@ -93019,6 +93032,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),
         MobError::ForkSourceUnavailable { .. } => "fork_source_unavailable".to_string(),
+        MobError::ResumeSessionBoundToAnotherMember { .. } => {
+            "resume_session_bound_to_another_member".to_string()
+        }
         MobError::RuntimeEffectRefused {
             kind, refusal_code, ..
         } => format!("runtime_effect_refused:{kind}:{refusal_code}"),

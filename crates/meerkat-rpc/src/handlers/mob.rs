@@ -1982,6 +1982,60 @@ pub async fn handle_fork_helper(
 }
 
 // ---------------------------------------------------------------------------
+// mob/fork_member
+// ---------------------------------------------------------------------------
+
+/// Fork a member's session at a message boundary into a new member. A source
+/// whose turn is in flight is refused `SESSION_BUSY` (`data.kind`
+/// `fork_source_unavailable`, `cause` `running`) and nothing is seated; a
+/// committed fork whose seat failed keeps its session id in the refusal's
+/// data.
+pub async fn handle_fork_member(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    state: &Arc<MobMcpState>,
+) -> RpcResponse {
+    let params: meerkat_contracts::MobForkMemberParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let mob_id = match parse_mob_id(id.clone(), &params.mob_id) {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    let source_identity = AgentIdentity::from(params.source_member_id.as_str());
+    match state
+        .mob_fork_member(
+            &mob_id,
+            &source_identity,
+            AgentIdentity::from(params.agent_identity.as_str()),
+            params.profile.map(meerkat_mob::ProfileName::from),
+            params.runtime_mode.map(mob_runtime_mode_from_wire),
+            params.message_index,
+        )
+        .await
+    {
+        Ok(fork) => {
+            let identity = fork.agent_identity.to_string();
+            RpcResponse::success(
+                id,
+                meerkat_contracts::MobForkMemberResult {
+                    member_ref: meerkat_contracts::WireMemberRef::encode(
+                        mob_id.as_str(),
+                        &identity,
+                    ),
+                    agent_identity: identity,
+                    session_id: fork.session_id.to_string(),
+                    source_session_id: fork.source_session_id.to_string(),
+                    message_count: fork.message_count,
+                },
+            )
+        }
+        Err(err) => mob_call_error(id, &err),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // mob/force_cancel
 // ---------------------------------------------------------------------------
 

@@ -865,6 +865,12 @@
       "result_type": "MobHelperResult"
     },
     {
+      "description": "Fork a member's session at a message boundary into a new member",
+      "name": "mob/fork_member",
+      "params_type": "MobForkMemberParams",
+      "result_type": "MobForkMemberResult"
+    },
+    {
       "description": "Force-cancel a mob member",
       "name": "mob/force_cancel",
       "params_type": "MobMemberParams",

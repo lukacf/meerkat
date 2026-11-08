@@ -156,6 +156,8 @@ import type {
   MobFlowsResult,
   MobForceCancelResult,
   MobForkHelperParams,
+  MobForkMemberParams,
+  MobForkMemberResult,
   MobGrantScopesParams,
   MobGrantScopesResult,
   MobGrantsResult,
@@ -891,6 +893,10 @@ export interface RpcMethodContracts {
   "mob/fork_helper": {
     params: MobForkHelperParams;
     result: (MobHelperResult) & Record<string, unknown>;
+  };
+  "mob/fork_member": {
+    params: MobForkMemberParams;
+    result: (MobForkMemberResult) & Record<string, unknown>;
   };
   "mob/force_cancel": {
     params: MobMemberParams;

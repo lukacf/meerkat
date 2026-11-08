@@ -3678,6 +3678,28 @@ class MobHelperResult:
 
 
 @dataclass
+class MobForkMemberParams:
+    """Request payload for `mob/fork_member`: fork a member's session at a
+message boundary and seat the fork as a new member."""
+    agent_identity: str
+    mob_id: str
+    source_member_id: str
+    message_index: Optional[int] = None
+    profile: Optional[str] = None
+    runtime_mode: Optional[WireMobRuntimeMode] = None
+
+
+@dataclass
+class MobForkMemberResult:
+    """Response payload for `mob/fork_member`."""
+    agent_identity: str
+    member_ref: WireMemberRef
+    message_count: int
+    session_id: str
+    source_session_id: str
+
+
+@dataclass
 class MobForceCancelResult:
     """Response payload for `mob/force_cancel`."""
     cancelled: bool

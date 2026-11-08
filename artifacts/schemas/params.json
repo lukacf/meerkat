@@ -33508,6 +33508,67 @@
     "title": "MobForkHelperParams",
     "type": "object"
   },
+  "MobForkMemberParams": {
+    "$defs": {
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `mob/fork_member`: fork a member's session at a\nmessage boundary and seat the fork as a new member.",
+    "properties": {
+      "agent_identity": {
+        "description": "The new member's identity.",
+        "type": "string"
+      },
+      "message_index": {
+        "description": "Where the copied prefix ends, as on `session/fork_at`: the new\nmember's transcript is the source's messages before this index.\nAbsent takes the source's committed transcript end.",
+        "format": "uint",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "mob_id": {
+        "type": "string"
+      },
+      "profile": {
+        "description": "The new member's profile. Absent takes the source member's.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "runtime_mode": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMobRuntimeMode"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "The new member's runtime mode. Absent takes the source member's."
+      },
+      "source_member_id": {
+        "description": "The member whose session is forked.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "mob_id",
+      "source_member_id",
+      "agent_identity"
+    ],
+    "title": "MobForkMemberParams",
+    "type": "object"
+  },
   "MobGrantScopesParams": {
     "$defs": {
       "WireControlScope": {

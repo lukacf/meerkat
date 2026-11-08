@@ -7783,6 +7783,45 @@ impl MobMcpState {
             .await
     }
 
+    /// Fork `source_identity`'s session at a message boundary and seat the
+    /// fork as the new member `identity`, through
+    /// [`meerkat_mob::MobHandle::fork_member`]: the child holds the source's
+    /// first `message_count` messages (its committed end when `None`). The
+    /// new member takes the source member's profile and runtime mode unless
+    /// `profile` or `runtime_mode` names others.
+    ///
+    /// An `identity` the roster already holds is refused with
+    /// [`MobError::MemberAlreadyExists`] before anything is forked. A member
+    /// seated under it between that read and the fork's own seat gets the
+    /// engine's answer, [`MobError::ForkMemberProvisionFailed`]: its committed
+    /// fork session is bound to `identity`, so resume it under that identity
+    /// once the identity is free, or archive it.
+    pub async fn mob_fork_member(
+        &self,
+        mob_id: &MobId,
+        source_identity: &AgentIdentity,
+        identity: AgentIdentity,
+        profile: Option<ProfileName>,
+        runtime_mode: Option<MobRuntimeMode>,
+        message_count: Option<usize>,
+    ) -> Result<meerkat_mob::ForkMemberResult, MobError> {
+        let handle = self
+            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        let source = handle
+            .get_member(source_identity)
+            .await?
+            .ok_or_else(|| MobError::MemberNotFound(source_identity.clone()))?;
+        if handle.get_member(&identity).await?.is_some() {
+            return Err(MobError::MemberAlreadyExists(identity));
+        }
+        let spec = SpawnMemberSpec::new(profile.unwrap_or(source.role), identity)
+            .with_runtime_mode(runtime_mode.unwrap_or(source.runtime_mode));
+        handle
+            .fork_member(source_identity, spec, message_count)
+            .await
+    }
+
     /// Subscribe to mob-wide events (all members, continuously updated).
     ///
     /// (b) gate at subscription ADMISSION only: a later revoke/expiry does

@@ -3029,6 +3029,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberAuthBindingConflict { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SessionError
         }
+        // The resumed session is bound to another member: the SESSION could
+        // not serve this resume - session-class failure.
+        MobError::ResumeSessionBoundToAnotherMember { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::SessionError
+        }
         // Process-incarnation provisioning terminals are not a public
         // spawn-many failure family. Keep the exhaustive classifier
         // fail-closed rather than laundering callback-transport state into a
@@ -5799,6 +5804,11 @@ pub struct ForkMemberResult {
     pub agent_identity: AgentIdentity,
     pub session_id: meerkat_core::SessionId,
     pub cache_inheritance: meerkat_core::ForkCacheInheritance,
+    /// The session the fork was cut from.
+    pub source_session_id: meerkat_core::SessionId,
+    /// Messages in the child's transcript after the fork, as
+    /// [`meerkat_core::SessionForkResult::message_count`] counts them.
+    pub message_count: usize,
     #[serde(skip)]
     pub(crate) agent_runtime_id: AgentRuntimeId,
     #[serde(skip)]
@@ -19601,6 +19611,8 @@ impl MobHandle {
             agent_runtime_id: entry.agent_runtime_id,
             fence_token: entry.fence_token,
             cache_inheritance: fork.cache_inheritance,
+            source_session_id: fork.source_session_id,
+            message_count: fork.message_count,
         })
     }
 

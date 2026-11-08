@@ -197,6 +197,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobSpawnHelperParams",
     "MobForkHelperParams",
     "MobHelperResult",
+    "MobForkMemberParams",
+    "MobForkMemberResult",
     "MobForceCancelResult",
     "MobTurnStartParams",
     "MobMemberStatusResult",

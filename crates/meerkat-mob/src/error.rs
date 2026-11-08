@@ -2105,6 +2105,23 @@ pub enum MobError {
         cause: Arc<MobError>,
     },
 
+    /// A resume of member `member_id` named session `session_id`, which is
+    /// durably bound to another member: its mob member binding, or the comms
+    /// name it was created under, names member `bound_member_id` of mob
+    /// `bound_mob_id`. The session stays that member's, and nothing is
+    /// seated. Structured data: `kind`
+    /// `resume_session_bound_to_another_member`, `session_id`, `member_id`,
+    /// `bound_mob_id` and `bound_member_id`.
+    #[error(
+        "session '{session_id}' is bound to member '{bound_member_id}' of mob '{bound_mob_id}', so member '{member_id}' cannot resume it"
+    )]
+    ResumeSessionBoundToAnotherMember {
+        session_id: meerkat_core::SessionId,
+        member_id: AgentIdentity,
+        bound_mob_id: MobId,
+        bound_member_id: AgentIdentity,
+    },
+
     /// A build of member `member_id` was refused because it would run
     /// without the tool dispatch admission its lineage runs under: the member
     /// is forked from a source whose build runs under one (a `fork_off`
@@ -2625,6 +2642,18 @@ impl std::fmt::Display for ForkSourceUnavailableCause {
     }
 }
 
+impl ForkSourceUnavailableCause {
+    /// The cause's wire name in a refusal's data: `no_session`, `running`
+    /// or `remote_read_unavailable`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSession => "no_session",
+            Self::Running => "running",
+            Self::RemoteReadUnavailable => "remote_read_unavailable",
+        }
+    }
+}
+
 fn held_cleanup_suffix(cleanup: Option<&MobError>) -> String {
     match cleanup {
         None => String::new(),
@@ -2973,6 +3002,26 @@ impl MobError {
                 "source_member_id": source_member_id.as_str(),
                 "max_bytes": max_bytes,
                 "required_bytes": required_bytes,
+            })),
+            Self::ResumeSessionBoundToAnotherMember {
+                session_id,
+                member_id,
+                bound_mob_id,
+                bound_member_id,
+            } => Some(serde_json::json!({
+                "kind": "resume_session_bound_to_another_member",
+                "session_id": session_id.to_string(),
+                "member_id": member_id.as_str(),
+                "bound_mob_id": bound_mob_id.as_str(),
+                "bound_member_id": bound_member_id.as_str(),
+            })),
+            Self::ForkSourceUnavailable {
+                source_member_id,
+                cause,
+            } => Some(serde_json::json!({
+                "kind": "fork_source_unavailable",
+                "source_member_id": source_member_id,
+                "cause": cause.as_str(),
             })),
             Self::DispatchAdmissionRequired { member_id } => Some(serde_json::json!({
                 "kind": "dispatch_admission_required",
@@ -3505,6 +3554,16 @@ impl MobError {
                 Self::ForkContextTooLarge { .. } => {
                     Some(meerkat_contracts::ErrorCode::InvalidParams)
                 }
+                // The caller named a session another member owns.
+                Self::ResumeSessionBoundToAnotherMember { .. } => {
+                    Some(meerkat_contracts::ErrorCode::InvalidParams)
+                }
+                // A fork source that owes work is busy: fork it again once
+                // it is idle.
+                Self::ForkSourceUnavailable {
+                    cause: ForkSourceUnavailableCause::Running,
+                    ..
+                } => Some(meerkat_contracts::ErrorCode::SessionBusy),
                 // The caller named a binding the session's live actor does
                 // not run.
                 Self::MemberAuthBindingConflict { .. } => {

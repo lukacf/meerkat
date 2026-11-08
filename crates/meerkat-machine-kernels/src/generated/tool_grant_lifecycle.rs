@@ -35,6 +35,8 @@ pub enum ToolGrantEndReason {
     Revoked,
     #[serde(rename = "RunEnded")]
     RunEnded,
+    #[serde(rename = "SubjectEnded")]
+    SubjectEnded,
 }
 impl ToolGrantEndReason {
     pub fn as_str(&self) -> &'static str {
@@ -42,6 +44,7 @@ impl ToolGrantEndReason {
             Self::Deadline => "Deadline",
             Self::Revoked => "Revoked",
             Self::RunEnded => "RunEnded",
+            Self::SubjectEnded => "SubjectEnded",
         }
     }
 }
@@ -52,6 +55,7 @@ impl std::convert::TryFrom<&str> for ToolGrantEndReason {
             "Deadline" => Ok(Self::Deadline),
             "Revoked" => Ok(Self::Revoked),
             "RunEnded" => Ok(Self::RunEnded),
+            "SubjectEnded" => Ok(Self::SubjectEnded),
             other => Err(format!("invalid ToolGrantEndReason value `{other}`")),
         }
     }
@@ -169,6 +173,8 @@ pub enum ToolGrantUseRefusal {
     RunEnded,
     #[serde(rename = "OutsideRun")]
     OutsideRun,
+    #[serde(rename = "SubjectEnded")]
+    SubjectEnded,
 }
 impl ToolGrantUseRefusal {
     pub fn as_str(&self) -> &'static str {
@@ -177,6 +183,7 @@ impl ToolGrantUseRefusal {
             Self::Revoked => "Revoked",
             Self::RunEnded => "RunEnded",
             Self::OutsideRun => "OutsideRun",
+            Self::SubjectEnded => "SubjectEnded",
         }
     }
 }
@@ -188,6 +195,7 @@ impl std::convert::TryFrom<&str> for ToolGrantUseRefusal {
             "Revoked" => Ok(Self::Revoked),
             "RunEnded" => Ok(Self::RunEnded),
             "OutsideRun" => Ok(Self::OutsideRun),
+            "SubjectEnded" => Ok(Self::SubjectEnded),
             other => Err(format!("invalid ToolGrantUseRefusal value `{other}`")),
         }
     }
@@ -263,6 +271,10 @@ pub mod inputs {
         pub run_id: ToolGrantRunId,
         pub now_ms: u64,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndWithSubject {
+        pub now_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -272,6 +284,7 @@ pub enum Input {
     Revoke(inputs::Revoke),
     AdmitUse(inputs::AdmitUse),
     EndRun(inputs::EndRun),
+    EndWithSubject(inputs::EndWithSubject),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -281,6 +294,7 @@ impl Input {
             Self::Revoke(_) => InputKind::Revoke,
             Self::AdmitUse(_) => InputKind::AdmitUse,
             Self::EndRun(_) => InputKind::EndRun,
+            Self::EndWithSubject(_) => InputKind::EndWithSubject,
         }
     }
 }
@@ -291,6 +305,7 @@ pub enum InputKind {
     Revoke,
     AdmitUse,
     EndRun,
+    EndWithSubject,
 }
 
 pub mod effects {
@@ -385,6 +400,12 @@ pub enum TransitionId {
     IssueRefusedIssuedRunEnded,
     ExpireSettledRunEnded,
     RevokeSettledRunEnded,
+    EndWithSubjectActive,
+    EndWithSubjectAfterDeadline,
+    EndWithSubjectSettledExpired,
+    EndWithSubjectSettledRevoked,
+    AdmitEndedWithSubject,
+    EndWithSubjectSettledRunEnded,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -138,6 +138,7 @@ const REQUIRED_IDENTITY_ENTRY_ARM_FAMILIES: &[&str] = &[
     "DeclareIdentityEntryMobNotRunning",
     "SealDeclaredRosterSealed",
     "SealDeclaredRosterMobNotRunning",
+    "SealDeclaredRosterRefused",
     "RecoverIdentityEntryRetiringMarked",
     "ForgetArchivedSession",
     "ProbeMemberAdmissionIdentityNameReserved",

@@ -78,6 +78,10 @@ fn end_run(now_ms: u64) -> Input {
     }
 }
 
+fn end_with_subject(now_ms: u64) -> Input {
+    Input::EndWithSubject { now_ms }
+}
+
 /// Build an authority parked in `phase` for the grant `GRANT`, issued at
 /// `ISSUED_AT` with the deadline `DEADLINE`: bounded by its window only, or,
 /// for `RunEnded`, scoped to the run `run-1`, which ended.
@@ -146,6 +150,10 @@ fn effect_label(effect: &Effect) -> &'static str {
             reason: ToolGrantUseRefusal::OutsideRun,
             ..
         } => "UseRefused(OutsideRun)",
+        Effect::UseRefused {
+            reason: ToolGrantUseRefusal::SubjectEnded,
+            ..
+        } => "UseRefused(SubjectEnded)",
         Effect::IssueRefused {
             reason: ToolGrantIssueRefusal::InvalidWindow,
         } => "IssueRefused(InvalidWindow)",
@@ -178,7 +186,7 @@ enum Expected {
 
 #[test]
 fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended() {
-    let commands: [(&str, fn() -> Input); 11] = [
+    let commands: [(&str, fn() -> Input); 13] = [
         ("Issue", valid_issue),
         ("IssuePastWindow", || {
             issue(GRANT, DEADLINE, ISSUED_AT, MAX_LIFETIME)
@@ -190,6 +198,8 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
         ("ExpireAtDeadline", || expire(DEADLINE)),
         ("RevokeEarly", || revoke(DEADLINE - 1)),
         ("RevokeAtDeadline", || revoke(DEADLINE)),
+        ("EndWithSubjectEarly", || end_with_subject(DEADLINE - 1)),
+        ("EndWithSubjectAtDeadline", || end_with_subject(DEADLINE)),
         ("AdmitEarly", || admit(DEADLINE - 1)),
         ("AdmitAtDeadline", || admit(DEADLINE)),
         ("EndRunEarly", || end_run(DEADLINE - 1)),
@@ -212,6 +222,8 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
             (Phase::Active, "ExpireAtDeadline") => Advance(Phase::Expired, &["Expired"]),
             (Phase::Active, "RevokeEarly") => Advance(Phase::Revoked, &["Revoked"]),
             (Phase::Active, "RevokeAtDeadline") => Advance(Phase::Expired, &["Expired"]),
+            (Phase::Active, "EndWithSubjectEarly") => Advance(Phase::Revoked, &["Revoked"]),
+            (Phase::Active, "EndWithSubjectAtDeadline") => Advance(Phase::Expired, &["Expired"]),
             (Phase::Active, "AdmitEarly") => SelfLoop(&["UseAdmitted"]),
             (Phase::Active, "AdmitAtDeadline") => {
                 Advance(Phase::Expired, &["Expired", "UseRefused(Expired)"])
@@ -222,8 +234,14 @@ fn every_command_class_in_every_phase_is_total_and_only_mutates_where_intended()
             (Phase::Active, "EndRunEarly" | "EndRunAtDeadline") => SelfLoop(&[]),
             (
                 Phase::Expired | Phase::Revoked | Phase::RunEnded,
-                "ExpireEarly" | "ExpireAtDeadline" | "RevokeEarly" | "RevokeAtDeadline"
-                | "EndRunEarly" | "EndRunAtDeadline",
+                "ExpireEarly"
+                | "ExpireAtDeadline"
+                | "RevokeEarly"
+                | "RevokeAtDeadline"
+                | "EndRunEarly"
+                | "EndRunAtDeadline"
+                | "EndWithSubjectEarly"
+                | "EndWithSubjectAtDeadline",
             ) => SelfLoop(&[]),
             (Phase::Expired, "AdmitEarly" | "AdmitAtDeadline") => {
                 SelfLoop(&["UseRefused(Expired)"])
@@ -544,6 +562,61 @@ fn revoke_after_the_deadline_records_expiry_not_revocation() {
             "{phase:?} revoke changes nothing"
         );
     }
+}
+
+// ===========================================================================
+// The end with the grant's subject
+// ===========================================================================
+
+/// A grant whose subject ends before its deadline ends with it: revoked,
+/// its end reason `SubjectEnded`, and every later use is refused as ended
+/// with its subject, so its owner cites it to no later life of the subject.
+/// At or after the deadline the end records the expiry, as a revoke does,
+/// and an ended grant stays as it is.
+#[test]
+fn a_grant_ended_with_its_subject_refuses_its_use_as_ended_with_it() {
+    let mut authority = authority_in(Phase::Active);
+    let ended = apply(&mut authority, end_with_subject(DEADLINE - 1));
+    assert_eq!(
+        ended.effects(),
+        &[Effect::Revoked {
+            grant_id: GRANT.to_owned(),
+            observed_at_ms: DEADLINE - 1,
+        }]
+    );
+    let state = authority.state();
+    assert_eq!(state.lifecycle_phase, Phase::Revoked);
+    assert_eq!(state.end_reason, Some(ToolGrantEndReason::SubjectEnded));
+    assert_eq!(state.ended_at_ms, Some(DEADLINE - 1));
+    let recovered = Authority::recover_from_state(state.clone())
+        .expect("a grant ended with its subject recovers");
+    assert_eq!(recovered.state(), state);
+    let before = state.clone();
+    for now_ms in [ISSUED_AT - 1, DEADLINE - 1, DEADLINE] {
+        let refused = apply(&mut authority, admit(now_ms));
+        assert_eq!(
+            labels(&refused),
+            ["UseRefused(SubjectEnded)"],
+            "at {now_ms}"
+        );
+        for input in [expire(now_ms), revoke(now_ms), end_with_subject(now_ms)] {
+            assert!(apply(&mut authority, input).effects().is_empty());
+        }
+    }
+    assert_eq!(authority.state(), &before, "the ended grant stays as it is");
+
+    let mut late = authority_in(Phase::Active);
+    let expired = apply(&mut late, end_with_subject(DEADLINE));
+    assert_eq!(labels(&expired), ["Expired"]);
+    assert_eq!(late.state().lifecycle_phase, Phase::Expired);
+    assert_eq!(late.state().end_reason, Some(ToolGrantEndReason::Deadline));
+
+    // An operator's revoke is still cited as a revoke.
+    let mut revoked = authority_in(Phase::Revoked);
+    assert_eq!(
+        labels(&apply(&mut revoked, admit(DEADLINE - 1))),
+        ["UseRefused(Revoked)"]
+    );
 }
 
 // ===========================================================================

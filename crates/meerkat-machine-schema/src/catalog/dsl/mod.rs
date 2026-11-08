@@ -5780,11 +5780,17 @@ pub fn tool_grant_lifecycle_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string("ToolGrantRunId"),
             NamedTypeBinding::string_enum(
                 "ToolGrantEndReason",
-                &["Deadline", "Revoked", "RunEnded"],
+                &["Deadline", "Revoked", "RunEnded", "SubjectEnded"],
             ),
             NamedTypeBinding::string_enum(
                 "ToolGrantUseRefusal",
-                &["Expired", "Revoked", "RunEnded", "OutsideRun"],
+                &[
+                    "Expired",
+                    "Revoked",
+                    "RunEnded",
+                    "OutsideRun",
+                    "SubjectEnded",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "ToolGrantIssueRefusal",

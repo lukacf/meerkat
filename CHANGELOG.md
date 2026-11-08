@@ -159,8 +159,8 @@ them.
   `AdmitUse` (kernel `inputs::AdmitUse`) gains
   `run_id: Option<ToolGrantRunId>`, so code that builds them literally must
   set them (`None` keeps the previous behaviour). The new key type
-  `ToolGrantRunId` names a run. Each appended last, so an exhaustive match
-  needs their arms: the input `EndRun { run_id, now_ms }`
+  `ToolGrantRunId` names a run. An exhaustive match needs the arms of the
+  input `EndRun { run_id, now_ms }`
   (`ToolGrantLifecycleInput`, its variant enum
   `ToolGrantLifecycleInputVariant` in meerkat-machine-schema and
   meerkat-runtime, kernel `Input` and `InputKind`), the phase
@@ -175,7 +175,9 @@ them.
   `EndRunMatching`, `EndRunAfterDeadline`, `EndRunOther`,
   `EndRunSettledExpired`, `EndRunSettledRevoked`, `EndRunSettledRunEnded`,
   `IssueRefusedIssuedRunEnded`, `ExpireSettledRunEnded` and
-  `RevokeSettledRunEnded`.
+  `RevokeSettledRunEnded`. Each follows every variant 0.9.10 published; the
+  machine's one order of its new variants is given with the end of a grant
+  with its subject, below.
 
 - `meerkat-runtime`: run-scoped tool grants (see Added).
   `tool_grant::ToolGrantRequest` and `tool_grant::StoredToolGrant` gain the
@@ -231,11 +233,58 @@ them.
 - `meerkat_mob::DesiredMemberMaterial` gains `profile_source`
   (`DesiredProfileSource`): where a store-owned identity's desired material
   took its profile from, which decides its member's tool grant gate (struct
-  literals need it).
+  literals need it). `DesiredProfileSource` is `Definition`, `Override` or
+  `Unrecorded`: material sealed before the field existed reads as
+  `Unrecorded`, so every material this release seals writes its source,
+  `definition` included.
+- `meerkat-mob`, `meerkat-machine-kernels`, `meerkat-machine-schema`: the
+  generated `MobMachineEffect`, the kernel `generated::mob::Effect` and
+  `EffectKind`, and the schema's `MobMachineEffectVariant` gain
+  `IdentityEnded` (`agent_identity`) and `DeclaredRosterSealRefused`, and the
+  kernel `generated::mob::TransitionId` gains `SealDeclaredRosterRefused`
+  after every published variant; exhaustive matches must add them.
+  Behaviour: `SealDeclaredRosterSealed` no longer removes an unseated
+  Declared entry the roster does not list. While such an entry remains, a
+  seal answers the refusal arm and changes nothing; the actor's seal ends
+  each such entry through the one-entry unlist first, so
+  `MobHandle::apply_declared_roster` answers as before. The recovered
+  terminal abandonment (`ObserveRespawnTopologyAbandonedTerminalRecoveredFresh`,
+  a respawn's abandonment replayed onto a retirement the replay folded as a
+  plain terminal) emits `IdentityEnded`, as the live terminal abandonment
+  does.
+- `meerkat-runtime`, `meerkat-machine-kernels`, `meerkat-machine-schema`:
+  the generated `ToolGrantLifecycleMachine`'s `ToolGrantEndReason` and
+  `ToolGrantUseRefusal` gain `SubjectEnded`, its `ToolGrantLifecycleInput`
+  and the schema's and the runtime's `ToolGrantLifecycleInputVariant` gain
+  `EndWithSubject`, and the kernel
+  `generated::tool_grant_lifecycle::TransitionId` gains
+  `EndWithSubjectActive`, `EndWithSubjectAfterDeadline`,
+  `EndWithSubjectSettledExpired`, `EndWithSubjectSettledRevoked` and
+  `AdmitEndedWithSubject` after every published variant. With the run
+  scope (above), the machine's new variants follow every variant 0.9.10
+  published in one order: `ToolGrantEndReason` `RunEnded`, `SubjectEnded`;
+  `ToolGrantUseRefusal` `RunEnded`, `OutsideRun`, `SubjectEnded`; the
+  inputs (`ToolGrantLifecycleInput`, `ToolGrantLifecycleInputVariant`, the
+  kernel `Input` and `InputKind`) `EndRun`, `EndWithSubject`; the phase
+  `RunEnded` and the effect `RunEnded`; and the kernel `TransitionId` the
+  twelve run-scope variants in the order listed above, then
+  `EndWithSubjectActive`, `EndWithSubjectAfterDeadline`,
+  `EndWithSubjectSettledExpired`, `EndWithSubjectSettledRevoked`,
+  `AdmitEndedWithSubject` and `EndWithSubjectSettledRunEnded` (the end with
+  its subject of a grant whose run ended, which changes nothing).
+  `meerkat_runtime::tool_grant::StoredToolGrant` gains
+  `subject_ended` (struct literals need it). Behaviour:
+  `ToolGrantService::revoke_subject` and `MeerkatMachine::end_tool_grants_of`
+  end each live grant with its subject (`SubjectEnded`; its status reads
+  `revoked`), and such a grant explains no later refusal: a call it no
+  longer admits is refused `tool_grant_required`, where an operator's revoke
+  is cited as `tool_grant_revoked`.
 - Behaviour: `tool_grants/grant`, `tool_grants/revoke`, `tool_grants/list`
-  and `tool_grants/audit` answer every refusal of a request as invalid
-  params carrying `data.kind = "tool_grant_request_refused"` and the typed
-  `tool_grant_request_refusal`; before, these refusals carried no data. An
+  and `tool_grants/audit` answer every refusal of a request that decodes as
+  invalid params carrying `data.kind = "tool_grant_request_refused"` and the
+  typed `tool_grant_request_refusal`; before, these refusals carried no
+  data. A request that does not decode (an unknown subject or target kind,
+  an unknown field) still answers plain invalid params, with no data. An
   absent or unparseable session subject answers `subject_unknown`, not
   `-32001 SESSION_NOT_FOUND` (grant) or invalid params without data. A mob
   member's build installs the gate its profile and its role declare (it
@@ -560,9 +609,23 @@ them.
   identity's history stays readable. An identity grant opens its names for
   the member's builds while the mob runs at the incarnation it was issued in,
   across respawns and restarts; the member's refusals are audited under its
-  identity. An identity's grants end, revoked, when the identity ends: a
-  plain retire of its member, the end of its identity entry, or a reset of
-  the mob, which ends every identity the mob held; a respawn keeps them.
+  identity. An identity's grants end, revoked, when the identity ends, and so
+  do the grants of the session the mob holds for it then (its member's
+  session, or an identity entry's archived session). The identity ends at
+  the end of a plain retire of its member; at the end of a retirement that
+  unlists or removes its identity entry; at the one-entry unlist, or a
+  complete roster's seal, of an unseated identity entry; at the removal of
+  an unseated store-owned identity; when a respawn whose replacement fails
+  after the old member's archive is abandoned, by its own step or by the
+  resume after a stop; and at a reset of the mob, which ends every identity
+  the mob held. A respawn keeps them, and so does a retirement an identity
+  entry outlives. Ending grants for several identities in one step is not
+  atomic: when one identity's end fails, the ends already made stay made,
+  the step fails and nothing else commits, and a retry ends the rest; a
+  respawn's abandonment retries a busy end (a concurrent writer) within its
+  bound. A grant ended with its identity
+  explains no later refusal: a name created again needs a grant of its own
+  (`tool_grant_required`).
 - `tool_grants/grant` takes `decision_ref`, the host's opaque reference to
   the decision it made before issuing (non-empty, at most 1024 bytes, no
   control character): the grant's issuer, its listing and its `granted`
@@ -743,12 +806,24 @@ them.
   open and approved requests, and the notices of ended ones, wait for the
   next upgrade, where a request past its deadline by then expires.
 
-- An identity adopted before this release reads as declared with its role's
-  named profile: its desired material records no profile source. One that
-  was declared with an exact profile of its own (`profile_override`) then
-  takes its role's gate as its own once the role gates something, so a gated
-  family its profile leaves off is mounted closed, where it would be ignored.
-  The families its category overrides disable still leave that gate.
+- An identity adopted before this release recorded no profile source in its
+  desired material: its material reads as `Unrecorded`, and the identity
+  keeps the rule of the release before, its role's gate joining as role
+  entries only (never as its own gate). Nothing records a source for it
+  later, and no step of this release moves it onto its role's gate as its
+  own: only an adoption seals an identity's material (a member tool update
+  keeps its material's reading), an adoption needs the identity and its
+  session to have no intent row yet, and the identity store never deletes
+  one. A member that should take its role's gate as its own needs a new
+  identity: a new name, adopted on another session, or declared or created,
+  with its role's named profile. The new identity holds none of the old
+  one's grants. Once an identity's own gate is the role's (one adopted by
+  this release with its role's named profile), an own entry its build
+  cannot honour fails that build, typed, where a role entry is ignored: a
+  gated tool name no tool source of the build provides (`UnknownTool`), a
+  gated name the build does not mount (`ToolNotMounted`), or a gated family
+  none of whose tools the build mounts (`FamilyNotMounted`). The families
+  its category overrides disable leave that gate.
 
 - Downgrade: an older binary drops `tools.grant_gated` (a profile's tool
   table refuses no unknown key). Leave a gated family's switch off, as the
@@ -757,18 +832,52 @@ them.
   role gates runs that family with no grant there. A grant whose issuer
   carries a `decision_ref` is unreadable to an older binary: it opens
   nothing there and is listed as unreadable. Revoke such grants, or let them
-  expire, before a rollback. A member built by this release records its gate
-  in its session; a 0.9.10 member build names no gate, so its resume restores
-  the recorded one, and a recorded family whose switch the profile leaves
-  off fails that resume as disabled and grant-gated (`FamilyDisabled`). The
-  member is not resumed: it fails closed. Recover by upgrading again, or by
-  respawning the member on the older binary, which starts it on a fresh
-  session with no recorded gate. An identity adopted by this release with an
-  exact profile of its own records `profile_source` in its desired material,
-  which an older binary cannot read: it reads that identity's intent as
-  malformed and leaves the identity unreconciled.
+  expire, before a rollback. A grant this release ended with its identity
+  records that end in its row (`subject_ended`), which 0.9.10 cannot read:
+  it lists that already ended grant as unreadable, and the row opens and
+  blocks nothing (v0.9.10 `meerkat-runtime/src/tool_grant/service.rs`:
+  `StoredToolGrant` refuses unknown fields, :54-56; `subject_rows` files an
+  undecodable row as unreadable, :970-994, and such a row admits nothing,
+  :404-415). A member built by this release records its gate in its
+  session; a 0.9.10 member build names no gate, so its resume restores the
+  recorded one, and a recorded family whose switch the profile leaves off
+  fails that resume as disabled and grant-gated (`FamilyDisabled`), as a
+  recorded tool name nothing mounts fails it as unknown (`UnknownTool`).
+  The member is not resumed: it fails closed. Recover by upgrading again, or
+  by respawning the member on the older binary, which starts it on a fresh
+  session with no recorded gate. Every identity this release adopts records
+  `profile_source` in its desired material, which 0.9.10 cannot read; over
+  time that is most identities. After a rollback to 0.9.10 each such
+  identity is refused, typed, on its own: its intent row reads as malformed
+  and the identity as `RepairBlocked`, and a write that needs its authority
+  is refused `IdentityAuthorityBlocked`. The mob still loads, and its other
+  identities run (v0.9.10 `meerkat-mob/src/store/sqlite.rs:536-604`, the
+  per-row `Malformed` classification;
+  `meerkat-mob/src/runtime/actor.rs:28386-28440`, `RepairBlocked`;
+  `sqlite.rs:606-625`, `IdentityAuthorityBlocked`). Recover by upgrading
+  again: 0.9.10 refuses a new adoption of such an identity too, as it
+  refuses every write over a malformed intent row (`sqlite.rs:5975-6006`).
 
 ### Known limitations
+
+- A grant to a mob member identity can land after the end of the identity
+  it races: `tool_grants/grant` checks the mob's roster before it writes
+  the grant, and nothing orders that write against the identity's end. Such
+  a grant stays live until it expires (at most the maximum lifetime, 24
+  hours by default), and a name created again in the same mob incarnation
+  holds it. Grant only to a member whose retirement you have not started,
+  or revoke the identity's grants (`tool_grants/list`, then
+  `tool_grants/revoke`) once its end completes.
+
+- When an identity ends, its grants end with the grants of the session the
+  mob holds for it then, but not those of an archived session the mob no
+  longer holds for it: the old session of a respawn abandoned after its old
+  member's archive, or a session an earlier fresh-session rotation of the
+  member archived. A resume of such an archived session (`launch_mode:
+  resume`) into a name created again keeps that session's grants until they
+  expire. Revoke the session's grants (`tool_grants/list` and
+  `tool_grants/revoke` on the session subject) before resuming it, or create
+  the name again on a fresh session.
 
 - Peers keep the original requester in process only. A delivery over a
   network carries no origin, and Core's binder refuses it

@@ -296,6 +296,7 @@ mod tests {
             expires_at_ms: 61_000,
             ended_at_ms: Some(2_000),
             run_scope: None,
+            subject_ended: false,
         };
         assert_eq!(
             serde_json::to_value(wire_tool_grant(&grant)).unwrap(),

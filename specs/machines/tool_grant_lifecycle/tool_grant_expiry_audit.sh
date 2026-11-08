@@ -2,11 +2,11 @@
 # Bounded TLC audit of scoped tool grant expiry and run scope over the
 # generated ToolGrantLifecycleMachine model: the deadline timer, the
 # model-request boundary that shows a gated name, the dispatch gate's fresh
-# admission and the end it writes after a refusal (or loses), revocation,
-# reads that settle a due grant without loading the session, two runs of the
-# session and the runtime's signal of their ends (at once, late or never),
-# crash and restart, durable-tail recovery of the interrupted run, and one
-# bounded host clock rollback.
+# admission and the end it writes after a refusal (or loses), revocation, a
+# grant's end with its subject, reads that settle a due grant without loading
+# the session, two runs of the session and the runtime's signal of their ends
+# (at once, late or never), crash and restart, durable-tail recovery of the
+# interrupted run, and one bounded host clock rollback.
 #
 # usage: tool_grant_expiry_audit.sh <max-steps> [--mutants] [extra tlc args...]
 #
@@ -28,7 +28,11 @@
 #   - after the expiry the clock rolls back before the deadline, and a call
 #     there is still refused (RollbackAfterExpiryStillRefused);
 #   - a revoked grant refuses a call (RevokedThenRefused);
+#   - a grant that ended with its subject refuses a call
+#     (EndedWithSubjectThenRefused);
 #   - a revoke at the deadline records expiry (RevokeAfterDeadlineRecordsExpiry);
+#   - the subject's end at the deadline records expiry
+#     (SubjectEndAfterDeadlineRecordsExpiry);
 #   - a dispatch refuses a call at the deadline and loses its expiry write,
 #     and after a clock rollback a call before the deadline is handed on
 #     (UnpersistedRefusalThenAdmitted);
@@ -39,8 +43,10 @@
 #   - a host call outside any run is refused and the run-scoped grant stays
 #     live (HostCallOutsideRunRefusedWithoutEnding);
 #   - recovery closes the run a crash interrupted and ends its grant
-#     (RecoveryEndsInterruptedRun).
-# With --mutants it seeds nine defects and requires TLC to refuse each with
+#     (RecoveryEndsInterruptedRun);
+#   - the subject of a grant whose run already ended ends, and the grant
+#     stays ended with its run (SubjectEndOfRunEndedGrantChangesNothing).
+# With --mutants it seeds ten defects and requires TLC to refuse each with
 # the property it targets. TLC reports only the first violated invariant of a
 # state, and one defect can break different properties in different states
 # of the same depth, so each mutant run checks the generated invariants and
@@ -57,6 +63,8 @@
 #     (action property AuditTerminalLatched);
 #   - revoked_admits: the dispatch hands on a call the revoked grant refused
 #     (AuditTerminalNeverAdmits);
+#   - subject_ended_admits: the dispatch hands on a call the grant that
+#     ended with its subject refused (AuditTerminalNeverAdmits);
 #   - boundary_trusts_durable_phase: the boundary shows the name because the
 #     stored row is still Active (AuditVisibleOnlyWhileLive);
 #   - other_run_admits: the dispatch hands on a call of another run that the
@@ -97,8 +105,10 @@ arms = [
     "ExpireSettledRunEnded",
     "RevokeActive", "RevokeAfterDeadline", "RevokeSettledExpired", "RevokeSettledRevoked",
     "RevokeSettledRunEnded",
+    "EndWithSubjectActive", "EndWithSubjectAfterDeadline", "EndWithSubjectSettledExpired",
+    "EndWithSubjectSettledRevoked", "EndWithSubjectSettledRunEnded",
     "AdmitLive", "AdmitDue", "AdmitEndedExpired", "AdmitEndedRevoked", "AdmitEndedRunEnded",
-    "AdmitOtherRun", "AdmitOutsideRun",
+    "AdmitEndedWithSubject", "AdmitOtherRun", "AdmitOutsideRun",
     "EndRunMatching", "EndRunAfterDeadline", "EndRunOther", "EndRunSettledExpired",
     "EndRunSettledRevoked", "EndRunSettledRunEnded",
 ]
@@ -226,8 +236,10 @@ fi
 
 for witness in ExpiredByTimer ExpiredAtDispatch ExpiredWhileDownSettledOnRead \
   AdmittedOneTickBeforeDeadline RollbackAfterExpiryStillRefused RevokedThenRefused \
-  RevokeAfterDeadlineRecordsExpiry UnpersistedRefusalThenAdmitted RunEndedThenRefused \
-  LaterRunEndsStaleGrant HostCallOutsideRunRefusedWithoutEnding RecoveryEndsInterruptedRun; do
+  EndedWithSubjectThenRefused RevokeAfterDeadlineRecordsExpiry \
+  SubjectEndAfterDeadlineRecordsExpiry UnpersistedRefusalThenAdmitted RunEndedThenRefused \
+  LaterRunEndsStaleGrant HostCallOutsideRunRefusedWithoutEnding RecoveryEndsInterruptedRun \
+  SubjectEndOfRunEndedGrantChangesNothing; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" none "" "
   NotAuditWitness${witness}"
@@ -303,6 +315,8 @@ PY
     AuditTerminalLatched restart_reactivates_terminal
   mutate revoked_admits "Invariant AuditTerminalNeverAdmits" AuditTerminalNeverAdmits \
     revoked_admits
+  mutate subject_ended_admits "Invariant AuditTerminalNeverAdmits" AuditTerminalNeverAdmits \
+    subject_ended_admits
   mutate boundary_trusts_durable_phase "Invariant AuditVisibleOnlyWhileLive" \
     AuditVisibleOnlyWhileLive boundary_trusts_durable_phase
   mutate other_run_admits "Invariant AuditRunScopedUseInItsRun" AuditRunScopedUseInItsRun \

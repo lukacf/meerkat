@@ -3,8 +3,8 @@
 //! A scoped tool grant opens tool names a session build marked grant-gated,
 //! for a bounded window. This machine owns the grant's own lifecycle:
 //! issuance against a maximum lifetime, expiry at its deadline, revocation,
-//! the end of the run a run-scoped grant was issued for, and the admission of
-//! each use.
+//! the end of the run a run-scoped grant was issued for, its end with its
+//! subject, and the admission of each use.
 //!
 //! # Scope discipline
 //!
@@ -36,17 +36,20 @@
 //!
 //! `Expired`, `Revoked` and `RunEnded` are terminal. Once a grant reaches
 //! one, no input moves it again, so a restart or a clock rollback can never
-//! revive it. A revoke or a run end that arrives at or after the deadline
-//! records expiry, so a `Revoked` or `RunEnded` grant always ended before its
-//! deadline.
+//! revive it. A revoke, a run end or a subject's end that arrives at or after
+//! the deadline records expiry, so a `Revoked` or `RunEnded` grant always
+//! ended before its deadline. A grant that ends with its subject (the
+//! identity it was issued to ended) is `Revoked` with the end reason
+//! `SubjectEnded`: its use refusal says so, and its owner service cites no
+//! such grant to a later life of the subject.
 //!
 //! # Totality discipline
 //!
 //! Every input has an explicit transition in every issued phase. `Expire`,
-//! `Revoke`, `AdmitUse` and `EndRun` against an `Unissued` record are refused
-//! by the generated kernel: their arms' phase guards fail there, so it
-//! answers `GuardRejected`. The owner service creates a row only through
-//! `Issue`, so it never sends them.
+//! `Revoke`, `AdmitUse`, `EndRun` and `EndWithSubject` against an `Unissued`
+//! record are refused by the generated kernel: their arms' phase guards fail
+//! there, so it answers `GuardRejected`. The owner service creates a row only
+//! through `Issue`, so it never sends them.
 
 use super::OptionValueExt;
 
@@ -64,6 +67,10 @@ pub mod types {
         Revoked,
         /// The run the grant was issued for ended before its deadline.
         RunEnded,
+        /// The grant's subject ended before its deadline (the mob member
+        /// identity it was issued to ended, or a session that identity
+        /// held), and the grant ended with it.
+        SubjectEnded,
     }
 
     /// Why a use of a grant was refused.
@@ -78,6 +85,8 @@ pub mod types {
         RunEnded,
         /// The grant is scoped to a run, and the use belongs to no run.
         OutsideRun,
+        /// The grant ended with its subject.
+        SubjectEnded,
     }
 
     /// Why an `Issue` input was refused.
@@ -179,6 +188,10 @@ macro_rules! tool_grant_lifecycle_catalog_machine_dsl {
                     AdmitUse { now_ms: u64, run_id: Option<ToolGrantRunId> },
                     // The run `run_id` of the grant's subject ended.
                     EndRun { run_id: ToolGrantRunId, now_ms: u64 },
+                    // The grant's subject ended (a mob member identity whose
+                    // identity ended, or a session that identity held): the
+                    // grant ends with it.
+                    EndWithSubject { now_ms: u64 },
                 }
 
                 effect ToolGrantLifecycleEffect {
@@ -235,12 +248,16 @@ macro_rules! tool_grant_lifecycle_catalog_machine_dsl {
                         )
                 }
 
-                // A revocation ends the grant before its deadline; a revoke at
+                // A revocation ends the grant before its deadline, by an
+                // operator or with its subject; a revoke or a subject's end at
                 // or after the deadline records expiry instead.
                 invariant revocation_precedes_the_deadline {
                     self.lifecycle_phase != Phase::Revoked
                         || (
-                            self.end_reason == Some(ToolGrantEndReason::Revoked)
+                            (
+                                self.end_reason == Some(ToolGrantEndReason::Revoked)
+                                || self.end_reason == Some(ToolGrantEndReason::SubjectEnded)
+                            )
                             && self.ended_at_ms != None
                             && self.ended_at_ms.get("value") < self.expires_at_ms
                         )
@@ -392,6 +409,49 @@ macro_rules! tool_grant_lifecycle_catalog_machine_dsl {
                 }
 
                 // ----------------------------------------------------------
+                // EndWithSubject
+                // ----------------------------------------------------------
+
+                // The grant's subject ended before the deadline: the grant
+                // ends with it, revoked, its end reason SubjectEnded.
+                transition EndWithSubjectActive {
+                    on input EndWithSubject { now_ms }
+                    guard "active" { self.lifecycle_phase == Phase::Active }
+                    guard "deadline_not_reached" { now_ms < self.expires_at_ms }
+                    update {
+                        self.ended_at_ms = Some(now_ms);
+                        self.end_reason = Some(ToolGrantEndReason::SubjectEnded);
+                    }
+                    to Revoked
+                    emit Revoked { grant_id: self.grant_id, observed_at_ms: now_ms }
+                }
+
+                // The subject's end at or after the deadline records the
+                // expiry the grant already reached, as a revoke does.
+                transition EndWithSubjectAfterDeadline {
+                    on input EndWithSubject { now_ms }
+                    guard "active" { self.lifecycle_phase == Phase::Active }
+                    guard "deadline_reached" { self.expires_at_ms <= now_ms }
+                    update {
+                        self.ended_at_ms = Some(now_ms);
+                        self.end_reason = Some(ToolGrantEndReason::Deadline);
+                    }
+                    to Expired
+                    emit Expired {
+                        grant_id: self.grant_id,
+                        expires_at_ms: self.expires_at_ms,
+                        observed_at_ms: now_ms
+                    }
+                }
+
+                transition EndWithSubjectSettled {
+                    per_phase [Expired, Revoked]
+                    on input EndWithSubject { now_ms }
+                    update {}
+                    to Expired
+                }
+
+                // ----------------------------------------------------------
                 // AdmitUse
                 // ----------------------------------------------------------
 
@@ -442,14 +502,17 @@ macro_rules! tool_grant_lifecycle_catalog_machine_dsl {
                 transition AdmitEndedRevoked {
                     on input AdmitUse { now_ms, run_id }
                     guard "revoked" { self.lifecycle_phase == Phase::Revoked }
+                    guard "revoked_by_an_operator" { self.end_reason == Some(ToolGrantEndReason::Revoked) }
                     update {}
                     to Revoked
                     emit UseRefused { grant_id: self.grant_id, reason: ToolGrantUseRefusal::Revoked }
                 }
 
-                // Every arm below was added by version 2 (run scope). They
-                // are declared after every arm version 1 released, so the
-                // generated transition ids of version 1 keep their order.
+                // Every arm below, and the end with its subject above, was
+                // added by version 2. The run-scope arms are declared after
+                // every arm version 1 released, and the arms of the end with
+                // its subject are the codegen's late tail of this machine, so
+                // the generated transition ids of version 1 keep their order.
 
                 transition AdmitEndedRunEnded {
                     on input AdmitUse { now_ms, run_id }
@@ -564,6 +627,27 @@ macro_rules! tool_grant_lifecycle_catalog_machine_dsl {
 
                 transition RevokeSettledRunEnded {
                     on input Revoke { now_ms }
+                    guard "run_ended" { self.lifecycle_phase == Phase::RunEnded }
+                    update {}
+                    to RunEnded
+                }
+
+                // A grant that ended with its subject refuses the use as
+                // ended with its subject: it explains nothing to a later life
+                // of the subject.
+                transition AdmitEndedWithSubject {
+                    on input AdmitUse { now_ms, run_id }
+                    guard "revoked" { self.lifecycle_phase == Phase::Revoked }
+                    guard "ended_with_its_subject" { self.end_reason == Some(ToolGrantEndReason::SubjectEnded) }
+                    update {}
+                    to Revoked
+                    emit UseRefused { grant_id: self.grant_id, reason: ToolGrantUseRefusal::SubjectEnded }
+                }
+
+                // The subject of a grant whose run already ended ends: the
+                // grant ended with its run, and nothing changes.
+                transition EndWithSubjectSettledRunEnded {
+                    on input EndWithSubject { now_ms }
                     guard "run_ended" { self.lifecycle_phase == Phase::RunEnded }
                     update {}
                     to RunEnded

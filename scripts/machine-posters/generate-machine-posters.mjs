@@ -842,13 +842,13 @@ const MACHINE_SPECS = [
         {
           id: "revocation",
           title: "Revocation Before The Deadline",
-          note: "A revoke at or after the deadline records expiry instead; settled grants ignore it.",
+          note: "An operator's revoke, or the end of the grant's subject (end reason SubjectEnded, whose uses are refused as ended with it). Either at or after the deadline records expiry instead; settled grants ignore both.",
           x: 1420,
           y: 470,
           w: 340,
           columns: 1,
           anchors: ["Active", "Revoked"],
-          triggers: ["Revoke"],
+          triggers: ["Revoke", "EndWithSubject"],
         },
         {
           id: "run-scope",

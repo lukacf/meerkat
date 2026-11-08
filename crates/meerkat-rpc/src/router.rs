@@ -8660,8 +8660,21 @@ mod tests {
             router: MethodRouter,
             probes: mpsc::UnboundedReceiver<Probed>,
             store: Arc<dyn meerkat_runtime::RuntimeStore>,
+            /// The same store, for its scripted grant-store failure; none
+            /// for a rig over a realm's persistence.
+            memory: Option<Arc<meerkat_runtime::InMemoryRuntimeStore>>,
             _notifications: mpsc::Receiver<RpcNotification>,
             _temp: tempfile::TempDir,
+        }
+
+        impl Rig {
+            /// The rig's in-memory runtime store, which scripts grant-store
+            /// failures.
+            fn memory(&self) -> &meerkat_runtime::InMemoryRuntimeStore {
+                self.memory
+                    .as_deref()
+                    .expect("the rig runs over the in-memory runtime store")
+            }
         }
 
         async fn rig() -> Rig {
@@ -8690,8 +8703,8 @@ mod tests {
                 meerkat_models::canonical(),
             ));
             let sessions: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
-            let store: Arc<dyn meerkat_runtime::RuntimeStore> =
-                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+            let memory = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+            let store: Arc<dyn meerkat_runtime::RuntimeStore> = memory.clone();
             let persistence =
                 meerkat::PersistenceBundle::new(sessions, Arc::clone(&store), memory_blob_store())
                     .expect("construct runtime authority");
@@ -8711,6 +8724,7 @@ mod tests {
                 router,
                 probes,
                 store,
+                memory: Some(memory),
                 _notifications: notif_rx,
                 _temp: temp,
             }
@@ -8762,6 +8776,7 @@ mod tests {
                 router,
                 probes,
                 store,
+                memory: None,
                 _notifications: notif_rx,
                 _temp: temp,
             }
@@ -8940,6 +8955,60 @@ mod tests {
                 .as_array()
                 .expect("grants")
                 .clone()
+        }
+
+        fn session_subject(session_id: &SessionId) -> serde_json::Value {
+            serde_json::json!({"kind": "session", "session_id": session_id.to_string()})
+        }
+
+        /// Grant `session_id`'s session the shell family for `duration_ms`.
+        async fn grant_session_shell(
+            rig: &Rig,
+            session_id: &SessionId,
+            duration_ms: u64,
+        ) -> serde_json::Value {
+            ok(
+                rig,
+                "tool_grants/grant",
+                serde_json::json!({
+                    "subject": session_subject(session_id),
+                    "target": {"kind": "family", "family": "shell"},
+                    "duration_ms": duration_ms,
+                }),
+                "a member's session is granted",
+            )
+            .await["grant"]
+                .clone()
+        }
+
+        async fn list_session(
+            rig: &Rig,
+            session_id: &SessionId,
+            include_ended: bool,
+        ) -> Vec<serde_json::Value> {
+            ok(
+                rig,
+                "tool_grants/list",
+                serde_json::json!({
+                    "subject": session_subject(session_id),
+                    "include_ended": include_ended,
+                }),
+                "a session subject is listed",
+            )
+            .await["grants"]
+                .as_array()
+                .expect("grants")
+                .clone()
+        }
+
+        /// `grants` are exactly `grant`, ended: `what` ended it.
+        fn assert_ended(grants: &[serde_json::Value], grant: &serde_json::Value, what: &str) {
+            assert_eq!(grants.len(), 1, "{what}: {grants:?}");
+            assert_eq!(
+                grants[0]["grant_id"], grant["grant_id"],
+                "{what}: {grants:?}"
+            );
+            assert_eq!(grants[0]["status"], "revoked", "{what}: {grants:?}");
         }
 
         /// The store key of `identity`'s grants in the mob's running
@@ -9485,7 +9554,8 @@ mod tests {
 
         /// An identity's grants end with the identity. A grant
         /// to a member that retires matches nothing when a new member takes
-        /// the same name in the same mob incarnation.
+        /// the same name in the same mob incarnation, and the new member's
+        /// refusal cites no grant of the old life: its call needs a grant.
         #[tokio::test]
         async fn a_recreated_identity_inherits_no_grant() {
             let mut rig = rig().await;
@@ -9518,8 +9588,8 @@ mod tests {
             let recreated = probe(&mut rig, "recreated", "worker-1").await;
             assert_eq!(
                 recreated.grant_refusal(),
-                Some(meerkat_core::tool_grant::TOOL_GRANT_REVOKED_CODE),
-                "the new member inherits nothing: {recreated:?}"
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the new member inherits nothing and needs a grant of its own: {recreated:?}"
             );
         }
 
@@ -9713,8 +9783,9 @@ mod tests {
                 let declared_again = probe(&mut rig, "reset-grants", identity).await;
                 assert_eq!(
                     declared_again.grant_refusal(),
-                    Some(meerkat_core::tool_grant::TOOL_GRANT_REVOKED_CODE),
-                    "{identity} declared again inherits nothing: {declared_again:?}"
+                    Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                    "{identity} declared again inherits nothing and needs a grant of its own: \
+                     {declared_again:?}"
                 );
             }
         }
@@ -10180,6 +10251,448 @@ mod tests {
             assert!(
                 matches!(receipt, ApprovalConsentDeliveryState::Failed { .. }),
                 "the notice reaches no member of a later life: {receipt:?}"
+            );
+        }
+
+        /// An identity entry whose member the host retired outlives the
+        /// retirement, unseated, with its grants. The one-entry unlist of
+        /// the unseated entry ends the identity at once, and with it the
+        /// identity's grants and its archived session's grants. The name
+        /// listed again is seated on that session and holds none of them:
+        /// its call needs a grant of its own.
+        #[tokio::test]
+        async fn an_unlisted_unseated_entry_listed_again_inherits_no_grant() {
+            let mut rig = rig().await;
+            create_mob(&rig, "unlist-grants", shell_gated_role()).await;
+            declare_entry(&rig, "unlist-grants", "entry-1").await;
+            let session_id = member_session(&rig, "unlist-grants", "entry-1").await;
+            let identity_grant =
+                grant_identity_shell(&rig, "unlist-grants", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "unlist-grants", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            // The dormant seat's session exists once its first turn built it.
+            let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
+
+            let handle = mob_handle(&rig, "unlist-grants").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            handle
+                .retire(entry.clone())
+                .await
+                .expect("the host retires the entry's member");
+            assert_eq!(
+                list_identity(&rig, "unlist-grants", "entry-1", false)
+                    .await
+                    .len(),
+                1,
+                "the entry outlives a retirement the declared apply did not start, and so do \
+                 its grants"
+            );
+            let unlisted = handle
+                .unlist_declared_identity(&entry)
+                .await
+                .expect("the unseated entry is unlisted");
+            assert!(
+                matches!(
+                    unlisted.unlisted.get(&entry),
+                    Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                ),
+                "{:?}",
+                unlisted.unlisted
+            );
+            assert_ended(
+                &list_identity(&rig, "unlist-grants", "entry-1", true).await,
+                &identity_grant,
+                "the unlist ended the identity's grant",
+            );
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &session_grant,
+                "the unlist ended the grant of the entry's archived session",
+            );
+
+            declare_entry(&rig, "unlist-grants", "entry-1").await;
+            assert_eq!(
+                member_session(&rig, "unlist-grants", "entry-1").await,
+                session_id,
+                "the name listed again is seated on its own archived session"
+            );
+            let listed_again = probe(&mut rig, "unlist-grants", "entry-1").await;
+            assert_eq!(
+                listed_again.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the name listed again needs a grant of its own: {listed_again:?}"
+            );
+        }
+
+        /// As the unlist above, with a complete roster's seal ending the
+        /// unseated entry: the seal's step ends it, its grants and its
+        /// archived session's grants before it commits.
+        #[tokio::test]
+        async fn a_sealed_unseated_entry_listed_again_inherits_no_grant() {
+            let mut rig = rig().await;
+            create_mob(&rig, "seal-grants", shell_gated_role()).await;
+            declare_entry(&rig, "seal-grants", "entry-1").await;
+            let session_id = member_session(&rig, "seal-grants", "entry-1").await;
+            let identity_grant =
+                grant_identity_shell(&rig, "seal-grants", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "seal-grants", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            // The dormant seat's session exists once its first turn built it.
+            let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
+
+            let handle = mob_handle(&rig, "seal-grants").await;
+            let entry = meerkat_mob::AgentIdentity::from("entry-1");
+            handle
+                .retire(entry.clone())
+                .await
+                .expect("the host retires the entry's member");
+            let sealed = handle
+                .apply_declared_roster(meerkat_mob::DeclaredRoster::complete(Vec::<
+                    meerkat_mob::DeclaredEntry,
+                >::new(
+                )))
+                .await
+                .expect("the complete roster seals");
+            assert!(
+                matches!(
+                    sealed.unlisted.get(&entry),
+                    Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                ),
+                "{:?}",
+                sealed.unlisted
+            );
+            assert_ended(
+                &list_identity(&rig, "seal-grants", "entry-1", true).await,
+                &identity_grant,
+                "the seal ended the identity's grant",
+            );
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &session_grant,
+                "the seal ended the grant of the entry's archived session",
+            );
+
+            declare_entry(&rig, "seal-grants", "entry-1").await;
+            let listed_again = probe(&mut rig, "seal-grants", "entry-1").await;
+            assert_eq!(
+                listed_again.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the name listed again needs a grant of its own: {listed_again:?}"
+            );
+        }
+
+        /// A complete roster's seal ends every unseated entry it does not
+        /// list in its one step, and their grants with them, before the
+        /// step commits. When no entry's grant end succeeds (the grant
+        /// store fails), the step fails and nothing commits: both entries
+        /// and all their grants stand, and the next apply ends them all.
+        /// Ending grants for several identities is not atomic: the row
+        /// after this one fails the second entry's end only.
+        #[tokio::test]
+        async fn a_seal_whose_grant_store_fails_is_refused_and_the_next_apply_ends_them() {
+            let rig = rig().await;
+            create_mob(&rig, "seal-step", shell_gated_role()).await;
+            let handle = mob_handle(&rig, "seal-step").await;
+            let mut grants = Vec::new();
+            for name in ["entry-1", "entry-2"] {
+                declare_entry(&rig, "seal-step", name).await;
+                grants.push((
+                    meerkat_mob::AgentIdentity::from(name),
+                    grant_identity_shell(&rig, "seal-step", name, 600_000).await,
+                ));
+                handle
+                    .retire(meerkat_mob::AgentIdentity::from(name))
+                    .await
+                    .expect("the host retires the entry's member");
+            }
+            let complete =
+                || meerkat_mob::DeclaredRoster::complete(Vec::<meerkat_mob::DeclaredEntry>::new());
+
+            rig.memory()
+                .fail_tool_grant_store_for_test(Some("grant store offline"));
+            let failed = handle.apply_declared_roster(complete()).await;
+            rig.memory().fail_tool_grant_store_for_test(None);
+            assert!(
+                failed.is_err(),
+                "a seal whose grant end fails fails its step: {failed:?}"
+            );
+            for (entry, _) in &grants {
+                assert!(
+                    matches!(
+                        handle.identity_entry(entry),
+                        Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+                    ),
+                    "the failed step ended no entry: {entry}"
+                );
+                assert_eq!(
+                    list_identity(&rig, "seal-step", entry.as_str(), false)
+                        .await
+                        .len(),
+                    1,
+                    "the failed step ended no grant: {entry}"
+                );
+            }
+
+            let sealed = handle
+                .apply_declared_roster(complete())
+                .await
+                .expect("the next apply seals");
+            for (entry, grant) in &grants {
+                assert!(
+                    matches!(
+                        sealed.unlisted.get(entry),
+                        Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                    ),
+                    "{entry}: {:?}",
+                    sealed.unlisted
+                );
+                assert_ended(
+                    &list_identity(&rig, "seal-step", entry.as_str(), true).await,
+                    grant,
+                    "the seal ended the entry's grant",
+                );
+            }
+        }
+
+        /// Ending grants for several identities in one step is not atomic.
+        /// When the seal's end of the second entry's grants fails, the
+        /// first entry's grants it already ended stay ended, and nothing
+        /// else commits: the seal fails, both entries stand, and so do the
+        /// second entry's grants. The next apply ends the rest and seals.
+        #[tokio::test]
+        async fn a_seal_whose_second_grant_end_fails_keeps_the_first_end_and_commits_nothing_else()
+        {
+            let rig = rig().await;
+            create_mob(&rig, "seal-partial", shell_gated_role()).await;
+            let handle = mob_handle(&rig, "seal-partial").await;
+            let mut grants = Vec::new();
+            for name in ["entry-1", "entry-2"] {
+                declare_entry(&rig, "seal-partial", name).await;
+                grants.push((
+                    meerkat_mob::AgentIdentity::from(name),
+                    grant_identity_shell(&rig, "seal-partial", name, 600_000).await,
+                ));
+                handle
+                    .retire(meerkat_mob::AgentIdentity::from(name))
+                    .await
+                    .expect("the host retires the entry's member");
+            }
+            let complete =
+                || meerkat_mob::DeclaredRoster::complete(Vec::<meerkat_mob::DeclaredEntry>::new());
+            let second = meerkat_core::tool_grant::ToolGrantSubject::member(
+                "seal-partial",
+                &handle.live_incarnation(),
+                "entry-2",
+            )
+            .key();
+
+            rig.memory().fail_tool_grant_subject_for_test(
+                second.as_str(),
+                Some("entry-2's grants offline"),
+            );
+            let failed = handle.apply_declared_roster(complete()).await;
+            rig.memory()
+                .fail_tool_grant_subject_for_test(second.as_str(), None);
+            assert!(
+                failed.is_err(),
+                "a seal whose second grant end fails fails its step: {failed:?}"
+            );
+            for (entry, _) in &grants {
+                assert!(
+                    matches!(
+                        handle.identity_entry(entry),
+                        Ok(meerkat_mob::IdentityEntryRead::Entry(_))
+                    ),
+                    "the failed step ended no entry: {entry}"
+                );
+            }
+            assert_ended(
+                &list_identity(&rig, "seal-partial", "entry-1", true).await,
+                &grants[0].1,
+                "the first entry's ended grant stays ended",
+            );
+            assert_eq!(
+                list_identity(&rig, "seal-partial", "entry-2", false)
+                    .await
+                    .len(),
+                1,
+                "the second entry's grant stands"
+            );
+
+            let sealed = handle
+                .apply_declared_roster(complete())
+                .await
+                .expect("the next apply seals");
+            for (entry, grant) in &grants {
+                assert!(
+                    matches!(
+                        sealed.unlisted.get(entry),
+                        Some(meerkat_mob::UnlistedEntryOutcome::Removed)
+                    ),
+                    "{entry}: {:?}",
+                    sealed.unlisted
+                );
+                assert_ended(
+                    &list_identity(&rig, "seal-partial", entry.as_str(), true).await,
+                    grant,
+                    "the next apply ended the entry's grant",
+                );
+            }
+        }
+
+        /// A member's session grants end with its identity: a name created
+        /// again by a resume of the retired member's archived session sees
+        /// none of them, and its call needs a grant.
+        #[tokio::test]
+        async fn a_member_resumed_on_its_archived_session_inherits_no_session_grant() {
+            let mut rig = rig().await;
+            create_mob(&rig, "session-grants", shell_gated_role()).await;
+            spawn(&rig, "session-grants", "worker-1", None).await;
+            let session_id = member_session(&rig, "session-grants", "worker-1").await;
+            let grant = grant_session_shell(&rig, &session_id, 600_000).await;
+            let admitted = probe(&mut rig, "session-grants", "worker-1").await;
+            assert_eq!(
+                admitted.grant_refusal(),
+                None,
+                "the session grant opens shell: {admitted:?}"
+            );
+
+            ok(
+                &rig,
+                "mob/retire",
+                serde_json::json!({"mob_id": "session-grants", "agent_identity": "worker-1"}),
+                "the member retires",
+            )
+            .await;
+            ok(
+                &rig,
+                "mob/spawn",
+                serde_json::json!({
+                    "mob_id": "session-grants",
+                    "profile": "worker",
+                    "agent_identity": "worker-1",
+                    "runtime_mode": "turn_driven",
+                    "launch_mode": {
+                        "mode": "resume",
+                        "bridge_session_id": session_id.to_string(),
+                    },
+                }),
+                "the name is created again on the archived session",
+            )
+            .await;
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &grant,
+                "the identity's end ended its session's grant",
+            );
+            let resumed = probe(&mut rig, "session-grants", "worker-1").await;
+            assert_eq!(
+                resumed.grant_refusal(),
+                Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
+                "the resumed member needs a grant of its own: {resumed:?}"
+            );
+        }
+
+        /// The reset ends its identities' grants before its epoch marker.
+        /// When that end fails, the reset is refused: the mob is left
+        /// Stopped with no `MobReset` row and the grants stand, and a retry
+        /// of the reset ends them.
+        #[tokio::test]
+        async fn a_reset_whose_grant_end_fails_is_refused_and_a_retry_ends_them() {
+            let mut rig = rig().await;
+            create_mob(&rig, "reset-retry", shell_gated_role()).await;
+            declare_entry(&rig, "reset-retry", "entry-1").await;
+            let grant = grant_identity_shell(&rig, "reset-retry", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "reset-retry", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            let reset = serde_json::json!({"mob_id": "reset-retry", "action": "reset"});
+
+            rig.memory()
+                .fail_tool_grant_store_for_test(Some("grant store offline"));
+            let refused = call(&rig, "mob/lifecycle", reset.clone()).await;
+            rig.memory().fail_tool_grant_store_for_test(None);
+            assert!(
+                refused.error.is_some(),
+                "a reset whose grant end fails is refused: {refused:?}"
+            );
+            let handle = mob_handle(&rig, "reset-retry").await;
+            assert_eq!(
+                handle.status().await.expect("the mob's state"),
+                meerkat_mob::MobState::Stopped,
+                "the refused reset leaves the mob Stopped"
+            );
+            let journal = handle
+                .events()
+                .replay_all()
+                .await
+                .expect("the mob's journal");
+            assert!(
+                journal
+                    .iter()
+                    .all(|event| !matches!(event.kind, meerkat_mob::MobEventKind::MobReset)),
+                "the refused reset appends no epoch marker"
+            );
+            assert_eq!(
+                list_identity(&rig, "reset-retry", "entry-1", false)
+                    .await
+                    .len(),
+                1,
+                "the entry's grant stands"
+            );
+
+            ok(&rig, "mob/lifecycle", reset, "the retried reset commits").await;
+            assert_ended(
+                &list_identity(&rig, "reset-retry", "entry-1", true).await,
+                &grant,
+                "the retried reset ended the entry's grant",
+            );
+        }
+
+        /// The reset ends the grants of the sessions MobMachine holds for
+        /// its identities, not only the identities' own: an unseated entry's
+        /// archived session record is one, and a grant of that session
+        /// reads revoked after the reset.
+        #[tokio::test]
+        async fn a_mob_reset_ends_the_grants_of_its_entries_archived_sessions() {
+            let mut rig = rig().await;
+            create_mob(&rig, "reset-sessions", shell_gated_role()).await;
+            declare_entry(&rig, "reset-sessions", "entry-1").await;
+            let session_id = member_session(&rig, "reset-sessions", "entry-1").await;
+            let identity_grant =
+                grant_identity_shell(&rig, "reset-sessions", "entry-1", 600_000).await;
+            let admitted = probe(&mut rig, "reset-sessions", "entry-1").await;
+            assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
+            // The dormant seat's session exists once its first turn built it.
+            let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
+
+            let handle = mob_handle(&rig, "reset-sessions").await;
+            handle
+                .retire(meerkat_mob::AgentIdentity::from("entry-1"))
+                .await
+                .expect("the host retires the entry's member");
+            assert_eq!(
+                list_session(&rig, &session_id, false).await.len(),
+                1,
+                "the entry outlives the retirement, unseated, and its archived session's \
+                 grant stands"
+            );
+
+            ok(
+                &rig,
+                "mob/lifecycle",
+                serde_json::json!({"mob_id": "reset-sessions", "action": "reset"}),
+                "the mob resets",
+            )
+            .await;
+            assert_ended(
+                &list_identity(&rig, "reset-sessions", "entry-1", true).await,
+                &identity_grant,
+                "the reset ended the entry's grant",
+            );
+            assert_ended(
+                &list_session(&rig, &session_id, true).await,
+                &session_grant,
+                "the reset ended the grant of the entry's archived session",
             );
         }
     }

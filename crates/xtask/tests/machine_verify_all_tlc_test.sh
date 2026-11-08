@@ -670,24 +670,28 @@ fi
 # Scoped tool grant expiry and run scope (the ToolGrantLifecycleMachine
 # deadline and run guards, the deadline timer, the boundary that shows a gated
 # name, the dispatch gate's fresh admission and the end it writes after a
-# refusal or loses, revocation, reads that settle a due grant without loading
-# the session, two runs and the runtime's signal of their ends, crash,
-# restart, recovery of the interrupted run and one bounded clock rollback)
-# spans the shell's use of the machine, which the machine's own ci sweep
-# cannot see. A hand-written audit over the same generated model drives one
-# grant with deadline 2 on a clock in 0..3, under every generated invariant
-# plus seven invariants and one action property (no call handed on at or
-# after the deadline or after the grant ended; a persisted end is latched
-# across crash, restart and rollback; expiry is never early; revocation
-# precedes the deadline; a visible name was shown before the deadline; a
-# run-scoped grant hands on calls of its own run only; it never ends with its
-# run while that run is current). It requires its twelve witnesses reached
-# and refuses nine seeded defects (--mutants): an early expiry guard, an
-# inclusive admission guard, an admission guard that ignores the run scope, a
-# dispatch that reuses the boundary's verdict, a restart that revives an
-# ended grant, a revoked grant handed on, a boundary that trusts the stored
-# phase, a call of another run handed on, and a run end signalled while the
-# run is current. 6 steps reach every witness.
+# refusal or loses, revocation and a grant's end with its subject, reads that
+# settle a due grant without loading the session, two runs and the runtime's
+# signal of their ends, crash, restart, recovery of the interrupted run and
+# one bounded clock rollback) spans the shell's use of the machine, which the
+# machine's own ci sweep cannot see. A hand-written audit over the same
+# generated model drives one grant with deadline 2 on a clock in 0..3, under
+# every generated invariant plus seven invariants and one action property (no
+# call handed on at or after the deadline or after the grant ended; a
+# persisted end is latched across crash, restart and rollback; expiry is
+# never early; revocation precedes the deadline; a visible name was shown
+# before the deadline; a run-scoped grant hands on calls of its own run only;
+# it never ends with its run while that run is current). It requires its
+# fifteen witnesses reached (among them a grant ended with its subject
+# refusing a call, the subject's end at the deadline recording expiry, and
+# the subject's end of a grant whose run ended changing nothing) and refuses
+# ten seeded defects (--mutants): an early expiry guard, an inclusive
+# admission guard, an admission guard that ignores the run scope, a dispatch
+# that reuses the boundary's verdict, a restart that revives an ended grant,
+# a revoked grant handed on, a grant ended with its subject handed on, a
+# boundary that trusts the stored phase, a call of another run handed on,
+# and a run end signalled while the run is current. 6 steps reach every
+# witness.
 tool_grant_expiry_audit="${workspace_root}/specs/machines/tool_grant_lifecycle/tool_grant_expiry_audit.sh"
 if [[ ! -x "${tool_grant_expiry_audit}" ]]; then
   echo "error: tool grant expiry audit runner is missing from workspace runfiles: ${tool_grant_expiry_audit}" >&2
@@ -884,8 +888,10 @@ fi
 # unlisted or not, declared again under the role its archived session was
 # built under or another (with the migration from it declared or not),
 # revived on its archived session or seated fresh once a forget let its
-# record go, under the seal, the unmark on listing, a candidate composition
-# and the forced destroy. --part legacy (shard audits-m): a legacy member
+# record go, under the seal (refused while an unseated entry it does not
+# list remains) and the one-entry unlist, the unmark on listing, a candidate
+# composition and the forced destroy. --part legacy (shard audits-m): a
+# legacy member
 # adopted, unlisted and retired to every copy of the plain end (live, after
 # its runtime retired, stopped, or replayed with its session archived or
 # not and its incarnation local or hosted elsewhere), the replay of its
@@ -903,7 +909,8 @@ fi
 # rotations under another role or its own, and a first-boot Resume request.
 # --part hosted (shard audits-o): held creation, the held spawn and entries
 # hosted on their first use, the seal that leaves a member whose spawn is in
-# flight unmarked, with Stop, Resume, Complete and the forced destroy (which
+# flight unmarked and the one-entry unlist, with Stop, Resume, Complete and
+# the forced destroy (which
 # ends the held spawn's ladder whether its membership committed or not), and
 # the declared apply's open fact; one bound host and the placed spawn ladder,
 # its remote commit, its retirement and the placed end; and an explicit
@@ -913,8 +920,8 @@ fi
 # exactly one arm answering every declaration, seal, mark replay and apply
 # opening, and the declared apply's action properties
 # (identity_entry_apply_audit.tla names them); they require every listed
-# arm to fire, a floor of distinct states and their fifty-eight witnesses
-# reached, and --mutants refuses sixty seeded defects: one per declared
+# arm to fire, a floor of distinct states and their fifty-nine witnesses
+# reached, and --mutants refuses sixty-one seeded defects: one per declared
 # apply invariant and property, one per guard of the declared apply that a
 # reachable state needs, two forced destroys, one that keeps a spawn ladder
 # whose membership committed and one that keeps the startup binding request

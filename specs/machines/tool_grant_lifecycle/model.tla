@@ -162,6 +162,40 @@ RevokeSettledRevoked(now_ms) ==
     /\ UnchangedFrame_bf68d02069a0314e
 
 
+EndWithSubjectActive(now_ms) ==
+    /\ phase = "Active"
+    /\ (now_ms < expires_at_ms)
+    /\ phase' = "Revoked"
+    /\ model_step_count' = model_step_count + 1
+    /\ ended_at_ms' = Some(now_ms)
+    /\ end_reason' = Some("SubjectEnded")
+    /\ UnchangedFrame_e6c699a4a6dfbb07
+
+
+EndWithSubjectAfterDeadline(now_ms) ==
+    /\ phase = "Active"
+    /\ (expires_at_ms <= now_ms)
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ ended_at_ms' = Some(now_ms)
+    /\ end_reason' = Some("Deadline")
+    /\ UnchangedFrame_e6c699a4a6dfbb07
+
+
+EndWithSubjectSettledExpired(now_ms) ==
+    /\ phase = "Expired"
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_bf68d02069a0314e
+
+
+EndWithSubjectSettledRevoked(now_ms) ==
+    /\ phase = "Revoked"
+    /\ phase' = "Revoked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_bf68d02069a0314e
+
+
 AdmitLive(now_ms, run_id) ==
     /\ phase = "Active"
     /\ (now_ms < expires_at_ms)
@@ -190,6 +224,7 @@ AdmitEndedExpired(now_ms, run_id) ==
 
 AdmitEndedRevoked(now_ms, run_id) ==
     /\ phase = "Revoked"
+    /\ (end_reason = Some("Revoked"))
     /\ phase' = "Revoked"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_bf68d02069a0314e
@@ -294,6 +329,21 @@ RevokeSettledRunEnded(now_ms) ==
     /\ UnchangedFrame_bf68d02069a0314e
 
 
+AdmitEndedWithSubject(now_ms, run_id) ==
+    /\ phase = "Revoked"
+    /\ (end_reason = Some("SubjectEnded"))
+    /\ phase' = "Revoked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_bf68d02069a0314e
+
+
+EndWithSubjectSettledRunEnded(now_ms) ==
+    /\ phase = "RunEnded"
+    /\ phase' = "RunEnded"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_bf68d02069a0314e
+
+
 Next ==
     \/ (phase = "Unissued") /\ \E arg_grant_id \in StringValues : \E now_ms \in 0..2 : \E arg_expires_at_ms \in 0..2 : \E max_lifetime_ms \in 0..2 : \E arg_run_scope \in OptionToolGrantRunIdValues : Issue(arg_grant_id, now_ms, arg_expires_at_ms, max_lifetime_ms, arg_run_scope)
     \/ (phase = "Unissued") /\ \E arg_grant_id \in StringValues : \E now_ms \in 0..2 : \E arg_expires_at_ms \in 0..2 : \E max_lifetime_ms \in 0..2 : \E arg_run_scope \in OptionToolGrantRunIdValues : IssueRefusedWindow(arg_grant_id, now_ms, arg_expires_at_ms, max_lifetime_ms, arg_run_scope)
@@ -308,6 +358,10 @@ Next ==
     \/ (phase = "Active") /\ \E now_ms \in 0..2 : RevokeAfterDeadline(now_ms)
     \/ (phase = "Expired") /\ \E now_ms \in 0..2 : RevokeSettledExpired(now_ms)
     \/ (phase = "Revoked") /\ \E now_ms \in 0..2 : RevokeSettledRevoked(now_ms)
+    \/ (phase = "Active") /\ \E now_ms \in 0..2 : EndWithSubjectActive(now_ms)
+    \/ (phase = "Active") /\ \E now_ms \in 0..2 : EndWithSubjectAfterDeadline(now_ms)
+    \/ (phase = "Expired") /\ \E now_ms \in 0..2 : EndWithSubjectSettledExpired(now_ms)
+    \/ (phase = "Revoked") /\ \E now_ms \in 0..2 : EndWithSubjectSettledRevoked(now_ms)
     \/ (phase = "Active") /\ \E now_ms \in 0..2 : \E run_id \in OptionToolGrantRunIdValues : AdmitLive(now_ms, run_id)
     \/ (phase = "Active") /\ \E now_ms \in 0..2 : \E run_id \in OptionToolGrantRunIdValues : AdmitDue(now_ms, run_id)
     \/ (phase = "Expired") /\ \E now_ms \in 0..2 : \E run_id \in OptionToolGrantRunIdValues : AdmitEndedExpired(now_ms, run_id)
@@ -324,6 +378,8 @@ Next ==
     \/ (phase = "RunEnded") /\ \E arg_grant_id \in StringValues : \E now_ms \in 0..2 : \E arg_expires_at_ms \in 0..2 : \E max_lifetime_ms \in 0..2 : \E arg_run_scope \in OptionToolGrantRunIdValues : IssueRefusedIssuedRunEnded(arg_grant_id, now_ms, arg_expires_at_ms, max_lifetime_ms, arg_run_scope)
     \/ (phase = "RunEnded") /\ \E now_ms \in 0..2 : ExpireSettledRunEnded(now_ms)
     \/ (phase = "RunEnded") /\ \E now_ms \in 0..2 : RevokeSettledRunEnded(now_ms)
+    \/ (phase = "Revoked") /\ \E now_ms \in 0..2 : \E run_id \in OptionToolGrantRunIdValues : AdmitEndedWithSubject(now_ms, run_id)
+    \/ (phase = "RunEnded") /\ \E now_ms \in 0..2 : EndWithSubjectSettledRunEnded(now_ms)
     \/ TerminalStutter
 
 unissued_is_empty == (IF (phase # "Unissued") THEN TRUE ELSE ((grant_id = "") /\ (issued_at_ms = 0) /\ (expires_at_ms = 0) /\ (ended_at_ms = None) /\ (end_reason = None)))
@@ -331,7 +387,7 @@ issued_window_is_nonempty == (IF (phase = "Unissued") THEN TRUE ELSE ((grant_id 
 active_has_no_end == (IF (phase # "Active") THEN TRUE ELSE ((ended_at_ms = None) /\ (end_reason = None)))
 ended_grants_record_their_end == (IF ((phase # "Expired") /\ (phase # "Revoked") /\ (phase # "RunEnded")) THEN TRUE ELSE ((ended_at_ms # None) /\ (end_reason # None)))
 expiry_never_precedes_its_deadline == (IF (phase # "Expired") THEN TRUE ELSE ((end_reason = Some("Deadline")) /\ (ended_at_ms # None) /\ ((IF "value" \in DOMAIN ended_at_ms THEN ended_at_ms["value"] ELSE None) >= expires_at_ms)))
-revocation_precedes_the_deadline == (IF (phase # "Revoked") THEN TRUE ELSE ((end_reason = Some("Revoked")) /\ (ended_at_ms # None) /\ ((IF "value" \in DOMAIN ended_at_ms THEN ended_at_ms["value"] ELSE None) < expires_at_ms)))
+revocation_precedes_the_deadline == (IF (phase # "Revoked") THEN TRUE ELSE ((IF (end_reason = Some("Revoked")) THEN TRUE ELSE (end_reason = Some("SubjectEnded"))) /\ (ended_at_ms # None) /\ ((IF "value" \in DOMAIN ended_at_ms THEN ended_at_ms["value"] ELSE None) < expires_at_ms)))
 run_ended_records_its_end == (IF (phase # "RunEnded") THEN TRUE ELSE ((end_reason = Some("RunEnded")) /\ (ended_at_ms # None) /\ ((IF "value" \in DOMAIN ended_at_ms THEN ended_at_ms["value"] ELSE None) < expires_at_ms) /\ (run_scope # None)))
 run_scope_set_only_by_issue == (IF (phase # "Unissued") THEN TRUE ELSE (run_scope = None))
 

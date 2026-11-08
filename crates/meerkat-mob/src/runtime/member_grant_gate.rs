@@ -90,8 +90,10 @@ pub(crate) fn family_switch(tools: &ToolConfig, family: &str) -> Option<bool> {
 /// role's current gate, less the families its declaration's category
 /// overrides switch off. `None` for any other member (no identity intent, an
 /// absent or unreadable one, one declared with an exact profile of its own,
-/// or one of another role): its own gate is the gate of the profile its
-/// build runs on, and its role's gate joins as role entries.
+/// one whose material was sealed before it recorded its profile source
+/// ([`DesiredProfileSource::Unrecorded`]), or one of another role): its own
+/// gate is the gate of the profile its build runs on, and its role's gate
+/// joins as role entries.
 ///
 /// # Errors
 /// The identity store's or the realm profile store's failure to read.

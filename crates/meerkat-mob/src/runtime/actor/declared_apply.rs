@@ -440,19 +440,24 @@ impl MobActor {
     /// entry is marked (the handle retires its member with the cause
     /// Unlisted), an unseated one ends at once, one with a member step in
     /// flight is deferred, and any other name is left as it is. No other
-    /// entry is read or changed. A mob that is not running answers an
-    /// invalid transition.
-    pub(super) fn unlist_identity_entry(
+    /// entry is read or changed. An unseated entry's end ends its identity
+    /// (MobMachine names it, `IdentityEnded`): its scoped tool grants, and
+    /// those of its archived session, end before the step commits, and a
+    /// failure fails the step, which commits nothing. A mob that is not
+    /// running answers an invalid transition.
+    pub(super) async fn unlist_identity_entry(
         &mut self,
         identity: &AgentIdentity,
     ) -> Result<mob_dsl::UnlistEntryVerdict, MobError> {
-        let effects = self.apply_dsl_input_collect_effects(
+        let prepared = self.prepare_dsl_input_transition(
             mob_dsl::MobMachineInput::UnlistIdentityEntry {
                 agent_identity: mob_dsl::AgentIdentity::from_domain(identity),
             },
             "unlist_identity_entry",
         )?;
-        let verdict = effects
+        let verdict = prepared
+            .transition
+            .effects()
             .iter()
             .find_map(|effect| match effect {
                 mob_dsl::MobMachineEffect::IdentityEntryUnlisted { verdict, .. } => Some(*verdict),
@@ -464,29 +469,84 @@ impl MobActor {
         if verdict == mob_dsl::UnlistEntryVerdict::MobNotRunning {
             return Err(self.invalid_transition_to(MobState::Running));
         }
+        self.end_tool_grants_of_ended_identities(
+            prepared.transition.effects(),
+            "its identity entry was unlisted",
+        )
+        .await?;
+        self.commit_prepared_dsl_transition(prepared)?;
         Ok(verdict)
     }
 
     /// Seal a complete declared roster (`SealDeclaredRoster`) in one
     /// MobMachine step, and answer the Declared entries it marked (whose
-    /// members the handle retires) and the ones it removed at once. A mob
-    /// that is not running answers an invalid transition.
-    pub(super) fn seal_declared_roster(
+    /// members the handle retires) and the ones the step ended at once. The
+    /// seal ends no entry itself: on the step's own prepared authority, each
+    /// unseated entry the roster does not list is unlisted first
+    /// (`UnlistIdentityEntry`, which ends a Declared one, naming the end,
+    /// defers it while a member step of it is in flight, and leaves any
+    /// other entry as it is), and only then is the roster sealed; MobMachine
+    /// refuses a seal while an unseated Declared entry it would end remains.
+    /// The identities the step ends have their scoped tool grants, and those
+    /// of their archived sessions, ended before the step commits. Ending
+    /// grants for several identities in one step is not atomic: when one
+    /// identity's end fails, the ends already made stay made (they fail
+    /// closed), the step fails and nothing else commits, and a retry ends the
+    /// rest. A mob that is not running answers an invalid transition.
+    pub(super) async fn seal_declared_roster(
         &mut self,
         desired: BTreeSet<AgentIdentity>,
     ) -> Result<SealAnswer, MobError> {
         let before = self.dsl_authority.state().identity_entry_origins.clone();
-        let prepared = self.prepare_dsl_input_transition(
-            mob_dsl::MobMachineInput::SealDeclaredRoster {
-                desired: desired
-                    .iter()
-                    .map(mob_dsl::AgentIdentity::from_domain)
-                    .collect(),
-            },
-            "seal_declared_roster",
-        )?;
-        let verdict = prepared
-            .transition
+        let desired: BTreeSet<mob_dsl::AgentIdentity> = desired
+            .iter()
+            .map(mob_dsl::AgentIdentity::from_domain)
+            .collect();
+        let mut authority = self.dsl_authority.prepare_authority();
+        // The unseated entries the roster leaves out, whatever their
+        // custody: MobMachine decides each one's unlist (a store-owned
+        // entry's answers NotADeclaredEntry and changes nothing).
+        let unlisted: Vec<mob_dsl::AgentIdentity> = {
+            let state = authority.state();
+            state
+                .identity_entry_origins
+                .keys()
+                .filter(|dsl_identity| {
+                    !desired.contains(*dsl_identity)
+                        && !state.identity_to_runtime.contains_key(*dsl_identity)
+                })
+                .cloned()
+                .collect()
+        };
+        let rejected = |input: &mob_dsl::MobMachineInput, error: &dyn std::fmt::Display| {
+            MobError::Internal(format!(
+                "DSL authority prepare (seal_declared_roster) rejected {input:?}: {error}"
+            ))
+        };
+        let mut effects = Vec::new();
+        let mut phase_changed = false;
+        for agent_identity in unlisted {
+            let input = mob_dsl::MobMachineInput::UnlistIdentityEntry { agent_identity };
+            let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input.clone())
+                .map_err(|error| rejected(&input, &error))?;
+            phase_changed |= transition.from_phase != transition.to_phase;
+            effects.extend(transition.into_effects());
+        }
+        let input = mob_dsl::MobMachineInput::SealDeclaredRoster { desired };
+        let transition = mob_dsl::MobMachineMutator::apply(&mut authority, input.clone())
+            .map_err(|error| rejected(&input, &error))?;
+        if transition
+            .effects()
+            .iter()
+            .any(|effect| matches!(effect, mob_dsl::MobMachineEffect::DeclaredRosterSealRefused))
+        {
+            return Err(MobError::Internal(
+                "MobMachine refused the seal: an unseated Declared entry the roster does not \
+                 list remained after its unlist"
+                    .to_string(),
+            ));
+        }
+        let verdict = transition
             .effects()
             .iter()
             .find_map(|effect| match effect {
@@ -497,7 +557,9 @@ impl MobActor {
         if verdict == mob_dsl::DeclaredRosterSealVerdict::MobNotRunning {
             return Err(self.invalid_transition_to(MobState::Running));
         }
-        let state = prepared.authority.state();
+        phase_changed |= transition.from_phase != transition.to_phase;
+        effects.extend(transition.into_effects());
+        let state = authority.state();
         let identity =
             |dsl_identity: &mob_dsl::AgentIdentity| AgentIdentity::from(dsl_identity.0.as_str());
         // The marked members whose retirement has not started: the handle
@@ -521,10 +583,14 @@ impl MobActor {
             .filter(|dsl_identity| !state.identity_entry_origins.contains_key(*dsl_identity))
             .map(identity)
             .collect();
-        let phase_changed = prepared.transition.from_phase != prepared.transition.to_phase;
+        self.end_tool_grants_of_ended_identities(
+            &effects,
+            "a complete roster's seal unlisted its identity entry",
+        )
+        .await?;
         self.commit_prepared_dsl_input(PreparedDslInput {
-            authority: prepared.authority,
-            effects: prepared.transition.into_effects(),
+            authority,
+            effects,
             phase_changed,
         })?;
         Ok(SealAnswer {

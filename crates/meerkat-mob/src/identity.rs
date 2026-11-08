@@ -556,23 +556,31 @@ impl TryFrom<meerkat_contracts::wire::WireMemberToolDeclaration> for MemberToolD
 /// its role's named profile takes the role's current gate as its own at
 /// every build, as a worker of the role does; one declared with an exact
 /// profile of its own joins the role's gate as role entries, as a member
-/// spawned with its own profile does.
+/// spawned with its own profile does; and so does one whose material
+/// records no source (it was sealed by an earlier release, and a later
+/// member tool update keeps that reading).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesiredProfileSource {
+    /// Material sealed before it recorded where its profile came from: the
+    /// reading of a material with no `profile_source`. It keeps the rule of
+    /// that release: its role's gate joins as role entries only. Never
+    /// written.
+    #[default]
+    Unrecorded,
     /// The role's named canonical profile: the declaration names no
     /// `profile_override`.
-    #[default]
     Definition,
     /// The declaration's exact portable profile (`profile_override`).
     Override,
 }
 
 impl DesiredProfileSource {
-    /// Whether the material took the role's named profile (the default).
+    /// Whether the material recorded no source (it was sealed before the
+    /// source was recorded).
     #[must_use]
-    pub fn is_definition(&self) -> bool {
-        matches!(self, Self::Definition)
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
     }
 }
 
@@ -587,11 +595,12 @@ impl DesiredProfileSource {
 pub struct DesiredMemberMaterial {
     pub profile_name: ProfileName,
     pub profile: PortableProfile,
-    /// Where `profile` came from: the role's named profile (the default,
-    /// omitted when serialized, so material sealed before this field reads
-    /// as it) or the declaration's own exact profile. It decides the tool
-    /// grant gate the identity's member builds with.
-    #[serde(default, skip_serializing_if = "DesiredProfileSource::is_definition")]
+    /// Where `profile` came from: the role's named profile or the
+    /// declaration's own exact profile, written for every material this
+    /// release seals; a material with no source reads as `Unrecorded` (it
+    /// was sealed before the source was recorded). It decides the tool grant
+    /// gate the identity's member builds with.
+    #[serde(default, skip_serializing_if = "DesiredProfileSource::is_unrecorded")]
     pub profile_source: DesiredProfileSource,
     pub definition_extract: PortableDefinitionExtract,
     pub overlay: DesiredMemberOverlay,
@@ -3817,6 +3826,19 @@ pub(crate) fn identity_adoption_fixture(
     request_id: &str,
     session_id: SessionId,
 ) -> (AdoptMemberIdentityDeclaration, IdentityIntentRecord) {
+    identity_adoption_fixture_with(mob_id, agent_identity, request_id, session_id, |_| {})
+}
+
+/// [`identity_adoption_fixture`], with its desired material changed by
+/// `edit` before the record is prepared.
+#[cfg(test)]
+pub(crate) fn identity_adoption_fixture_with(
+    mob_id: MobId,
+    agent_identity: AgentIdentity,
+    request_id: &str,
+    session_id: SessionId,
+    edit: impl FnOnce(&mut DesiredMemberMaterial),
+) -> (AdoptMemberIdentityDeclaration, IdentityIntentRecord) {
     use meerkat_contracts::wire::PortableToolConfig;
 
     let profile_name = ProfileName::from("worker");
@@ -3875,7 +3897,7 @@ pub(crate) fn identity_adoption_fixture(
         owned_wiring: BTreeSet::new(),
         convergence: IdentityConvergenceMode::Drain { max_wait_ms: 1_000 },
     };
-    let material = DesiredMemberMaterial {
+    let mut material = DesiredMemberMaterial {
         profile_name,
         profile,
         profile_source: DesiredProfileSource::Definition,
@@ -3899,6 +3921,7 @@ pub(crate) fn identity_adoption_fixture(
         required_local_callback_tools: Vec::new(),
         execution,
     };
+    edit(&mut material);
     let record =
         prepare_identity_adoption_record(&request, material, 10).expect("valid adoption record");
     (request, record)

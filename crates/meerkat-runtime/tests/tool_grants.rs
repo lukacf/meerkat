@@ -3171,3 +3171,75 @@ async fn ending_a_subject_revokes_its_live_grants_only() {
         );
     }
 }
+
+/// A grant that ended with its subject (the identity it was issued to
+/// ended) explains no refusal: a later build under the subject's key, a
+/// name created again, needs a grant of its own, where an operator's revoke
+/// is cited. Both read `revoked`.
+#[tokio::test]
+async fn a_grant_ended_with_its_subject_explains_no_refusal() {
+    for backend in BACKENDS {
+        let durable = Durable::new(backend);
+        let clock = FakeClock::at(T0);
+        let machine = durable.machine(&clock);
+        let member = member_subject();
+        let member_session = SessionId::new();
+        let served = serve_member(&machine, &member_session, &member).await;
+        let ended = machine
+            .grant_tool(
+                member_shell_grant(&member, Duration::from_mins(1)),
+                Some(&member_session),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            machine
+                .end_tool_grants_of(&member, ToolGrantRevocation::default())
+                .await
+                .unwrap(),
+            1,
+            "{backend:?}"
+        );
+        assert_eq!(
+            machine
+                .tool_grant(&ended.record.grant_id)
+                .await
+                .unwrap()
+                .status,
+            ToolGrantStatus::Revoked,
+            "{backend:?}: a grant ended with its subject reads revoked"
+        );
+        let refusal = served
+            .call("shell", "call-after-the-subject-ended")
+            .await
+            .expect_err("an ended grant admits nothing");
+        assert_eq!(
+            refusal,
+            ToolGrantRefusal::Required,
+            "{backend:?}: a grant ended with its subject explains nothing"
+        );
+
+        let revoked = machine
+            .grant_tool(
+                member_shell_grant(&member, Duration::from_mins(1)),
+                Some(&member_session),
+            )
+            .await
+            .unwrap();
+        machine
+            .revoke_tool_grant(&revoked.record.grant_id, ToolGrantRevocation::default())
+            .await
+            .unwrap();
+        let refusal = served
+            .call("shell", "call-after-the-revoke")
+            .await
+            .expect_err("a revoked grant admits nothing");
+        assert_eq!(
+            refusal,
+            ToolGrantRefusal::Revoked {
+                grant_id: revoked.record.grant_id.clone(),
+            },
+            "{backend:?}: an operator's revoke is cited"
+        );
+    }
+}

@@ -33,19 +33,21 @@
 \* run, deciding from its own fresh AdmitUse right before the hand-off, so
 \* the admission time is the hand-off time, and writing an expiry or run end
 \* it observed only after it refused the call, in a separate step that can
-\* fail or be lost to a crash; an operator revoke from any process; a read
-\* from any process settling a due grant (Expire) without loading the
-\* session; the serving process crashing (interrupting its current run) and
-\* restarting, the restored gate starting closed; and durable-tail recovery
-\* closing the interrupted run (EndRun) before the session runs again, or
-\* losing that write.
+\* fail or be lost to a crash; an operator revoke from any process; the end
+\* of the grant's subject (the identity it was issued to ended) from any
+\* process; a read from any process settling a due grant (Expire) without
+\* loading the session; the serving process crashing (interrupting its
+\* current run) and restarting, the restored gate starting closed; and
+\* durable-tail recovery closing the interrupted run (EndRun) before the
+\* session runs again, or losing that write.
 \*
 \* Properties:
 \*
 \*   AuditNoAdmitAtOrAfterDeadline: no gated call is handed on at or after
 \*     the deadline.
 \*   AuditTerminalNeverAdmits: no gated call is handed on once the grant
-\*     expired, was revoked or ended with its run.
+\*     expired, was revoked (by an operator or with its subject) or ended
+\*     with its run.
 \*   AuditTerminalLatched (action property): an ended grant never changes
 \*     again, across crash, restart and clock rollback. It covers persisted
 \*     ends only: an end a dispatch decided but has not written (or whose
@@ -70,6 +72,8 @@
 \*     live.
 \*   "revoked_admits": the dispatch hands on a call the revoked grant
 \*     refused.
+\*   "subject_ended_admits": the dispatch hands on a call the grant that
+\*     ended with its subject refused.
 \*   "boundary_trusts_durable_phase": the boundary shows the name because
 \*     the stored row is still Active, without applying AdmitUse at the
 \*     current clock.
@@ -86,8 +90,8 @@ ASSUME AuditDeadline \in 1..AuditClockMax
 ASSUME AuditMaxLifetime >= AuditDeadline
 ASSUME AuditMutant \in {"none", "dispatch_reuses_boundary_verdict",
                         "restart_reactivates_terminal", "revoked_admits",
-                        "boundary_trusts_durable_phase", "other_run_admits",
-                        "run_end_signalled_while_running"}
+                        "subject_ended_admits", "boundary_trusts_durable_phase",
+                        "other_run_admits", "run_end_signalled_while_running"}
 
 \* The session's runs, in start order, and the label of no run.
 AuditRunIds == <<"run_1", "run_2">>
@@ -120,9 +124,11 @@ VARIABLES
     current_run, runs_started, interrupted_run,
     \* History: whether a gated call was handed on outside the grant's run
     \* scope, what ended the grant with its run, whether a call outside any
-    \* run was refused, and whether the grant ended with its run while that
-    \* run went on.
-    admitted_outside_scope, run_ended_by, refused_outside_run, ended_while_running
+    \* run was refused, whether the grant ended with its run while that run
+    \* went on, and whether the grant's subject ended after the grant ended
+    \* with its run.
+    admitted_outside_scope, run_ended_by, refused_outside_run, ended_while_running,
+    subject_end_after_run_end
 
 audit_vars == << clock, rollback_used, up, visible, visible_at, timer, admissions,
                  refused_before_deadline, last_dispatch, expired_by, down_at_deadline,
@@ -133,7 +139,7 @@ write_vars == << pending_writes, write_lost, admitted_after_lost_write >>
 session_vars == << current_run, runs_started, interrupted_run >>
 
 run_history_vars == << admitted_outside_scope, run_ended_by, refused_outside_run,
-                       ended_while_running >>
+                       ended_while_running, subject_end_after_run_end >>
 
 all_vars == << vars, audit_vars, write_vars, session_vars, run_history_vars >>
 
@@ -184,6 +190,7 @@ AuditInit ==
     /\ run_ended_by = "none"
     /\ refused_outside_run = FALSE
     /\ ended_while_running = FALSE
+    /\ subject_end_after_run_end = FALSE
 
 \* The scopes an operator can issue the grant with: its window from any
 \* process, or the session's latest run from the serving process, which
@@ -278,7 +285,7 @@ AuditFinishRun ==
                     refused_before_deadline, last_dispatch, down_at_deadline,
                     admitted_after_end, rolled_back_after_end >>
     /\ UNCHANGED write_vars
-    /\ UNCHANGED << admitted_outside_scope, refused_outside_run >>
+    /\ UNCHANGED << admitted_outside_scope, refused_outside_run, subject_end_after_run_end >>
     /\ TrackRunEnd
 
 \* Seeded defect "run_end_signalled_while_running": the session signals the
@@ -293,7 +300,7 @@ AuditEarlyRunEndSignal ==
                     refused_before_deadline, last_dispatch, down_at_deadline,
                     admitted_after_end, rolled_back_after_end >>
     /\ UNCHANGED write_vars
-    /\ UNCHANGED << admitted_outside_scope, refused_outside_run >>
+    /\ UNCHANGED << admitted_outside_scope, refused_outside_run, subject_end_after_run_end >>
     /\ TrackRunEnd
 
 \* The served session's deadline timer fires, early or due, and applies
@@ -350,6 +357,7 @@ AuditBoundary ==
             \/ /\ \/ AdmitEndedExpired(clock, CurrentRunArg)
                   \/ AdmitEndedRevoked(clock, CurrentRunArg)
                   \/ AdmitEndedRunEnded(clock, CurrentRunArg)
+                  \/ AdmitEndedWithSubject(clock, CurrentRunArg)
                /\ visible' = FALSE
                /\ visible_at' = 0
                /\ UNCHANGED << expired_by, run_ended_by >>
@@ -364,7 +372,7 @@ AuditBoundary ==
                     rolled_back_after_end >>
     /\ UNCHANGED write_vars
     /\ UNCHANGED session_vars
-    /\ UNCHANGED << admitted_outside_scope, refused_outside_run >>
+    /\ UNCHANGED << admitted_outside_scope, refused_outside_run, subject_end_after_run_end >>
     /\ TrackRunEnd
 
 \* The gated call naming the run `arg` is handed on at the current clock.
@@ -431,10 +439,13 @@ AuditDispatch ==
              \/ /\ AdmitEndedRevoked(clock, arg)
                 /\ IF AuditMutant = "revoked_admits" THEN Admit(arg) ELSE RefuseInRun
                 /\ UNCHANGED << expired_by, pending_writes >>
+             \/ /\ AdmitEndedWithSubject(clock, arg)
+                /\ IF AuditMutant = "subject_ended_admits" THEN Admit(arg) ELSE RefuseInRun
+                /\ UNCHANGED << expired_by, pending_writes >>
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, down_at_deadline,
                     rolled_back_after_end, write_lost >>
     /\ UNCHANGED session_vars
-    /\ UNCHANGED << run_ended_by, ended_while_running >>
+    /\ UNCHANGED << run_ended_by, ended_while_running, subject_end_after_run_end >>
 
 \* The dispatch writes an end it decided, at the reading and with the run it
 \* decided with, to the row as it now stands: the write reloads a row
@@ -453,13 +464,14 @@ AuditDispatchWrite ==
            \/ /\ \/ AdmitEndedExpired(w[1], w[2])
                  \/ AdmitEndedRevoked(w[1], w[2])
                  \/ AdmitEndedRunEnded(w[1], w[2])
+                 \/ AdmitEndedWithSubject(w[1], w[2])
               /\ UNCHANGED << expired_by, run_ended_by >>
     /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
                     refused_before_deadline, last_dispatch, down_at_deadline,
                     admitted_after_end, rolled_back_after_end, write_lost,
                     admitted_after_lost_write >>
     /\ UNCHANGED session_vars
-    /\ UNCHANGED << admitted_outside_scope, refused_outside_run >>
+    /\ UNCHANGED << admitted_outside_scope, refused_outside_run, subject_end_after_run_end >>
     /\ TrackRunEnd
 
 \* A decided write fails: the refusal stands and the row stays as it was, so
@@ -490,6 +502,30 @@ AuditRevoke ==
     /\ UNCHANGED write_vars
     /\ UNCHANGED session_vars
     /\ UNCHANGED run_history_vars
+
+\* The grant's subject ends, from any process: the mob ends the identity it
+\* was issued to (or the session that identity held). The grant ends with it,
+\* revoked with the end reason SubjectEnded; an end at or after the deadline
+\* records the expiry instead, and an ended grant, one that ended with its run
+\* included, stays as it is.
+AuditEndWithSubject ==
+    /\ \/ /\ EndWithSubjectActive(clock)
+          /\ UNCHANGED << expired_by, subject_end_after_run_end >>
+       \/ /\ EndWithSubjectAfterDeadline(clock)
+          /\ expired_by' = "subject"
+          /\ UNCHANGED subject_end_after_run_end
+       \/ /\ (EndWithSubjectSettledExpired(clock) \/ EndWithSubjectSettledRevoked(clock))
+          /\ UNCHANGED << expired_by, subject_end_after_run_end >>
+       \/ /\ EndWithSubjectSettledRunEnded(clock)
+          /\ subject_end_after_run_end' = TRUE
+          /\ UNCHANGED expired_by
+    /\ UNCHANGED << clock, rollback_used, up, visible, visible_at, timer, admissions,
+                    refused_before_deadline, last_dispatch, down_at_deadline,
+                    admitted_after_end, rolled_back_after_end >>
+    /\ UNCHANGED write_vars
+    /\ UNCHANGED session_vars
+    /\ UNCHANGED << admitted_outside_scope, run_ended_by, refused_outside_run,
+                    ended_while_running >>
 
 \* A list or audit read from any process settles a due grant with Expire. It
 \* touches only the grant row: it neither loads nor wakes the session.
@@ -564,7 +600,7 @@ AuditRecover ==
                     refused_before_deadline, last_dispatch, down_at_deadline,
                     admitted_after_end, rolled_back_after_end >>
     /\ UNCHANGED write_vars
-    /\ UNCHANGED << admitted_outside_scope, refused_outside_run >>
+    /\ UNCHANGED << admitted_outside_scope, refused_outside_run, subject_end_after_run_end >>
     /\ TrackRunEnd
 
 AuditNext ==
@@ -580,6 +616,7 @@ AuditNext ==
     \/ AuditDispatchWrite
     \/ AuditDispatchWriteLost
     \/ AuditRevoke
+    \/ AuditEndWithSubject
     \/ AuditRead
     \/ AuditCrash
     \/ AuditRestart
@@ -640,8 +677,16 @@ NotAuditWitnessRollbackAfterExpiryStillRefused ==
 NotAuditWitnessRevokedThenRefused ==
     ~(phase = "Revoked" /\ last_dispatch = "refused")
 
+\* A grant that ended with its subject refused a call.
+NotAuditWitnessEndedWithSubjectThenRefused ==
+    ~(phase = "Revoked" /\ AuditIsSome(end_reason) /\ end_reason.value = "SubjectEnded"
+      /\ last_dispatch = "refused")
+
 \* A revoke at the deadline recorded expiry, not revocation.
 NotAuditWitnessRevokeAfterDeadlineRecordsExpiry == ~(expired_by = "revoke")
+
+\* The subject's end at the deadline recorded expiry, as a revoke does.
+NotAuditWitnessSubjectEndAfterDeadlineRecordsExpiry == ~(expired_by = "subject")
 
 \* A dispatch refused a call at the deadline and its expiry write was lost,
 \* so the row never ended; after the clock rolled back before the deadline,
@@ -667,4 +712,10 @@ NotAuditWitnessHostCallOutsideRunRefusedWithoutEnding ==
 \* Recovery closed the run a crash interrupted and ended its grant.
 NotAuditWitnessRecoveryEndsInterruptedRun ==
     ~(phase = "RunEnded" /\ run_ended_by = "recovery")
+
+\* The subject of a grant whose run already ended ended, and the grant stayed
+\* ended with its run, its end reason unchanged.
+NotAuditWitnessSubjectEndOfRunEndedGrantChangesNothing ==
+    ~(subject_end_after_run_end /\ phase = "RunEnded"
+      /\ AuditIsSome(end_reason) /\ end_reason.value = "RunEnded")
 ====

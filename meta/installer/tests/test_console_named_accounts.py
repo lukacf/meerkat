@@ -1245,15 +1245,16 @@ def method_not_found(identity):
 
 
 # A console that predates `meta/console/whoami` (and `meta/console/sign_out`)
-# names no administrator. The review then opens at the first ready login and
-# is that login's: as before the console could name one.
+# names no administrator. The review then opens at the first ready login of a
+# person, administrator or not, and is that login's alone.
 async def test_the_review_opens_at_the_first_ready_login_when_the_console_predates_whoami(tmp_path, reviews):
     native = ConsoleNative(sign_out=method_not_found)
     native.whoami_answer = method_not_found
     console = front(tmp_path, native, controller_review_factory=Review)
     app = console.application(NATIVE)
     try:
-        async with browser(app, console) as alice, browser(app, console) as bob:
+        async with browser(app, console) as alice, browser(app, console) as bob, \
+                browser(app, console) as alice_again:
             await sign_in(alice, console, ALICE, ALICE_PASSWORD)
             await started_reviews(console)
             assert len(reviews) == 1 and reviews[0].started == 1
@@ -1264,7 +1265,48 @@ async def test_the_review_opens_at_the_first_ready_login_when_the_console_predat
             for refused in (await bob.get("/console/forge/controller-review/state"),
                             await answer_review(bob, console)):
                 assert refused.status_code == 409 and refused.json() == {"error": {"code": "unavailable"}}
+            # The same person's other sign-in neither sees nor answers it either.
+            await sign_in(alice_again, console, ALICE, ALICE_PASSWORD)
+            for refused in (await alice_again.get("/console/forge/controller-review/state"),
+                            await answer_review(alice_again, console)):
+                assert refused.status_code == 409 and refused.json() == {"error": {"code": "unavailable"}}
             answered = await answer_review(alice, console)
+            assert answered.status_code == 202 and reviews[0].answers == [("review-approval", "approve")]
+            assert len(reviews) == 1
+    finally:
+        await console.close()
+
+
+# Each read and answer asks the console again, so a console that starts or
+# stops serving whoami while the review is open changes who reaches it at once:
+# served, only an administrator; not served, only the sign-in it opened at.
+@pytest.mark.parametrize("served_first", [False, True], ids=["predates-then-serves", "serves-then-predates"])
+async def test_the_review_follows_a_console_that_starts_or_stops_serving_whoami(tmp_path, reviews, served_first):
+    # Bob is an administrator; Alice is one only on the console that serves whoami first.
+    native = ConsoleNative(admins=(ALICE, BOB) if served_first else (BOB,))
+    if not served_first:
+        native.whoami_answer = method_not_found
+    console = front(tmp_path, native, controller_review_factory=Review)
+    app = console.application(NATIVE)
+    try:
+        async with browser(app, console) as alice, browser(app, console) as bob:
+            await sign_in(alice, console, ALICE, ALICE_PASSWORD)
+            assert (await review_state(alice)).json()["status"] == "prompt"
+            assert len(reviews) == 1 and reviews[0].login_scope_id == login_of(alice, console).login_scope_id
+            await sign_in(bob, console, BOB, BOB_PASSWORD)
+            native.whoami_answer = method_not_found if served_first else None
+            if served_first:
+                # No longer served: only Alice's sign-in, where the review opened.
+                refused, code, status, reader = bob, "unavailable", 409, alice
+            else:
+                # Served now: Alice is not an administrator, Bob is.
+                refused, code, status, reader = alice, "not_administrator", 403, bob
+            for response in (await refused.get("/console/forge/controller-review/state"),
+                             await answer_review(refused, console)):
+                assert response.status_code == status and response.json() == {"error": {"code": code}}
+            state = await reader.get("/console/forge/controller-review/state")
+            assert state.status_code == 200 and state.json()["status"] == "prompt"
+            answered = await answer_review(reader, console)
             assert answered.status_code == 202 and reviews[0].answers == [("review-approval", "approve")]
             assert len(reviews) == 1
     finally:

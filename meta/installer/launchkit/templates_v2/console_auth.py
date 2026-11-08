@@ -1121,7 +1121,8 @@ class ConsoleFront:
             except Exception:
                 login.console_login_revoke_failed = True
         # The controller review is the host lifetime's, not this login's: the
-        # administrators' other logins keep it after this one ends.
+        # administrators' other logins keep it after this one ends (with a
+        # console that predates whoami, none does).
         if login.retirement_task is None:
             login.retirement_task = asyncio.create_task(self._finish_login(login, reason))
             # Keep cleanup failures available to logout/close, without logging

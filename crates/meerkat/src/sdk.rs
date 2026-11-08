@@ -169,10 +169,7 @@ struct ReadHookSource {
 
 impl ReadHookSource {
     fn as_source(&self) -> crate::HookSource<'_> {
-        crate::HookSource {
-            path: &self.path,
-            sha256: self.sha256,
-        }
+        crate::HookSource::new(&self.path, self.sha256)
     }
 }
 

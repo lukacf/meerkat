@@ -633,7 +633,7 @@ function assertArchivedLanes(plan, label) {
 // The lane runs as the rows of its hash partitions (below).
 {
   const plan = planFor(["crates/meerkat-runtime/src/lib.rs"]);
-  assert.equal(plan.pr_unit_budget_minutes, 20, "runtime uses the 20-minute surrogate packing cap");
+  assert.equal(plan.pr_unit_budget_minutes, 21, "runtime uses the 21-minute surrogate packing cap");
   assert.deepEqual(
     unitLanesOf(unitOf(plan).shards, "runtime touch").map((shard) => shard.packages).sort(),
     [["meerkat-runtime"]],

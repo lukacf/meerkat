@@ -887,6 +887,7 @@ pub(super) fn lease_publication(
             credential_present: true,
             generation,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         },
     )
     .expect("a lease that holds a credential has a publication")

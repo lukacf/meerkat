@@ -347,11 +347,14 @@ pub fn mark_tokens_lifecycle_published_for_transition(
     let credential_published_at_millis = transition
         .credential_published_at_millis()
         .ok_or(TokenLifecycleMarkerError::CredentialPublicationTimeMissing)?;
+    // The marker names the publication with the generation the lease records
+    // for it: a publication the lease adopted (or restored after passing it)
+    // keeps the generation its record was published with.
     Ok(mark_tokens_lifecycle_published_inner(
         key,
         tokens,
         transition.phase(),
-        transition.generation(),
+        transition.marker_generation(),
         credential_published_at_millis,
     ))
 }
@@ -1666,6 +1669,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(1),
+            adopted_marker_generation: None,
         };
 
         assert!(durable_marker::marker_payload_valid_for_tokens(
@@ -1712,6 +1716,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         };
 
         let status = project_published_auth_status(now, None, &snapshot);

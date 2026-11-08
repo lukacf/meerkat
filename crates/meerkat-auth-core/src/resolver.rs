@@ -3106,6 +3106,7 @@ mod tests {
                 credential_present: false,
                 generation: 0,
                 credential_published_at_millis: None,
+                adopted_marker_generation: None,
             })
         }
 
@@ -3399,6 +3400,7 @@ mod tests {
                 credential_present: true,
                 generation: 1,
                 credential_published_at_millis: None,
+                adopted_marker_generation: None,
             });
             let env = ResolverEnvironment::testing()
                 .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -4073,6 +4075,7 @@ mod tests {
             credential_present: false,
             generation: 1,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         });
         let env = ResolverEnvironment::testing()
             .with_provider_auth_persistence(test_provider_auth_persistence(store))
@@ -4121,6 +4124,7 @@ mod tests {
                 credential_present: false,
                 generation: 1,
                 credential_published_at_millis: None,
+                adopted_marker_generation: None,
             },
         );
         let env = ResolverEnvironment::testing()
@@ -4186,6 +4190,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(requested_previous_snapshot);
         let previous_snapshot = auth_lease.snapshot(&lease_key);
@@ -4237,6 +4242,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(matching_published_at),
+            adopted_marker_generation: None,
         };
 
         assert_eq!(
@@ -4289,6 +4295,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(snapshot_published_at),
+            adopted_marker_generation: None,
         };
 
         assert_eq!(
@@ -4334,6 +4341,7 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &same_time_longer,
             )),
+            adopted_marker_generation: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4356,6 +4364,7 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &same_time_shorter,
             )),
+            adopted_marker_generation: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4380,6 +4389,7 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &same_time_same_expiry_future_generation,
             )),
+            adopted_marker_generation: None,
         };
         assert_eq!(
             durable_marker::marker_relation_for_tokens_and_snapshot(
@@ -4407,6 +4417,7 @@ mod tests {
             credential_published_at_millis: Some(marker_credential_published_at_for_test(
                 &stale_same_time,
             )),
+            adopted_marker_generation: None,
         };
 
         assert_eq!(
@@ -4418,6 +4429,73 @@ mod tests {
             durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
             "same-ms publication ties must not let older credential generations masquerade as current"
         );
+    }
+
+    /// A lease at generation 2 that adopted a record another process
+    /// published at its generation 1: the snapshot records that marker
+    /// generation. The relation compares a same-time record with it.
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn adopted_marker_snapshot_for_test(record: &PersistedTokens) -> AuthLeaseSnapshot {
+        AuthLeaseSnapshot {
+            phase: Some(AuthLeasePhase::Valid),
+            expires_at: Some(meerkat_core::persisted_token_expires_at_epoch_secs(record)),
+            credential_present: true,
+            generation: 2,
+            credential_published_at_millis: Some(marker_credential_published_at_for_test(record)),
+            adopted_marker_generation: Some(1),
+        }
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_matches_the_adopted_marker_generation() {
+        let mut tokens = chatgpt_oauth_tokens("adopted-record-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+        let adopted = mark_tokens_lifecycle_published_for_test(&tokens, 1);
+        let snapshot = adopted_marker_snapshot_for_test(&adopted);
+
+        assert_eq!(
+            durable_marker::marker_relation_for_tokens_and_snapshot(
+                &adopted,
+                &snapshot,
+                &default_test_token_key()
+            ),
+            durable_marker::AuthLeaseDurableMarkerRelation::Matches,
+            "the record a lease adopted at its own marker generation is its current publication"
+        );
+    }
+
+    #[cfg(feature = "workspace-tests")]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oauth_lifecycle_marker_relation_refuses_other_generations_than_the_adopted_marker() {
+        let mut tokens = chatgpt_oauth_tokens("adopted-record-access");
+        tokens.expires_at = Some(chrono::Utc::now() + chrono::Duration::hours(2));
+        let adopted = mark_tokens_lifecycle_published_for_test(&tokens, 1);
+        let snapshot = adopted_marker_snapshot_for_test(&adopted);
+
+        for generation in [2_u64, 0] {
+            // The same record, publication time and expiry under another
+            // marker generation.
+            let mut other = adopted.clone();
+            other.metadata["meerkat_auth_lifecycle"]["generation"] = serde_json::json!(generation);
+            assert_eq!(
+                meerkat_core::tokens_lifecycle_published_generation(&other),
+                Some(generation)
+            );
+            assert_eq!(
+                durable_marker::marker_relation_for_tokens_and_snapshot(
+                    &other,
+                    &snapshot,
+                    &default_test_token_key()
+                ),
+                durable_marker::AuthLeaseDurableMarkerRelation::Invalid,
+                "a same-time record at generation {generation} is not the publication the lease adopted, \
+                 the lease's own generation included"
+            );
+        }
     }
 
     #[cfg(feature = "workspace-tests")]
@@ -4433,6 +4511,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         };
         let marker = mark_tokens_lifecycle_published_for_test(&tokens, 1);
 
@@ -4464,6 +4543,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         };
         let auth_lease = MutableAuthLeaseHandle::from_snapshot(requested_initial_snapshot);
         let initial_snapshot = auth_lease.snapshot(&lease_key);
@@ -4529,6 +4609,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let before_refresh = auth_lease.snapshot(&lease_key);
         let previous_tokens =
@@ -4743,6 +4824,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(1),
+            adopted_marker_generation: None,
         });
         let marked_a = publisher.mark_tokens_lifecycle_published_for_test(&raw_a);
         store
@@ -4945,6 +5027,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -4998,6 +5081,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5052,6 +5136,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let tokens = auth_lease.mark_tokens_lifecycle_published_for_test(&expired_tokens);
         store
@@ -5110,6 +5195,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5199,6 +5285,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5283,6 +5370,7 @@ mod tests {
             credential_present: true,
             generation: 2,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let mut previous = managed_store_tokens(
             Arc::clone(&store),
@@ -5540,6 +5628,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: Some(2_000),
+            adopted_marker_generation: None,
         });
         let previous_tokens =
             auth_lease.mark_tokens_lifecycle_published_for_test(&raw_previous_tokens);

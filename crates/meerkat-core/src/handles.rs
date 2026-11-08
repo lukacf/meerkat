@@ -2172,6 +2172,15 @@ impl std::fmt::Display for LeaseKey {
 /// after credential rollback.
 /// `credential_published_at_millis` advances only when credential material is
 /// acquired/refreshed.
+/// `adopted_marker_generation` is the generation the durable lifecycle marker
+/// of the current publication carries when it is not `generation`: the lease
+/// took the publication from a durable record published at a lower generation
+/// (another process's login or refresh), or a rollback restored a publication
+/// the lease's own later publication had passed. `generation` never goes back,
+/// so the marker and the lease can name one publication by different
+/// generations. `None` when the marker carries `generation`, and while no
+/// credential is present. [`AuthLeaseSnapshot::marker_generation`] reads the
+/// one a marker carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseSnapshot {
     pub phase: Option<AuthLeasePhase>,
@@ -2179,6 +2188,18 @@ pub struct AuthLeaseSnapshot {
     pub credential_present: bool,
     pub generation: u64,
     pub credential_published_at_millis: Option<u64>,
+    pub adopted_marker_generation: Option<u64>,
+}
+
+impl AuthLeaseSnapshot {
+    /// The generation the durable lifecycle marker of the current publication
+    /// carries: `adopted_marker_generation` when the lease records one, else
+    /// `generation`. A stored record's marker names this publication only with
+    /// this generation; a refusal or a [`CredentialLeasePublication`] names it
+    /// with `generation`.
+    pub fn marker_generation(&self) -> u64 {
+        self.adopted_marker_generation.unwrap_or(self.generation)
+    }
 }
 
 /// One publication of credential material to an auth lease, as a call
@@ -2286,6 +2307,9 @@ impl AuthLeaseRestoreSnapshot {
 /// that published it without taking a later snapshot.
 /// `credential_published_at_millis` is the durable credential publication
 /// timestamp attached to acquired/refreshed credential material.
+/// `adopted_marker_generation` is the lease's
+/// [`AuthLeaseSnapshot::adopted_marker_generation`] after the transition: a
+/// durable marker written for it carries that generation when present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthLeaseTransition {
     lease_key: LeaseKey,
@@ -2293,6 +2317,7 @@ pub struct AuthLeaseTransition {
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
+    adopted_marker_generation: Option<u64>,
 }
 
 impl AuthLeaseTransition {
@@ -2316,6 +2341,20 @@ impl AuthLeaseTransition {
         self.credential_published_at_millis
     }
 
+    /// The marker generation the lease records for the publication, when it
+    /// is not [`Self::generation`] (see
+    /// [`AuthLeaseSnapshot::adopted_marker_generation`]).
+    pub fn adopted_marker_generation(&self) -> Option<u64> {
+        self.adopted_marker_generation
+    }
+
+    /// The generation a durable lifecycle marker written for this transition
+    /// carries: [`Self::adopted_marker_generation`] when present, else
+    /// [`Self::generation`].
+    pub fn marker_generation(&self) -> u64 {
+        self.adopted_marker_generation.unwrap_or(self.generation)
+    }
+
     #[cfg_attr(
         any(not(meerkat_internal_generated_authority_bridge), test),
         allow(dead_code)
@@ -2326,6 +2365,7 @@ impl AuthLeaseTransition {
         expires_at: u64,
         generation: u64,
         credential_published_at_millis: Option<u64>,
+        adopted_marker_generation: Option<u64>,
     ) -> Self {
         Self {
             lease_key,
@@ -2333,6 +2373,7 @@ impl AuthLeaseTransition {
             expires_at,
             generation,
             credential_published_at_millis,
+            adopted_marker_generation,
         }
     }
 }
@@ -2409,7 +2450,7 @@ unsafe extern "Rust" {
 #[doc(hidden)]
 #[allow(improper_ctypes_definitions, unsafe_code)]
 #[unsafe(export_name = concat!(
-    "__meerkat_core_runtime_generated_auth_lease_transition_build_v1_",
+    "__meerkat_core_runtime_generated_auth_lease_transition_build_v2_",
     env!("MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX")
 ))]
 pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
@@ -2419,6 +2460,7 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
     expires_at: u64,
     generation: u64,
     credential_published_at_millis: Option<u64>,
+    adopted_marker_generation: Option<u64>,
 ) -> Result<AuthLeaseTransition, String> {
     validate_runtime_generated_authority_bridge_token(token)?;
     Ok(
@@ -2428,6 +2470,7 @@ pub(crate) extern "Rust" fn runtime_generated_auth_lease_transition_build(
             expires_at,
             generation,
             credential_published_at_millis,
+            adopted_marker_generation,
         ),
     )
 }

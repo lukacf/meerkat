@@ -337,6 +337,7 @@ pub struct State {
     pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
     pub oauth_outstanding_flow_count: u64,
     pub release_draining: bool,
+    pub adopted_marker_generation: Option<u64>,
 }
 impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -386,6 +387,7 @@ impl std::fmt::Debug for State {
                 &self.oauth_outstanding_flow_count,
             )
             .field("release_draining", &self.release_draining)
+            .field("adopted_marker_generation", &self.adopted_marker_generation)
             .finish()
     }
 }
@@ -471,6 +473,7 @@ pub mod inputs {
         pub credential_generation: u64,
         pub credential_published_at_millis: Option<u64>,
         pub restored_oauth_membership_observed: bool,
+        pub adopted_marker_generation: Option<u64>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RestoreOAuthBrowserFlow {
@@ -1062,5 +1065,6 @@ pub fn initial_state() -> State {
         oauth_device_poll_ids: Default::default(),
         oauth_outstanding_flow_count: 0,
         release_draining: false,
+        adopted_marker_generation: None,
     }
 }

@@ -10464,4 +10464,14 @@ async fn a_failed_refresh_after_adopting_another_login_keeps_its_publication() {
         durable_marker::AuthLeaseDurableMarkerRelation::Matches,
         "so does this process"
     );
+    let publisher = FixtureAuthority::with_fixture_http(
+        ProviderAuthPersistence::new(inner.clone(), Arc::new(InMemoryCoordinator::new())),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        other.clone(),
+    );
+    assert!(
+        matches!(publisher.stored_bearer_token(&target).await, Ok(Some(_))),
+        "the process that published the credential is served"
+    );
 }

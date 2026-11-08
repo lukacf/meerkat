@@ -41,20 +41,27 @@
 \*     withdraws the lease is enabled exactly when the refusal names the
 \*     publication the lease carries in a live phase (Valid, Expiring,
 \*     Expired, Refreshing).
+\*   AuditGenerationNeverDecreases (action property): no step lowers
+\*     credential_generation. A restore that adopts a durable record
+\*     published at a lower generation (another process's) keeps the lease's
+\*     generation and records the record's marker generation
+\*     (adopted_marker_generation) instead.
 \*
 \* AuditWitness* operators are reachability goals the runner checks as
 \* expected violations, so the properties are not vacuous: a refused value
 \* healed by another, a logged-out value healed by another, a declared window
 \* that ran out renewing the same value, a refused and a logged-out value
 \* whose Acquire is disabled while another value's is enabled, a newer
-\* publication that a late refusal of the earlier one leaves valid, and a
-\* refusal of the current publication that withdraws it. With --mutants the
-\* runner seeds three defects into copies of the generated model and
-\* requires TLC to refuse each: Acquire without its guard (refused by the
-\* action property), the renewal arms AcquireFromExpiring and
-\* AcquireFromExpired disabled (refused by AuditVerdictMatchesAcquire), and
-\* MarkPublicationRefusedFromValid without its correlation guard (refused by
-\* AuditRefusalCorrelated).
+\* publication that a late refusal of the earlier one leaves valid, a
+\* refusal of the current publication that withdraws it, and a lease that
+\* records a marker generation below its own. With --mutants the runner seeds
+\* four defects into copies of the generated model and requires TLC to refuse
+\* each: Acquire without its guard (refused by the action property),
+\* the renewal arms AcquireFromExpiring and AcquireFromExpired disabled
+\* (refused by AuditVerdictMatchesAcquire), MarkPublicationRefusedFromValid
+\* without its correlation guard (refused by AuditRefusalCorrelated), and
+\* RestoreAuthoritySnapshotValid taking the record's generation (refused by
+\* AuditGenerationNeverDecreases).
 \*
 \* The TLC config is DERIVED from the generated ci.cfg on every run by
 \* source_credential_publication_audit.sh. Run a deeper bound by hand with:
@@ -117,6 +124,9 @@ AuditWithdrawnMaterialNeverRepublished ==
     [][AuditWithdrawn
        => ~(phase' = "Valid"
             /\ credential_material_fingerprint' = credential_material_fingerprint)]_<<vars, auditVars>>
+
+AuditGenerationNeverDecreases ==
+    [][credential_generation' >= credential_generation]_<<vars, auditVars>>
 
 \* The classifier's arms, one per phase (the per_phase expansion of the
 \* catalog transitions).
@@ -218,6 +228,15 @@ AuditWitnessCurrentRefusalWithdraws ==
     /\ credential_material_fingerprint # None
     /\ ENABLED MarkPublicationRefusedFromValid(credential_generation, credential_material_fingerprint)
 
+\* A lease that records a marker generation below its own: it adopted a
+\* durable record published at a lower generation and kept its own. (No
+\* record field is named here: TLC orders record fields by the first name it
+\* meets, and this module is read before the model's None and Some.)
+AuditWitnessAdoptedBelowLease ==
+    \E g \in NatValues :
+        /\ adopted_marker_generation = Some(g)
+        /\ g < credential_generation
+
 NotAuditWitnessRefusalHealed == ~AuditWitnessRefusalHealed
 NotAuditWitnessLogoutHealed == ~AuditWitnessLogoutHealed
 NotAuditWitnessWindowRenewed == ~AuditWitnessWindowRenewed
@@ -225,4 +244,5 @@ NotAuditWitnessRefusedValueBlocked == ~AuditWitnessRefusedValueBlocked
 NotAuditWitnessLoggedOutValueBlocked == ~AuditWitnessLoggedOutValueBlocked
 NotAuditWitnessLateRefusalLeavesNewer == ~AuditWitnessLateRefusalLeavesNewer
 NotAuditWitnessCurrentRefusalWithdraws == ~AuditWitnessCurrentRefusalWithdraws
+NotAuditWitnessAdoptedBelowLease == ~AuditWitnessAdoptedBelowLease
 ====

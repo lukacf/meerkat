@@ -202,6 +202,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &valid).as_public_str(),
@@ -214,6 +215,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &expired).as_public_str(),
@@ -226,6 +228,7 @@ mod tests {
             credential_present: true,
             generation: 1,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &machine_expired).as_public_str(),
@@ -238,6 +241,7 @@ mod tests {
             credential_present: false,
             generation: 1,
             credential_published_at_millis: None,
+            adopted_marker_generation: None,
         };
         assert_eq!(
             AuthStatusPhase::from_lease_snapshot(now, &stale_token_without_machine).as_public_str(),

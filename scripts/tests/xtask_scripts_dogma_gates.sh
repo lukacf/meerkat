@@ -342,7 +342,7 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # actions (of module entered_step_audit) generated a state, its three
 # witnesses violated, and with --mutants each seeded defect's invariant or
 # property violated.
-# source_credential_publication_audit.sh (auth) requires each of its seven
+# source_credential_publication_audit.sh (auth) requires each of its eight
 # reachability witnesses violated.
 # tool_grant_expiry_audit.sh (tool_grant_lifecycle) requires its eight
 # witnesses violated, and with --mutants each seeded defect's invariant or
@@ -709,6 +709,8 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessLoggedOutValueBlocked is violated."' \
   'echo "Error: Invariant NotAuditWitnessLateRefusalLeavesNewer is violated."' \
   'echo "Error: Invariant NotAuditWitnessCurrentRefusalWithdraws is violated."' \
+  'echo "Error: Invariant NotAuditWitnessAdoptedBelowLease is violated."' \
+  'echo "Error: Action property AuditGenerationNeverDecreases is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredByTimer is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredAtDispatch is violated."' \
   'echo "Error: Invariant NotAuditWitnessExpiredWhileDownSettledOnRead is violated."' \

@@ -2546,15 +2546,33 @@ impl CopilotAuthorizer {
             // A stored token names the publication it was stored under: its
             // record's durable marker. A store write publishes before it
             // saves, so a lease snapshot read after the value can already
-            // carry a newer token's publication.
+            // carry a newer token's publication. A refusal names that
+            // publication by its lease generation: the record's marker
+            // carries the marker generation the lease records for it, which
+            // is another generation for a publication the lease adopted from
+            // another process's record, so the lease snapshot taken with the
+            // record translates it when it carries exactly that publication.
             CredentialSourceSpec::ManagedStore => {
                 let managed =
                     load_managed_store_tokens_with_lifecycle(&self.env, &self.binding).await?;
                 if managed.lifecycle == ManagedStoreLifecycle::RefreshRequired {
                     return Err(ProviderAuthError::Auth(AuthError::RefreshRequired));
                 }
-                let generation =
-                    meerkat_core::tokens_lifecycle_published_generation(&managed.tokens);
+                let generation = meerkat_core::tokens_lifecycle_publication(&managed.tokens)
+                    .and_then(|marker| {
+                        let marker_generation = marker.generation?;
+                        Some(match managed.lifecycle_snapshot.as_ref() {
+                            Some(lease)
+                                if lease.credential_present
+                                    && lease.marker_generation() == marker_generation
+                                    && lease.credential_published_at_millis
+                                        == marker.credential_published_at_millis =>
+                            {
+                                lease.generation
+                            }
+                            _ => marker_generation,
+                        })
+                    });
                 let secret = managed.tokens.primary_secret.ok_or_else(|| {
                     ProviderAuthError::SourceResolutionFailed(
                         "managed_store credential has no primary_secret".to_string(),

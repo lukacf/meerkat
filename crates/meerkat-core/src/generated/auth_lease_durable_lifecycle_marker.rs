@@ -312,7 +312,14 @@ pub fn marker_relation_for_tokens_and_snapshot(
     if !snapshot.credential_present {
         return AuthLeaseDurableMarkerRelation::TokenStale;
     }
-    let generation_matches = marker.generation == snapshot.generation;
+    // The equal branches compare the record with the generation the lease
+    // records for its current publication's marker: the marker generation of
+    // a publication it adopted from a record published at a lower generation,
+    // else its own generation (which never goes back).
+    let generation_matches = marker.generation
+        == snapshot
+            .adopted_marker_generation
+            .unwrap_or(snapshot.generation);
     let snapshot_expires_at = snapshot.expires_at.unwrap_or(u64::MAX);
 
     if let Some(snapshot_published_at) = snapshot.credential_published_at_millis {

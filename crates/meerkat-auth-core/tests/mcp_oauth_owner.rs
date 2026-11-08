@@ -10308,3 +10308,57 @@ async fn a_login_in_another_process_is_another_publication_to_a_lease_ahead_of_i
         "a lease holding another credential names another publication"
     );
 }
+
+/// A lease ahead of another process's login serves that login's credential.
+/// This process logged in and published once more (generation 2) before
+/// another process logged the target out and in again (its generation 1).
+/// This process's next read adopts that publication and serves its
+/// credential, and so does every read after it, while the lease keeps its
+/// larger generation.
+#[tokio::test]
+async fn a_lease_ahead_serves_a_login_from_another_process() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let lease = test_auth_lease();
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        lease.clone(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    let lease_key = target.lease_key().unwrap();
+    authority
+        .interactive_login(&target, None)
+        .await
+        .expect("this process logs in");
+    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+        tokens.primary_secret = Some("credential-of-this-process".to_owned());
+    })
+    .await;
+    assert_eq!(
+        lease.snapshot(&lease_key).generation,
+        2,
+        "this process's lease is ahead of a first login"
+    );
+
+    log_in_again_in_another_process(store.as_ref(), &target, "credential-of-the-other-login").await;
+
+    for read in ["first", "second"] {
+        assert_eq!(
+            authority
+                .stored_bearer_token(&target)
+                .await
+                .map_err(|error| error.to_string()),
+            Ok(Some("credential-of-the-other-login".to_owned())),
+            "the {read} read serves the other login's credential"
+        );
+        assert_eq!(
+            lease.snapshot(&lease_key).generation,
+            2,
+            "the lease generation never goes back"
+        );
+    }
+}

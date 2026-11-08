@@ -200,7 +200,9 @@ async fn a_kept_run(store: &dyn RuntimeStore) -> (SessionId, RunId, Input) {
 /// reload in this process can make. The call answers
 /// `RuntimeDriverError::StaleAuthority`, the refusal of a session that leaves
 /// this process, never `Settled` and never the reload refusal, and nothing
-/// runs. The teardown's unregister would settle the run its registration
+/// runs. A host's retry meets the registration the teardown left degraded
+/// and answers the same, at the settle's first gate acquisition this time.
+/// The teardown's unregister would settle the run its registration
 /// retained, but no batch of this writer lands once its fence is lost: a
 /// realm the new owner opens reads the run's input with no terminal and the
 /// run's tail standing, which its own registration then recovers. The row of
@@ -291,6 +293,26 @@ async fn a_host_settle_on_a_host_store_writer_that_lost_its_fence_leaves_the_new
         executor.applied().is_empty(),
         "nothing runs in this process: {:?}",
         executor.applied()
+    );
+    // The host's retry meets the registration the teardown left degraded,
+    // which no reload in this process can serve: the same refusal.
+    assert!(
+        machine
+            .durability_reload_required(&session_id)
+            .await
+            .is_some(),
+        "the writer's registration stays durability-degraded"
+    );
+    let retried = tokio::time::timeout(STEP, machine.settle_retained_run(&session_id))
+        .await
+        .expect("the retry answers");
+    assert!(
+        matches!(
+            retried,
+            Err(crate::RuntimeDriverError::StaleAuthority { .. })
+        ),
+        "a retry on a writer whose store realm lost its fence answers the stale-authority \
+         refusal again, not {retried:?}"
     );
     assert_eq!(
         host.commit_count(),

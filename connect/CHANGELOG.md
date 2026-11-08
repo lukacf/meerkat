@@ -20,13 +20,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   conversation were still ending. The close now hands the realm's grant
   owner back, so the finalization and the continuation restore it at once.
   An installed host's close hands its own grant owner and its originals
-  store back the same way, once the host has settled, so a host reopened
-  in the same process (the installer's setup followed by the ordinary
-  host) opens both at once instead of being refused while tasks of the
-  closed host are still ending. `SqliteStore::release_custody` (in
-  `toolkit-store`) ends a store's physical custody for every clone, after
-  any operation already running on it; `NativeHostLifetime::bind_native_store_custody`
-  (in `meerkat-toolkit`) names the store a host's settled close releases.
+  store back the same way, as its last step, once every task of the host
+  that can still use them has finished: the host's admitted work and its
+  presenters are joined first (within 30 seconds), so work admitted before
+  the close completes instead of being refused, and a host reopened in the
+  same process opens both at once instead of being refused while tasks of
+  the closed host are still ending. After a host loss the close hands both
+  back as soon as it settles, and work still running then fails.
+  `SqliteStore::release_custody` (in `toolkit-store`) ends a store's
+  physical custody for every clone, after any operation already running on
+  it, and unlocks its owner file before closing it; `SqliteStore::custody`
+  is that custody's handle. `NativeHostLifetime::bind_native_grant_custody`
+  and `NativeHostLifetime::bind_native_store_custody` (in `meerkat-toolkit`)
+  name the grant owner and the store a host's close releases, and
+  `PrivateHostLifetimeControl::release_native_custody` is that release.
 
 ### Known limitations
 
@@ -41,3 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   chosen, on the same credential: choosing `copilot_openai` for an Anthropic
   model runs on `copilot_anthropic`, so the chosen target's name is not the
   route the session runs on.
+- After a host loss, an access decision whose native issuance was still
+  pending stays pending: the next host does not settle it, and a fresh
+  approval of the same proposal is refused as a conflict. Make a new
+  proposal for that access instead.

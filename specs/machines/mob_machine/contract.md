@@ -380,8 +380,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Shutdown`
 - `ForceCancel`(agent_identity: AgentIdentity)
 - `ConcludeObjective`(member_id: AgentIdentity, objective_id: String, outcome: String)
-- `AdmitOwnedEdgeRealization`(edge: WiringEdge)
-- `RestoreOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
 
 ## Surface-only Inputs
 - `FlowStatus`
@@ -610,6 +608,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AdoptIdentityIntoStore`(agent_identity: AgentIdentity, source: IdentityAdoptionSource, generation: Option<Generation>, spawn_overridden: Bool)
 - `PurgeIdentityRows`(receipt: IdentityChangeReceiptKind, host_operator: Bool, rows_present: Bool)
 - `ImportIdentityRecord`(agent_identity: AgentIdentity, kind: ImportedRecordKind, adopted_from_roster: Bool, row: ImportedRowState, last_session: Option<SessionId>)
+- `AdmitOwnedEdgeRealization`(edge: WiringEdge)
+- `RestoreOwnedIdentityEdge`(edge: WiringEdge, owner: AgentIdentity)
 
 ## Signals
 - `ObserveRuntimeReady`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, runtime_epoch_id: Option<RuntimeEpochId>)

@@ -5379,6 +5379,12 @@ runtime_internal_inputs!(
         // commands.
         PurgeIdentityRows,
         ImportIdentityRecord,
+        // An owned edge's realization, a pure verdict a seat, a spawn and a
+        // realization pass read before their wire, and the import's
+        // restoration of an owned edge its restored record holds (0.9.11),
+        // decided in the actor's steps. Not surface commands.
+        AdmitOwnedEdgeRealization,
+        RestoreOwnedIdentityEdge,
     ]
 );
 

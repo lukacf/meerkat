@@ -283,6 +283,134 @@ async fn a_requester_less_steer_keeps_its_place_ahead_of_a_later_steer() {
     );
 }
 
+/// Wait until the boundary work of `input_id` settled (a join, a fallback or
+/// a failure).
+async fn wait_for_settled_boundary_work(
+    outcomes: &mut BoundaryWorkOutcomes,
+    settled: &mut Vec<(Option<InputId>, Result<(), String>)>,
+    input_id: &InputId,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            while let Ok(outcome) = outcomes.try_recv() {
+                settled.push(outcome);
+            }
+            if settled
+                .iter()
+                .any(|(settled_id, _)| settled_id.as_ref() == Some(input_id))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the boundary work of {input_id} settles"));
+}
+
+/// The order holds at an open boundary for request-only context. A
+/// requester-less run is going and person b's steer waits for a run of its
+/// own. A later requester-less background completion (request-only context
+/// of the run's own key) reaches an open boundary: it is not injected, keeps
+/// its place in the Steer lane, and runs after b's steer. The runtime's
+/// predicate keeps it out before its realization; were the predicate to let
+/// it through, the receipt's order guard would refuse it inside the
+/// realization and the accepted input would end instead of keeping its
+/// place.
+#[tokio::test]
+async fn a_later_request_only_steer_at_an_open_boundary_waits_behind_a_person_s_steer() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let mut outcomes = observe_boundary_work(&rig);
+    let mut settled = Vec::new();
+    let busy = rig.start_busy_turn().await;
+
+    let from_b = steer_from("from b", person("b"));
+    let b = from_b.id().clone();
+    rig.admit(from_b).await;
+    wait_for_settled_boundary_work(&mut outcomes, &mut settled, &b).await;
+
+    let continuation = background_completion();
+    let continuation_id = continuation.id().clone();
+    rig.admit(continuation).await;
+    wait_for_boundary_decision(&rig, &mut outcomes, &mut settled, &continuation_id).await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    wait_for_settled_boundary_work(&mut outcomes, &mut settled, &continuation_id).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        rig.script.request_only_taken.lock().unwrap().is_empty(),
+        "the later request-only steer was injected while b's earlier steer waited"
+    );
+    assert_eq!(
+        rig.phase(&continuation_id).await,
+        Some(InputLifecycleState::Queued),
+        "the later request-only steer keeps its place; settled {settled:?}"
+    );
+
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(3).await;
+    rig.script.step(RunnerStep::Finish);
+    for input_id in [&busy, &b, &continuation_id] {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+    assert_eq!(
+        rig.script.primitives()[1..3].to_vec(),
+        vec![vec![b.clone()], vec![continuation_id.clone()]],
+        "b's earlier steer runs first, then the completion"
+    );
+}
+
+/// The order holds at an open boundary across delivery classes. Person a's
+/// run is going and an earlier requester-less background completion
+/// (request-only context) waits in the Steer lane. Person a's own later
+/// durable steer reaches an open boundary: it does not join a's turn and
+/// runs after the completion. No durable steer is ahead of it, so the
+/// durable class order does not hold it back: only the order across
+/// requesters does (the runtime's predicate, and behind it the machine's
+/// join guard).
+#[tokio::test]
+async fn a_person_s_later_steer_at_an_open_boundary_waits_behind_a_request_only_one() {
+    let rig = DurableSteerRig::ephemeral().await;
+    let mut outcomes = observe_boundary_work(&rig);
+    let mut settled = Vec::new();
+    let busy = start_busy_turn_for(&rig, person("a")).await;
+
+    let continuation = background_completion();
+    let continuation_id = continuation.id().clone();
+    rig.admit(continuation).await;
+    wait_for_settled_boundary_work(&mut outcomes, &mut settled, &continuation_id).await;
+
+    let later_from_a = steer_from("later from a", person("a"));
+    let later = later_from_a.id().clone();
+    rig.admit(later_from_a).await;
+    wait_for_boundary_decision(&rig, &mut outcomes, &mut settled, &later).await;
+    rig.script.step(RunnerStep::BoundaryThenToolCalls);
+    wait_for_settled_boundary_work(&mut outcomes, &mut settled, &later).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        rig.script.applied_durable().is_empty(),
+        "a's later steer joined a's turn while the earlier completion waited: {:?}",
+        rig.script.applied_durable()
+    );
+
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(2).await;
+    rig.script.step(RunnerStep::Finish);
+    rig.wait_for_apply_calls(3).await;
+    rig.script.step(RunnerStep::Finish);
+    for input_id in [&busy, &continuation_id, &later] {
+        rig.wait_for_phase(input_id, InputLifecycleState::Consumed)
+            .await;
+    }
+    assert_eq!(
+        rig.script.primitives()[1..3].to_vec(),
+        vec![vec![continuation_id.clone()], vec![later.clone()]],
+        "the earlier completion runs first, then a's later steer; settled {settled:?}"
+    );
+}
+
 /// Absence is a requester value too: an input without a requester (here a
 /// background completion steered as request-only context) never joins a
 /// person's running turn. It runs in a turn of its own after that run ends.

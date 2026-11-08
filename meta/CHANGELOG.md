@@ -191,7 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   sender: "You asked" for the caller's own messages in every tab (the
   sender's `caller_scope` equals the one `meta/console/whoami` reports),
   and the sender's display name for anyone else's. A frame from an older
-  gateway, which names no sender, keeps the earlier words.
+  gateway, which names no sender, keeps the earlier words. Every anonymous
+  caller of an Open console shares one caller scope, so an anonymous
+  message reads "You asked" only in the tab that sent it.
 - The stock console sends no approver with a decision and shows approvals
   read-only unless `meta/console/whoami` reports a signed-in person.
 - A console approval decision's audit entry records the assurance the

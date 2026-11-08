@@ -1204,7 +1204,9 @@ the caller it authenticated, never from the request: `kind` (`person`,
 the caller), `assurance` when the Console established one, `display_name`
 (the authenticated principal) and `caller_scope` (the opaque scope
 `meta/console/whoami` reports, so a client can tell its own messages from
-another caller's). On a console that requires sign-in, a person's send also
+another caller's; every anonymous caller of an open console shares one, so
+it does not tell anonymous callers apart). On a console that requires
+sign-in, a person's send also
 carries the person's qualified principal to the agent's run as its original
 requester; the frame keeps it in storage and no view returns it, neither on
 the frame nor on the run's transcript identities (the `identity` of the

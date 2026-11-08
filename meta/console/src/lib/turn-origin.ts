@@ -4,7 +4,9 @@
 // gateway recorded from the caller it authenticated (`sender`: kind,
 // display name and the caller scope `meta/console/whoami` reports). "You"
 // means a send whose sender is this console's caller, in any tab; another
-// caller's send reads with its sender's display name. A frame that names no
+// caller's send reads with its sender's display name. Every anonymous caller
+// of an Open console shares one caller scope, so an anonymous sender is
+// "You" only for the sends this tab made. A frame that names no
 // sender (an older gateway) falls back to the sends this console made in
 // this browser session. Pure module: panels whose test bundles cannot
 // resolve React use it too.
@@ -87,6 +89,13 @@ export function turnSender(data: Record<string, unknown> | null | undefined): Tu
   if (kind === "operator" || origin.startsWith("console:")) {
     const sender = senderOf(data);
     const senderScope = text(sender?.caller_scope);
+    // Every anonymous caller of an Open console shares one caller scope, so
+    // the scope cannot tell this tab's caller from another anonymous one:
+    // an anonymous message is "You" only when this tab sent it.
+    if (text(sender?.kind) === "anonymous") {
+      if (isOwnSend(data?.idempotency_key)) return "you";
+      return text(sender?.display_name) ? "named" : "operator";
+    }
     if (senderScope) {
       if (ownCallerScope) {
         if (senderScope === ownCallerScope) return "you";

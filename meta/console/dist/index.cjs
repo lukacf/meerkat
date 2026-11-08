@@ -59386,6 +59386,10 @@ function turnSender(data) {
   if (kind === "operator" || origin.startsWith("console:")) {
     const sender = senderOf(data);
     const senderScope = text10(sender?.caller_scope);
+    if (text10(sender?.kind) === "anonymous") {
+      if (isOwnSend(data?.idempotency_key)) return "you";
+      return text10(sender?.display_name) ? "named" : "operator";
+    }
     if (senderScope) {
       if (ownCallerScope) {
         if (senderScope === ownCallerScope) return "you";

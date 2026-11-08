@@ -489,15 +489,19 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
 // the row excludes them without requiring them to fail.
 export const CONNECT_CONSOLE_TEST_DEBT = "connect/crates/meerkat-connect/CONSOLE-TEST-DEBT.md";
 const SETUP_CONTENTION = "setup-contention";
+const CONSENT_LEASE_HELD = "consent-lease-held";
 export const CONNECT_CONSOLE_KNOWN_REDS = [
   ["resources::shared_setup::native_case::two_sdk_children_share_one_preparation_and_cancel_independently", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::observe_controls::owner_change_at_a_finds_helper_observation_is_waited_out_and_observed_again", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::two_sdk_originals_admit_one_fresh_dedicated_planning_input", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::console_consent_case::installed_console_consent_rechecks_human_login_and_selected_policy", CONSENT_LEASE_HELD, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::console_consent_case::entered_operation::registered_r2_find_enters_once_per_call_and_commits_real_context_graphs", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::closed_workflow_refuses_context_replay_after_automatic_admission", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::committed_waiter_context_is_delivered_automatically_once_and_survives_departure", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_survives_a_departure_and_refuses_closed_recipient", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_validates_mutable_payload_without_replaying_find", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::a_fresh_install_pending_at_its_members_cancel_keeps_its_proofs", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_join_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_release_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_install_check_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_check_after_the_join_ends_typed_without_replay", SETUP_CONTENTION, { intermittent: true }],

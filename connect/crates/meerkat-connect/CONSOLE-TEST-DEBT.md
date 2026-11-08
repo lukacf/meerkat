@@ -73,6 +73,13 @@ removes the limitation, and with it these entries.
   an original's first submission is refused at its bind, or the planning
   Find's worker submission answers `not_admitted` (`planning_admission.rs`,
   the `observation["state"] == "native"` check).
+- `resources::shared_setup::native_case::post_effect_controls::a_fresh_install_pending_at_its_members_cancel_keeps_its_proofs`:
+  a setup helper's call is refused as unavailable while another call holds
+  the selected component's entry.
+- `resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_join_is_waited_out_once`:
+  an original's first submission is refused at its bind ("fresh native
+  Original admission remains unestablished"), and that original's Find is
+  then refused as not allowed by policy.
 - `resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_release_is_waited_out_once`:
   a setup helper's call is refused as unavailable.
 - `resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_install_check_is_refused_certified_and_installed_fresh`:
@@ -85,3 +92,22 @@ removes the limitation, and with it these entries.
   a setup helper's call is refused as unavailable, or an original's first
   submission is refused at its bind ("fresh native Original admission
   remains unestablished").
+
+## Consent lease held
+
+Status: open. Kind: timing of the consent lease's release; the fix belongs
+in Connect.
+
+The consent owner holds its issuer lease as an exclusive lock on the lease
+file (`lock_issuer` in `application_consent.rs`). The lock belongs to the
+open file, so it is released only when every descriptor of that file is
+closed. When the case's process starts a child process just as the owner
+drops the lease, the child's copy of the descriptor keeps the lock until the
+child executes its program, and the case's immediate reopen of the owner
+meets the held lock (`OwnerHeld`). Releasing the lease explicitly when its
+owner drops it, with a bounded wait for the release in the case, removes
+this entry.
+
+- `resources::shared_setup::native_case::planning_admission::console_consent_case::installed_console_consent_rechecks_human_login_and_selected_policy`:
+  the reopen after the owner is dropped answers `OwnerHeld`
+  (`console_consent_case.rs`, `ApplicationConsentOwner::reopen`).

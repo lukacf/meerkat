@@ -969,6 +969,16 @@ them.
   for it; a background shell job, a monitor or a command hook keeps the
   notice.
 
+- `meerkat-rpc`: every request is answered under its own id. Params that
+  `mob/stream_open`, `mob/stream_close`, `comms/send`, `comms/peers`,
+  `session/external_event`, `session/peer_response_terminal` or a `live/*`
+  method could not read were refused with `"id": null`, which a client that
+  matches answers by id never received: a call through the TypeScript or
+  Python SDK, which waits for the answer to its own id, never settled. The
+  router now sends a response its handler built without an id under the
+  request's id, for every method. (#2114, thanks @zond) Affects 0.9.0
+  through 0.9.10.
+
 ### Security
 
 - `meerkat-sandbox`: on Linux, compiling a confinement requirement opened

@@ -1648,6 +1648,18 @@ impl RoutedRpcResponse {
     fn into_response(self) -> RpcResponse {
         self.response
     }
+
+    /// This response as the answer to the request `request_id` names. A
+    /// handler that refuses before it reads the request's id (the params
+    /// refusal of `handlers::parse_params`, a shared helper's error) builds
+    /// its response with no id; it gets the request's id here. An id the
+    /// handler set is kept.
+    fn answering(mut self, request_id: Option<crate::protocol::RpcId>) -> Self {
+        if self.response.id.is_none() {
+            self.response.id = request_id;
+        }
+        self
+    }
 }
 
 /// Dispatches incoming JSON-RPC requests to the appropriate handler.
@@ -2666,8 +2678,22 @@ impl MethodRouter {
             .await
     }
 
-    #[allow(clippy::if_not_else)]
+    /// Route `request` and answer it under its own id. JSON-RPC answers a
+    /// request under the request's id, so a response its handler built with
+    /// none gets the request's id here, once for every route.
     async fn dispatch_routed_with_request_context(
+        &self,
+        request: RpcRequest,
+        request_context: Option<RequestContext>,
+    ) -> Option<RoutedRpcResponse> {
+        let request_id = request.id.clone();
+        routed_arm(|| self.route_request(request, request_context))
+            .await
+            .map(|routed| routed.answering(request_id))
+    }
+
+    #[allow(clippy::if_not_else)]
+    async fn route_request(
         &self,
         request: RpcRequest,
         request_context: Option<RequestContext>,

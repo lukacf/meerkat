@@ -546,23 +546,26 @@ them.
     durability reload refusal when its write failed (the reload loses the
     stop, so the host keeps its hold, reloads and settles again) or its tail
     repair failed (the reloaded registration keeps no run), and the refusal
-    of a session that leaves the process when another writer took its store
-    fence (`RuntimeDriverError::StaleAuthority` on a host store realm, which
-    refuses that writer until it is reopened), or when an unregister ended
-    the run first (its inputs then end `Abandoned { Stopped }` when it keeps
-    queued work, a mob Shutdown's default, whatever their state, and
-    `Abandoned { Cancelled }` when it stops).
+    of a session that leaves the process when its store realm lost its
+    fence (another writer took it, or the realm stopped itself:
+    `RuntimeDriverError::StaleAuthority` at every call on a host store realm,
+    which refuses that writer until it is opened again), or when an
+    unregister ended the run first (its inputs then end
+    `Abandoned { Stopped }` when it keeps queued work, a mob Shutdown's
+    default, whatever their state, and `Abandoned { Cancelled }` when it
+    stops).
   A repeat that arrives while the settle is pending joins it. The mob verb
   never wakes a member, and answers typed refusals: `MemberNotFound`,
   `MemberSessionNotLive` (not live in this process: dormant, gone, leaving
-  through its unregister, or its store fence taken by another writer),
+  through its unregister, or its store realm's fence lost),
   `MemberReloadRequired` (its registration needs a durability reload),
   `UnsupportedForMode` (a placed member) and the new
   `MobError::MemberInputTerminalNotYetReadable` (the run is no longer kept,
   but an input of it reads no committed terminal yet: settle again). The
   durable-runs guide has the Recover recipe: hold, wake, settle, release on
-  every path that leaves no open run, and count a member the mob no longer
-  holds or the hold never applied to as done.
+  every path that leaves no open run, count a member the mob no longer
+  holds or the hold never applied to as done, and end the recovery when the
+  mob is gone or its store realm lost its fence.
 - `meerkat-runtime`: `MeerkatMachine::session_work_state(&session_id)` reads
   cold whether one session holds the work a start wakes a member for,
   without loading its body or registering it, so a dormant mob member stays

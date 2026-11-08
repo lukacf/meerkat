@@ -463,7 +463,10 @@ impl ClassicResend<'_> {
         let Some(identity_runtime) = self.resolved.entry.identity_runtime.as_ref() else {
             return false;
         };
-        let Some(identity) = identity_runtime
+        // A name the runtime refuses (Core holds it for an identity the
+        // runtime has not registered, or its entry could not be read) is no
+        // keyed identity delivery: never dispatched again.
+        let Ok(Some(identity)) = identity_runtime
             .identity_for_member_mutation(&self.resolved.runtime_identity)
             .await
         else {
@@ -1851,8 +1854,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the request,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let mut record = identity_record_for_status(entry, &status);
                     let topology_peers =
@@ -2040,7 +2051,13 @@ impl MetaConsoleAggregator {
                 && let Some(parsed_identity) = identity_runtime
                     .owned_identity_for_member_alias(&resolved.runtime_identity)
                     .await
-                && let Ok(status) = identity_runtime.status(&parsed_identity).await
+                && let Some(status) = match identity_runtime.status(&parsed_identity).await {
+                    Ok(status) => Some(status),
+                    Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => None,
+                    // A read Core could not serve fails the inspection,
+                    // typed, never an answer without the identity's record.
+                    Err(error) => return Err(error.into()),
+                }
             {
                 let durable_record = identity_record_for_status(&resolved.entry, &status);
                 let durable_live_records = Box::pin(self.live_records_for_durable_record(
@@ -2141,8 +2158,16 @@ impl MetaConsoleAggregator {
                     else {
                         continue;
                     };
-                    let Ok(status) = identity_runtime.status(&parsed_identity).await else {
-                        continue;
+                    let status = match identity_runtime.status(&parsed_identity).await {
+                        Ok(status) => status,
+                        // Not an identity of this runtime.
+                        Err(crate::identity_first::IdentityRuntimeError::UnknownIdentity(_)) => {
+                            continue;
+                        }
+                        // A read Core could not serve fails the retire,
+                        // typed: no identity is left out of the match on a
+                        // read that could not tell.
+                        Err(error) => return Err(error.into()),
                     };
                     let record = identity_record_for_status(entry, &status);
                     if !Box::pin(console_identity_record_visible(entry, &record)).await {
@@ -2250,10 +2275,17 @@ impl MetaConsoleAggregator {
             {
                 return Err(stale_error.into());
             }
-            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
-                && let Some(parsed_identity) = identity_runtime
+            let mutation_identity = match resolved.entry.identity_runtime.as_ref() {
+                Some(identity_runtime) => identity_runtime
                     .identity_for_member_mutation(&resolved.runtime_identity)
                     .await
+                    .map_err(|err| -> ConsoleLogError {
+                        format!("retire failed for {identity}: {err}").into()
+                    })?,
+                None => None,
+            };
+            if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+                && let Some(parsed_identity) = mutation_identity
             {
                 let status = identity_runtime.status(&parsed_identity).await.map_err(
                     |err| -> ConsoleLogError {
@@ -4879,10 +4911,18 @@ async fn dispatch_message_to_resolved_member(
     accepted: &ConsoleInteractionAccepted,
     attribution: &ConsoleHumanAttribution,
 ) -> Result<String, ConsoleSendError> {
-    if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
-        && let Some(identity) = identity_runtime
+    // A name the identity runtime refuses (Core holds it for an identity the
+    // runtime has not registered, or its entry could not be read) is refused
+    // typed, never sent through the raw member door.
+    let identity = match resolved.entry.identity_runtime.as_ref() {
+        Some(identity_runtime) => identity_runtime
             .identity_for_member_mutation(&resolved.runtime_identity)
             .await
+            .map_err(|error| ConsoleSendError::RuntimeOperation(Box::new(error)))?,
+        None => None,
+    };
+    if let Some(identity_runtime) = resolved.entry.identity_runtime.as_ref()
+        && let Some(identity) = identity
     {
         identity_runtime
             .send_console_human_input_tracked(

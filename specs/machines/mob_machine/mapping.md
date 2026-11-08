@@ -2031,6 +2031,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveSubmitWorkRejectionRetiringAsMemberNotFound`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveSubmitWorkRejectionIdentityMember`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ResolveSubmitWorkRejectionNotExternallyAddressable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

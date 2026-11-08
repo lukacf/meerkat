@@ -75,6 +75,107 @@ impl MobActor {
         Ok(None)
     }
 
+    /// A door that acts on `agent_identity`'s member session as its host (a
+    /// turn start, a system context append, a live channel's open, control
+    /// or close) reaches an identity entry, or a member whose name is
+    /// reserved unreadable, only for a principal that holds `AdminHost`: any
+    /// other caller is refused [`MobError::IdentityMember`]. Decided from
+    /// Core's own entry read of this actor's state
+    /// ([`super::super::identity_entry::identity_entry_read`]); every other
+    /// member is admitted, so the door is unchanged for it. The door's own
+    /// scope was enforced at the gate first, and the agent lane's own rules
+    /// refused an entry before this.
+    pub(super) fn member_host_door_refusal(
+        &self,
+        authority: &CommandAuthority,
+        agent_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        match super::super::identity_entry::identity_entry_read(
+            self.dsl_authority.state(),
+            agent_identity,
+        )? {
+            super::super::IdentityEntryRead::Entry(_)
+            | super::super::IdentityEntryRead::Unreadable { .. } => {}
+            super::super::IdentityEntryRead::NotAnEntry { .. }
+            | super::super::IdentityEntryRead::Removed => return Ok(()),
+        }
+        let holds_admin_host = authority.control_principal().is_some_and(|principal| {
+            self.resolve_control_policy_for(principal)
+                .permits(mob_dsl::ControlScope::AdminHost)
+        });
+        if holds_admin_host {
+            Ok(())
+        } else {
+            Err(MobError::IdentityMember {
+                member_id: agent_identity.clone(),
+            })
+        }
+    }
+
+    /// MobMachine's admission of external work for `agent_identity`, asked
+    /// as an unkeyed member send asks it (`MemberHandle::send`: SubmitWork of
+    /// `WorkOrigin::External` at the member's current runtime incarnation
+    /// and fence, with no expected session) and answered on a fork of the
+    /// machine, so nothing is submitted or recorded. `Ok` when MobMachine
+    /// admits it; otherwise the typed refusal the send gets
+    /// (`ResolveSubmitWorkRejection`): [`MobError::IdentityMember`] for an
+    /// identity entry or a name reserved unreadable,
+    /// [`MobError::NotExternallyAddressable`] for a member whose runtime
+    /// admits no external work, [`MobError::MemberNotFound`] for a name no
+    /// member holds, and the invalid transition of a mob that is not
+    /// running.
+    pub(super) fn external_work_admission(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+        // A name no member holds is asked at its initial incarnation, as
+        // the send does: MobMachine answers it not found.
+        let (runtime_id, fence_token) = self
+            .dsl_authority
+            .state()
+            .member_runtime_material_for_identity(&dsl_identity)
+            .map(|material| material.to_domain_for_identity(agent_identity))
+            .unwrap_or_else(|| {
+                (
+                    AgentRuntimeId::initial(agent_identity.clone()),
+                    FenceToken::new(0),
+                )
+            });
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(fence_token);
+        if self
+            .probe_command_admission(
+                mob_dsl::MobMachineInput::SubmitWork {
+                    agent_identity: dsl_identity.clone(),
+                    agent_runtime_id: dsl_runtime_id.clone(),
+                    fence_token: dsl_fence_token,
+                    expected_session_id: None,
+                    work_id: mob_dsl::WorkId::from_work_ref(&WorkRef::new()),
+                    origin: mob_dsl::WorkOrigin::from(WorkOrigin::External),
+                    content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
+                },
+                MobState::Running,
+                "external_work_admission",
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let mut probe = self.dsl_authority.fork();
+        Err(Self::resolve_submit_work_rejection_in_authority(
+            &mut probe,
+            &dsl_identity,
+            &dsl_runtime_id,
+            dsl_fence_token,
+            None,
+            &runtime_id,
+            WorkOrigin::External,
+            agent_identity,
+            self.state(),
+        ))
+    }
+
     /// The adoption of one legacy member as an identity entry
     /// (`AdoptLegacyIdentityEntry`), decided by MobMachine from the handle's
     /// observation of the member's incarnation at `generation` (its legacy

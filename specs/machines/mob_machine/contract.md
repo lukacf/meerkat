@@ -7050,6 +7050,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_not_retiring`
   - `external_origin`
   - `runtime_externally_addressable`
+  - `not_an_identity_entry`
+  - `name_readable`
 - Emits: `RequestRuntimeIngress`
 - To: `Running`
 
@@ -7069,6 +7071,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `external_origin`
   - `runtime_externally_addressable`
   - `member_peer_registered`
+  - `not_an_identity_entry`
+  - `name_readable`
 - Emits: `RequestPeerRuntimeIngress`
 - To: `Running`
 
@@ -7164,6 +7168,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 
+### `ResolveSubmitWorkRejectionIdentityMember`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `member_not_retiring`
+  - `external_origin`
+  - `identity_entry`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
+### `ResolveSubmitWorkRejectionIdentityMemberUnreadableName`
+- From: `Running`
+- On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
+- Guards:
+  - `identity_binding_matches`
+  - `runtime_live`
+  - `fence_token_matches`
+  - `member_not_retiring`
+  - `external_origin`
+  - `not_an_identity_entry`
+  - `name_unreadable`
+- Emits: `SubmitWorkRejected`
+- To: `Running`
+
 ### `ResolveSubmitWorkRejectionNotExternallyAddressable`
 - From: `Running`
 - On: `ResolveSubmitWorkRejection`(agent_identity, agent_runtime_id, fence_token, expected_session_id, origin)
@@ -7174,6 +7205,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `member_not_retiring`
   - `external_origin`
   - `runtime_not_externally_addressable`
+  - `not_an_identity_entry`
+  - `name_readable`
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 
@@ -7200,6 +7233,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `fence_token_matches`
   - `expected_session_named`
   - `session_binding_differs`
+  - `not_external_work_to_an_identity_member`
 - Emits: `SubmitWorkRejected`
 - To: `Running`
 

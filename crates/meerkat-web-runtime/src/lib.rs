@@ -2674,6 +2674,19 @@ pub async fn mob_append_system_context(
 
     let (mob_state, session_service) =
         with_runtime_state(|state| Ok((state.mob_state.clone(), state.session_service.clone())))?;
+    // The append acts on the member's session as its host: an identity
+    // entry, or a member whose name is reserved unreadable, is reached only
+    // with AdminHost, which this runtime's owner console holds.
+    mob_state
+        .handle_for(&mob_id_typed)
+        .await
+        .map_err(err_mob)?
+        .admit_member_host_door(
+            meerkat_mob::ControlScope::SendCommand,
+            &agent_identity_typed,
+        )
+        .await
+        .map_err(err_mob)?;
     let bridge_session_id =
         resolve_mob_member_bridge_session_id(&mob_state, &mob_id_typed, &agent_identity_typed)
             .await?;

@@ -458,12 +458,23 @@ pub(crate) async fn validate_raw_member_target(
         ));
     }
     refuse_runtime_plane_member(&mob_member_id_str(&alias), None)?;
-    if let Some(identity_runtime) = identity_runtime
-        && let Some(identity) = identity_runtime.identity_for_member_mutation(&alias).await
-    {
-        return Err(format!(
-            "member id '{alias}' is owned by durable identity '{identity}'"
-        ));
+    if let Some(identity_runtime) = identity_runtime {
+        match identity_runtime.identity_for_member_mutation(&alias).await {
+            Ok(Some(identity)) => {
+                return Err(format!(
+                    "member id '{alias}' is owned by durable identity '{identity}'"
+                ));
+            }
+            Ok(None) => {}
+            // Core holds the name for an identity this runtime has not
+            // registered, or its entry could not be read: never a raw
+            // member's name on a read that could not tell.
+            Err(error) => {
+                return Err(format!(
+                    "member id '{alias}' is held for a durable identity: {error}"
+                ));
+            }
+        }
     }
     Ok(alias)
 }

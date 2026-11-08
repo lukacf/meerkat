@@ -711,6 +711,11 @@ impl UnifiedRuntime {
                             let authority_identity = authority_runtime
                                 .identity_for_member_mutation(&agent_id)
                                 .await
+                                .map_err(|error| {
+                                    crate::MobRuntimeError::InvalidConfig(format!(
+                                        "identity event target refused before subscription: {agent_id}: {error}"
+                                    ))
+                                })?
                                 .ok_or_else(|| {
                                     crate::MobRuntimeError::InvalidConfig(format!(
                                         "identity event target lost authority before subscription: {agent_id}"

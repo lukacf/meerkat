@@ -1077,6 +1077,10 @@ const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
             "ResolveMemberBuildPreparationRunning",
             "ResolveMemberBuildPreparationStopped",
             "ResolveMemberBuildPreparationCompleted",
+            // External work refused for an identity entry and for a name
+            // reserved unreadable (0.9.11).
+            "ResolveSubmitWorkRejectionIdentityMember",
+            "ResolveSubmitWorkRejectionIdentityMemberUnreadableName",
         ],
     ),
     // The entered-step arms of the review attempt lifecycle (0.9.7), after

@@ -1633,7 +1633,22 @@ delivery status, not a turn:
   Follow it with `session/input_status`.
 - `stranded`: committed and never admitted, because the member incarnation it
   was bound to was replaced. This is final: resend the content under a new key.
-- `refused`: settled as refused, never admitted; `reason` names why.
+  A member's runtime stops admitting external work only as a new incarnation
+  (a respawn or a rotation, onto a profile that admits none included), so a
+  keyed send committed before that settles `stranded`.
+- `refused`: settled as refused, never admitted; `reason` names why. A keyed
+  send whose member became an identity entry, or whose name became reserved
+  unreadable, after its commit settles `refused` with `reason`
+  `authority_denied` at delivery.
+
+A first keyed send asks the same external admission as an unkeyed one and
+answers exactly as it does, before anything is committed: a send to an
+identity entry, or to a member whose name is reserved unreadable, is refused
+with `data.kind` `identity_member`, and a send to a member whose runtime
+admits no external work is refused as not externally addressable. A
+profile's `external_addressable` defaults to false; setting it on the profile
+admits external sends, keyed or not, to its members that are no identity
+entries.
 
 Other content under a used key is refused with `-32602` and `data.kind`
 `input_idempotency_conflict`, naming the first delivery in `data.delivery_id`.

@@ -770,7 +770,14 @@ impl IdentityRuntime {
         // its hold released, and every later build of a registered identity
         // is prepared inline.
         self.compose_member_builds().await;
-        let after = self.core_view_history().await.ok().flatten();
+        // Core's member history after the declaration: one read serves every
+        // identity of the pass. A read Core could not serve refuses, typed
+        // and retryable, each identity whose outcome reads it: no outcome is
+        // read off a history that could not be read.
+        let after = self
+            .core_view_history()
+            .await
+            .map_err(|error| error.to_string());
         let held_pass = self.held_create_pass();
         let mut outcomes = BTreeMap::new();
         let mut hosted_creates = Vec::new();
@@ -787,6 +794,16 @@ impl IdentityRuntime {
                     detail: format!("Core answered no declaration of {identity}"),
                 })
             });
+            let unread = |detail: &str| {
+                RestoreOutcome::Refused(Arc::new(
+                    IdentityRuntimeError::IdentityHistoryUnavailable {
+                        identity: identity.clone(),
+                        detail: format!(
+                            "reading Core's member history after the identity's declaration: {detail}"
+                        ),
+                    },
+                ))
+            };
             let outcome = match answer {
                 Ok(
                     DeclaredIdentityAnswer::Seated { session_id, .. }
@@ -795,18 +812,27 @@ impl IdentityRuntime {
                     let minted = !before
                         .get(identity)
                         .is_some_and(|sessions| sessions.contains(&session_id));
-                    member_outcome(after.as_ref(), identity, draft, minted)
+                    match &after {
+                        Ok(after) => member_outcome(after.as_ref(), identity, draft, minted),
+                        Err(detail) => unread(detail.as_str()),
+                    }
                 }
                 Ok(
                     DeclaredIdentityAnswer::FreshLife { .. }
                     | DeclaredIdentityAnswer::RoleRotated { .. },
-                ) => member_outcome(after.as_ref(), identity, draft, true),
+                ) => match &after {
+                    Ok(after) => member_outcome(after.as_ref(), identity, draft, true),
+                    Err(detail) => unread(detail.as_str()),
+                },
                 Ok(
                     DeclaredIdentityAnswer::Kept
                     | DeclaredIdentityAnswer::Noted { .. }
                     | DeclaredIdentityAnswer::Restamped { .. }
                     | DeclaredIdentityAnswer::RoleMigrated { .. },
-                ) => member_outcome(after.as_ref(), identity, draft, false),
+                ) => match &after {
+                    Ok(after) => member_outcome(after.as_ref(), identity, draft, false),
+                    Err(detail) => unread(detail.as_str()),
+                },
                 Ok(DeclaredIdentityAnswer::RecordedOnly) => RestoreOutcome::Dormant { draft },
                 // An identity awaiting its held creation is the held pass's
                 // to create when a held pass in progress covers it; with none,
@@ -821,15 +847,18 @@ impl IdentityRuntime {
                 // Core reports that launch would give changes its member.
                 Ok(DeclaredIdentityAnswer::Refused {
                     refusal: meerkat_mob::DeclaredEntryRefusal::NonAuthoritative { would_be },
-                }) => match self
-                    .candidate_deferral(spec, would_be, after.as_ref())
-                    .await
-                {
-                    None => member_outcome(after.as_ref(), identity, draft, false),
-                    Some(error) => {
-                        self.record_wake_refusal(identity, &error).await;
-                        RestoreOutcome::Refused(Arc::new(error))
-                    }
+                }) => match &after {
+                    Ok(after) => match self
+                        .candidate_deferral(spec, would_be, after.as_ref())
+                        .await
+                    {
+                        None => member_outcome(after.as_ref(), identity, draft, false),
+                        Some(error) => {
+                            self.record_wake_refusal(identity, &error).await;
+                            RestoreOutcome::Refused(Arc::new(error))
+                        }
+                    },
+                    Err(detail) => unread(detail.as_str()),
                 },
                 Ok(DeclaredIdentityAnswer::HostedOnFirstUse) => {
                     if hosted == HostedIdentities::CreateNow
@@ -839,17 +868,20 @@ impl IdentityRuntime {
                     }
                     RestoreOutcome::Dormant { draft }
                 }
-                Ok(answer) => {
-                    let error = self
-                        .declared_answer_error(identity, answer, after.as_ref())
-                        .unwrap_or_else(|| {
-                            IdentityRuntimeError::Internal(format!(
-                                "Core's answer for {identity} was mapped as a refusal"
-                            ))
-                        });
-                    self.record_wake_refusal(identity, &error).await;
-                    RestoreOutcome::Refused(Arc::new(error))
-                }
+                Ok(answer) => match &after {
+                    Ok(after) => {
+                        let error = self
+                            .declared_answer_error(identity, answer, after.as_ref())
+                            .unwrap_or_else(|| {
+                                IdentityRuntimeError::Internal(format!(
+                                    "Core's answer for {identity} was mapped as a refusal"
+                                ))
+                            });
+                        self.record_wake_refusal(identity, &error).await;
+                        RestoreOutcome::Refused(Arc::new(error))
+                    }
+                    Err(detail) => unread(detail.as_str()),
+                },
                 Err(error) => {
                     self.record_wake_refusal(identity, &error).await;
                     RestoreOutcome::Refused(Arc::new(error))

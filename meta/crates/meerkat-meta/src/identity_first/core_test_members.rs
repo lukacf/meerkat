@@ -23,8 +23,9 @@ use std::sync::{Mutex, PoisonError};
 use meerkat_core::types::SessionId;
 
 use super::bridge::{
-    BridgeError, MemberLifecycleFact, MemberLifecycleFactRecord, MemberLifecycleJournalHead,
-    MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding,
+    BridgeError, CoreBrokenMember, CoreIdentityEntry, CoreMember, MemberLifecycleFact,
+    MemberLifecycleFactRecord, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
+    MemberRuntimeBinding, MemberStanding,
 };
 use super::types::{AgentIdentity, AgentRuntimeId};
 
@@ -70,6 +71,13 @@ pub(crate) struct CoreTestMembers {
     /// The cause each retirement Core started for one was journaled for
     /// ([`Self::start_unlisting`]), by incarnation, until its end records it.
     retirement_causes: Mutex<BTreeMap<AgentRuntimeId, meerkat_mob::MemberRetirementCause>>,
+    /// The members Core holds Broken ([`Self::mark_broken`]), by identity,
+    /// each with the generation it was recorded for: a later incarnation is
+    /// not Broken.
+    broken: Mutex<BTreeMap<AgentIdentity, (u64, CoreBrokenMember)>>,
+    /// The runtime mode Core runs an identity's member in
+    /// ([`Self::set_runtime_mode`]); Core's default mode otherwise.
+    runtime_modes: Mutex<BTreeMap<AgentIdentity, meerkat_mob::MobRuntimeMode>>,
 }
 
 impl CoreTestMembers {
@@ -487,6 +495,94 @@ impl CoreTestMembers {
             .insert(identity.clone(), standing);
     }
 
+    /// Core holds `identity`'s live member Broken with `broken`, as Core's
+    /// wake records a failed restore: the incarnation stays Broken until a
+    /// later one replaces it. Nothing happens with no live member.
+    pub(crate) fn mark_broken(&self, identity: &AgentIdentity, broken: CoreBrokenMember) {
+        let Some(member) = self.live(identity) else {
+            return;
+        };
+        self.broken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone(), (member.generation, broken));
+    }
+
+    /// Core runs `identity`'s member in `mode` from now on (Core's default
+    /// mode until then).
+    pub(crate) fn set_runtime_mode(
+        &self,
+        identity: &AgentIdentity,
+        mode: meerkat_mob::MobRuntimeMode,
+    ) {
+        self.runtime_modes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(identity.clone(), mode);
+    }
+
+    /// Core's read of `identity`'s name, as `SessionBridge::identity_entry`
+    /// answers it: an identity entry when `entry` (the double holds the
+    /// identity declared), no entry otherwise; its live member, with the
+    /// runtime mode Core runs it in, retiring once its retirement started,
+    /// and Broken while Core holds that incarnation Broken; and, for an entry
+    /// no member holds, the session its last member was bound to, which
+    /// Core's retirement archived. The double holds no host preparation.
+    pub(crate) fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+        entry: bool,
+    ) -> CoreIdentityEntry {
+        let mut read = if entry {
+            CoreIdentityEntry::entry()
+        } else {
+            CoreIdentityEntry::not_an_entry()
+        };
+        let recorded = self
+            .members
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(identity)
+            .cloned();
+        match recorded {
+            Some(member) if member.live => {
+                let mode = self
+                    .runtime_modes
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(identity)
+                    .copied()
+                    .unwrap_or_default();
+                let mut core = CoreMember::seated(
+                    member.generation,
+                    member.session_id.clone(),
+                    member.profile.clone(),
+                    mode,
+                );
+                if member.retiring {
+                    core = core.retiring();
+                }
+                if let Some((generation, broken)) = self
+                    .broken
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(identity)
+                    && *generation == member.generation
+                {
+                    core = core.with_broken(broken.clone());
+                }
+                read = read.with_member(core);
+            }
+            Some(member) if entry => {
+                if let Some(session_id) = member.session_id {
+                    read = read.with_archived_session(session_id);
+                }
+            }
+            Some(_) | None => {}
+        }
+        read
+    }
+
     /// Core journals `count` facts of a member no identity spawned (the
     /// starts of its retirements), which owe the identities nothing: a busy
     /// journal between two facts of an identity.
@@ -747,6 +843,23 @@ impl CoreTestMembers {
     fn live(&self, identity: &AgentIdentity) -> Option<TestMember> {
         let members = self.members.lock().unwrap_or_else(PoisonError::into_inner);
         members.get(identity).filter(|member| member.live).cloned()
+    }
+}
+
+/// Core's entry of a name, for a test double whose Core holds members only
+/// as bindings (its `last_member_binding`): no identity entry, with the
+/// member of `binding` while that binding is live, in Core's default runtime
+/// mode.
+pub(crate) fn entry_of_binding(binding: Option<&meerkat_mob::MemberBinding>) -> CoreIdentityEntry {
+    let entry = CoreIdentityEntry::not_an_entry();
+    match binding {
+        Some(binding) if binding.is_live() => entry.with_member(CoreMember::seated(
+            binding.generation().get(),
+            binding.session_id().cloned(),
+            binding.role().clone(),
+            meerkat_mob::MobRuntimeMode::default(),
+        )),
+        _ => entry,
     }
 }
 

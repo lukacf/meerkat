@@ -505,6 +505,16 @@ impl SessionBridge for RecordingResumeBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn identity_management(
         &self,
         _identity: &AgentIdentity,
@@ -2360,6 +2370,16 @@ impl SessionBridge for CoreBackedBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -2810,10 +2830,12 @@ async fn identity_first_shutdown_cancels_an_abandoned_reconcile_at_its_seat_buil
         .status(&AgentIdentity::parse("agent:alpha").unwrap())
         .await
         .unwrap();
+    // The status reads Core's facts, never this runtime's shutdown: Core's
+    // stopped mob still holds the identity's member.
     assert_eq!(
         status.state,
-        IdentityLifecycleState::Dormant,
-        "post-shutdown status must not project an Active identity"
+        IdentityLifecycleState::Active,
+        "post-shutdown status reads the member Core holds"
     );
     let beta = meerkat_meta::member_comms_id::roster_member_id_for_identity("agent:beta");
     assert!(

@@ -13179,6 +13179,12 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_externally_addressable" { self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
+            // External work never reaches an identity entry, or a name
+            // reserved unreadable: its host delivers to it through its own
+            // door, as internal work (ResolveSubmitWorkRejectionIdentityMember
+            // answers it).
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             update {}
             to Running
             emit RequestRuntimeIngress {
@@ -13207,6 +13213,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_externally_addressable" { self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
             guard "member_peer_registered" { self.member_peer_ids.contains_key(agent_identity) }
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             update {}
             to Running
             emit RequestPeerRuntimeIngress {
@@ -13386,6 +13394,56 @@ macro_rules! mob_catalog_machine_dsl {
             }
         }
 
+        // External work addressed to an identity entry: the entry's host
+        // delivers to it through its own door, as internal work, so no
+        // external sender reaches it (SubmitWorkRunningExternal and its
+        // peer-only twin are not enabled for an entry). Declared before the
+        // addressability classification, which never answers an entry.
+        transition ResolveSubmitWorkRejectionIdentityMember {
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, expected_session_id, origin }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "external_origin" { origin == WorkOrigin::External }
+            guard "identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == true }
+            update {}
+            to Running
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::IdentityMember,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
+        // External work addressed to a member whose name is reserved as
+        // unreadable (its seat row names an origin this build does not know,
+        // or its created entry row cannot be read): refused as an identity
+        // member, as the agent lane's command to it is.
+        transition ResolveSubmitWorkRejectionIdentityMemberUnreadableName {
+            on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, expected_session_id, origin }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_binding_matches" { self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id) }
+            guard "runtime_live" { self.live_runtime_ids.contains(agent_runtime_id) }
+            guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
+            guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
+            guard "external_origin" { origin == WorkOrigin::External }
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "name_unreadable" { self.identity_entry_unreadable.contains(agent_identity) == true }
+            update {}
+            to Running
+            emit SubmitWorkRejected {
+                agent_runtime_id: agent_runtime_id,
+                origin: origin,
+                reason: SubmitWorkRejectReasonKind::IdentityMember,
+                expected_fence_token: None,
+                actual_fence_token: None
+            }
+        }
+
         transition ResolveSubmitWorkRejectionNotExternallyAddressable {
             on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, expected_session_id, origin }
             guard { self.lifecycle_phase == Phase::Running }
@@ -13395,6 +13453,8 @@ macro_rules! mob_catalog_machine_dsl {
             guard "member_not_retiring" { self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring) }
             guard "external_origin" { origin == WorkOrigin::External }
             guard "runtime_not_externally_addressable" { !self.externally_addressable_runtime_ids.contains(agent_runtime_id) }
+            guard "not_an_identity_entry" { self.identity_entry_origins.contains_key(agent_identity) == false }
+            guard "name_readable" { self.identity_entry_unreadable.contains(agent_identity) == false }
             update {}
             to Running
             emit SubmitWorkRejected {
@@ -13431,7 +13491,11 @@ macro_rules! mob_catalog_machine_dsl {
         // against. Runtime id and fence can stay current while the member's
         // session binding moves (session recovery under the same runtime),
         // so a mismatch is its own typed refusal, never a retarget. Declared
-        // after the other classifications: first match wins.
+        // after the other classifications. External work to an identity
+        // entry, or to a name reserved unreadable, is refused as an identity
+        // member whatever session it names: a stale session answer would
+        // invite a retry that can only be refused again, so this arm never
+        // answers it.
         transition ResolveSubmitWorkRejectionStaleSessionBinding {
             on input ResolveSubmitWorkRejection { agent_identity, agent_runtime_id, fence_token, expected_session_id, origin }
             guard { self.lifecycle_phase == Phase::Running }
@@ -13440,6 +13504,11 @@ macro_rules! mob_catalog_machine_dsl {
             guard "fence_token_matches" { self.runtime_fence_tokens.get_copied(agent_runtime_id) == Some(fence_token) }
             guard "expected_session_named" { expected_session_id != None }
             guard "session_binding_differs" { self.member_session_bindings.get_cloned(agent_identity) != expected_session_id }
+            guard "not_external_work_to_an_identity_member" {
+                origin != WorkOrigin::External
+                || (self.identity_entry_origins.contains_key(agent_identity) == false
+                    && self.identity_entry_unreadable.contains(agent_identity) == false)
+            }
             update {}
             to Running
             emit SubmitWorkRejected {
@@ -38217,6 +38286,10 @@ pub enum SubmitWorkRejectReasonKind {
     /// A scope-bound submit named a member session that is no longer the
     /// member's current session binding.
     StaleSessionBinding,
+    /// External work addressed to an identity entry, or to a name reserved
+    /// unreadable: only the entry's host delivers to it, through its own
+    /// door, as internal work.
+    IdentityMember,
 }
 
 /// Typed public rejection class for [`MobMachineInput::CancelAllWork`].

@@ -350,6 +350,13 @@ impl SessionBridge for TicketBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &crate::identity_first::AgentIdentity,
+    ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError> {
+        Ok(self.core.identity_entry(identity, false))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,

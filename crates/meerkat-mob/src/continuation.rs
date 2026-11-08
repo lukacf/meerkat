@@ -15,7 +15,7 @@ use meerkat::{
 };
 use meerkat_core::SessionId;
 use meerkat_core::service::MobIncarnationId;
-use meerkat_runtime::LogicalRuntimeId;
+use meerkat_runtime::{LogicalRuntimeId, RuntimeDeliveryRefusalReason};
 
 use crate::ids::{AgentIdentity, MobId};
 use crate::runtime::MobHandle;
@@ -230,6 +230,70 @@ impl ContinuationAddressResolver for MobContinuationResolver {
             crate::MobState::Completed | crate::MobState::Destroyed => AddressObservation::Retired,
             _ => AddressObservation::MayServe,
         })
+    }
+
+    /// External work a caller committed to a member (a keyed member send)
+    /// is asked again at its delivery: MobMachine's admission of external
+    /// work for the member, as it answers an unkeyed member send
+    /// ([`MobHandle::admit_external_work`]). A member that became an
+    /// identity entry since the commit, or whose name became reserved
+    /// unreadable, refuses it for good (`AuthorityDenied`): the drain settles
+    /// the row refused and admits nothing. MobMachine records a runtime's
+    /// external addressability when it seats that runtime, so a member stops
+    /// admitting external work only as a new incarnation (a respawn or a
+    /// rotation), whose address no longer serves the row: the row strands, as
+    /// below. A `NotExternallyAddressable` answer is refused all the same.
+    /// An address the mob does not serve (another incarnation of
+    /// the mob, a replaced or retired member, a session address) is not
+    /// refused here: the drain's own observation strands its row. A mob this
+    /// host does not manage now, or an answer that cannot be read now (a
+    /// stopped mob, an actor that does not answer), leaves the row waiting.
+    async fn external_work_refusal(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeDeliveryRefusalReason>, String> {
+        let Some(member) = address
+            .member_address()
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(None);
+        };
+        let Some(handle) = self
+            .mobs
+            .mob_handle(&MobId::from(member.mob_id.as_str()))
+            .await
+        else {
+            return Err(format!(
+                "no mob this host manages holds '{}' now",
+                member.mob_id
+            ));
+        };
+        if !handle
+            .serves_member_address_incarnation(member.incarnation)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(None);
+        }
+        let identity = AgentIdentity::from(member.identity.as_str());
+        let roster = handle.roster().await;
+        if roster
+            .get_by_identity(&identity)
+            .is_none_or(|entry| entry.generation.get() != member.generation)
+        {
+            return Ok(None);
+        }
+        match handle.admit_external_work(&identity).await {
+            Ok(()) => Ok(None),
+            Err(
+                crate::MobError::IdentityMember { .. }
+                | crate::MobError::NotExternallyAddressable(_),
+            ) => Ok(Some(RuntimeDeliveryRefusalReason::AuthorityDenied)),
+            // The member left the roster since: the address retired, and the
+            // drain's observation strands the row.
+            Err(crate::MobError::MemberNotFound(_)) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
     }
 }
 

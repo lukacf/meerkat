@@ -483,8 +483,15 @@ impl MobCommand {
                     .collect(),
             ),
             Self::AdmitControlScope { subject, .. } => match subject {
-                ScopeAdmissionSubject::Mob => AgentLaneAdmission::Unaddressed,
-                ScopeAdmissionSubject::Member(member) => AgentLaneAdmission::Members(vec![member]),
+                // External work addresses no member the lane rules name,
+                // as SubmitWork does: MobMachine's admission answers it.
+                ScopeAdmissionSubject::Mob | ScopeAdmissionSubject::ExternalWork(_) => {
+                    AgentLaneAdmission::Unaddressed
+                }
+                ScopeAdmissionSubject::Member(member)
+                | ScopeAdmissionSubject::MemberHost(member) => {
+                    AgentLaneAdmission::Members(vec![member])
+                }
                 ScopeAdmissionSubject::LegacyAdoption(_) | ScopeAdmissionSubject::DeclaredApply => {
                     AgentLaneAdmission::HostOnly
                 }

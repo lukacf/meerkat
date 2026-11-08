@@ -347,24 +347,32 @@ async fn run_implicit_delegate_retirement(
                     .clone();
                 let retire_result = if is_primary_mob {
                     if let Some(identity_runtime) = identity_runtime.as_ref() {
-                        if let Some(durable_identity) = identity_runtime
+                        match identity_runtime
                             .identity_for_member_mutation(&public_alias)
                             .await
                         {
-                            identity_runtime
+                            Ok(Some(durable_identity)) => identity_runtime
                                 .retire_member_alias_tracked(&durable_identity, &public_alias)
                                 .await
-                                .map_err(|error| error.to_string())
-                        } else if crate::member_comms_id::is_reserved_generated_alias(&public_alias)
-                        {
-                            Err(format!(
-                                "generated alias is not owned by IdentityRuntime: {public_alias}"
-                            ))
-                        } else {
-                            handle
+                                .map_err(|error| error.to_string()),
+                            // Core holds the name for an identity the runtime
+                            // has not registered, or its entry could not be
+                            // read: never a raw retire on a read that could
+                            // not tell.
+                            Err(error) => Err(error.to_string()),
+                            Ok(None)
+                                if crate::member_comms_id::is_reserved_generated_alias(
+                                    &public_alias,
+                                ) =>
+                            {
+                                Err(format!(
+                                    "generated alias is not owned by IdentityRuntime: {public_alias}"
+                                ))
+                            }
+                            Ok(None) => handle
                                 .retire(AgentIdentity::from(identity.as_str()))
                                 .await
-                                .map_err(|error| error.to_string())
+                                .map_err(|error| error.to_string()),
                         }
                     } else if crate::member_comms_id::is_reserved_generated_alias(&public_alias) {
                         Err(format!(

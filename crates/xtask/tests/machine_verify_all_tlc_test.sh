@@ -1151,7 +1151,7 @@ fi
 # either. A hand-written audit over the same generated model
 # (created_identity_audit.tla, shards audits-q, audits-r and audits-t
 # through audits-v) checks
-# fourteen runs over their whole reachable space, in two parts. Its
+# fifteen runs over their whole reachable space, in three parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
 # or after the scan of its rows: no replay turns a Created entry Declared;
@@ -1209,7 +1209,12 @@ fi
 # archived session record holds) and the replay of a removal or an archive
 # in flight carried to its terminal, its one row scanned before or after
 # the journal replay (no replay seats a member under an archived entry, and
-# the boot plan's seal keeps an archived identity's standing). They
+# the boot plan's seal keeps an archived identity's standing). Its doors
+# part (0.9.11) drives work of either origin to a Declared entry, a Created
+# entry, a reserved name and a worker, each bound to its session or
+# reachable by its peer: no external work is admitted to an entry or a
+# reserved name, at most one arm answers every piece of work, and an
+# entry's external work is refused as an identity member. They
 # require every listed arm
 # to fire, a floor of distinct states (the changes part's printed until its
 # first green run sets them) and their witnesses reached, and --mutants
@@ -1223,7 +1228,9 @@ fi
 # tombstoned name seated, a Declared row's replay over a Created entry, a
 # record over an entry's name, a new entry's cause out of precedence, an
 # unlist of a Created entry, a created custody kept local, which leaves the
-# placed witness unreachable).
+# placed witness unreachable, external work admitted to an entry or a
+# reserved name, an identity member refusal of a worker's work, an entry's
+# external work answered by no arm).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -1231,9 +1238,10 @@ if [[ ! -x "${created_identity_audit}" ]]; then
 fi
 # Its runs are split over five shards (sized below): the recovery part's
 # scan and placed runs in audits-q and its reseat and names runs in
-# audits-v; the changes part's admit, commit and update runs in audits-r,
-# its archive, unlist, placement and recovered runs in audits-t, and its
-# removal, preparation and prepverdicts runs in audits-u.
+# audits-v; the changes part's admit, commit and update runs and the doors
+# part's doors run in audits-r, its archive, unlist, placement and
+# recovered runs in audits-t, and its removal, preparation and
+# prepverdicts runs in audits-u.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part scan,placed
@@ -1243,8 +1251,8 @@ if run_part audits-v; then
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part reseat,names
 fi
 if run_part audits-r; then
-  echo "running bounded created identity admissions and records TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update
+  echo "running bounded created identity admissions, records and doors TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update,doors
 fi
 if run_part audits-u; then
   echo "running bounded created identity removals TLC audit"
@@ -1527,9 +1535,11 @@ run_machine_verify() {
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
 # 248-375 s, plus the retained-run settle audit with --mutants (0.9.11, not
-# yet measured on a hosted runner), and the GrantAuthorityMachine custody end
+# yet measured on a hosted runner), the GrantAuthorityMachine custody end
 # audit with --mutants (sixteen runs, not yet measured hosted; 17 s locally
-# with 4 TLC workers, about 40 s at 2.3x): about 290-415 s before the settle audit;
+# with 4 TLC workers, about 40 s at 2.3x) and the doors run with --mutants
+# (52 s locally with 4 TLC workers, up to about 200 s hosted): about 340-615 s
+# before the settle audit;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s, plus the requester

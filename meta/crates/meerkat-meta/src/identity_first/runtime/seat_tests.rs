@@ -96,8 +96,8 @@ struct SeatCore {
     /// Core holds no durable copy of these sessions: a seat that names one
     /// is refused as Core refuses it (absent).
     unheld: Vec<SessionId>,
-    /// Core's read of its broken members fails.
-    broken_read_fails: bool,
+    /// Core's read of its entry of a name fails.
+    entry_read_fails: bool,
     /// Core admits a delivery to a live member onto the member's session
     /// and records it; otherwise it delivers nothing.
     admits_deliveries: bool,
@@ -631,15 +631,16 @@ impl SessionBridge for SeatCore {
         self.core.durable_identity_members()
     }
 
-    async fn broken_members(
+    async fn identity_entry(
         &self,
-    ) -> Result<std::collections::BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        if self.broken_read_fails {
+        identity: &AgentIdentity,
+    ) -> Result<crate::identity_first::CoreIdentityEntry, BridgeError> {
+        if self.entry_read_fails {
             return Err(BridgeError::Mob(
-                "Core's member list did not read".to_string(),
+                "Core's entry of the name did not read".to_string(),
             ));
         }
-        Ok(std::collections::BTreeMap::new())
+        Ok(self.core.identity_entry(identity, false))
     }
 
     async fn seat_dormant_members(
@@ -2756,14 +2757,14 @@ fn skip_whitespace(code: &[u8], at: usize) -> usize {
     })
 }
 
-/// When Core's broken members cannot be read, an identity's status is
-/// a typed refusal, never a guess: a member that may be Broken never reads
-/// `active`.
+/// When Core's entry of an identity's name cannot be read, the identity's
+/// status is a typed refusal, never a guess: a member that may be Broken
+/// never reads `active`.
 #[tokio::test]
 async fn r67_an_unreadable_broken_member_list_never_reads_active() {
     let alice = identity("personal:alice");
     let core = Arc::new(SeatCore {
-        broken_read_fails: true,
+        entry_read_fails: true,
         ..SeatCore::default()
     });
     let runtime = runtime_over(None, &core);
@@ -2779,7 +2780,7 @@ async fn r67_an_unreadable_broken_member_list_never_reads_active() {
 
     match runtime.status(&alice).await {
         Err(IdentityRuntimeError::IdentityHistoryUnavailable { detail, .. }) => {
-            assert!(detail.contains("broken members"), "{detail}");
+            assert!(detail.contains("Core's entry"), "{detail}");
         }
         other => panic!("expected a typed history refusal, got {other:?}"),
     }

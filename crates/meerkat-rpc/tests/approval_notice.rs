@@ -32,7 +32,7 @@ use meerkat_core::{
 use meerkat_rpc::server::serve_tcp_connection;
 use meerkat_rpc::session_runtime::SessionRuntime;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -195,8 +195,12 @@ struct Connection {
     frames: mpsc::UnboundedReceiver<Value>,
     reader_task: JoinHandle<()>,
     next_id: u64,
-    /// Notifications that arrived while waiting for a response.
+    /// Notifications (frames without an id) received so far, in order.
     notifications: Vec<Value>,
+    /// Responses that arrived while waiting for another one, by id. The
+    /// server writes long-running and inline replies on independent
+    /// channels, so replies can arrive out of request order.
+    responses: HashMap<u64, Value>,
 }
 
 impl Drop for Connection {
@@ -218,15 +222,28 @@ impl Connection {
         id
     }
 
-    /// The result of request `id`, keeping the notifications before it.
+    /// File one incoming frame: a response under its id, anything else as
+    /// a notification.
+    fn route(&mut self, frame: Value) {
+        match frame["id"].as_u64() {
+            Some(id) if frame.get("method").is_none() => {
+                let previous = self.responses.insert(id, frame);
+                assert!(previous.is_none(), "response {id} arrived twice");
+            }
+            _ => self.notifications.push(frame),
+        }
+    }
+
+    /// The response to request `id`, buffering every other frame that
+    /// arrives first (other responses by id, notifications in order).
     async fn response(&mut self, id: u64) -> Value {
         let frame = tokio::time::timeout(LIMIT, async {
             loop {
-                let frame = self.frames.recv().await.expect("connection open");
-                if frame["id"] == json!(id) {
+                if let Some(frame) = self.responses.remove(&id) {
                     return frame;
                 }
-                self.notifications.push(frame);
+                let frame = self.frames.recv().await.expect("connection open");
+                self.route(frame);
             }
         })
         .await
@@ -244,7 +261,7 @@ impl Connection {
     async fn collect_for(&mut self, window: Duration) {
         let deadline = tokio::time::Instant::now() + window;
         while let Ok(Some(frame)) = tokio::time::timeout_at(deadline, self.frames.recv()).await {
-            self.notifications.push(frame);
+            self.route(frame);
         }
     }
 
@@ -359,6 +376,7 @@ impl Harness {
             reader_task,
             next_id: 0,
             notifications: Vec::new(),
+            responses: HashMap::new(),
         };
         connection.request("initialize", json!({})).await;
         connection

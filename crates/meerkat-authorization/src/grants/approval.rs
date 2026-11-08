@@ -30,12 +30,13 @@ use meerkat_core::auth::PrincipalRef;
 use serde::Serialize;
 
 use super::dsl::{
-    ChildApprovalRule, GrantApproval, GrantAuthorityInput, GrantDecisionAssurance,
-    GrantDecisionTier, GrantDeviceTrust, GrantOperationBinding, GrantPrincipal, GrantRecord,
+    ChildApprovalRule, GrantApproval, GrantAuthorityInput, GrantAuthorityPhase,
+    GrantDecisionAssurance, GrantDecisionTier, GrantDeviceTrust, GrantOperationBinding,
+    GrantPrincipal, GrantRecord,
 };
 use super::{
     GrantRefusal, LineageResolutionRefusal, LineageUse, LocalGrantAuthority, ResolvedGrant,
-    exact_record, principal,
+    exact_record, principal, require_custody,
 };
 
 /// One use of a lineage: the requester the work serves, the work, and the
@@ -531,11 +532,7 @@ impl LocalGrantAuthority {
             .owner
             .try_lock()
             .map_err(|_| ConsumeUseRefusal::Unavailable)?;
-        if let Some(durable) = &self.durable {
-            durable
-                .check_available()
-                .map_err(|_| ConsumeUseRefusal::Unavailable)?;
-        }
+        require_custody(&owner).map_err(|_| ConsumeUseRefusal::Unavailable)?;
         let reference = references.last().ok_or(ConsumeUseRefusal::Denied)?;
         let leaf = exact_record(&owner, reference).map_err(denied)?.clone();
         let chain = super::chain(&owner, &leaf).map_err(|_| ConsumeUseRefusal::Unavailable)?;
@@ -572,10 +569,9 @@ impl LocalGrantAuthority {
             },
         );
         if let Err(refusal) = applied {
-            let uncertain = self
-                .durable
-                .as_ref()
-                .is_some_and(|durable| durable.check_available().is_err());
+            // Custody was required above under this same owner lock, so an
+            // owner now in `Uncertain` recorded this spend's own append.
+            let uncertain = owner.state().lifecycle_phase == GrantAuthorityPhase::Uncertain;
             return Err(if uncertain {
                 ConsumeUseRefusal::Uncertain
             } else if refusal == GrantRefusal::Unavailable {
@@ -663,9 +659,7 @@ impl LocalGrantAuthority {
         reference: &GrantLineageRef,
     ) -> Result<RetainedGrant, GrantRefusal> {
         let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
-        if let Some(durable) = &self.durable {
-            durable.check_available()?;
-        }
+        require_custody(&owner)?;
         let record = exact_record(&owner, reference)?;
         Ok(RetainedGrant {
             issuer: record.issuer.principal().clone(),

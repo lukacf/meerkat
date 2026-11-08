@@ -948,9 +948,7 @@ impl LocalGrantAuthority {
         select: impl Fn(&EvidenceId) -> bool,
     ) -> Result<Vec<GrantLineageRef>, GrantRefusal> {
         let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
-        if let Some(durable) = &self.durable {
-            durable.check_available()?;
-        }
+        require_custody(&owner)?;
         let state = owner.state();
         state
             .records

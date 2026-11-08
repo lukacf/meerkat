@@ -578,6 +578,13 @@ them.
   boot's recovery-work predicate for one runtime; its default answers
   through the store-wide scan, and the SQLite and in-memory stores answer it
   for the one runtime.
+- `meerkat-sandbox`: `unmet_host_requirements()` returns the host settings
+  the native confinement backend needs and the host refuses, as far as the
+  backend can tell, each an `UnmetHostRequirement` whose text names the
+  setting: on Linux, `ExecutableMemoryFiles` (executable memory files,
+  `vm.memfd_noexec` below 2). A host's startup report (`meerkat`'s
+  `HostConfinement::startup_report`) names them beside a launch kind's
+  `BackendUnavailable` refusal, so an operator can act on it.
 
 ### Changed
 
@@ -706,21 +713,20 @@ them.
   interface; with IP access it shows the host's network namespace. A host
   that refuses the mount (a masked or overmounted `/proc`, a kernel before
   5.8) still launches, without `/proc`, as before. The launch's first
-  process is pid 1 of the namespace and the process `NativeChild` owns: it
-  runs the setup, starts the command as pid 2, then executes a small init
+  process runs the setup, starts the command, then executes a small init
   that the backend carries in a sealed memory file. The init holds none of
   the host's memory, the command cannot inspect it, it reaps every orphan,
   and it reports the command's exit status, which `NativeChild` returns
-  (the exit code, or the signal that ended the command). When the command
-  ends, every process it left running ends with it; killing the launch's
-  PID ends them all at once. With IP access, Unix stream and seqpacket
-  socket pairs are allowed, so a confined Rust program can start processes
-  (`cargo`, and `rustc`'s linker call, failed with `EPERM`); datagram pairs
-  stay refused. A confined launch is now two processes, and the backend
-  needs pid namespaces, network namespaces for a launch without IP access,
-  and memory files it may execute (`vm.memfd_noexec` below 2); a host
-  without them refuses confined launches (`BackendUnavailable`). See
-  Breaking.
+  (the exit code, or the signal that ended the command); killing the
+  launch's PID ends the whole launch at once. With IP access, Unix stream
+  and seqpacket socket pairs are allowed, so a confined Rust program can
+  start processes (`cargo`, and `rustc`'s linker call, failed with
+  `EPERM`); datagram pairs stay refused. A confined launch is now two
+  processes, and the backend needs pid namespaces, network namespaces for
+  a launch without IP access, and memory files it may execute
+  (`vm.memfd_noexec` below 2); a host without them refuses confined
+  launches (`BackendUnavailable`), and its startup report names such a
+  setting where the backend can tell (see Added). See Breaking.
 
 ### Deprecated
 

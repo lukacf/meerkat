@@ -656,8 +656,10 @@ A launch the platform's backend cannot confine as required is refused at that
 launch with typed `confinement_refused` feedback; it never runs unconfined,
 and the rest of the run continues. At startup a host reports each launch
 kind's requested and effective confinement (the backend that enforces it, or
-that every launch of the kind is refused), what keeps the host's own inputs
-from its confined processes, and each convention source it does not trust.
+that every launch of the kind is refused, with any host setting the backend
+can tell it lacks, such as `vm.memfd_noexec`), what keeps the host's own
+inputs from its confined processes, and each convention source it does not
+trust.
 macOS uses Seatbelt. Linux uses namespaces and seccomp: it needs unprivileged
 user namespaces (with pid namespaces in them, and network namespaces for a
 launch without IP access) and memory files it may execute (`vm.memfd_noexec`

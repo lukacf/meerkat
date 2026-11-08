@@ -86,7 +86,10 @@ use tokio::process::{ChildStderr, ChildStdout};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::native_stdio::{duplicate, inherit, input, output};
-use crate::{ConfinementRefusal, ExecutionConfinement, NativeChild, ProcessLaunchSpec, SpawnIo};
+use crate::{
+    ConfinementRefusal, ExecutionConfinement, NativeChild, ProcessLaunchSpec, SpawnIo,
+    UnmetHostRequirement,
+};
 
 // These are compatibility resources, not a bind of the host root. Missing
 // optional distribution paths are omitted; /bin/sh and the target still have
@@ -1066,6 +1069,24 @@ fn sealed_init() -> Result<OwnedFd, ConfinementRefusal> {
     above_floor(readable.into_raw_fd())
         .map(|moved| unsafe { OwnedFd::from_raw_fd(moved) })
         .map_err(unavailable)
+}
+
+/// The host settings this backend needs and the host refuses, as far as it
+/// can tell (see `crate::unmet_host_requirements`): an executable memory
+/// file, which `sealed_init` needs, refused with EACCES is
+/// `vm.memfd_noexec` at 2. A kernel before 6.3 has no such setting.
+pub(super) fn unmet_host_requirements() -> Vec<UnmetHostRequirement> {
+    let descriptor =
+        unsafe { libc::memfd_create(c"meerkat-check".as_ptr(), libc::MFD_CLOEXEC | MFD_EXEC) };
+    if descriptor != -1 {
+        drop(unsafe { OwnedFd::from_raw_fd(descriptor) });
+        return Vec::new();
+    }
+    if errno() == libc::EACCES {
+        vec![UnmetHostRequirement::ExecutableMemoryFiles]
+    } else {
+        Vec::new()
+    }
 }
 
 /// The init image's bytes, in this binary's own code.

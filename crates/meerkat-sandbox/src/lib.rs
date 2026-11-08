@@ -280,6 +280,43 @@ impl std::fmt::Debug for ConfinementCapabilityReport {
     }
 }
 
+/// A host setting the native backend needs and this host refuses, as far as
+/// the backend can tell. Such a host refuses every requirement with
+/// [`ConfinementRefusal::BackendUnavailable`]; the requirement's text names
+/// the setting, so an operator can act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnmetHostRequirement {
+    /// Linux: the host refuses memory files it may execute, from which the
+    /// backend executes each launch's init (`vm.memfd_noexec` is 2).
+    ExecutableMemoryFiles,
+}
+
+impl std::fmt::Display for UnmetHostRequirement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExecutableMemoryFiles => f.write_str(
+                "executable memory files are refused, and each launch's init runs from one: set vm.memfd_noexec below 2",
+            ),
+        }
+    }
+}
+
+/// The host settings the native backend needs and this host refuses, as far
+/// as the backend can tell: on Linux, executable memory files. Empty when it
+/// finds none, and on every other platform.
+#[must_use]
+pub fn unmet_host_requirements() -> Vec<UnmetHostRequirement> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::unmet_host_requirements()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
 /// Immutable policy compilation retained by the existing host configuration.
 /// Replacing that configuration requires a new compilation. No policy lookup,
 /// generation registry, or authority is stored here.

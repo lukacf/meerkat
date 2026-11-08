@@ -2717,9 +2717,10 @@ async fn runtime_administration_reads_name_no_member_hidden_from_their_caller() 
 }
 
 /// Stands in for meerkat's agent mob tools: records each call's tool, and
-/// answers `mob_check_member` through Core's admission of an owned member
-/// target for `caller` without manage scope, as meerkat's tool does (a name
-/// no member holds is absent; a member the caller does not own is refused).
+/// answers `mob_check_member` and `mob_retire_member` through Core's
+/// admission of an owned member target for `caller` without manage scope, as
+/// meerkat's tools do (a name no member holds is absent; a member the caller
+/// does not own is refused). An admitted retire changes nothing here.
 struct OwnedMemberTools {
     handle: meerkat_mob::MobHandle,
     caller: AgentIdentity,
@@ -2762,7 +2763,7 @@ impl meerkat_core::AgentToolDispatcher for OwnedMemberTools {
                 meerkat_core::types::ToolResult::new(call.id.to_string(), "{}".to_string(), false),
             ))
         };
-        if call.name != "mob_check_member" {
+        if call.name != "mob_check_member" && call.name != "mob_retire_member" {
             return done();
         }
         let args: Value = serde_json::from_str(call.args.get()).map_err(|error| {
@@ -2876,12 +2877,12 @@ async fn a_private_member_cannot_convene_a_council() -> TestResult {
     Ok(())
 }
 
-/// An agent's `mob_check_member` naming a member private to a person the
-/// agent does not act for answers exactly as a name no member holds does:
-/// nothing tells the agent the member exists. Its owner's private member
-/// checks it as before.
+/// An agent's `mob_check_member` and `mob_retire_member` naming a member
+/// private to a person the agent does not act for answer exactly as a name
+/// no member holds does: nothing tells the agent the member exists. Its
+/// owner's private member checks it as before.
 #[tokio::test]
-async fn mob_check_member_answers_a_hidden_member_as_an_absent_one() -> TestResult {
+async fn mob_check_and_retire_member_answer_a_hidden_member_as_an_absent_one() -> TestResult {
     const MOB: &str = "private-check-member";
     let state = tempfile::tempdir()?;
     let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
@@ -2908,18 +2909,22 @@ async fn mob_check_member_answers_a_hidden_member_as_an_absent_one() -> TestResu
         &runtime,
         member_session(&runtime, "alpha").await?,
     );
-    let hidden = answer(
-        agent_tool_call(&shared, "mob_check_member", check("alpha-side")).await,
-        "alpha-side",
-    );
-    let absent = answer(
-        agent_tool_call(&shared, "mob_check_member", check("alpha-gone")).await,
-        "alpha-gone",
-    );
-    assert_eq!(
-        hidden, absent,
-        "a shared agent's check of a private member answers as for an absent member"
-    );
+    let mut absent_answers = BTreeMap::new();
+    for tool in ["mob_check_member", "mob_retire_member"] {
+        let hidden = answer(
+            agent_tool_call(&shared, tool, check("alpha-side")).await,
+            "alpha-side",
+        );
+        let absent = answer(
+            agent_tool_call(&shared, tool, check("alpha-gone")).await,
+            "alpha-gone",
+        );
+        assert_eq!(
+            hidden, absent,
+            "a shared agent's {tool} of a private member answers as for an absent member"
+        );
+        absent_answers.insert(tool, absent);
+    }
 
     let private = crate::mob_handle_runtime::agent_mob_tool_wrapper_as_member_for_test(
         OwnedMemberTools::new(runtime.handle(), "alpha-side"),
@@ -2932,20 +2937,323 @@ async fn mob_check_member_answers_a_hidden_member_as_an_absent_one() -> TestResu
         "alpha-side",
     );
     assert_ne!(
-        own, absent,
+        own, absent_answers["mob_check_member"],
         "the owner's own private member checks it as an existing member"
     );
     Ok(())
 }
 
+/// The arguments of a daily `meerkat_schedule_create` named `name` aimed at
+/// `target`.
+fn daily_schedule(name: &str, target: Value) -> Value {
+    json!({
+        "name": name,
+        "trigger": {
+            "type": "interval",
+            "start_at_utc": "2026-07-01T05:00:00Z",
+            "every_seconds": 86400,
+        },
+        "target": target,
+    })
+}
+
+/// A schedule target that sends `content` to member `member` of mob `mob`.
+fn member_schedule_target(mob: &str, member: &str, content: &str) -> Value {
+    json!({
+        "target_kind": "mob",
+        "type": "member",
+        "mob_id": mob,
+        "member_id": member,
+        "action": { "type": "send", "content": content },
+    })
+}
+
+/// One agent schedule tool call `name` with `args` through `tools`, as the
+/// turn of the member whose session is `caller` dispatches it: the text it
+/// answers, or its refusal.
+async fn schedule_tool_call(
+    tools: &Arc<dyn meerkat_core::AgentToolDispatcher>,
+    caller: &meerkat_core::types::SessionId,
+    name: &str,
+    args: Value,
+) -> Result<String, meerkat_core::ToolError> {
+    let args = serde_json::value::RawValue::from_string(args.to_string())
+        .map_err(|error| meerkat_core::ToolError::invalid_arguments(name, error.to_string()))?;
+    let outcome = tools
+        .dispatch_with_context(
+            meerkat_core::types::ToolCallView {
+                id: "schedule-tool-call",
+                name,
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default()
+                .with_runtime_identity(caller.clone(), None),
+        )
+        .await?;
+    Ok(outcome
+        .result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            meerkat_core::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The id of the schedule a `meerkat_schedule_create` answered with.
+fn created_schedule_id(created: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(serde_json::from_str::<Value>(created)?["schedule_id"]
+        .as_str()
+        .ok_or_else(|| format!("no schedule id in {created}"))?
+        .to_string())
+}
+
+/// `answer` with `schedule_id` replaced by a placeholder, so the answers a
+/// verb gives two ids compare as answers.
+fn schedule_answer(answer: &Result<String, meerkat_core::ToolError>, schedule_id: &str) -> String {
+    match answer {
+        Ok(text) => format!("ok: {text}"),
+        Err(error) => format!("error: {error:?}"),
+    }
+    .replace(schedule_id, "<schedule>")
+}
+
 /// An agent's schedule tools refuse a target that names a member private to
 /// a person the agent does not act for, as an act on a member outside the
 /// agent's reach (`access_denied`), in every target form that names one: the
-/// member, a fork helper of it, and its session. A member private to the
-/// same person schedules into it, and a shared target stays open.
+/// member, a fork helper of it, and its session. A shared target stays open.
 #[tokio::test]
-async fn schedule_tools_refuse_a_private_target_unless_the_caller_shares_its_owner() -> TestResult {
+async fn schedule_tools_refuse_a_private_target_outside_the_callers_reach() -> TestResult {
     const MOB: &str = "private-schedule-targets";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let tools = crate::schedule_wiring::agent_schedule_tools_over_runtime_for_test(
+        meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new())),
+        &runtime,
+    );
+    let side_session = member_session(&runtime, "alpha-side").await?.to_string();
+    let shared_agent = member_session(&runtime, "alpha").await?;
+    let content = "Look at the salary review.";
+    for target in [
+        member_schedule_target(MOB, "alpha-side", content),
+        json!({
+            "target_kind": "mob",
+            "type": "fork_helper",
+            "mob_id": MOB,
+            "source_member_id": "alpha-side",
+            "member_id": "alpha-side-helper",
+            "prompt": content,
+        }),
+        json!({
+            "target_kind": "session",
+            "type": "resumable_session",
+            "session_id": side_session,
+            "action": { "type": "prompt", "prompt": content },
+        }),
+    ] {
+        let refused = schedule_tool_call(
+            &tools,
+            &shared_agent,
+            "meerkat_schedule_create",
+            daily_schedule("a reminder", target.clone()),
+        )
+        .await;
+        assert!(
+            matches!(&refused, Err(meerkat_core::ToolError::AccessDenied { .. })),
+            "a shared agent's schedule into a private member as {target} is refused as an \
+             act outside its reach: {refused:?}"
+        );
+    }
+    let open = schedule_tool_call(
+        &tools,
+        &shared_agent,
+        "meerkat_schedule_create",
+        daily_schedule("a reminder", member_schedule_target(MOB, "alpha", content)),
+    )
+    .await;
+    assert!(open.is_ok(), "a shared target stays open: {open:?}");
+    Ok(())
+}
+
+/// A schedule a private member's own agent writes, aimed at itself, is on no
+/// other agent's schedule surface. Another person's shared agent lists every
+/// schedule but it, and each verb that names a schedule by its id (read, its
+/// occurrences, rename, update, pause, resume, delete) answers it exactly as
+/// it answers an id no schedule holds, and changes nothing. The private
+/// member's own agent reads and lists it; after its owner closes the side
+/// chat, the shared agent still reads nothing of it.
+#[tokio::test]
+async fn a_private_members_schedule_is_absent_to_another_agents_schedule_tools() -> TestResult {
+    const MOB: &str = "private-schedule-reads";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let alice = bearer(alice_claims());
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let tools = crate::schedule_wiring::agent_schedule_tools_over_runtime_for_test(
+        meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new())),
+        &runtime,
+    );
+    let private = member_session(&runtime, "alpha-side").await?;
+    let shared = member_session(&runtime, "alpha").await?;
+    let hidden_id = created_schedule_id(
+        &schedule_tool_call(
+            &tools,
+            &private,
+            "meerkat_schedule_create",
+            daily_schedule(
+                "PRIVATE-NAME salary review",
+                member_schedule_target(
+                    MOB,
+                    "alpha-side",
+                    "PRIVATE-NOTE: Alice asks for 15% at the salary review.",
+                ),
+            ),
+        )
+        .await?,
+    )?;
+    let shared_id = created_schedule_id(
+        &schedule_tool_call(
+            &tools,
+            &shared,
+            "meerkat_schedule_create",
+            daily_schedule(
+                "Standup",
+                member_schedule_target(MOB, "alpha", "Post the standup notes."),
+            ),
+        )
+        .await?,
+    )?;
+
+    let listed = schedule_tool_call(&tools, &shared, "meerkat_schedule_list", json!({})).await?;
+    assert!(
+        listed.contains(&shared_id) && !listed.contains(&hidden_id) && !listed.contains("PRIVATE-"),
+        "the shared agent lists its own schedule and nothing of the private member's: {listed}"
+    );
+    let absent_id = meerkat::ScheduleId::new().to_string();
+    let by_id = |schedule_id: &str| {
+        vec![
+            (
+                "meerkat_schedule_get",
+                json!({ "schedule_id": schedule_id }),
+            ),
+            (
+                "meerkat_schedule_occurrences",
+                json!({ "schedule_id": schedule_id }),
+            ),
+            (
+                "meerkat_schedule_update",
+                json!({ "schedule_id": schedule_id, "name": "renamed by a shared agent" }),
+            ),
+            (
+                "meerkat_schedule_update",
+                json!({
+                    "schedule_id": schedule_id,
+                    "trigger": {
+                        "type": "interval",
+                        "start_at_utc": "2026-08-01T05:00:00Z",
+                        "every_seconds": 3600,
+                    },
+                }),
+            ),
+            (
+                "meerkat_schedule_pause",
+                json!({ "schedule_id": schedule_id }),
+            ),
+            (
+                "meerkat_schedule_resume",
+                json!({ "schedule_id": schedule_id }),
+            ),
+            (
+                "meerkat_schedule_delete",
+                json!({ "schedule_id": schedule_id }),
+            ),
+        ]
+    };
+    for ((verb, hidden), (_, absent)) in by_id(&hidden_id).into_iter().zip(by_id(&absent_id)) {
+        let hidden_answer = schedule_tool_call(&tools, &shared, verb, hidden.clone()).await;
+        let absent_answer = schedule_tool_call(&tools, &shared, verb, absent).await;
+        assert_eq!(
+            schedule_answer(&hidden_answer, &hidden_id),
+            schedule_answer(&absent_answer, &absent_id),
+            "{verb} {hidden} answers the private member's schedule as an id no schedule holds"
+        );
+    }
+    let own = schedule_tool_call(
+        &tools,
+        &private,
+        "meerkat_schedule_get",
+        json!({ "schedule_id": hidden_id }),
+    )
+    .await?;
+    assert!(
+        own.contains("PRIVATE-NAME salary review") && own.contains("\"phase\":\"active\""),
+        "the private member's own agent reads its schedule, unchanged: {own}"
+    );
+    let own_list = schedule_tool_call(&tools, &private, "meerkat_schedule_list", json!({})).await?;
+    assert!(
+        own_list.contains(&hidden_id),
+        "the private member's own agent lists its schedule: {own_list}"
+    );
+
+    let closed = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/retire_member",
+        json!({ "member_id": "alpha-side" }),
+    )
+    .await;
+    assert!(closed["error"].is_null(), "{closed:#}");
+    assert!(
+        leaves_the_roster(&runtime, "alpha-side").await?,
+        "the owner closes the side chat"
+    );
+    let listed = schedule_tool_call(&tools, &shared, "meerkat_schedule_list", json!({})).await?;
+    assert!(
+        listed.contains(&shared_id) && !listed.contains(&hidden_id) && !listed.contains("PRIVATE-"),
+        "the closed side chat's schedule stays out of the shared agent's list: {listed}"
+    );
+    let hidden_answer = schedule_tool_call(
+        &tools,
+        &shared,
+        "meerkat_schedule_get",
+        json!({ "schedule_id": hidden_id }),
+    )
+    .await;
+    let absent_answer = schedule_tool_call(
+        &tools,
+        &shared,
+        "meerkat_schedule_get",
+        json!({ "schedule_id": absent_id }),
+    )
+    .await;
+    assert_eq!(
+        schedule_answer(&hidden_answer, &hidden_id),
+        schedule_answer(&absent_answer, &absent_id),
+        "the closed side chat's schedule reads as an id no schedule holds"
+    );
+    Ok(())
+}
+
+/// A private member's own schedule tools write only schedules aimed at the
+/// member itself, so nothing of its person's conversation runs in another
+/// member's turns: a create whose target names any other member, in any
+/// form (a shared member, its identity or session, a helper forked from it or
+/// spawned beside it, or another member private to the same person), is
+/// refused as a policy denial (`private_member_schedule_target`), and so is
+/// an update that aims its own schedule elsewhere or changes a schedule aimed
+/// elsewhere. A schedule aimed at itself is written and renamed as before.
+#[tokio::test]
+async fn a_private_member_schedules_only_into_itself() -> TestResult {
+    const MOB: &str = "private-schedule-self";
     let state = tempfile::tempdir()?;
     let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
     seeded_member(&runtime, "worker", "alpha", &[]).await?;
@@ -2955,91 +3263,358 @@ async fn schedule_tools_refuse_a_private_target_unless_the_caller_shares_its_own
         let forked = fork_on_console(&app, Some(&alice), "alpha", side_chat).await;
         assert!(forked["error"].is_null(), "{forked:#}");
     }
-    let service = meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new()));
-    let registry = crate::schedule_wiring::ScheduleMobTargetRegistry::default();
-    registry.set_mob_state(runtime.agent_mob_mcp_state());
-    let tools = crate::schedule_wiring::agent_schedule_tools_for_test(service, registry);
-    let side_session = member_session(&runtime, "alpha-side").await?.to_string();
-    let create = |target: Value| {
-        json!({
-            "name": "a reminder",
-            "trigger": {
-                "type": "interval",
-                "start_at_utc": "2026-07-01T05:00:00Z",
-                "every_seconds": 86400,
-            },
-            "target": target,
-        })
+    let tools = crate::schedule_wiring::agent_schedule_tools_over_runtime_for_test(
+        meerkat::ScheduleService::new(Arc::new(meerkat::MemoryScheduleStore::new())),
+        &runtime,
+    );
+    let private = member_session(&runtime, "alpha-side").await?;
+    let shared = member_session(&runtime, "alpha").await?;
+    let note = "PRIVATE-NOTE: Alice asks for 15% at the salary review.";
+    let refused = |answer: &Result<String, meerkat_core::ToolError>| {
+        matches!(
+            answer,
+            Err(meerkat_core::ToolError::PolicyDenied { denial })
+                if denial.code == "private_member_schedule_target"
+        )
     };
-    let member_target = |member: &str| {
+    for target in [
+        member_schedule_target(MOB, "alpha", note),
+        member_schedule_target(MOB, "alpha-note", note),
+        json!({
+            "target_kind": "identity",
+            "type": "resumable_identity",
+            "identity": "alpha",
+            "action": { "type": "prompt", "prompt": note },
+        }),
+        json!({
+            "target_kind": "session",
+            "type": "resumable_session",
+            "session_id": shared.to_string(),
+            "action": { "type": "prompt", "prompt": note },
+        }),
+        json!({
+            "target_kind": "session",
+            "type": "exact_session",
+            "session_id": shared.to_string(),
+            "action": { "type": "prompt", "prompt": note },
+        }),
         json!({
             "target_kind": "mob",
-            "type": "member",
+            "type": "fork_helper",
             "mob_id": MOB,
-            "member_id": member,
-            "action": { "type": "send", "content": "Look at the salary review." },
-        })
-    };
-    let schedule_as = |caller: meerkat_core::types::SessionId, target: Value| {
-        let tools = Arc::clone(&tools);
-        let args = create(target);
+            "source_member_id": "alpha",
+            "member_id": "alpha-helper",
+            "prompt": note,
+        }),
+        json!({
+            "target_kind": "mob",
+            "type": "spawn_helper",
+            "mob_id": MOB,
+            "member_id": "alpha-spawned",
+            "prompt": note,
+        }),
+    ] {
+        let answer = schedule_tool_call(
+            &tools,
+            &private,
+            "meerkat_schedule_create",
+            daily_schedule("a reminder", target.clone()),
+        )
+        .await;
+        assert!(
+            refused(&answer),
+            "the private member's schedule aimed at {target} is refused: {answer:?}"
+        );
+    }
+    let own_id = created_schedule_id(
+        &schedule_tool_call(
+            &tools,
+            &private,
+            "meerkat_schedule_create",
+            daily_schedule(
+                "a reminder",
+                member_schedule_target(MOB, "alpha-side", note),
+            ),
+        )
+        .await?,
+    )?;
+    let retargeted = schedule_tool_call(
+        &tools,
+        &private,
+        "meerkat_schedule_update",
+        json!({ "schedule_id": own_id, "target": member_schedule_target(MOB, "alpha", note) }),
+    )
+    .await;
+    assert!(
+        refused(&retargeted),
+        "the private member's schedule is not aimed elsewhere: {retargeted:?}"
+    );
+    let renamed = schedule_tool_call(
+        &tools,
+        &private,
+        "meerkat_schedule_update",
+        json!({ "schedule_id": own_id, "name": "the salary review" }),
+    )
+    .await?;
+    assert!(
+        renamed.contains("the salary review"),
+        "the private member renames its own schedule: {renamed}"
+    );
+    let shared_id = created_schedule_id(
+        &schedule_tool_call(
+            &tools,
+            &shared,
+            "meerkat_schedule_create",
+            daily_schedule(
+                "Standup",
+                member_schedule_target(MOB, "alpha", "Post the standup notes."),
+            ),
+        )
+        .await?,
+    )?;
+    let into_shared = schedule_tool_call(
+        &tools,
+        &private,
+        "meerkat_schedule_update",
+        json!({ "schedule_id": shared_id, "name": "PRIVATE-NAME salary review" }),
+    )
+    .await;
+    assert!(
+        refused(&into_shared),
+        "the private member changes no schedule aimed elsewhere: {into_shared:?}"
+    );
+    let shared_read = schedule_tool_call(
+        &tools,
+        &shared,
+        "meerkat_schedule_get",
+        json!({ "schedule_id": shared_id }),
+    )
+    .await?;
+    assert!(
+        shared_read.contains("Standup") && !shared_read.contains("PRIVATE-"),
+        "the shared schedule is unchanged: {shared_read}"
+    );
+    Ok(())
+}
+
+/// A WorkGraph binding cannot serve a private member, which is built without
+/// WorkGraph tools while each turn of a bound member takes the binding's
+/// tools: a goal or a reassignment aimed at a private side chat, in any form
+/// of the target, and a goal whose supervisor is one, are refused for every
+/// caller who may see it, its owner included, as naming a member no binding
+/// can serve (`-32602`, `private_member_workgraph_target`). Nothing is bound
+/// to it, and the side chat keeps taking turns.
+#[tokio::test]
+async fn a_workgraph_binding_on_a_private_member_is_refused_to_its_owner_too() -> TestResult {
+    const MOB: &str = "private-workgraph-owner";
+    let (_state, runtime, app) = signed_in_unified_runtime(MOB).await?;
+    let alice = bearer(alice_claims());
+    let forked = fork_on_console(&app, Some(&alice), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let side = AgentIdentity::from("alpha-side");
+    runtime.mob_handle().ensure_member_live(&side).await?;
+    let session = runtime
+        .mob_handle()
+        .get_member(&side)
+        .await?
+        .and_then(|entry| entry.bridge_session_id().cloned())
+        .ok_or("the side chat has a session")?
+        .to_string();
+    let turn = |text: &'static str| {
+        let runtime = Arc::clone(&runtime);
+        let side = side.clone();
         async move {
-            let args = serde_json::value::RawValue::from_string(args.to_string())
-                .map_err(|error| error.to_string())?;
+            runtime
+                .mob_handle()
+                .member(&side)
+                .await
+                .map_err(|error| error.to_string())?
+                .start_turn(
+                    meerkat_core::types::ContentInput::Text(text.to_string()),
+                    meerkat_core::types::HandlingMode::Queue,
+                    meerkat_mob::MemberTurnOptions::new(),
+                    None,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                .wait()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
+    };
+    assert_eq!(
+        turn("A first turn.").await,
+        Ok(()),
+        "the side chat takes a turn"
+    );
+    let refused = |answer: &Value| {
+        answer["error"]["code"] == json!(-32602)
+            && answer["error"]["data"]["kind"] == json!("private_member_workgraph_target")
+    };
+    let forms = [
+        json!({ "kind": "identity", "identity": "alpha-side" }),
+        json!({ "kind": "owner", "owner_key": agent_owner_key(MOB, "alpha-side") }),
+        json!({ "kind": "lowered_owner", "owner_key": agent_owner_key(MOB, "alpha-side") }),
+        json!({ "kind": "owner", "owner_key": { "kind": "session", "id": session } }),
+        json!({ "kind": "session", "session_id": session }),
+    ];
+    let shared = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "Alice's goal for the shared agent",
+            "target": { "kind": "identity", "identity": "alpha" },
+        }),
+    )
+    .await;
+    assert!(
+        shared["error"].is_null(),
+        "a shared member takes a goal: {shared:#}"
+    );
+    let binding_id = shared["result"]["attention"]["binding_id"].clone();
+    let revision = shared["result"]["item"]["revision"].clone();
+    for target in &forms {
+        let created = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/workgraph/goal/create",
+            json!({ "title": "Alice's goal for her side chat", "target": target }),
+        )
+        .await;
+        assert!(
+            refused(&created),
+            "the owner's goal aimed at her private side chat as {target} is refused: \
+             {created:#}"
+        );
+        let reassigned = console_rpc_as(
+            &app,
+            Some(&alice),
+            "meta/workgraph/attention/reassign",
+            json!({ "binding_id": binding_id, "expected_revision": revision, "target": target }),
+        )
+        .await;
+        assert!(
+            refused(&reassigned),
+            "the owner's reassignment onto her private side chat as {target} is refused: \
+             {reassigned:#}"
+        );
+    }
+    let supervised = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "Alice's supervised goal",
+            "target": { "kind": "identity", "identity": "nobody-here" },
+            "completion_policy": {
+                "kind": "supervisor",
+                "owner_key": agent_owner_key(MOB, "alpha-side"),
+            },
+        }),
+    )
+    .await;
+    assert!(
+        refused(&supervised),
+        "the owner's goal supervised by her private side chat is refused: {supervised:#}"
+    );
+    assert_eq!(
+        turn("A second turn.").await,
+        Ok(()),
+        "the side chat still takes turns"
+    );
+    let listed = console_rpc_as(
+        &app,
+        Some(&alice),
+        "meta/workgraph/attention/list",
+        json!({}),
+    )
+    .await;
+    assert!(
+        listed["error"].is_null()
+            && !listed.to_string().contains("agent/alpha-side")
+            && !listed.to_string().contains(&session),
+        "nothing is bound to the private side chat: {listed:#}"
+    );
+    Ok(())
+}
+
+/// Meerkat's member tools (`member_status`, `retire_member`,
+/// `force_cancel_member`, mounted for a member whose profile has mob tools)
+/// answer a member private to a person the calling member does not act for
+/// exactly as a member the mob does not hold, and change nothing. The
+/// owner's own private member reads it as an existing member.
+#[tokio::test]
+async fn meerkat_member_tools_answer_a_hidden_member_as_an_absent_one() -> TestResult {
+    const MOB: &str = "private-member-tools";
+    let state = tempfile::tempdir()?;
+    let runtime = persistent_gateway_runtime_in(state.path(), MOB, "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let app = console_json_router_with_state(enforced_console(&runtime, None));
+    let forked = fork_on_console(&app, Some(&bearer(alice_claims())), "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "{forked:#}");
+    let tools = runtime.handle().member_operator_tools_for_test()?;
+    let call = |caller: meerkat_core::types::SessionId, tool: &'static str, member: &str| {
+        let tools = Arc::clone(&tools);
+        let args = json!({ "member_id": member });
+        async move {
+            let args =
+                serde_json::value::RawValue::from_string(args.to_string()).map_err(|error| {
+                    meerkat_core::ToolError::invalid_arguments(tool, error.to_string())
+                })?;
             tools
                 .dispatch_with_context(
                     meerkat_core::types::ToolCallView {
-                        id: "schedule-create",
-                        name: "meerkat_schedule_create",
+                        id: "member-tool-call",
+                        name: tool,
                         args: &args,
                     },
                     &meerkat_core::ToolDispatchContext::default()
                         .with_runtime_identity(caller, None),
                 )
                 .await
-                .map(|_| ())
-                .map_err(|error| format!("{error:?}"))
         }
     };
+    let answer = |outcome: Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>,
+                  name: &str| {
+        match outcome {
+            Ok(outcome) => format!("ok: {outcome:?}"),
+            Err(error) => format!("error: {error:?}"),
+        }
+        .replace(name, "<member>")
+    };
 
-    let shared_agent = member_session(&runtime, "alpha").await?;
-    for target in [
-        member_target("alpha-side"),
-        json!({
-            "target_kind": "mob",
-            "type": "fork_helper",
-            "mob_id": MOB,
-            "source_member_id": "alpha-side",
-            "member_id": "alpha-side-helper",
-            "prompt": "Look at the salary review.",
-        }),
-        json!({
-            "target_kind": "session",
-            "type": "resumable_session",
-            "session_id": side_session,
-            "action": { "type": "prompt", "prompt": "Look at the salary review." },
-        }),
-    ] {
-        let refused = schedule_as(shared_agent.clone(), target.clone()).await;
-        assert!(
-            matches!(&refused, Err(error) if error.contains("AccessDenied")),
-            "a shared agent's schedule into a private member as {target} is refused as an \
-             act outside its reach: {refused:?}"
+    let shared = member_session(&runtime, "alpha").await?;
+    for tool in ["member_status", "force_cancel_member", "retire_member"] {
+        let hidden = answer(call(shared.clone(), tool, "alpha-side").await, "alpha-side");
+        let absent = answer(call(shared.clone(), tool, "alpha-gone").await, "alpha-gone");
+        assert_eq!(
+            hidden, absent,
+            "a shared member's {tool} of a private member answers as for an absent member"
         );
     }
-    assert_eq!(
-        schedule_as(shared_agent, member_target("alpha")).await,
-        Ok(()),
-        "a shared target stays open"
+    assert!(
+        runtime
+            .handle()
+            .get_member(&AgentIdentity::from("alpha-side"))
+            .await?
+            .is_some(),
+        "the side chat is still seated"
     );
-    assert_eq!(
-        schedule_as(
-            member_session(&runtime, "alpha-note").await?,
-            member_target("alpha-side"),
-        )
-        .await,
-        Ok(()),
-        "a member private to the same person schedules into it"
+
+    let private = member_session(&runtime, "alpha-side").await?;
+    let own = answer(
+        call(private.clone(), "member_status", "alpha-side").await,
+        "alpha-side",
+    );
+    let absent = answer(
+        call(private, "member_status", "alpha-gone").await,
+        "alpha-gone",
+    );
+    assert_ne!(
+        own, absent,
+        "the owner's own private member reads it as an existing member"
     );
     Ok(())
 }

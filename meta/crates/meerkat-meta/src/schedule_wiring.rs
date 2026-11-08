@@ -1396,14 +1396,18 @@ fn agent_schedule_tool_chain(
     ))
 }
 
-/// The agent-facing schedule tools a composition installs, over `service`
-/// and `mob_target_registry`, without the firing-host gate: rows outside
+/// The agent-facing schedule tools a composition installs, over `service`,
+/// without the firing-host gate, over a registry that adopts `runtime`'s mobs
+/// as a gateway composition adopts its runtime's
+/// ([`crate::gateway_composition::adopt_schedule_mob_targets`]): rows outside
 /// this module drive an agent's schedule tool call through them.
 #[cfg(test)]
-pub(crate) fn agent_schedule_tools_for_test(
+pub(crate) fn agent_schedule_tools_over_runtime_for_test(
     service: ScheduleService,
-    mob_target_registry: ScheduleMobTargetRegistry,
+    runtime: &crate::mob_handle_runtime::MobRuntime,
 ) -> Arc<dyn meerkat_core::AgentToolDispatcher> {
+    let mob_target_registry = ScheduleMobTargetRegistry::default();
+    mob_target_registry.set_mob_state(runtime.agent_mob_mcp_state());
     agent_schedule_tool_chain(service, mob_target_registry)
 }
 

@@ -353,9 +353,9 @@ def stage_b_checks(f, actions):
         'fixture-claims': b and f.get('mode') == '"fixture"' and f.get('claimed') == 'TRUE' and admitted(1)
             and 'B_FixtureCall' in actions,
         # An Unavailable read published as Absent discharges the read owed after a lost answer:
-        # the record is kept with nothing owed over Core's admission, and no final absence.
+        # the record is kept with nothing owed over Core's admission, with a false final absence.
         'unavailable-as-absent': b and last == 'B_ObserveRead' and f.get('epoch') == '1' and phase(1) == 'Offered'
-            and num(1, 'absence_through') == 0 and ['inc1', 'k1', '1'] in keys3 and jr(1, 'read_owed') == 'FALSE',
+            and num(1, 'absence_through') == 1 and ['inc1', 'k1', '1'] in keys3 and jr(1, 'read_owed') == 'FALSE',
         # An Absent read fed as Core's refusal of the last open dispatch: the receipt names a
         # refusal Core never made.
         'absent-terminates': b and last == 'B_ObserveRead' and not_admitted(1)
@@ -382,6 +382,11 @@ def stage_b_checks(f, actions):
         # The final absence recorded over a dispatch of this process that then admits (owner mutant).
         'absence-in-process': b and num(1, 'absence_through') > 0
             and any(t[1] == 'k1' and int(t[3]) <= num(1, 'absence_through') for t in native),
+        # The durable read's absence recorded as final over a lost dispatch of this process whose
+        # admission write is still in flight (owner mutant).
+        'durable-read-counts': b and last == 'B_ObserveRead' and f.get('epoch') == '1'
+            and num(1, 'absence_through') >= 1 and 'B_ReadDurable' in actions
+            and any(t[1] == 'k1' and int(t[3]) <= num(1, 'absence_through') for t in tuples(f.get('landing'))),
         'no-relookup-b': b and f.get('prep_refused') == 'TRUE' and proc(out='Refused', cause='PreparationRefused')
             and 'controller_grant' in strings(f.get('dup_arts')) and issue_once,
         'row-class-first-send-b': b and f.get('door') == '"ClassInput"' and admitted(1)
@@ -519,11 +524,23 @@ def stage_b_checks(f, actions):
         # and Core's next re-offer, a dispatch after the evidence, is denied.
         'row-held-claim-denied-after-restart': b and last == 'B_Settle' and f.get('door') == '"Peer"'
             and f.get('epoch') == '2' and f.get('auth_ok') == 'FALSE' and native == [] and phase(1) == 'Offered'
+            and f.get('absence_epoch') == '2'
             and o(1, 'unresolved_dispatches') != '{}' and num(1, 'absence_through') > 0 and jr(1, 'fifo') == 'FALSE'
             and any(q(p.get('kind')) == 'core' and q(p.get('pc')) == 'Done' and q(p.get('out')) == 'Refused'
                     and q(p.get('cause')) == 'PolicyDenied' and q(p.get('d')).isdigit()
                     and int(q(p.get('d'))) > num(1, 'absence_through') for p in procs)
             and 'B_Crash' in actions and before_last('B_ObserveRead', 'B_CoreReoffer'),
+        # The held claim released in the same process: Core's live read recorded the final
+        # absence over the lost dispatch and the held re-offer's, and Core's next re-offer, a
+        # dispatch after the evidence, is denied; no crash or stop before.
+        'row-held-claim-denied-in-process': b and last == 'B_Settle' and f.get('door') == '"Peer"'
+            and f.get('epoch') == '1' and f.get('auth_ok') == 'FALSE' and native == [] and phase(1) == 'Offered'
+            and o(1, 'unresolved_dispatches') != '{}' and num(1, 'absence_through') >= 2 and jr(1, 'fifo') == 'FALSE'
+            and any(q(p.get('kind')) == 'core' and q(p.get('pc')) == 'Done' and q(p.get('out')) == 'Refused'
+                    and q(p.get('cause')) == 'PolicyDenied' and q(p.get('d')).isdigit()
+                    and int(q(p.get('d'))) > num(1, 'absence_through') for p in procs)
+            and 'B_Crash' not in actions and 'B_Stop' not in actions and 'B_ReadCore' in actions
+            and before_last('B_ObserveRead', 'B_CoreReoffer'),
         # The drain's FIFO head first: the queued claim's re-offer before the second delivery.
         'row-peer-head-first': b and f.get('door') == '"Peer"' and admitted(1) and len(native) == 1
             and f.get('begun') == '2' and proc(kind='core', out='Admitted') and proc(kind='caller', n='2', out='Admitted')
@@ -662,6 +679,8 @@ def live_witness(name, states, loop):
         'live-no-deadline': (proc(pc='MetaWait', dl='FALSE') or proc(pc='PeerWait', dl='FALSE'))
             and (f('gate') == '"Held"' or f('current_inc') == '"inc2"'),
         'live-no-reoffer-fairness': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE',
+        # The live read fed as durable: the claim stays held and queued, the reads go on.
+        'live-read-as-durable': f('door') == '"Peer"' and jr(1, 'fifo') == 'TRUE' and jr(1, 'held') == 'TRUE',
         # Without the declared wait assumption a send waits forever.
         'live-driver-only-disposition': f('offer_phase') == '"Offered"'
             and (proc(pc='MetaWait') or proc(pc='PeerWait')),

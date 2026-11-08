@@ -57,6 +57,10 @@ pub fn original_offer_schema() -> meerkat_machine_schema::MachineSchema {
             "ToolkitWithdrawalCause",
             ToolkitWithdrawalCause::MODEL_VARIANTS,
         ),
+        meerkat_machine_schema::NamedTypeBinding::string_enum(
+            "ToolkitCoreRead",
+            ToolkitCoreRead::MODEL_VARIANTS,
+        ),
     ]);
     schema
 }

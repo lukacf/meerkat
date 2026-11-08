@@ -65,3 +65,8 @@ bounded_enum!(ToolkitWithdrawalCause {
     PreparationStale,
     ProcessEnded,
 });
+// Which of Core's reads by key answered: the durable read, which takes no gate (an admission
+// whose write is still in flight after its call returned may land after it answers), or the
+// live read, which takes the session's mutation gate and then its driver lock and so is ordered
+// after any admission write in flight on the session.
+bounded_enum!(ToolkitCoreRead { Durable, Live });

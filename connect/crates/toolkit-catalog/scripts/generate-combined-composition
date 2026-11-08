@@ -23,7 +23,9 @@ closed admission or a verdict over an ambiguous dispatch); durable deliveries ke
 and a record withdrawn for no verdict is prepared again on Core's re-offer; volatile and
 supervisor deliveries (no claim) end dropped past their deadline, their records kept for the
 sender's retry. Two offer slots of one source and two send tasks; the
-driver observes Core's outcome by the offer's own qualified key; one crash and restart;
+driver observes Core's outcome by the offer's own qualified key (Core's live read, ordered after
+an admission write still in flight; with late landings also its durable read, whose absence never
+counts a lost dispatch of this process); one crash and restart;
 admission closure with the close's join, the close's unresolved record scoped to the closing
 process, and in the stop profiles the process's end after its close and the restart into a new
 component lifetime, whose re-drive and Core's re-offer dispatch the records the close recorded.
@@ -51,10 +53,11 @@ OWN_INITIAL = ['First', 'Partial', 'Bound']
 BOTH = ['A', 'B']
 HELD_DOORS = ['Find', 'Launch']
 # Stage B environment dimensions a profile may enable. The full-environment bases take ALL_ENV;
-# the stop (the process ends after its close and restarts into a new component lifetime) runs in
-# profiles of its own.
+# the stop (the process ends after its close and restarts into a new component lifetime) and the
+# late landing (Core's admission write still in flight after its call returned, and the driver's
+# durable read beside the live one) run in profiles of their own.
 ALL_ENV = ['hold', 'revoke', 'session', 'srcclose', 'close', 'crash', 'drop', 'lost', 'corerefuse']
-ENV_TOKENS = ALL_ENV + ['stop']
+ENV_TOKENS = ALL_ENV + ['stop', 'late']
 
 # The attempt model's own variables (stage A), renamed a_*; the rest are shared with B.
 A_OWN = ['attempt', 'effect', 'decided', 'wrote', 'nested', 'pc', 'step', 'after_store', 'bw', 'answer',
@@ -65,7 +68,8 @@ B_VARS = ['mode', 'sp', 'prep', 'jr', 'begun', 'native', 'core_refusals', 'lost_
           'meta_holder', 'pub_holder', 'conn_holder', 'store_pc', 'alive', 'epoch', 'scanned', 'joined',
           'read_slot', 'raw_read', 'published_read', 'unavail_reads', 'dup_arts', 'prep_refused', 'drop_partial',
           'held_site', 'entered_after_close', 'claimed', 'lost_reply_seen', 'crashed_offered', 'admitted_stale',
-          'cas_lost', 'replayed', 'close_waited_prep', 'dead_prep', 'a_held', 'refusals', 'life_cur', 'orphan_claim']
+          'cas_lost', 'replayed', 'close_waited_prep', 'dead_prep', 'a_held', 'refusals', 'life_cur', 'orphan_claim',
+          'read_kind', 'landing', 'absence_epoch']
 ATTEMPT_FAULTS = ['drop-controller-mark', 'silent-blocking-writer', 'drop-callback-mark', 'drop-callback-leaf-mark',
                   'drop-class-input-mark', 'drop-service-setup-mark', 'drop-service-observation-mark',
                   'drop-first-binding-mark', 'drop-configured-setup-mark', 'drop-configured-setup-grant-mark',
@@ -108,9 +112,13 @@ OWNER_MUTANTS = {
     # The final absence is recorded before this process dispatched the record (its re-drive
     # or Core's re-offer still owed).
     'absence-without-redispatch': ('RecordFinalAbsence', '(last_dispatch_epoch = epoch)', 'TRUE'),
-    # The final absence is recorded while a dispatch of this process is open or unresolved.
+    # The final absence is recorded over any open or lost dispatch, one of this process in
+    # flight included.
     'absence-in-process': ('RecordFinalAbsence', '\\A dispatch \\in DOMAIN dispatch_epochs :',
                            '\\A dispatch \\in {} :'),
+    # The final absence counts a lost dispatch of this process on Core's durable read, which
+    # takes no gate: the dispatch's admission write may still be in flight.
+    'durable-read-counts': ('RecordFinalAbsence', '(read = "Live")', 'TRUE'),
     # The close's unresolved record blocks every later dispatch start, in every later process
     # (the record is never driven again after a stop and restart).
     'close-blocks-later-process': ('RecordDispatchStart', '(close_epoch < epoch)', '(close_epoch = 0)'),
@@ -271,12 +279,14 @@ def build_model(root, output):
                             'life!SettleClosed(life_incarnation, life_revision, life_close_id)'], LIFE)
     # The stop: after its close settled, the process ends (the ordinary shutdown) while a record
     # is not terminal or Core holds a queued claim. Its in-process obligations end with it; the
-    # owner records, their outboxes and Core's queued claims stay.
+    # owner records, their outboxes and Core's queued claims stay; an admission write still in
+    # flight (env late) ends with it, landed or not.
     action('B_Stop', ['"stop" \\in Env', 'alive', 'epoch = 1', 'life_phase = "Closed"',
                       '(\\E i \\in Slots : NonTerminal(i)) \\/ QueuedClaim', "alive' = FALSE",
                       "jr' = [i \\in Slots |-> [jr[i] EXCEPT !.parked = FALSE, !.redrive = FALSE, !.read_owed = FALSE,\n"
-                      '                              !.held = FALSE]]'],
-           {'alive', 'jr'})
+                      '                              !.held = FALSE]]',
+                      "\\E landed \\in SUBSET landing : native' = native \\cup landed", "landing' = {}"],
+           {'alive', 'jr', 'native', 'landing'})
     # The next process's component lifetime, a new incarnation, staged and opened after a restart
     # that followed a stop.
     action('B_Life2Stage', ['life_cur = 2', 'alive', 'life2!StageComponent("inc2", "component1", "activation2")'],
@@ -540,6 +550,11 @@ def build_model(root, output):
     # admitted passes no new fence: Core's dedup answers it (the readmitted-fence mutant fences
     # it again). The fence's refusal keeps its cause, checked in the decision's order (a closed
     # admission, a closed source, a denied authority): it decides the binder's answer to Core.
+    # With late landings (env late) a lost answer may leave its admission write still in flight
+    # after the call returned (LostPending): it lands or fails later (B_Land). It holds the
+    # session's mutation gate and driver lock until then, so Core's next admission on the
+    # session waits for it: the entry resolves the session's writes in flight first, then
+    # deduplicates against what landed.
     action('B_Entry', ['sp[p].pc = "Entry"', 'meta_holder = p', 'alive',
                        'LET r == sp[p]\n'
                        '           fence == \\/ r.kind = "core" /\\ ObservedAdmitted(r.slot) /\\ Fault # "readmitted-fence"\n'
@@ -547,26 +562,40 @@ def build_model(root, output):
                        '                           THEN r.view ELSE auth_ok)\n'
                        '                       /\\ SourceOpen /\\ Admission\n'
                        '           inc == IF r.kind = "core" /\\ ObservedAdmitted(r.slot) THEN OInc(r.slot) ELSE current_inc\n'
-                       '           dup == KeyAdmitted(inc, r.key)\n'
-                       '       IN \\E res \\in EntryResults(fence, dup) :\n'
+                       '       IN \\E landed \\in SUBSET WritesInFlight(inc) :\n'
+                       '          LET base == native \\cup landed\n'
+                       '              dup == \\E x \\in base : x[1] = inc /\\ x[2] = r.key\n'
+                       '          IN \\E res \\in EntryResults(fence, dup) :\n'
                        "            /\\ native' = IF res \\in {\"Admitted\", \"LostAfter\"} /\\ ~dup\n"
-                       '                         THEN native \\cup {<<inc, r.key, epoch, r.d>>} ELSE native\n'
-                       "            /\\ admitted_stale' = (admitted_stale \\/ (res \\in {\"Admitted\", \"LostAfter\"} /\\ ~dup /\\ ~auth_ok))\n"
+                       '                         THEN base \\cup {<<inc, r.key, epoch, r.d>>} ELSE base\n'
+                       "            /\\ landing' = (landing \\ WritesInFlight(inc))\n"
+                       '                          \\cup (IF res = "LostPending" THEN {<<inc, r.key, epoch, r.d>>} ELSE {})\n'
+                       "            /\\ admitted_stale' = (admitted_stale \\/ (res \\in {\"Admitted\", \"LostAfter\", \"LostPending\"}\n"
+                       '                                                     /\\ ~dup /\\ ~auth_ok))\n'
                        "            /\\ core_refusals' = IF res = \"NotAdmitted\" THEN core_refusals + 1 ELSE core_refusals\n"
                        "            /\\ refusals' = CASE res = \"NotAdmitted\" -> refusals \\cup {<<r.slot, r.d, \"CoreRefused\">>}\n"
                        "                            [] res = \"EntryRefused\" -> refusals \\cup {<<r.slot, r.d, \"EntryRefused\">>}\n"
                        '                            [] OTHER -> refusals\n'
-                       "            /\\ lost_count' = IF res \\in {\"LostAfter\", \"LostBefore\"} THEN lost_count + 1 ELSE lost_count\n"
-                       "            /\\ jr' = IF res \\in {\"LostAfter\", \"LostBefore\"} /\\ ClaimedPeer\n"
+                       "            /\\ lost_count' = IF res \\in LostResults THEN lost_count + 1 ELSE lost_count\n"
+                       "            /\\ jr' = IF res \\in LostResults /\\ ClaimedPeer\n"
                        "                      THEN [jr EXCEPT ![r.slot].fifo = TRUE] ELSE jr\n"
                        "            /\\ sp' = [sp EXCEPT ![p] = [@ EXCEPT !.pc = \"Settle\",\n"
-                       '                         !.ans = CASE res \\in {"LostAfter", "LostBefore"} -> "Unresolved"\n'
+                       '                         !.ans = CASE res \\in LostResults -> "Unresolved"\n'
                        '                                   [] res = "NotAdmitted" -> "CoreRefused"\n'
                        '                                   [] OTHER -> res,\n'
                        '                         !.cause = IF res = "EntryRefused" THEN EntryFenceCause ELSE @]]',
                        "meta_holder' = 0"],
-           {'native', 'admitted_stale', 'core_refusals', 'refusals', 'lost_count', 'jr', 'sp', 'meta_holder'},
+           {'native', 'landing', 'admitted_stale', 'core_refusals', 'refusals', 'lost_count', 'jr', 'sp', 'meta_holder'},
            params=PROC)
+    # Core's store answers an admission write still in flight after its call returned (env
+    # late): the write lands (the key admitted) or fails (never admitted). Until then it holds the
+    # session's mutation gate and driver lock: Core's next admission on the session (B_Entry) and
+    # its live read (B_ReadCore) wait for it; its durable read (B_ReadDurable) does not.
+    action('B_Land', ['alive', 'landing # {}',
+                      '\\E x \\in landing : \\E lands \\in BOOLEAN :\n'
+                      "        /\\ native' = IF lands THEN native \\cup {x} ELSE native\n"
+                      "        /\\ landing' = landing \\ {x}"],
+           {'native', 'landing'})
     # After Meta returns (nothing durable inside its section or the entry's callbacks), the
     # effect runner feeds the dispatch's answer to the owner, which decides: an admission
     # settles (RetainCoreReceipt); a refusal settles only when its dispatch is the only one
@@ -616,8 +645,9 @@ def build_model(root, output):
                         # (the stale-read-clears mutant lets it discharge the new read owed).
                         "read_slot' = IF StaleRead(p) THEN 0 ELSE read_slot",
                         "raw_read' = IF StaleRead(p) THEN \"Unread\" ELSE raw_read",
-                        "published_read' = IF StaleRead(p) THEN \"Unread\" ELSE published_read"],
-           OFFERS | {'jr', 'claimed', 'sp', 'read_slot', 'raw_read', 'published_read'}, params=PROC)
+                        "published_read' = IF StaleRead(p) THEN \"Unread\" ELSE published_read",
+                        "read_kind' = IF StaleRead(p) THEN \"\" ELSE read_kind"],
+           OFFERS | {'jr', 'claimed', 'sp', 'read_slot', 'raw_read', 'published_read', 'read_kind'}, params=PROC)
     # Meta's wait (one deadline per send, at most 3 free rebinds) and Core's peer waiter (one
     # deadline per delivery). The wait ends when its condition clears (a rebind of the same
     # input and key), or at the deadline, which passes only while the condition persists:
@@ -673,23 +703,34 @@ def build_model(root, output):
     # Reads by the offer's own qualified key when one is owed (a lost answer, a restart):
     # Found, a successful Absent or Unavailable (I13: unavailable is never absence; the
     # mutant publishes it as Absent). Core and storage are unavailable for at most
-    # UnavailBound reads (the core-unavailable-forever profile drops the bound).
-    action('B_ReadCore', ['alive', 'scanned', '~joined', 'read_slot = 0', 'OPhase(i) = "Offered"', 'jr[i].read_owed',
-                          '\\E available \\in AvailChoices :\n'
-                          "        /\\ raw_read' = IF ~available THEN \"Unavailable\" ELSE IF OfferAdmitted(i) THEN \"Found\" ELSE \"Absent\"\n"
-                          "        /\\ published_read' = IF Fault = \"unavailable-as-absent\" /\\ ~available THEN \"Absent\" ELSE raw_read'\n"
-                          "        /\\ unavail_reads' = IF available \\/ Fault = \"core-unavailable-forever\" THEN unavail_reads\n"
-                          '                            ELSE unavail_reads + 1',
-                          "read_slot' = i"],
-           {'raw_read', 'published_read', 'unavail_reads', 'read_slot'}, params=SLOT)
-    # The observation through the owner: Found is Core's admission (RetainFoundReceipt); a
-    # successful Absent keeps the record Offered (never NotAdmitted: the absent-terminates
-    # mutant feeds it as Core's refusal of the last open dispatch) and, when the owner finds
-    # it final (every open or unresolved dispatch made by an ended process, and this process
-    # has dispatched the record: no re-drive or re-offer owed), records the evidence with the
-    # dispatches it covers (RecordFinalAbsence); Unavailable keeps it Offered and owes another
-    # read. An Unavailable or non-final Absent read changes no owner field and is no owner
-    # input.
+    # UnavailBound reads (the core-unavailable-forever profile drops the bound). The driver's
+    # read is Core's live read, which takes the session's mutation gate and then its driver lock:
+    # it waits for an admission write still in flight on the session and is ordered after it
+    # (the live-read-as-durable mutant feeds it to the owner as durable). With late landings
+    # (env late) the driver may also use Core's durable read, which takes no gate: it can answer
+    # Absent while such a write is still in flight.
+    for name, kind, guards in [('B_ReadCore', 'IF Fault = "live-read-as-durable" THEN "Durable" ELSE "Live"',
+                                ['WritesInFlight(OInc(i)) = {}']),
+                               ('B_ReadDurable', '"Durable"', ['"late" \\in Env'])]:
+        action(name, ['alive', 'scanned', '~joined', 'read_slot = 0', 'OPhase(i) = "Offered"', 'jr[i].read_owed',
+                      *guards,
+                      '\\E available \\in AvailChoices :\n'
+                      "        /\\ raw_read' = IF ~available THEN \"Unavailable\" ELSE IF OfferAdmitted(i) THEN \"Found\" ELSE \"Absent\"\n"
+                      "        /\\ published_read' = IF Fault = \"unavailable-as-absent\" /\\ ~available THEN \"Absent\" ELSE raw_read'\n"
+                      "        /\\ unavail_reads' = IF available \\/ Fault = \"core-unavailable-forever\" THEN unavail_reads\n"
+                      '                            ELSE unavail_reads + 1',
+                      "read_slot' = i", f"read_kind' = {kind}"],
+               {'raw_read', 'published_read', 'unavail_reads', 'read_slot', 'read_kind'}, params=SLOT)
+    # The observation through the owner, with the read's kind: Found is Core's admission
+    # (RetainFoundReceipt); a successful Absent keeps the record Offered (never NotAdmitted: the
+    # absent-terminates mutant feeds it as Core's refusal of the last open dispatch) and, when
+    # the owner finds it final (this process has dispatched the record, none of its dispatches
+    # is in flight, and every dispatch left open or lost is an ended process's or, on Core's live
+    # read, a lost one of this process), records the evidence with the dispatches it covers
+    # (RecordFinalAbsence), which ends a held claim's hold; a durable read that is not final
+    # leaves the read owed (only a live read or a later process can speak for a lost dispatch of
+    # this process); Unavailable keeps it Offered and owes another read. An Unavailable or
+    # non-final Absent read changes no owner field and is no owner input.
     action('B_ObserveRead', ['alive', 'read_slot # 0',
                              'LET i == read_slot\n'
                              '           open == OPhase(i) = "Offered"\n'
@@ -706,12 +747,17 @@ def build_model(root, output):
                              '            [] published_read = "Absent" ->\n'
                              '                 LET final == open /\\ ENABLED OFinalAbsence(i)\n'
                              '                 IN /\\ IF final THEN OFinalAbsence(i) ELSE UNCHANGED <<Offer1Vars, Offer2Vars>>\n'
-                             "                    /\\ jr' = [jr EXCEPT ![i].read_owed = FALSE, ![i].held = @ /\\ ~final]\n"
+                             "                    /\\ jr' = [jr EXCEPT ![i].read_owed = (open /\\ read_kind = \"Durable\" /\\ ~final),\n"
+                             '                                        ![i].held = @ /\\ ~final]\n'
                              '                    /\\ UNCHANGED claimed\n'
                              '            [] OTHER ->\n'
                              '                 /\\ UNCHANGED <<Offer1Vars, Offer2Vars, jr, claimed>>',
-                             "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\""],
-           OFFERS | {'jr', 'claimed', 'read_slot', 'raw_read', 'published_read'})
+                             "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\"", "read_kind' = \"\"",
+                             # The process that recorded the last final absence (rows only).
+                             "absence_epoch' = IF RecordRows /\\ (offer_absence_through' # offer_absence_through\n"
+                             "                                       \\/ offer2_absence_through' # offer2_absence_through)\n"
+                             '                 THEN epoch ELSE absence_epoch'],
+           OFFERS | {'jr', 'claimed', 'read_slot', 'raw_read', 'published_read', 'read_kind', 'absence_epoch'})
     # After a restart the driver dispatches each enumerated record's intent once more, with
     # the same key and input (a replay after a crash uses Core's dedup): every door's
     # record but a peer delivery's. A durable peer delivery's dispatcher is Core's claim;
@@ -750,7 +796,8 @@ def build_model(root, output):
     # in flight (or answered NotReady) is kept queued by Core, with its record or, before the
     # record exists, without one. A dispatch open at the crash stays open in the owner:
     # its outcome is unknown, and no later refusal settles the record over it (the
-    # crash-clears-ambiguity mutant answers it as not submitted at the scan).
+    # crash-clears-ambiguity mutant answers it as not submitted at the scan). An admission write
+    # still in flight (env late) ends with the process, landed or not.
     action('B_Crash', ['"crash" \\in Env', 'alive', 'epoch = 1', 'Busy \\/ \\E i \\in Slots : NonTerminal(i)',
                        "alive' = FALSE",
                        "sp' = [q \\in Procs |-> IF Live(q) THEN [FreshProc EXCEPT !.out = \"Crashed\", !.slot = sp[q].slot,\n"
@@ -760,7 +807,7 @@ def build_model(root, output):
                        "dead_prep' = (dead_prep \\/ (RecordRows /\\ \\E n \\in Preparers : prep[n].st = \"Running\"))",
                        "pub_holder' = \"none\"", "conn_holder' = \"none\"", "meta_holder' = 0",
                        "store_pc' = IF store_pc \\in {\"hook\", \"write\"} THEN \"done\" ELSE store_pc",
-                       "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\"",
+                       "read_slot' = 0", "raw_read' = \"Unread\"", "published_read' = \"Unread\"", "read_kind' = \"\"",
                        "jr' = [i \\in Slots |-> [jr[i] EXCEPT !.parked = FALSE, !.redrive = FALSE, !.read_owed = FALSE,\n"
                        '                              !.held = FALSE,\n'
                        '                              !.fifo = @ \\/ (ClaimedPeer /\\ OPhase(i) # "Absent"\n'
@@ -768,9 +815,10 @@ def build_model(root, output):
                        '                                                /\\ (sp[q].pc # "Settle" \\/ KeepClaim(sp[q]) \\/ EntryKeep(sp[q])))]]',
                        "orphan_claim' = (orphan_claim \\/ (ClaimedPeer /\\ \\E q \\in Procs : Live(q)\n"
                        '                                    /\\ (sp[q].slot = 0 \\/ OPhase(sp[q].slot) = "Absent")))',
-                       "crashed_offered' = (crashed_offered \\/ (RecordRows /\\ \\E i \\in Slots : OPhase(i) = \"Offered\"))"],
+                       "crashed_offered' = (crashed_offered \\/ (RecordRows /\\ \\E i \\in Slots : OPhase(i) = \"Offered\"))",
+                       "\\E landed \\in SUBSET landing : native' = native \\cup landed", "landing' = {}"],
            {'alive', 'sp', 'prep', 'dead_prep', 'pub_holder', 'conn_holder', 'meta_holder', 'store_pc', 'read_slot',
-            'raw_read', 'published_read', 'jr', 'crashed_offered', 'orphan_claim'})
+            'raw_read', 'published_read', 'read_kind', 'jr', 'crashed_offered', 'orphan_claim', 'native', 'landing'})
     # The restart: a new process (epoch 2) scans before anything else. After a stop (the stop
     # profiles), its component is a new lifetime (staged and opened above) with no join of its
     # own yet; otherwise the model keeps the one lifetime across the crash.
@@ -829,7 +877,7 @@ def build_model(root, output):
             'drop_partial = FALSE', 'held_site = ""', 'entered_after_close = FALSE', 'claimed = FALSE',
             'lost_reply_seen = FALSE', 'crashed_offered = FALSE', 'admitted_stale = FALSE', 'cas_lost = FALSE',
             'replayed = FALSE', 'close_waited_prep = FALSE', 'dead_prep = FALSE', 'a_held = ""', 'refusals = {}',
-            'life_cur = 1', 'orphan_claim = FALSE']
+            'life_cur = 1', 'orphan_claim = FALSE', 'read_kind = ""', 'landing = {}', 'absence_epoch = 0']
     initialized = {re.match(r'(\w+)', e)[1] for e in init[7:]}
     if initialized != set(B_VARS):
         raise ValueError(f'B init mismatch: {sorted(initialized ^ set(B_VARS))}')
@@ -929,8 +977,9 @@ def build_model(root, output):
         owner_op('UnresolvedDispatch', f'PreserveUnresolvedOffer({identity}, d, a, "")', 'd, a'),
         '\\* A dispatch\'s answer, fed to the owner: exactly one of its three transitions accepts it.',
         'OAnswer(i, d, a) == ORetainDispatch(i, d, a) \\/ OPruneDispatch(i, d, a) \\/ OUnresolvedDispatch(i, d, a)',
-        owner_op('RetainFound', f'RetainFoundReceipt({identity}, epoch, "Admitted", AdmittedReceipt(i))'),
-        owner_op('FinalAbsence', f'RecordFinalAbsence({identity}, epoch, "Absent", "")'),
+        '\\* The read by key, fed with its kind (Core\'s live or durable read).',
+        owner_op('RetainFound', f'RetainFoundReceipt({identity}, epoch, "Admitted", AdmittedReceipt(i), read_kind)'),
+        owner_op('FinalAbsence', f'RecordFinalAbsence({identity}, epoch, "Absent", "", read_kind)'),
         owner_op('CloseRecord', 'RecordCloseUnresolved($_offer_key, $_revision, "close1", epoch)'),
         'NonTerminal(i) == OPhase(i) \\in {"Prepared", "Offered"}',
         'ObservedAdmitted(i) == OPhase(i) = "CoreObserved" /\\ OReceiptKind(i) \\in {"Admitted", "Found"}',
@@ -1071,12 +1120,18 @@ def build_model(root, output):
         "            /\\ sp' = [sp EXCEPT ![p] = NotNowRec(sp[p], d.c)]\n"
         "            /\\ meta_holder' = 0\n"
         "            /\\ held_site' = IF RecordRows /\\ d.c = \"SourceHeld\" THEN site ELSE held_site",
+        '\\* The answers lost on their way back (AdmissionUnresolved): the admission write landed, did\n'
+        '\\* not, or (env late) is still in flight after the call returned.',
+        'LostResults == {"LostAfter", "LostBefore", "LostPending"}',
+        '\\* The admission writes still in flight on a session (env late).',
+        'WritesInFlight(inc) == {x \\in landing : x[1] = inc}',
         'EntryResults(fence, dup) ==\n'
         '    (IF ~fence THEN {"EntryRefused"}\n'
         '     ELSE {"Admitted"} \\cup (IF ~dup /\\ "corerefuse" \\in Env /\\ core_refusals < CoreRefuseBound\n'
         '                             THEN {"NotAdmitted"} ELSE {}))\n'
         '    \\cup (IF "lost" \\in Env /\\ lost_count < LostBound\n'
-        '          THEN (IF fence THEN {"LostAfter", "LostBefore"} ELSE {"LostBefore"}) ELSE {})',
+        '          THEN (IF fence THEN {"LostAfter", "LostBefore"} \\cup (IF "late" \\in Env /\\ ~dup THEN {"LostPending"} ELSE {})\n'
+        '                ELSE {"LostBefore"}) ELSE {})',
         'AvailChoices == IF Fault = "core-unavailable-forever" THEN {FALSE}\n'
         '                ELSE IF unavail_reads < UnavailBound THEN BOOLEAN ELSE {TRUE}',
         '\\* A read by key in flight when a send of the same record answers AdmissionUnresolved started\n'
@@ -1116,6 +1171,8 @@ def build_model(root, output):
                    '    /\\ pub_holder \\in {"none", "store", "runner1", "runner2"} /\\ conn_holder \\in {"none", "store"}\n'
                    '    /\\ current_inc \\in {"inc1", "inc2"} /\\ dup_arts \\subseteq BA!AllArts /\\ life_cur \\in {1, 2}\n'
                    '    /\\ native \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..9))\n'
+                   '    /\\ landing \\subseteq ({"inc1", "inc2"} \\X {"k1", "k2", "k3"} \\X {1, 2} \\X (0..9))\n'
+                   '    /\\ read_kind \\in {"", "Live", "Durable"} /\\ absence_epoch \\in 0..2\n'
                    '    /\\ refusals \\subseteq (Slots \\X (0..9) \\X {"CoreRefused", "EntryRefused"})'),
         'OwnerCanonical': ' /\\ '.join(['src!' + i for i in src_invs] + ['offer!' + i for i in offer_invs]
                                         + ['offer2!' + i for i in offer_invs] + ['life!' + i for i in life_invs]
@@ -1191,6 +1248,10 @@ def build_model(root, output):
                                        '    => <<i, OReceiptDispatch(i), OReceiptKind(i)>> \\in refusals'),
         'I13_FinalAbsenceProven': ('\\A i \\in Slots : OAbsenceThrough(i) > 0\n'
                                    '    => ~\\E x \\in native : x[1] = OInc(i) /\\ x[2] = Key(i) /\\ x[4] <= OAbsenceThrough(i)'),
+        # The final-absence evidence covers no dispatch whose admission write is still in flight
+        # (env late): Core's live read is ordered after such a write, its durable read is not.
+        'I13_FinalAbsenceAfterWrites': ('\\A i \\in Slots : \\A x \\in landing :\n'
+                                        '    (x[1] = OInc(i) /\\ x[2] = Key(i)) => x[4] > OAbsenceThrough(i)'),
         # A send whose grants exist is never refused for a Duplicate.
         'NoDuplicateRefusalB': ('\\A p \\in Procs : (sp[p].out = "Refused" /\\ sp[p].cause = "PreparationRefused")\n'
                                 '    => ~(BA!StepArts(door) \\subseteq issued)'),
@@ -1276,8 +1337,8 @@ def build_model(root, output):
         # A dispatch whose answer is lost without a crash; the read by key observes it.
         'NotRowLostDispatchObserved': ('~(stage = "B" /\\ epoch = 1 /\\ ObservedAdmitted(1) /\\ Cardinality(native) = 1\n'
                                        '    /\\ \\E p \\in Procs : sp[p].out = "Unresolved")'),
-        # A lost dispatch that never landed is kept (in-process absence is not final); a
-        # same-key replay admits it once.
+        # A lost dispatch that never landed: the record stays Offered with its intent (a final
+        # absence is evidence, no verdict); a same-key replay admits it once.
         'NotRowLostBeforeReplayed': ('~(stage = "B" /\\ epoch = 1 /\\ replayed /\\ ObservedAdmitted(1)\n'
                                      '    /\\ NativeKeys = {<<"inc1", "k1", 1>>} /\\ \\E p \\in Procs : sp[p].out = "Unresolved")'),
         # The final-absence evidence after a restart, once the restart's re-drive was
@@ -1355,16 +1416,29 @@ def build_model(root, output):
                                         '    /\\ OUnresolved(1) # {} /\\ jr[1].fifo /\\ jr[1].held /\\ jr[1].read_owed\n'
                                         '    /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].out = "Pending"\n'
                                         '                       /\\ sp[p].cause = "PolicyDenied")'),
-        # The held claim's release: after a restart, Core's re-offer records a dispatch of the
-        # new process and meets the same verdict (NotReady, a read owed); the read finds the key
-        # absent and the owner records the final absence over every dispatch, the lost one
-        # included; Core's next re-offer, a dispatch after the evidence, is denied for the verdict
-        # and the claim ends (the denied-over-ambiguity mutant denies before the evidence).
+        # The held claim's release across a restart: Core's re-offer records a dispatch of the
+        # new process and meets the same verdict (NotReady, a read owed); the new process's read
+        # finds the key absent and the owner records the final absence over every dispatch, the
+        # lost one included; Core's next re-offer, a dispatch after the evidence, is denied for
+        # the verdict and the claim ends (the denied-over-ambiguity mutant denies before the
+        # evidence).
         'NotRowHeldClaimDeniedAfterRestart': ('~(stage = "B" /\\ door = "Peer" /\\ epoch = 2 /\\ ~auth_ok /\\ native = {}\n'
                                               '    /\\ offer_phase = "Offered" /\\ OUnresolved(1) # {} /\\ OAbsenceThrough(1) > 0\n'
+                                              '    /\\ absence_epoch = 2\n'
                                               '    /\\ ~jr[1].fifo /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].pc = "Done"\n'
                                               '                                         /\\ sp[p].out = "Refused" /\\ sp[p].cause = "PolicyDenied"\n'
                                               '                                         /\\ sp[p].d > OAbsenceThrough(1))'),
+        # The held claim released in the same process: Core's re-offer meets the verdict over the
+        # lost dispatch (NotReady, held, a read owed); Core's live read finds the key absent and the
+        # owner records the final absence over the lost dispatch and the held re-offer's (at least
+        # two); Core's next re-offer, a dispatch after the evidence, is denied and the claim ends,
+        # no restart between (RED on the owner whose final absence counts no lost dispatch of the
+        # process).
+        'NotRowHeldClaimDeniedInProcess': ('~(stage = "B" /\\ door = "Peer" /\\ epoch = 1 /\\ ~auth_ok /\\ native = {}\n'
+                                           '    /\\ offer_phase = "Offered" /\\ OUnresolved(1) # {} /\\ OAbsenceThrough(1) >= 2\n'
+                                           '    /\\ ~jr[1].fifo /\\ \\E p \\in Procs : sp[p].kind = "core" /\\ sp[p].pc = "Done"\n'
+                                           '                                         /\\ sp[p].out = "Refused" /\\ sp[p].cause = "PolicyDenied"\n'
+                                           '                                         /\\ sp[p].d > OAbsenceThrough(1))'),
         # Core's drain binds the FIFO head first: a second delivery begins only after the
         # first delivery's queued claim was re-offered (here admitted); it finds the admission.
         'NotRowPeerHeadFirst': ('~(stage = "B" /\\ door = "Peer" /\\ ObservedAdmitted(1) /\\ Cardinality(native) = 1 /\\ begun = 2\n'
@@ -1478,20 +1552,21 @@ def build_model(root, output):
         '\\* Core\'s drain, one peer bind per session, the FIFO head first): its pure decision at (P)\n'
         '\\* and (A), its wait (or Core\'s peer waiter) with one deadline, and native admission behind\n'
         '\\* the entry fence in the same section; the answer fed to the owner after Meta returns. Held\n'
-        '\\* and the peer deadline end only the caller\'s wait. The driver reads by key, one crash and\n'
-        '\\* restart with its scan, admission closure with the close\'s join (its unresolved records\n'
-        '\\* scoped to the closing process), a stop after the close and the restart into the next\n'
-        '\\* lifetime, the declared composition mode. Core\'s commit and dedup by qualified key are\n'
-        '\\* assumptions. Liveness: LiveSpec, under the declared fairness and environment assumptions\n'
-        '\\* (below).',
+        '\\* and the peer deadline end only the caller\'s wait. The driver reads by key (Core\'s live\n'
+        '\\* read, ordered after an admission write still in flight; with late landings also its\n'
+        '\\* durable read), one crash and restart with its scan, admission closure with the close\'s\n'
+        '\\* join (its unresolved records scoped to the closing process), a stop after the close and\n'
+        '\\* the restart into the next lifetime, the declared composition mode. Core\'s commit and\n'
+        '\\* dedup by qualified key are assumptions. Liveness: LiveSpec, under the declared fairness\n'
+        '\\* and environment assumptions (below).',
         'CONSTANTS ' + ', '.join(constants) + ',\n    Fault, StageValues, DoorValues, InitialValues, MaxAttempts, '
                                               'Interrupts, ModeValues,\n    ProcBound, SendBound, UnavailBound, '
                                               'LostBound, CoreRefuseBound, GateBound, Env, RecordRows, PeerClaims',
         '\\* RecordRows: the row-only history variables (held_site, cas_lost, replayed, dup_arts, drop_partial,\n'
-        '\\* lost_reply_seen, crashed_offered, close_waited_prep, dead_prep, a_held, a send\'s waited) are\n'
-        '\\* recorded. No action reads them (a send\'s waited only in the cached-authority mutant, which\n'
-        '\\* records), so they change no behavior; the clean bases and the liveness profiles run without\n'
-        '\\* them (their invariants and properties read none), the rows and mutants with them.',
+        '\\* lost_reply_seen, crashed_offered, close_waited_prep, dead_prep, a_held, absence_epoch, a send\'s\n'
+        '\\* waited) are recorded. No action reads them (a send\'s waited only in the cached-authority\n'
+        '\\* mutant, which records), so they change no behavior; the clean bases and the liveness profiles\n'
+        '\\* run without them (their invariants and properties read none), the rows and mutants with them.',
         'VARIABLES ' + ', '.join(variables),
         'vars == <<' + ', '.join(variables) + '>>',
         'AttemptFaults == {' + ', '.join(json.dumps(f) for f in ATTEMPT_FAULTS) + '}',
@@ -1546,21 +1621,22 @@ def build_model(root, output):
 # Declared liveness bounds. Weak fairness for enabled driver and effect steps: the effect
 # runner (lookup, owner, preparers, seal, commit, read-back, dispatch, recording the answer),
 # Meta's protected section (lock, decision, entry), the peer binder's section in Core's drain,
-# and Core (admission, reads, the peer FIFO re-offer, a queued claim's with or without its
-# record), the driver (read, observation, re-drive), restart and scan, the next process's new
-# lifetime after a stop (staged, opened), the other store write, the close's join and its
-# records; Core
-# and storage are unavailable for at most UnavailBound reads. Meta's identity lock (B_Lock,
-# Meta's doors only) is a tokio FIFO mutex: strong fairness per task. The peer door takes no
-# Meta lock: Core's drain binds one delivery at a time (weak fairness suffices). The declared
-# environment assumption: a wait ends. Meta's waiter (Core's for a peer) wakes when its
-# condition clears, the deadline passes while the condition persists, and the expiry answers
-# Held, Pending or the transport's drop. Each liveness mutant drops one fairness or the bound.
+# and Core (admission, its store's answer to an admission write still in flight, reads, the
+# peer FIFO re-offer, a queued claim's with or without its record), the driver (live read,
+# observation, re-drive; the durable read is allowed, never relied on), restart and scan, the
+# next process's new lifetime after a stop (staged, opened), the other store write, the close's
+# join and its records; Core and storage are unavailable for at most UnavailBound reads. Meta's
+# identity lock (B_Lock, Meta's doors only) is a tokio FIFO mutex: strong fairness per task.
+# The peer door takes no Meta lock: Core's drain binds one delivery at a time (weak fairness
+# suffices). The declared environment assumption: a wait ends. Meta's waiter (Core's for a
+# peer) wakes when its condition clears, the deadline passes while the condition persists,
+# and the expiry answers Held, Pending or the transport's drop. Each liveness mutant drops one
+# fairness or the bound, or feeds the live read as durable.
 DRIVER_FAIRNESS = ['B_Lookup', 'B_Create', 'B_PrepLookup', 'B_PrepIssue', 'B_PrepDone', 'B_Seal', 'B_CommitPub',
                    'B_CommitStore', 'B_CommitRefuse', 'B_ReadBack', 'B_Call', 'B_FixtureCall', 'B_Lock',
-                   'B_PeerSection', 'B_DecideP', 'B_DecideA', 'B_Entry', 'B_Settle', 'B_ReadCore', 'B_ObserveRead',
-                   'B_Redrive', 'B_CoreReoffer', 'B_CoreReofferFresh', 'B_Restart', 'B_ScanWithdraw', 'B_Scan',
-                   'B_StoreEnd', 'B_JoinDriver', 'B_CloseRecord', 'B_Life2Stage', 'B_Life2Open']
+                   'B_PeerSection', 'B_DecideP', 'B_DecideA', 'B_Entry', 'B_Land', 'B_Settle', 'B_ReadCore',
+                   'B_ObserveRead', 'B_Redrive', 'B_CoreReoffer', 'B_CoreReofferFresh', 'B_Restart', 'B_ScanWithdraw',
+                   'B_Scan', 'B_StoreEnd', 'B_JoinDriver', 'B_CloseRecord', 'B_Life2Stage', 'B_Life2Open']
 WAIT_FAIRNESS = ['B_MetaRebind', 'B_PeerRebind', 'B_Deadline', 'B_MetaExpire', 'B_PeerExpire']
 STRONG_FAIRNESS = {'B_Lock'}
 ACTION_PARAMS = {}
@@ -1601,10 +1677,11 @@ LIVENESS = {
     # Every send task ends: admitted, refused, held, pending, unresolved or dropped.
     'LV6_SendEnds': '\\A p \\in Procs : Live(p) ~> ~Live(p)',
     # Core re-offers a queued peer claim, with or without its record, while admission is open
-    # (the peer discharge of a kept record), unless the claim is held: a verdict met while
-    # another dispatch of the record may have admitted holds it until a read settles the
-    # record or records its final absence (in a later process: in-process absence is not final).
-    'LV7_PeerClaimReoffered': ('(\\A i \\in Slots : jr[i].fifo ~> (~jr[i].fifo \\/ joined \\/ LPhase # "Open" \\/ jr[i].held))\n'
+    # (the peer discharge of a kept record), a held claim included: a verdict met while another
+    # dispatch of the record may have admitted holds it only until the read owed settles the
+    # record or records its final absence, Core's live read counting a lost dispatch of this
+    # process.
+    'LV7_PeerClaimReoffered': ('(\\A i \\in Slots : jr[i].fifo ~> (~jr[i].fifo \\/ joined \\/ LPhase # "Open"))\n'
                                '    /\\ (orphan_claim ~> (~orphan_claim \\/ joined \\/ LPhase # "Open"))'),
 }
 DRIVER_ONLY_HOLDS = ['LV1_AdmissionObserved', 'LV3_RestartRecovers', 'LV4_PreparersEnd',
@@ -1628,7 +1705,8 @@ def fairness_definitions():
     out = ['\\* Declared liveness bounds: fairness for enabled driver and effect steps, per send task,\n'
            '\\* preparer and slot (the effect runner, Meta\'s protected section with its lock a tokio\n'
            '\\* FIFO mutex (strong fairness, Meta\'s doors), the peer binder\'s section in Core\'s drain (one\n'
-           '\\* bind at a time), Core\'s admission, reads and FIFO re-offer, the driver, restart and scan,\n'
+           '\\* bind at a time), Core\'s admission, its store\'s answer to an admission write still in\n'
+           '\\* flight, Core\'s live reads and FIFO re-offer, the driver, restart and scan,\n'
            '\\* the other store write, the close\'s join and records), with Core and storage unavailable\n'
            '\\* for at most UnavailBound reads; and, as a declared environment assumption, that a\n'
            '\\* wait ends: the waiter is taken to observe a cleared condition before its deadline, the\n'
@@ -1677,6 +1755,7 @@ def config_text(spec, checked, properties):
             '  ToolkitReceiptKindValues = {"Unsettled","Admitted","Found","CoreRefused","EntryRefused"}\n'
             '  ToolkitWithdrawalCauseValues = {"NotWithdrawn","PolicyDenied","SourceClosed","AdmissionClosed",'
             '"PreparationStale","ProcessEnded"}\n'
+            '  ToolkitCoreReadValues = {"Durable","Live"}\n'
             f'  Fault = "{spec["fault"]}"\n'
             f'  StageValues = {domain(spec["stage"])}\n'
             f'  DoorValues = {domain(spec["door"])}\n'
@@ -1747,8 +1826,10 @@ def main():
                  'entry fence in the same section, the answer fed to the owner after Meta returns; every fact that '
                  'decides an owner transition is owner state; Held and the peer deadline keep the offer; the peer '
                  'door as Core\'s drain runs it, durable and claimless deliveries; two offer slots, two send tasks, '
-                 'Core\'s five results, the driver by key, one crash and restart, admission closure with the close\'s '
-                 'record scoped to the closing process, a stop and the restart into the next lifetime, declared mode)',
+                 'Core\'s results (with late landings a lost answer whose admission write is still in flight), the '
+                 'driver by key with Core\'s live read and its durable read, one crash and restart, admission closure '
+                 'with the close\'s record scoped to the closing process, a stop and the restart into the next '
+                 'lifetime, declared mode)',
         'full_b1_acceptance': False,
         **info,
         'actions': actions,
@@ -1825,6 +1906,10 @@ PROFILES = {
                            env=['hold', 'revoke', 'close', 'crash', 'drop', 'lost', 'corerefuse', 'stop']),
     'none-b-stop-noclaim': profile('base', door=['Peer'], claims=False, procs=2, sends=2,
                                    env=['hold', 'close', 'crash', 'lost', 'corerefuse', 'stop']),
+    # Late landings: a lost answer's admission write still in flight after its call returned,
+    # Core's live read ordered after it, the driver's durable read not; a verdict over the lost
+    # dispatch, a same-key replay, Core's re-offer, a crash.
+    'none-b-late': profile('base', door=['Find', 'Peer'], procs=2, sends=2, env=['lost', 'late', 'revoke', 'crash']),
     # ---- Liveness (the Helper door included; the peer door as Core's drain runs it,
     # one bind per session at a time, with and without Core's claim). ----
     'live-find-waits': lb('LiveSpec', door=['Find'], env=['hold', 'session', 'crash'], **LIVE2),
@@ -1837,6 +1922,8 @@ PROFILES = {
     # Across a stop and the restart into the next lifetime (LV1 for the records the close recorded).
     'live-find-stop': lb('LiveSpec', door=['Find'], env=['hold', 'lost', 'close', 'stop'], **LIVE2),
     'live-peer-stop': lb('LiveSpec', door=['Peer'], env=['hold', 'lost', 'close', 'stop'], **LIVE2),
+    # A claim held for a verdict over a lost dispatch, released in the process (LV7).
+    'live-peer-held': lb('LiveSpec', door=['Peer'], env=['lost', 'revoke'], **LIVE2),
     'live-driver-only': lb('LiveSpecDriverOnly', live=DRIVER_ONLY_HOLDS, door=['Find'], env=['hold', 'lost', 'crash'],
                            **LIVE2),
     'live-no-dispatch-fairness': lm('none', 'LV1_OfferDisposition', 'LiveSpecNoDispatch', **ONE),
@@ -1851,6 +1938,9 @@ PROFILES = {
     'live-no-deadline': lm('none', 'LV6_SendEnds', 'LiveSpecNoDeadline', env=['hold'], **ONE),
     'live-no-reoffer-fairness': lm('none', 'LV7_PeerClaimReoffered', 'LiveSpecNoReoffer', door=['Peer'],
                                    env=['hold'], **ONE),
+    # The driver's live read fed to the owner as durable: a held claim is never released.
+    'live-read-as-durable': lm('live-read-as-durable', 'LV7_PeerClaimReoffered', 'LiveSpec', door=['Peer'],
+                               env=['lost', 'revoke'], **ONE),
     'live-driver-only-disposition': lm('none', 'LV1_OfferDisposition', 'LiveSpecDriverOnly', env=['hold'], **ONE),
     'live-driver-only-rebind': lm('none', 'LV2_FreedWaitRebinds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
     'live-driver-only-send-ends': lm('none', 'LV6_SendEnds', 'LiveSpecDriverOnly', env=['hold'], **ONE),
@@ -1890,8 +1980,8 @@ PROFILES = {
     'omit-driver-undeclared': m('none', 'I12_NoOrphanOffer', modes=['undeclared']),
     'fixture-claims': m('fixture-claims', 'I12_ClaimsProduction', modes=['fixture']),
     # An Unavailable read published as Absent discharges the read owed after a lost answer:
-    # the record is kept with nothing owed over Core's admission (the owner records no final
-    # absence over this process's own open dispatch).
+    # the record is kept with nothing owed over Core's admission (fed as the live read's
+    # absence, it even records a final absence over the lost dispatch Core admitted).
     'unavailable-as-absent': m('unavailable-as-absent', 'I7_KeptRecordNotAdmitted', env=['lost']),
     # The driver feeds an Absent read as Core's refusal of the record's last open dispatch.
     'absent-terminates': m('absent-terminates', 'I13_ReceiptNamesItsRefusal', env=['crash']),
@@ -1937,6 +2027,9 @@ PROFILES = {
                                     env=['corerefuse']),
     'absence-without-redispatch': m('absence-without-redispatch', 'I13_FinalAbsenceSound', env=['crash']),
     'absence-in-process': m('absence-in-process', 'I13_FinalAbsenceProven', sends=2, env=['lost']),
+    # The durable read's absence counts a lost dispatch of this process whose write is still in
+    # flight (owner mutant).
+    'durable-read-counts': m('durable-read-counts', 'I13_FinalAbsenceAfterWrites', env=['lost', 'late']),
     # The close's record blocks every later dispatch start (owner mutant): after a stop and
     # restart, the re-drive cannot record its dispatch.
     'close-blocks-later-process': m('close-blocks-later-process', 'I11_CallRecordsItsDispatch',
@@ -2068,6 +2161,7 @@ PROFILES = {
     'row-no-denial-over-ambiguity': r('NotRowNoDenialOverAmbiguity', door=['Peer'], env=['lost', 'revoke']),
     'row-held-claim-denied-after-restart': r('NotRowHeldClaimDeniedAfterRestart', door=['Peer'],
                                              env=['lost', 'revoke', 'crash']),
+    'row-held-claim-denied-in-process': r('NotRowHeldClaimDeniedInProcess', door=['Peer'], env=['lost', 'revoke']),
     'row-peer-head-first': r('NotRowPeerHeadFirst', door=['Peer'], procs=2, sends=2, env=['hold']),
     'row-noclaim-dropped-kept': r('NotRowNoClaimDroppedKept', door=['Peer'], claims=False, env=['hold']),
     'row-noclaim-retry-admitted': r('NotRowNoClaimRetryAdmitted', door=['Peer'], claims=False, procs=2, sends=2,

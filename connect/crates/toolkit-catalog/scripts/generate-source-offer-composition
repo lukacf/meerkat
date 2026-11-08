@@ -126,7 +126,7 @@ def main():
             f'{o}!PreserveUnresolvedOffer({ov("offer_key")}, {ov("revision")}, {ov("input_digest")}, {ov("incarnation")}, {ov("dispatch_count")}, "Unresolved", "")',
             f'inflight{i}\' = FALSE'], [o, 'inflight' + i])
         action('Find' + i, ['alive', 'scanned', f'native{i}', f'~inflight{i}',
-            f'{o}!RetainFoundReceipt({ov("offer_key")}, {ov("revision")}, {ov("input_digest")}, {ov("incarnation")}, epoch, "Admitted", "core-found{i}")',
+            f'{o}!RetainFoundReceipt({ov("offer_key")}, {ov("revision")}, {ov("input_digest")}, {ov("incarnation")}, epoch, "Admitted", "core-found{i}", "Live")',
             f'outbox{i}\' = FALSE', f'parked{i}\' = FALSE'], [o, 'outbox' + i, 'parked' + i])
     action('Crash', ['alive', 'epoch = 1', 'offer1_phase = "Offered" \\/ offer2_phase = "Offered"',
                     'alive\' = FALSE', 'parked1\' = FALSE', 'parked2\' = FALSE',
@@ -187,6 +187,7 @@ def main():
                   '  ToolkitReceiptKindValues = {"Unsettled","Admitted","Found","CoreRefused","EntryRefused"}\n'
                   '  ToolkitWithdrawalCauseValues = {"NotWithdrawn","PolicyDenied","SourceClosed","AdmissionClosed",'
                   '"PreparationStale","ProcessEnded"}\n'
+                  '  ToolkitCoreReadValues = {"Durable","Live"}\n'
                   f'  Fault = "{name}"\nINVARIANTS\n  ' + '\n  '.join(invariants) + '\nCONSTRAINT Bound\n')
         (output / (name + '.cfg')).write_text(config)
     manifest = {'scope': 'two source/offer pairs, fixed distinct incarnations, publication/revocation, one crash/restart, eight steps per owner; dispatch starts, lost answers and found reads through the owner',

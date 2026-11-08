@@ -11,16 +11,18 @@
 //! each dispatch started before its call into Meta (a peer delivery's before its
 //! protected section) with that process's epoch, a lost answer recorded against its
 //! dispatch, the dispatch and kind a terminal receipt settles, the final-absence
-//! evidence with the dispatches it covers, and the close's unresolved record with the
-//! closing process's epoch (no dispatch of that process follows it; the next process's
-//! restart dispatches the record again). A dispatch answered without native submission,
-//! or refused while another dispatch is open or unresolved, leaves the journal: it
-//! cannot have admitted. An open dispatch of an ended process stays: its outcome is
-//! unknown.
+//! evidence with the dispatches it covers (a lost dispatch of this process counts only
+//! on Core's live read, which is ordered after any admission write still in flight),
+//! and the close's unresolved record with the closing process's epoch (no dispatch of
+//! that process follows it; the next process's restart dispatches the record again). A
+//! dispatch answered without native submission, or refused while another dispatch is
+//! open or unresolved, leaves the journal: it cannot have admitted. An open dispatch of
+//! an ended process stays: its outcome is unknown.
 #![allow(clippy::cmp_owned)]
 
 use super::original_types::{
-    ToolkitCoreObservation, ToolkitDispatchAnswer, ToolkitReceiptKind, ToolkitWithdrawalCause,
+    ToolkitCoreObservation, ToolkitCoreRead, ToolkitDispatchAnswer, ToolkitReceiptKind,
+    ToolkitWithdrawalCause,
 };
 use meerkat_machine_dsl::machine;
 
@@ -91,6 +93,7 @@ machine! {
             ObserveRead {
                 offer_key: String, expected_revision: u64, input_digest: String, incarnation: String,
                 epoch: u64, observation: Enum<ToolkitCoreObservation>, receipt_ref: String,
+                read: Enum<ToolkitCoreRead>,
             },
             CloseUnresolved { offer_key: String, expected_revision: u64, close_id: String, epoch: u64 },
         }
@@ -345,7 +348,7 @@ machine! {
         }
         // A read by the offer's own key that found Core's admission.
         transition RetainFoundReceipt {
-            on input ObserveRead { offer_key, expected_revision, input_digest, incarnation, epoch, observation, receipt_ref }
+            on input ObserveRead { offer_key, expected_revision, input_digest, incarnation, epoch, observation, receipt_ref, read }
             guard {
                 self.offer_phase == Phase::Offered && self.core_receipt_ref == ""
                 && offer_key == self.offer_key && expected_revision == self.revision
@@ -361,12 +364,16 @@ machine! {
             emit CoreObserved { offer_key: self.offer_key, observation: observation, receipt_ref: self.core_receipt_ref }
             emit PublishOffer { offer_key: self.offer_key, revision: self.revision }
         }
-        // A successful Absent read, final for the dispatches it covers: every open or
-        // unresolved dispatch was made by an ended process, and this process has dispatched
-        // the record (no re-drive or re-offer owed after a restart). It covers dispatches
-        // 1..dispatch_count; a consumer checks that none was started after it.
+        // A successful Absent read, final for the dispatches it covers: this process has
+        // dispatched the record (no re-drive or re-offer owed after a restart), no dispatch of
+        // this process is in flight, and every dispatch left open or lost is an ended process's,
+        // or a lost one of this process when Core's live read answered (it takes the session's
+        // mutation gate, then its driver lock, so it is ordered after any admission write still
+        // in flight after its call returned; the durable read takes no gate and never counts
+        // one). It covers dispatches 1..dispatch_count; a consumer checks that none was started
+        // after it.
         transition RecordFinalAbsence {
-            on input ObserveRead { offer_key, expected_revision, input_digest, incarnation, epoch, observation, receipt_ref }
+            on input ObserveRead { offer_key, expected_revision, input_digest, incarnation, epoch, observation, receipt_ref, read }
             guard {
                 self.offer_phase == Phase::Offered && self.core_receipt_ref == ""
                 && offer_key == self.offer_key && expected_revision == self.revision
@@ -374,7 +381,8 @@ machine! {
                 && observation == ToolkitCoreObservation::Absent && receipt_ref == ""
                 && epoch > 0 && self.last_dispatch_epoch == epoch && self.absence_through < self.dispatch_count
                 && for_all(dispatch in self.dispatch_epochs.keys(),
-                    self.dispatch_epochs.get_cloned(dispatch).get("value") < epoch)
+                    self.dispatch_epochs.get_cloned(dispatch).get("value") < epoch
+                    || (read == ToolkitCoreRead::Live && self.unresolved_dispatches.contains(dispatch)))
                 && self.revision < u64::MAX
             }
             update { self.absence_through = self.dispatch_count; self.revision += 1; }

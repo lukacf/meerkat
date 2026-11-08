@@ -123,6 +123,7 @@ fn read(
     epoch: u64,
     observation: ToolkitCoreObservation,
     receipt: &str,
+    kind: ToolkitCoreRead,
 ) -> ToolkitOfferInput {
     ToolkitOfferInput::ObserveRead {
         offer_key: "offer".into(),
@@ -132,6 +133,7 @@ fn read(
         epoch,
         observation,
         receipt_ref: receipt.into(),
+        read: kind,
     }
 }
 
@@ -337,13 +339,30 @@ fn a_lost_answer_is_recorded_against_its_dispatch_and_reads_that_change_nothing_
     assert!(owner.state().unresolved_dispatches.contains(&first));
     assert_eq!(owner.state().offer_phase, ToolkitOfferPhase::Offered);
     let before = owner.state().clone();
-    for kind in [
+    // The durable read never counts this process's lost dispatch: its write may still land.
+    for observation in [
         ToolkitCoreObservation::Unavailable,
         ToolkitCoreObservation::Absent,
         ToolkitCoreObservation::Unresolved,
         ToolkitCoreObservation::NotAdmitted,
     ] {
-        assert!(owner.apply(read(&owner, 1, kind, "")).is_err());
+        assert!(
+            owner
+                .apply(read(&owner, 1, observation, "", ToolkitCoreRead::Durable))
+                .is_err()
+        );
+        assert_eq!(owner.state(), &before);
+    }
+    for observation in [
+        ToolkitCoreObservation::Unavailable,
+        ToolkitCoreObservation::Unresolved,
+        ToolkitCoreObservation::NotAdmitted,
+    ] {
+        assert!(
+            owner
+                .apply(read(&owner, 1, observation, "", ToolkitCoreRead::Live))
+                .is_err()
+        );
         assert_eq!(owner.state(), &before);
     }
     // A later refusal cannot settle the record while the lost answer is unresolved.
@@ -443,7 +462,8 @@ fn an_admission_settles_with_its_dispatch_and_cannot_be_overwritten() {
                 &owner,
                 1,
                 ToolkitCoreObservation::Admitted,
-                "different-receipt"
+                "different-receipt",
+                ToolkitCoreRead::Live
             ))
             .is_err()
     );
@@ -480,7 +500,13 @@ fn a_found_read_settles_without_naming_a_dispatch() {
     let mut owner = sent_offer();
     start(&mut owner, 1);
     owner
-        .apply(read(&owner, 2, ToolkitCoreObservation::Admitted, "found"))
+        .apply(read(
+            &owner,
+            2,
+            ToolkitCoreObservation::Admitted,
+            "found",
+            ToolkitCoreRead::Durable,
+        ))
         .unwrap();
     assert_eq!(owner.state().receipt_kind, ToolkitReceiptKind::Found);
     assert_eq!(owner.state().receipt_dispatch, 0);
@@ -494,25 +520,35 @@ fn final_absence_needs_this_process_dispatch_and_covers_the_dispatches_so_far() 
     owner
         .apply(answer(&owner, first, ToolkitDispatchAnswer::Unresolved, ""))
         .unwrap();
-    // In the same process the lost answer may still land: not final.
+    // In the same process the durable read cannot speak for the lost answer: not final.
     assert!(
         owner
-            .apply(read(&owner, 1, ToolkitCoreObservation::Absent, ""))
+            .apply(read(
+                &owner,
+                1,
+                ToolkitCoreObservation::Absent,
+                "",
+                ToolkitCoreRead::Durable
+            ))
             .is_err()
     );
     // After a restart, before this process dispatched it (its re-drive owed): not final.
-    assert!(
-        owner
-            .apply(read(&owner, 2, ToolkitCoreObservation::Absent, ""))
-            .is_err()
-    );
+    for kind in [ToolkitCoreRead::Durable, ToolkitCoreRead::Live] {
+        assert!(
+            owner
+                .apply(read(&owner, 2, ToolkitCoreObservation::Absent, "", kind))
+                .is_err()
+        );
+    }
     let redrive = start(&mut owner, 2);
     // The re-drive in flight: not final.
-    assert!(
-        owner
-            .apply(read(&owner, 2, ToolkitCoreObservation::Absent, ""))
-            .is_err()
-    );
+    for kind in [ToolkitCoreRead::Durable, ToolkitCoreRead::Live] {
+        assert!(
+            owner
+                .apply(read(&owner, 2, ToolkitCoreObservation::Absent, "", kind))
+                .is_err()
+        );
+    }
     owner
         .apply(answer(
             &owner,
@@ -521,10 +557,71 @@ fn final_absence_needs_this_process_dispatch_and_covers_the_dispatches_so_far() 
             "",
         ))
         .unwrap();
+    // Every dispatch left open or lost is an ended process's: the durable read is final too.
     owner
-        .apply(read(&owner, 2, ToolkitCoreObservation::Absent, ""))
+        .apply(read(
+            &owner,
+            2,
+            ToolkitCoreObservation::Absent,
+            "",
+            ToolkitCoreRead::Durable,
+        ))
         .unwrap();
     assert_eq!(owner.state().absence_through, 2);
+    assert_eq!(owner.state().offer_phase, ToolkitOfferPhase::Offered);
+}
+
+#[test]
+fn a_live_read_counts_this_process_lost_dispatch_and_a_durable_read_never_does() {
+    let mut owner = sent_offer();
+    let first = start(&mut owner, 1);
+    owner
+        .apply(answer(&owner, first, ToolkitDispatchAnswer::Unresolved, ""))
+        .unwrap();
+    // Another dispatch of this process in flight blocks either read.
+    let second = start(&mut owner, 1);
+    for kind in [ToolkitCoreRead::Durable, ToolkitCoreRead::Live] {
+        assert!(
+            owner
+                .apply(read(&owner, 1, ToolkitCoreObservation::Absent, "", kind))
+                .is_err()
+        );
+    }
+    owner
+        .apply(answer(
+            &owner,
+            second,
+            ToolkitDispatchAnswer::NotSubmitted,
+            "",
+        ))
+        .unwrap();
+    // Core's durable read takes no gate: the lost answer's write may land after it answers.
+    let before = owner.state().clone();
+    assert!(
+        owner
+            .apply(read(
+                &owner,
+                1,
+                ToolkitCoreObservation::Absent,
+                "",
+                ToolkitCoreRead::Durable
+            ))
+            .is_err()
+    );
+    assert_eq!(owner.state(), &before);
+    // Core's live read is ordered after any admission write in flight on the session: final
+    // for this process's lost dispatch, and it covers every dispatch so far.
+    owner
+        .apply(read(
+            &owner,
+            1,
+            ToolkitCoreObservation::Absent,
+            "",
+            ToolkitCoreRead::Live,
+        ))
+        .unwrap();
+    assert_eq!(owner.state().absence_through, 2);
+    assert!(owner.state().unresolved_dispatches.contains(&first));
     assert_eq!(owner.state().offer_phase, ToolkitOfferPhase::Offered);
 }
 

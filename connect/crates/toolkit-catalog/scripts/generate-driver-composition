@@ -177,7 +177,7 @@ def main():
                           "inflight' = FALSE"],
            O | {'inflight'})
     action('Find', ['alive', 'scanned', '~joined', '~inflight', f'{KEY} \\in native_keys',
-                    'offer!RetainFoundReceipt(offer_offer_key, offer_revision, offer_input_digest, offer_incarnation, epoch, "Admitted", "receipt1")',
+                    'offer!RetainFoundReceipt(offer_offer_key, offer_revision, offer_input_digest, offer_incarnation, epoch, "Admitted", "receipt1", "Live")',
                     "outbox' = FALSE", "parked' = FALSE", "claimed' = (mode = \"production\")"],
            O | {'outbox', 'parked', 'claimed'})
     # One crash and restart; restart enumerates every non-terminal record for the driver.
@@ -258,6 +258,7 @@ def main():
                   '  ToolkitReceiptKindValues = {"Unsettled","Admitted","Found","CoreRefused","EntryRefused"}\n'
                   '  ToolkitWithdrawalCauseValues = {"NotWithdrawn","PolicyDenied","SourceClosed","AdmissionClosed",'
                   '"PreparationStale","ProcessEnded"}\n'
+                  '  ToolkitCoreReadValues = {"Durable","Live"}\n'
                   f'  Fault = "{fault}"\n'
                   '  ModeValues = {' + ','.join(json.dumps(m) for m in modes) + '}\n'
                   'INVARIANTS\n' + ''.join(f'  {inv}\n' for inv in checked)

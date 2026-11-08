@@ -10,8 +10,10 @@ EXTENDS model
 \* is recorded in the owner before its call (RecordDispatchStart); the call ends
 \* without native submission (its bind held or refused: the journal drops the
 \* dispatch) or its answer is lost (the call never returns here); the read by key
-\* decides. An Unavailable or non-final Absent read changes no owner state and is
-\* not an owner input.
+\* decides. The read is atomic over Core's admitted keys, as Core's live read is (no
+\* admission write here outlives its call); no lost answer is fed to the owner here, so
+\* the read's kind changes no transition. An Unavailable or non-final Absent read changes
+\* no owner state and is not an owner input.
 \* Source, protected callback, publication and multi-offer composition remain
 \* separate.
 CONSTANT Fault
@@ -101,7 +103,7 @@ ObserveAdmission ==
     /\ alive /\ phase = "Offered"
     /\ published_read = "Found" \/ (Fault = "forge-admission" /\ published_read = "Unavailable")
     /\ RetainFoundReceipt(offer_key, revision, input_digest, incarnation, epoch,
-                          "Admitted", "receipt-session-one:raw-key")
+                          "Admitted", "receipt-session-one:raw-key", "Live")
     /\ outbox' = FALSE
     /\ UNCHANGED <<alive, epoch, in_flight, dispatch_key, native_keys,
                    canonical_input, raw_read, published_read, dispatched_epochs>>
@@ -109,7 +111,7 @@ ObserveAdmission ==
 ObserveFinalAbsence ==
     /\ alive /\ phase = "Offered"
     /\ published_read = "Absent"
-    /\ RecordFinalAbsence(offer_key, revision, input_digest, incarnation, epoch, "Absent", "")
+    /\ RecordFinalAbsence(offer_key, revision, input_digest, incarnation, epoch, "Absent", "", "Live")
     /\ UNCHANGED recovery_vars
 Finished ==
     /\ phase = "CoreObserved" /\ ~in_flight

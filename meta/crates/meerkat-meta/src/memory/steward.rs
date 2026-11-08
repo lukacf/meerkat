@@ -8306,6 +8306,116 @@ mod tests {
         }
     }
 
+    /// A member private to a person feeds no dream, its person's operator
+    /// memory included: an `operator_said` proposal that a private side
+    /// chat files for the person who opened it reaches no prompt, an accept
+    /// that names it commits nothing, and it stays pending. A shared
+    /// member's proposal to the same person is judged as before.
+    #[tokio::test]
+    async fn a_private_side_chats_operator_proposal_is_judged_by_no_dream() {
+        const PRIVATE_TITLE: &str = "Alice prefers private briefings";
+        const PRIVATE_BODY: &str = "PRIVATE-OPERATOR-DETAIL";
+        const SHARED_TITLE: &str = "Alice prefers terse status notes";
+        let alice = MemoryScope::Operator {
+            realm: REALM.to_string(),
+            operator: "console-caller:v1:aa".to_string(),
+        };
+        let fixture = build_fixture(
+            vec![
+                empty_gather(),
+                empty_consolidate(),
+                "OPERATOR-PROPOSALS".to_string(),
+            ],
+            Vec::new(),
+        );
+        let engine = Arc::new(
+            StewardEngine::new(
+                StewardProfile::embedded_default(),
+                StewardConfig {
+                    enabled: true,
+                    min_signals: 1,
+                    ..StewardConfig::default()
+                },
+                Arc::new(ScriptedHandle {
+                    client: fixture.llm.clone(),
+                }),
+                fixture.store.clone(),
+                fixture.transcripts.clone(),
+                REALM,
+            )
+            .with_mob_context(Arc::new(PrivateRosterSource))
+            .with_operator_routing(true),
+        );
+        let private_proposal = fixture
+            .store
+            .propose(
+                &alice,
+                new_record(PRIVATE_TITLE, PRIVATE_BODY),
+                MemoryAuthor::Agent {
+                    identity: "identity:alice-side".to_string(),
+                },
+            )
+            .await
+            .expect("the private side chat proposes to its person's operator scope");
+        let shared_proposal = fixture
+            .store
+            .propose(
+                &alice,
+                new_record(SHARED_TITLE, "Alice said: keep status notes short."),
+                MemoryAuthor::Agent {
+                    identity: "identity:worker".to_string(),
+                },
+            )
+            .await
+            .expect("the shared member proposes to the person's operator scope");
+        {
+            let mut replies = fixture.llm.replies.lock().unwrap();
+            *replies
+                .iter_mut()
+                .find(|r| r.as_str() == "OPERATOR-PROPOSALS")
+                .unwrap() = json_reply(serde_json::json!({
+                "proposal_verdicts": [
+                    {"proposal_id": private_proposal, "verdict": "accept",
+                     "rationale": "the person said it"},
+                    {"proposal_id": shared_proposal, "verdict": "accept",
+                     "rationale": "the person said it"}
+                ]
+            }));
+        }
+        engine.note_session_completed();
+        let outcome = engine.dream_now().await;
+        let DreamOutcome::Completed(run) = outcome else {
+            panic!("dream must complete: {outcome:?}");
+        };
+        let prompts = fixture.llm.prompts().join("\n");
+        assert!(
+            prompts.contains(SHARED_TITLE),
+            "the operator proposal call ran: {:?}",
+            run.skips
+        );
+        for private in [PRIVATE_TITLE, PRIVATE_BODY] {
+            assert!(!prompts.contains(private), "no prompt holds {private}");
+        }
+        assert_eq!(
+            scope_titles(&fixture.store, alice).await,
+            vec![SHARED_TITLE.to_string()],
+            "only the shared member's proposal reaches the person's operator memory: {:?}",
+            run.skips
+        );
+        let pending = fixture
+            .store
+            .pending_proposals(REALM, 8)
+            .await
+            .expect("pending");
+        assert!(
+            pending
+                .iter()
+                .any(|proposal| proposal.proposal_id == private_proposal
+                    && proposal.status == "pending"),
+            "the private side chat's proposal stays pending: {pending:?}"
+        );
+    }
+
     // -- §7.2 P4 operator-scope routing --------------------------------------
 
     fn operator_scope() -> MemoryScope {

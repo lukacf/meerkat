@@ -305,6 +305,7 @@ impl PrivateOriginals {
                             Some(leaf) => leaf,
                             None => grants
                                 .issue_child(
+                                    &meerkat_core::AdmissionGuard::none(),
                                     &facts.application,
                                     &child.parent,
                                     child.id.clone(),
@@ -642,7 +643,12 @@ impl ServiceSetupCleanup {
                                 source
                                     .owner
                                     .grants()
-                                    .revoke(&issuer, &current, &mut custody)
+                                    .revoke(
+                                        &meerkat_core::AdmissionGuard::none(),
+                                        &issuer,
+                                        &current,
+                                        &mut custody,
+                                    )
                                     .map_err(|_| PrivateOriginalError::Unavailable)
                             });
                         unresolved |= result.is_err();

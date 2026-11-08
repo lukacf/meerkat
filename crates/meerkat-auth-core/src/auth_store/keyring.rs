@@ -23,6 +23,10 @@
 //!   recorded.
 //! - A completed denial is recorded. Unattended work for that credential is
 //!   then refused with no call until an interactive operation succeeds.
+//! - A write is fenced: a save or delete whose admission guard does not cover
+//!   the credential fence C(r) of its credential's realm, under the base the
+//!   store's refresh locks use, is refused before any call
+//!   ([`TokenStoreError::AdmissionFence`]).
 //!
 //! The keyring crate has no enumeration API; `list()` returns
 //! `TokenStoreError::Unavailable` so callers can fall back to a file-store
@@ -32,10 +36,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use meerkat_core::AdmissionGuard;
 use meerkat_core::auth::token_store::{TokenStoreAccess, TokenStoreObservation, TokenStoreRefusal};
 
 use super::refresh::InFlightMutation;
-use super::{PersistedTokens, TokenKey, TokenStore, TokenStoreError};
+use super::{PersistedTokens, TokenKey, TokenStore, TokenStoreError, require_credential_fence};
 
 /// Operating-system credential calls admitted at once across every keyring
 /// store in the process. Past it, work is refused with no thread and no queue.
@@ -364,28 +369,41 @@ impl Drop for AdmittedCall {
 
 pub struct KeyringTokenStore {
     service_name: String,
+    /// The credential root whose fences C(r) cover this store's entries:
+    /// the default credential root, the base its refresh locks use. `None`
+    /// when there is no configuration directory: every write then refuses.
+    credential_root: Option<std::path::PathBuf>,
     access: Arc<dyn KeychainAccess>,
     owner: Arc<KeychainOwner>,
 }
 
 impl KeyringTokenStore {
+    /// A store over the operating system's keychain under `service_name`.
+    /// Its writes are fenced by the credential fences of the default
+    /// credential root (`<config dir>/meerkat/credentials`), the base its
+    /// refresh locks use: a write whose guard does not cover the fence of
+    /// its credential's realm there is refused before any keychain call.
     pub fn new(service_name: impl Into<String>) -> Self {
         Self {
             service_name: service_name.into(),
+            credential_root: super::default_credential_root(),
             access: Arc::new(OsKeychain),
             owner: process_keychain_owner(),
         }
     }
 
-    /// A store over another keychain and owner (tests block the calls).
+    /// A store over another keychain and owner (tests block the calls),
+    /// fenced under `credential_root`.
     #[cfg(test)]
     pub(crate) fn with_keychain(
         service_name: impl Into<String>,
+        credential_root: Option<std::path::PathBuf>,
         access: Arc<dyn KeychainAccess>,
         owner: Arc<KeychainOwner>,
     ) -> Self {
         Self {
             service_name: service_name.into(),
+            credential_root,
             access,
             owner,
         }
@@ -610,13 +628,19 @@ impl TokenStore for KeyringTokenStore {
         self.load_for(key, TokenStoreAccess::Unattended).await
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        self.save_for(key, tokens, TokenStoreAccess::Unattended)
+    async fn save(
+        &self,
+        guard: &AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        self.save_for(guard, key, tokens, TokenStoreAccess::Unattended)
             .await
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        self.clear_for(key, TokenStoreAccess::Unattended).await
+    async fn clear(&self, guard: &AdmissionGuard, key: &TokenKey) -> Result<(), TokenStoreError> {
+        self.clear_for(guard, key, TokenStoreAccess::Unattended)
+            .await
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
@@ -651,18 +675,26 @@ impl TokenStore for KeyringTokenStore {
 
     async fn save_for(
         &self,
+        guard: &AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
         access: TokenStoreAccess,
     ) -> Result<(), TokenStoreError> {
+        if access != TokenStoreAccess::Status {
+            require_credential_fence(guard, self.credential_root.as_deref(), key)?;
+        }
         self.save_then(key, tokens, access, None).await
     }
 
     async fn clear_for(
         &self,
+        guard: &AdmissionGuard,
         key: &TokenKey,
         access: TokenStoreAccess,
     ) -> Result<(), TokenStoreError> {
+        if access != TokenStoreAccess::Status {
+            require_credential_fence(guard, self.credential_root.as_deref(), key)?;
+        }
         self.clear_then(key, access, None).await
     }
 
@@ -798,10 +830,27 @@ pub(crate) mod test_keychain {
         }
     }
 
-    /// A keyring store over `keychain` with its own owner of `capacity`.
+    /// A keyring store over `keychain` with its own owner of `capacity`, and
+    /// no credential root: it reads, and refuses every write.
     pub(crate) fn store(keychain: &Arc<FakeKeychain>, capacity: usize) -> KeyringTokenStore {
         KeyringTokenStore::with_keychain(
             "meerkat-keyring-test",
+            None,
+            Arc::clone(keychain) as Arc<dyn KeychainAccess>,
+            Arc::new(KeychainOwner::new(capacity)),
+        )
+    }
+
+    /// [`store`] fenced under `credential_root`, so writes under a guard over
+    /// its credential fences land.
+    pub(crate) fn store_under(
+        keychain: &Arc<FakeKeychain>,
+        capacity: usize,
+        credential_root: &std::path::Path,
+    ) -> KeyringTokenStore {
+        KeyringTokenStore::with_keychain(
+            "meerkat-keyring-test",
+            Some(credential_root.to_path_buf()),
             Arc::clone(keychain) as Arc<dyn KeychainAccess>,
             Arc::new(KeychainOwner::new(capacity)),
         )
@@ -1050,7 +1099,7 @@ mod tests {
         let coordinator = crate::InMemoryCoordinator::retaining_custody();
         let refresh = |completed: Option<Completed>| -> RefreshFn {
             let store = Arc::clone(&store);
-            Box::new(move || {
+            Box::new(move |_guard| {
                 Box::pin(async move {
                     let read = store
                         .load_for(&key("refresh"), TokenStoreAccess::Unattended)
@@ -1162,8 +1211,10 @@ mod tests {
     /// effect is kept.
     #[test]
     fn a_late_save_after_its_caller_left_is_recorded_not_discarded() {
+        let root = tempfile::tempdir().unwrap();
         let keychain = FakeKeychain::blocked();
-        let store = Arc::new(store(&keychain, 2));
+        let store = Arc::new(super::test_keychain::store_under(&keychain, 2, root.path()));
+        let guard = crate::auth_store::covering_guard(root.path(), &key("written"));
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -1174,6 +1225,7 @@ mod tests {
             async move {
                 store
                     .save_for(
+                        &guard,
                         &key("written"),
                         &tokens("new"),
                         TokenStoreAccess::Interactive,
@@ -1202,13 +1254,58 @@ mod tests {
         );
     }
 
+    /// A save or delete whose guard does not cover the store's credential
+    /// fence for the key's realm is refused before any keychain call, and
+    /// nothing is written; a covering guard lands.
+    #[tokio::test]
+    async fn a_write_without_a_covering_guard_is_refused_with_no_keychain_call() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::open();
+        let store = super::test_keychain::store_under(&keychain, 2, root.path());
+        let key = key("fenced");
+        for guard in [
+            meerkat_core::AdmissionGuard::none(),
+            crate::auth_store::covering_guard(other.path(), &key),
+        ] {
+            let saved = store
+                .save_for(&guard, &key, &tokens("new"), TokenStoreAccess::Interactive)
+                .await;
+            assert!(
+                matches!(saved, Err(TokenStoreError::AdmissionFence(_))),
+                "{saved:?}"
+            );
+            let cleared = store
+                .clear_for(&guard, &key, TokenStoreAccess::Interactive)
+                .await;
+            assert!(
+                matches!(cleared, Err(TokenStoreError::AdmissionFence(_))),
+                "{cleared:?}"
+            );
+        }
+        assert_eq!(keychain.calls(), 0, "no keychain call for a refused write");
+        assert_eq!(keychain.entry(&key.keyring_account()), None);
+        store
+            .save_for(
+                &crate::auth_store::covering_guard(root.path(), &key),
+                &key,
+                &tokens("new"),
+                TokenStoreAccess::Interactive,
+            )
+            .await
+            .unwrap();
+        assert_eq!(keychain.calls(), 1);
+        assert!(keychain.entry(&key.keyring_account()).is_some());
+    }
+
     /// A completed denial refuses unattended work with no call until an
     /// interactive operation succeeds; status reports it without a call.
     #[tokio::test]
     async fn a_completed_denial_refuses_unattended_work_until_an_interactive_success() {
+        let root = tempfile::tempdir().unwrap();
         let keychain = FakeKeychain::open();
         keychain.fail_next(KeychainFailure::Denied("the user denied access".into()));
-        let store = store(&keychain, 2);
+        let store = super::test_keychain::store_under(&keychain, 2, root.path());
         let denied = store
             .load_for(&key("denied"), TokenStoreAccess::Unattended)
             .await;
@@ -1232,6 +1329,7 @@ mod tests {
         // An explicit credential change re-arms unattended access.
         store
             .save_for(
+                &crate::auth_store::covering_guard(root.path(), &key("denied")),
                 &key("denied"),
                 &tokens("relogin"),
                 TokenStoreAccess::Interactive,

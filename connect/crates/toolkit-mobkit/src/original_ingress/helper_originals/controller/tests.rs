@@ -196,6 +196,7 @@ impl Fixture {
             let grant = owner
                 .grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &crate::original_ingress::tests::principal("admin"),
                     EvidenceId::new("independent-report-parent").unwrap(),
                     crate::original_ingress::tests::principal("agent"),
@@ -217,6 +218,7 @@ impl Fixture {
                     owner
                         .grants
                         .issue_root(
+                            &meerkat_core::AdmissionGuard::none(),
                             &crate::original_ingress::tests::principal("admin"),
                             EvidenceId::new("independent-account-parent").unwrap(),
                             crate::original_ingress::tests::principal("agent"),
@@ -242,6 +244,7 @@ impl Fixture {
                     owner
                         .grants
                         .issue_root(
+                            &meerkat_core::AdmissionGuard::none(),
                             &crate::original_ingress::tests::principal("admin"),
                             EvidenceId::new("independent-public-parent").unwrap(),
                             crate::original_ingress::tests::principal("agent"),
@@ -280,6 +283,7 @@ impl Fixture {
                 owner
                     .grants
                     .issue_root(
+                        &meerkat_core::AdmissionGuard::none(),
                         &crate::original_ingress::tests::principal("admin"),
                         EvidenceId::new(id).unwrap(),
                         crate::original_ingress::tests::principal("setup-agent"),
@@ -304,6 +308,7 @@ impl Fixture {
             let parent = owner
                 .grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &crate::original_ingress::tests::principal("admin"),
                     EvidenceId::new("independent-successor-catalog-parent").unwrap(),
                     crate::original_ingress::tests::principal("agent"),

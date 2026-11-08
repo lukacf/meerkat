@@ -50,7 +50,10 @@ fn evidence(value: &str) -> HistoricalEvidenceRef {
     }
 }
 fn store(path: &Path) -> Arc<dyn GrantOwnerStore> {
-    Arc::new(FileGrantOwnerStore::new(path))
+    Arc::new(FileGrantOwnerStore::new(
+        path,
+        meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+    ))
 }
 pub(crate) fn initialized(path: &Path) -> Arc<ToolkitOriginalOwner> {
     initialized_with_clock(path, Arc::new(HostAuthorizationClock))
@@ -83,6 +86,7 @@ fn base(owner: &ToolkitOriginalOwner) -> GrantLineageRef {
     owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("base"),
             principal("admin"),
@@ -332,6 +336,7 @@ fn original_operation_child_cannot_be_a_sibling_controller_in_either_restore_ord
     let b_child = owner
         .grants()
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             &base,
             id("b-child"),
@@ -929,6 +934,7 @@ async fn standing_original_cancel_is_durable_without_revoking_shared_grant_or_co
     let controller = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("controller"),
             principal("agent"),
@@ -1186,6 +1192,7 @@ async fn durable_binding_callback_and_original_cancel_share_the_writer_mutex() {
     let standing = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("standing"),
             principal("agent"),
@@ -1536,6 +1543,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -1546,6 +1554,7 @@ pub(crate) mod cancellation_store_faults {
             let controller = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("controller"),
                     principal("agent"),
@@ -1755,6 +1764,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -1973,6 +1983,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2081,6 +2092,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2184,6 +2196,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2280,6 +2293,7 @@ pub(crate) mod cancellation_store_faults {
         let standing = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("standing"),
                 principal("agent"),

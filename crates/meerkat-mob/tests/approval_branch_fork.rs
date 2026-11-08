@@ -279,6 +279,7 @@ impl Grants {
         );
         let grantee_controller = owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &grant_root(),
                 id("grantee-controller"),
                 data_agent(),
@@ -290,6 +291,7 @@ impl Grants {
         delegation.delegation_depth = DelegationDepth::remaining(1);
         let owner_delegation = owner
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &grant_root(),
                 id("owner-delegation"),
                 owner_agent(),
@@ -321,6 +323,7 @@ impl Grants {
         let approval = self
             .owner
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &owner_agent(),
                 &self.owner_delegation,
                 id(&format!("approval-{DECISION}")),
@@ -342,6 +345,7 @@ impl Grants {
         let child = self
             .owner
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &data_agent(),
                 &self.grantee_controller,
                 id(&format!("branch-controller-{DECISION}")),
@@ -356,7 +360,12 @@ impl Grants {
     fn revoke(&self, lineage: &[GrantLineageRef]) {
         let leaf = lineage.last().expect("a lineage");
         self.owner
-            .revoke(&owner_agent(), leaf, &mut AnyCustody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &owner_agent(),
+                leaf,
+                &mut AnyCustody,
+            )
             .expect("the issuer revokes the approval grant");
     }
 }

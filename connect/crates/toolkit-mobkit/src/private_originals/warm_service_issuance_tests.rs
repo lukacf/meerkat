@@ -222,7 +222,7 @@ async fn partial_case(mismatched_child: bool) {
                 std::slice::from_ref(&setup.configured.capability.parent), &application,
                 route.represented_subject.as_ref()).unwrap().restrictions().clone();
             wrong.delegation_depth = meerkat_authorization_contracts::constraints::DelegationDepth::remaining(0);
-            source.owner.grants().issue_child(&application, &setup.configured.capability.parent,
+            source.owner.grants().issue_child(&meerkat_core::AdmissionGuard::none(), &application, &setup.configured.capability.parent,
                 find_id.clone(), route.logical_executor.clone(), wrong).unwrap();
         }
         let sql = rusqlite::Connection::open(&fixture.source_path).unwrap();

@@ -183,7 +183,8 @@ impl AgentInstallationGrant {
                 LineageResolutionRefusal::Refused(
                     GrantRefusal::ControllerInUse
                     | GrantRefusal::Duplicate
-                    | GrantRefusal::Unavailable,
+                    | GrantRefusal::Unavailable
+                    | GrantRefusal::AdmissionFence,
                 ) => McpAttachmentRefusal::Unavailable,
             })?;
         let now_ms = self

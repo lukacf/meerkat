@@ -449,14 +449,16 @@ impl TokenStore for FailClearStore {
 
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
 
     async fn clear(
         &self,
+        _fence: &meerkat_core::AdmissionGuard,
         _key: &TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
         Err(meerkat_auth_core::auth_store::TokenStoreError::Io(
@@ -485,6 +487,7 @@ impl TokenStore for FailNextSaveDynStore {
 
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
@@ -493,14 +496,15 @@ impl TokenStore for FailNextSaveDynStore {
                 "injected save failure".to_string(),
             ));
         }
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
 
     async fn clear(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
@@ -523,6 +527,7 @@ impl TokenStore for FailNextSaveStore {
 
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
@@ -531,14 +536,15 @@ impl TokenStore for FailNextSaveStore {
                 "injected save failure".to_string(),
             ));
         }
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
 
     async fn clear(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
@@ -1040,7 +1046,10 @@ async fn unmarked_non_expiring_stored_token_is_dead_data() {
     });
     stored.expires_at = None;
     stored.metadata = metadata;
-    store.save(&key, &stored).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &stored)
+        .await
+        .unwrap();
     auth_lease
         .release_lease(&target.lease_key().unwrap())
         .unwrap();
@@ -1161,7 +1170,9 @@ async fn interactive_login_commit_waits_for_cross_process_refresh_transaction() 
 
     let (base, state) = spawn_oauth_fixture().await;
     let temp = tempfile::tempdir().unwrap();
-    let lock_dir = temp.path().join("locks");
+    // One credential root: the coordinators fence the store's writes from
+    // their lock directory's parent.
+    let lock_dir = temp.path().join("credentials").join("refresh-locks");
     let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(temp.path().join("credentials")));
     let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
         .with_expected_account("fixture-account-42")
@@ -1176,10 +1187,16 @@ async fn interactive_login_commit_waits_for_cross_process_refresh_transaction() 
         test_auth_lease(),
     );
     seed.interactive_login(&target, None).await.unwrap();
-    republish_stored_tokens(&seed, store.as_ref(), &target, |tokens| {
-        tokens.primary_secret = Some("stale-access-token".to_string());
-        tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
-    })
+    republish_stored_tokens_under(
+        &covering_target(&temp.path().join("credentials"), &target),
+        &seed,
+        store.as_ref(),
+        &target,
+        |tokens| {
+            tokens.primary_secret = Some("stale-access-token".to_string());
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        },
+    )
     .await;
 
     state.pause_refresh.store(true, Ordering::SeqCst);
@@ -1245,7 +1262,7 @@ async fn failed_login_after_paused_refresh_restores_refresh_winner() {
 
     let (base, state) = spawn_oauth_fixture().await;
     let temp = tempfile::tempdir().unwrap();
-    let lock_dir = temp.path().join("locks");
+    let lock_dir = temp.path().join("credentials").join("refresh-locks");
     let durable_store: Arc<dyn TokenStore> =
         Arc::new(FileTokenStore::new(temp.path().join("credentials")));
     let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
@@ -1261,10 +1278,16 @@ async fn failed_login_after_paused_refresh_restores_refresh_winner() {
         test_auth_lease(),
     );
     seed.interactive_login(&target, None).await.unwrap();
-    republish_stored_tokens(&seed, durable_store.as_ref(), &target, |tokens| {
-        tokens.primary_secret = Some("stale-access-token".to_string());
-        tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
-    })
+    republish_stored_tokens_under(
+        &covering_target(&temp.path().join("credentials"), &target),
+        &seed,
+        durable_store.as_ref(),
+        &target,
+        |tokens| {
+            tokens.primary_secret = Some("stale-access-token".to_string());
+            tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        },
+    )
     .await;
 
     state.pause_refresh.store(true, Ordering::SeqCst);
@@ -1514,14 +1537,45 @@ async fn republish_stored_tokens(
     target: &McpServerIdentity,
     mutate: impl FnOnce(&mut PersistedTokens),
 ) -> PersistedTokens {
+    republish_stored_tokens_under(
+        &meerkat_core::AdmissionGuard::none(),
+        authority,
+        store,
+        target,
+        mutate,
+    )
+    .await
+}
+
+/// [`republish_stored_tokens`] for a persisted store: the seeding write
+/// takes `fence`, a guard over the target's credential fence.
+async fn republish_stored_tokens_under(
+    fence: &meerkat_core::AdmissionGuard,
+    authority: &FixtureAuthority,
+    store: &dyn TokenStore,
+    target: &McpServerIdentity,
+    mutate: impl FnOnce(&mut PersistedTokens),
+) -> PersistedTokens {
     let key = target.token_key().unwrap();
     let mut tokens = store.load(&key).await.unwrap().unwrap();
     mutate(&mut tokens);
     let published = authority
         .publish_login_tokens_via_lease(target, &key, &tokens)
         .unwrap();
-    store.save(&key, &published).await.unwrap();
+    store.save(fence, &key, &published).await.unwrap();
     published
+}
+
+/// A guard over the credential fence of `target`'s realm under `root`.
+fn covering_target(
+    root: &std::path::Path,
+    target: &McpServerIdentity,
+) -> Arc<meerkat_core::AdmissionGuard> {
+    let key = target.token_key().unwrap();
+    meerkat_core::AdmissionGuard::try_acquire(vec![
+        meerkat_core::AdmissionFence::credentials(root, key.realm()).unwrap(),
+    ])
+    .unwrap()
 }
 
 async fn assert_login_fails_closed(
@@ -1796,7 +1850,13 @@ async fn durable_clear_crash_point_reconciles_stranded_refreshing_lifecycle() {
         )
         .unwrap();
     auth_lease.begin_refresh(&lease_key).unwrap();
-    store.clear(&target.token_key().unwrap()).await.unwrap();
+    store
+        .clear(
+            &meerkat_core::AdmissionGuard::none(),
+            &target.token_key().unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         auth_lease.snapshot(&lease_key).phase,
         Some(meerkat_core::handles::AuthLeasePhase::Refreshing)
@@ -1925,7 +1985,11 @@ async fn stored_token_metadata_must_match_requested_target() {
         .unwrap()
         .unwrap();
     store
-        .save(&other.token_key().unwrap(), &stored)
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &other.token_key().unwrap(),
+            &stored,
+        )
         .await
         .unwrap();
 
@@ -2599,8 +2663,18 @@ async fn selected_account_never_falls_back_to_admissible_legacy_credentials() {
     let legacy_tokens = authority
         .publish_login_tokens_via_lease(&legacy, &legacy_key, &tokens)
         .unwrap();
-    store.save(&legacy_key, &legacy_tokens).await.unwrap();
-    store.clear(&selected_key).await.unwrap();
+    store
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &legacy_key,
+            &legacy_tokens,
+        )
+        .await
+        .unwrap();
+    store
+        .clear(&meerkat_core::AdmissionGuard::none(), &selected_key)
+        .await
+        .unwrap();
     let legacy_only = McpOAuthAuthority::new(
         ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
         authority.auth_lease.clone(),
@@ -2699,22 +2773,26 @@ impl TokenStore for ReplaceOnSecondLoadStore {
                 key, &expected,
                 "replacement must meet the exact selected key"
             );
-            self.inner.save(key, &tokens).await?;
+            self.inner
+                .save(&meerkat_core::AdmissionGuard::none(), key, &tokens)
+                .await?;
         }
         self.inner.load(key).await
     }
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
     async fn clear(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
         self.inner.list().await
@@ -4753,7 +4831,10 @@ async fn discover_commit_refuses_a_racing_occupant_even_with_the_same_subject() 
     let raced = authority
         .publish_login_tokens_via_lease(&target, &key, &occupant)
         .unwrap();
-    store.save(&key, &raced).await.unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &raced)
+        .await
+        .unwrap();
 
     assert!(matches!(
         authority.login_complete(&target, callback).await,
@@ -5001,14 +5082,20 @@ async fn absent_account_evidence_never_satisfies_an_account_dependent_target() {
         let placed = authority
             .publish_login_tokens_via_lease(target, &key, &grant)
             .unwrap();
-        store.save(&key, &placed).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &placed)
+            .await
+            .unwrap();
         assert!(matches!(
             authority.stored_bearer_token(target).await,
             Err(McpOAuthError::Verification(
                 ConnectorOAuthRefusal::AccountMismatch
             ))
         ));
-        store.clear(&key).await.unwrap();
+        store
+            .clear(&meerkat_core::AdmissionGuard::none(), &key)
+            .await
+            .unwrap();
     }
     assert_eq!(
         authority
@@ -5498,6 +5585,7 @@ impl TokenStore for PausedSaveStore {
 
     async fn save(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
@@ -5505,16 +5593,17 @@ impl TokenStore for PausedSaveStore {
             self.save_started.notify_one();
             self.save_release.notified().await;
         }
-        let saved = self.inner.save(key, tokens).await;
+        let saved = self.inner.save(fence, key, tokens).await;
         self.saved.notify_one();
         saved
     }
 
     async fn clear(
         &self,
+        fence: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
 
     async fn list(&self) -> Result<Vec<TokenKey>, meerkat_auth_core::auth_store::TokenStoreError> {
@@ -7366,6 +7455,7 @@ async fn a_stalled_well_known_probe_is_a_timeout_not_an_absent_document() {
 async fn relogin_behind_a_stalled_refresh(
     persistence: ProviderAuthPersistence,
     store: Arc<dyn TokenStore>,
+    credential_root: Option<&std::path::Path>,
     base: &str,
     state: &Arc<TestState>,
 ) {
@@ -7382,11 +7472,16 @@ async fn relogin_behind_a_stalled_refresh(
         .with_expected_account("fixture-account-42")
         .unwrap();
     authority.interactive_login(&target, None).await.unwrap();
-    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+    let fence = match credential_root {
+        Some(root) => covering_target(root, &target),
+        None => meerkat_core::AdmissionGuard::none(),
+    };
+    republish_stored_tokens_under(&fence, &authority, store.as_ref(), &target, |tokens| {
         tokens.primary_secret = Some("stale-access-token".to_string());
         tokens.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
     })
     .await;
+    drop(fence);
     // The token endpoint accepts the refresh and never answers it.
     state.pause_refresh.store(true, Ordering::SeqCst);
     let refresh = tokio::spawn({
@@ -7430,6 +7525,7 @@ async fn a_stalled_refresh_fails_transient_and_lets_a_relogin_commit_land() {
     relogin_behind_a_stalled_refresh(
         ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),
         store,
+        None,
         &base,
         &state,
     )
@@ -7446,9 +7542,12 @@ async fn a_stalled_refresh_under_the_file_lock_lets_a_relogin_commit_land() {
     relogin_behind_a_stalled_refresh(
         ProviderAuthPersistence::new(
             Arc::clone(&store),
-            Arc::new(FileLockCoordinator::new(temp.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                temp.path().join("credentials").join("refresh-locks"),
+            )),
         ),
         store,
+        Some(&temp.path().join("credentials")),
         &base,
         &state,
     )
@@ -7906,6 +8005,7 @@ impl TokenStore for FailSaveAndRollbackStore {
 
     async fn save(
         &self,
+        _fence: &meerkat_core::AdmissionGuard,
         _key: &TokenKey,
         _tokens: &PersistedTokens,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
@@ -7916,6 +8016,7 @@ impl TokenStore for FailSaveAndRollbackStore {
 
     async fn clear(
         &self,
+        _fence: &meerkat_core::AdmissionGuard,
         _key: &TokenKey,
     ) -> Result<(), meerkat_auth_core::auth_store::TokenStoreError> {
         Err(meerkat_auth_core::auth_store::TokenStoreError::Io(
@@ -8089,7 +8190,10 @@ impl StatusShape {
         let key = self.target.token_key().unwrap();
         let mut tokens = self.store.load(&key).await.unwrap().unwrap();
         edit(&mut tokens);
-        self.store.save(&key, &tokens).await.unwrap();
+        self.store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+            .await
+            .unwrap();
     }
 }
 
@@ -8181,7 +8285,10 @@ async fn stored_credential_status_agrees_with_use_for_every_stored_shape() {
     let emptied = StatusShape::logged_in().await;
     emptied
         .store
-        .clear(&emptied.target.token_key().unwrap())
+        .clear(
+            &meerkat_core::AdmissionGuard::none(),
+            &emptied.target.token_key().unwrap(),
+        )
         .await
         .unwrap();
     shapes.push((
@@ -8750,11 +8857,16 @@ async fn a_fixed_client_is_bound_to_its_server_issuer_and_owner() {
         .unwrap()
         .unwrap();
     store
-        .save(&client_profile_key(&server_b), &row)
+        .save(
+            &meerkat_core::AdmissionGuard::none(),
+            &client_profile_key(&server_b),
+            &row,
+        )
         .await
         .unwrap();
     store
         .save(
+            &meerkat_core::AdmissionGuard::none(),
             &client_profile_key(&server_a.clone().in_realm(realm_b)),
             &row,
         )
@@ -8911,7 +9023,7 @@ async fn the_client_secret_never_appears_in_errors_debug_or_display() {
 /// them, and a login through it authenticates the fixed client.
 #[tokio::test]
 async fn fixed_client_custody_survives_a_store_reopen() {
-    use meerkat_auth_core::auth_store::FileTokenStore;
+    use meerkat_auth_core::auth_store::{FileLockCoordinator, FileTokenStore};
     let method = McpOAuthClientAuthMethod::ClientSecretBasic;
     let (base, state) = spawn_fixed_client_fixture(method).await;
     let temp = tempfile::tempdir().unwrap();
@@ -8923,7 +9035,7 @@ async fn fixed_client_custody_survives_a_store_reopen() {
         let installing = FixtureAuthority::with_fixture_http(
             ProviderAuthPersistence::new(
                 Arc::new(FileTokenStore::new(&credentials)),
-                Arc::new(InMemoryCoordinator::new()),
+                Arc::new(FileLockCoordinator::new(credentials.join("refresh-locks"))),
             ),
             recording_browser(Arc::clone(&state)),
             no_redirect_client(),
@@ -8937,7 +9049,7 @@ async fn fixed_client_custody_survives_a_store_reopen() {
     let reopened = FixtureAuthority::with_fixture_http(
         ProviderAuthPersistence::new(
             Arc::clone(&reopened_store),
-            Arc::new(InMemoryCoordinator::new()),
+            Arc::new(FileLockCoordinator::new(credentials.join("refresh-locks"))),
         ),
         recording_browser(Arc::clone(&state)),
         no_redirect_client(),
@@ -10391,5 +10503,165 @@ async fn a_central_callback_is_the_configured_base_byte_for_byte() {
             .await
             .unwrap(),
         Some(slashed)
+    );
+}
+
+/// Another process logs `target` out and in again, as `rkat mcp logout` and
+/// `rkat mcp login` beside a running host do: it clears the stored
+/// credential, then stores `secret` under a publication of its own lease
+/// handle (every process has its own), which never held the credential and
+/// so publishes generation 1, later than every publication before it.
+async fn log_in_again_in_another_process(
+    store: &EphemeralTokenStore,
+    target: &McpServerIdentity,
+    secret: &str,
+) {
+    let key = target.token_key().unwrap();
+    let lease_key = target.lease_key().unwrap();
+    let mut tokens = store.load(&key).await.unwrap().unwrap();
+    store
+        .clear(&meerkat_core::AdmissionGuard::none(), &key)
+        .await
+        .unwrap();
+    // A publication time later than the first process's.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokens.primary_secret = Some(secret.to_owned());
+    let other_process = test_auth_lease();
+    let transition = other_process
+        .acquire_lease(
+            &lease_key,
+            meerkat_core::persisted_token_expires_at_epoch_secs(&tokens),
+        )
+        .unwrap();
+    assert_eq!(
+        transition.generation(),
+        1,
+        "a process that never held the credential publishes generation 1"
+    );
+    let published =
+        meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &tokens, &transition)
+            .unwrap();
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &published)
+        .await
+        .unwrap();
+}
+
+/// A lease publication names one credential. This process logs in (its
+/// lease publishes generation 1) and a call records that publication; then
+/// another process logs the target out and in again with another credential
+/// (its own generation 1). This process's next read adopts that credential
+/// into its lease at generation 1 again, and the publication the lease names
+/// now is not the recorded one.
+#[tokio::test]
+async fn a_login_in_another_process_is_another_publication_at_the_same_generation() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        test_auth_lease(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    authority
+        .interactive_login(&target, None)
+        .await
+        .expect("this process logs in");
+    let recorded = authority
+        .credential_publication(&target)
+        .expect("the lease holds the login's credential");
+    assert_eq!(recorded.generation(), 1);
+
+    log_in_again_in_another_process(store.as_ref(), &target, "credential-of-the-other-login").await;
+
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("credential-of-the-other-login"),
+        "this process now serves the other login's credential"
+    );
+    let current = authority
+        .credential_publication(&target)
+        .expect("the lease holds the other login's credential");
+    assert_eq!(
+        current.generation(),
+        1,
+        "the adopted credential keeps the lease's generation"
+    );
+    assert_ne!(
+        current, recorded,
+        "a lease serving another credential names another publication"
+    );
+}
+
+/// The same for a lease ahead of the other process: this process logged in
+/// and published once more (generation 2) before another process logged the
+/// target out and in again (its generation 1). This process's next read
+/// adopts that publication into its lease, which keeps generation 2, and the
+/// publication the lease names is not the recorded one.
+#[tokio::test]
+async fn a_login_in_another_process_is_another_publication_to_a_lease_ahead_of_it() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let store = Arc::new(EphemeralTokenStore::new());
+    let lease = test_auth_lease();
+    let authority = FixtureAuthority::with_test_http(
+        store.clone(),
+        recording_browser(Arc::clone(&state)),
+        Client::new(),
+        lease.clone(),
+    );
+    let target = McpServerIdentity::from_server_config("glean", format!("{base}/mcp"))
+        .with_expected_account("fixture-account-42")
+        .unwrap();
+    let lease_key = target.lease_key().unwrap();
+    authority
+        .interactive_login(&target, None)
+        .await
+        .expect("this process logs in");
+    republish_stored_tokens(&authority, store.as_ref(), &target, |tokens| {
+        tokens.primary_secret = Some("credential-of-this-process".to_owned());
+    })
+    .await;
+    assert_eq!(
+        authority
+            .stored_bearer_token(&target)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("credential-of-this-process")
+    );
+    let recorded = authority
+        .credential_publication(&target)
+        .expect("the lease holds this process's credential");
+    assert_eq!(recorded.generation(), 2);
+    let recorded_at = lease.snapshot(&lease_key).credential_published_at_millis;
+
+    log_in_again_in_another_process(store.as_ref(), &target, "credential-of-the-other-login").await;
+
+    // The read adopts the other login's publication into this lease; what
+    // it then serves is not this row's subject.
+    let _ = authority.stored_bearer_token(&target).await;
+    assert_ne!(
+        lease.snapshot(&lease_key).credential_published_at_millis,
+        recorded_at,
+        "the lease holds the other login's publication"
+    );
+    let current = authority
+        .credential_publication(&target)
+        .expect("the lease holds the other login's credential");
+    assert_eq!(
+        current.generation(),
+        2,
+        "the adopted publication keeps the lease's larger generation"
+    );
+    assert_ne!(
+        current, recorded,
+        "a lease holding another credential names another publication"
     );
 }

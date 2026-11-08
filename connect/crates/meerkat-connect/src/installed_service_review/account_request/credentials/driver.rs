@@ -401,7 +401,9 @@ fn secret_failure(error: meerkat::McpServiceSecretUpdateError) -> WriteState {
         | McpServiceSecretUpdateError::DefinitionChanged(_)
         | McpServiceSecretUpdateError::StillCurrent(_)
         | McpServiceSecretUpdateError::ConfigurationUnavailable(_)
-        | McpServiceSecretUpdateError::Ownership(_) => WriteState::NotWritten,
+        | McpServiceSecretUpdateError::Ownership(_)
+        | McpServiceSecretUpdateError::AdmissionInProgress
+        | McpServiceSecretUpdateError::AdmissionFenceUnavailable(_) => WriteState::NotWritten,
     }
 }
 

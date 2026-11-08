@@ -1175,6 +1175,7 @@ async fn the_original_observes_its_registrations_current_mcp_adapter() {
     let callable = Observation::Callable {
         connection_generation: 7,
         connector: None,
+        service_secret_launch: None,
     };
     // Each returned Arc stands for the agent that owns the installed
     // adapter; the slot holds it weakly.

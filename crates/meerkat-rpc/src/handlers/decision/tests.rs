@@ -1661,6 +1661,22 @@ mod operator_connections {
         async fn patch(&self, _delta: ConfigDelta) -> Result<Config, ConfigError> {
             Err(ConfigError::Validation("unreadable".to_string()))
         }
+
+        async fn set_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _config: Config,
+        ) -> Result<(), ConfigError> {
+            Err(ConfigError::Validation("unreadable".to_string()))
+        }
+
+        async fn patch_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _delta: ConfigDelta,
+        ) -> Result<Config, ConfigError> {
+            Err(ConfigError::Validation("unreadable".to_string()))
+        }
     }
 
     /// When the realm's configuration cannot be read, the operator's

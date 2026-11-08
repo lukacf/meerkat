@@ -148,6 +148,13 @@ pub mod prompt_cache_anchor;
 pub mod provider;
 pub mod provider_evidence;
 pub mod provider_matrix;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod realm_admission;
+/// The wasm32 form of the admission guard: the same paths and the names
+/// target-neutral code uses, with nothing to fence.
+#[cfg(target_arch = "wasm32")]
+#[path = "realm_admission_wasm32.rs"]
+pub mod realm_admission;
 pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
@@ -509,6 +516,14 @@ pub use provider_evidence::{
     TargetCacheLoweringIssuer, TokenAggregationProvenance, UNMEASURED_MARKER_PREFIX,
     UnmeasuredTurnUsageAccounting, ValidatedSourceCacheBreakpoint, canonical_cache_prefix_identity,
     provider_cache_breakpoint_claim,
+};
+#[cfg(target_arch = "wasm32")]
+pub use realm_admission::AdmissionGuard;
+#[cfg(not(target_arch = "wasm32"))]
+pub use realm_admission::{
+    AdmissionFence, AdmissionFenceKind, AdmissionGuard, AdmissionHold, AdmissionRefusal,
+    EnteredWorkLost, FenceIdentity, FenceUnavailable, FenceUnavailableCause, FileCoverage,
+    ImmutableInstallationFiles, UncoveredCredentialEntry, UncoveredFile,
 };
 pub use realtime_transcript::{
     LiveAssistantPlaybackTarget, PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome,

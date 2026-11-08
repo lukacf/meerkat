@@ -85,6 +85,7 @@ impl FirstFixture {
                     .owner
                     .grants()
                     .issue_root(
+                        &meerkat_core::AdmissionGuard::none(),
                         &selected.parent.root_authority,
                         EvidenceId::new("cold-a-report-parent").unwrap(),
                         native.grant_administrator.clone(),
@@ -870,6 +871,7 @@ impl<S> FirstFixture<S> {
             .map_err(|error| format!("{error:?}"))?;
         grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &route.grant_caller,
                 parent.last().ok_or("fixture controller parent empty")?,
                 EvidenceId::new(format!(

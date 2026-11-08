@@ -77,7 +77,7 @@ use std::sync::{Arc, OnceLock};
 
 use meerkat_authorization::clock::LocalAuthorizationClock;
 use meerkat_authorization::grants::{
-    FileGrantOwnerStore, GrantDurabilityError, LocalGrantAuthority, LocalGrantConfiguration,
+    GrantDurabilityError, LocalGrantAuthority, LocalGrantConfiguration,
 };
 use meerkat_authorization::publication::{LocalAuthorizationPublication, PublicationError};
 use meerkat_authorization_contracts::constraints::{ExecutionRestrictions, ResourceDomain};
@@ -160,6 +160,21 @@ pub enum StockGovernanceError {
     CommandUncertain,
     #[error("the realm's review rules are unavailable: {0}")]
     Review(String),
+    /// An admission, or another fenced operation, holds the realm's
+    /// admission fence beyond the command's bound
+    /// ([`meerkat_core::realm_admission::INTERACTIVE_FENCE_WAIT`]): nothing
+    /// was started or written. It may be retried once the hold ends, which
+    /// can be only when the holding process restarts.
+    #[error(
+        "an admission or another fenced operation holds the realm's admission fence; nothing \
+         was started or written; retry later (an admission's hold may last until its process \
+         restarts)"
+    )]
+    AdmissionInProgress,
+    /// The realm's admission fence could not be opened, created, locked or
+    /// identity-checked: nothing was started or written.
+    #[error("{0}; nothing was started or written")]
+    AdmissionFenceUnavailable(String),
     #[error(transparent)]
     Store(#[from] meerkat_store::StoreError),
     #[error(transparent)]
@@ -259,6 +274,7 @@ pub(crate) async fn read_stock_grant_file(
 
 /// Record the default agent's pair, keeping every other agent's references.
 async fn write_stock_grants(
+    guard: &meerkat_core::AdmissionGuard,
     paths: &RealmPaths,
     selection: &StockGrantSelection,
 ) -> Result<(), StockGovernanceError> {
@@ -274,7 +290,7 @@ async fn write_stock_grants(
     // An agent already in per-target mode keeps it: the older worker grant
     // is recorded for cleanup, never selected (unless selected elsewhere).
     file.settle();
-    Ok(write_stock_grant_file(paths, &file).await?)
+    Ok(write_stock_grant_file(guard, paths, &file).await?)
 }
 
 /// Where a selection write stopped. Before the rename the selection on disk
@@ -296,10 +312,74 @@ impl From<SelectionWriteFailure> for StockGovernanceError {
     }
 }
 
+impl From<meerkat_core::AdmissionRefusal> for StockGovernanceError {
+    fn from(refusal: meerkat_core::AdmissionRefusal) -> Self {
+        match refusal {
+            meerkat_core::AdmissionRefusal::InProgress => Self::AdmissionInProgress,
+            meerkat_core::AdmissionRefusal::Unavailable(unavailable) => {
+                Self::AdmissionFenceUnavailable(unavailable.to_string())
+            }
+        }
+    }
+}
+
+/// Take R, the admission fence of `realm_id` under `realms_root`, EXCLUSIVE,
+/// waiting up to the interactive bound: the first step of every stock
+/// command's owned task, before any custody of its own. It covers the
+/// realm's grant log and stock selection (its `authorization/` files).
+pub(crate) async fn take_realm_fence<E>(
+    realms_root: &Path,
+    realm_id: &str,
+) -> Result<Arc<meerkat_core::AdmissionGuard>, E>
+where
+    E: From<StockGovernanceError> + From<meerkat_core::AdmissionRefusal>,
+{
+    let fence = realm_fence::<E>(realms_root, realm_id)?;
+    Ok(meerkat_core::AdmissionGuard::acquire(
+        vec![fence],
+        meerkat_core::realm_admission::INTERACTIVE_FENCE_WAIT,
+    )
+    .await?)
+}
+
+/// [`take_realm_fence`] without waiting, for a command that runs under a
+/// custody it already holds (a staged realm's execution custody): a held
+/// fence refuses at once ([`meerkat_core::AdmissionRefusal::InProgress`]),
+/// so no fence is waited for under another lock.
+pub(crate) fn take_realm_fence_now<E>(
+    realms_root: &Path,
+    realm_id: &str,
+) -> Result<Arc<meerkat_core::AdmissionGuard>, E>
+where
+    E: From<StockGovernanceError> + From<meerkat_core::AdmissionRefusal>,
+{
+    let fence = realm_fence::<E>(realms_root, realm_id)?;
+    Ok(meerkat_core::AdmissionGuard::try_acquire(vec![fence])?)
+}
+
+/// R, the admission fence of `realm_id` under `realms_root`.
+fn realm_fence<E>(realms_root: &Path, realm_id: &str) -> Result<meerkat_core::AdmissionFence, E>
+where
+    E: From<StockGovernanceError> + From<meerkat_core::AdmissionRefusal>,
+{
+    let realm = RealmId::parse(realm_id)
+        .map_err(|error| StockGovernanceError::Principal(error.to_string()))?;
+    Ok(meerkat_core::AdmissionFence::realm(realms_root, &realm)?)
+}
+
+/// Write the realm's selection file under `guard`, which must hold the
+/// realm's admission fence (it covers the file): otherwise nothing is
+/// written.
 pub(crate) async fn write_stock_grant_file(
+    guard: &meerkat_core::AdmissionGuard,
     paths: &RealmPaths,
     file: &issuance::StockGrantFile,
 ) -> Result<(), SelectionWriteFailure> {
+    super::realm_admission_fence(paths)
+        .and_then(|fence| guard.covers(&fence))
+        .map_err(|refusal| {
+            SelectionWriteFailure::NotWritten(std::io::Error::other(refusal.to_string()))
+        })?;
     let path = stock_grants_path(paths);
     let body = serde_json::to_vec_pretty(file)
         .map_err(|error| SelectionWriteFailure::NotWritten(error.into()))?;
@@ -1456,7 +1536,38 @@ fn process_id() -> String {
 /// rather than recreated, since a new owner would replace its lineage. This
 /// is not a transaction: a failure after the flip leaves a governed realm
 /// without owners, which refuses, and is reported here.
+///
+/// The realm's admission fence is taken first, before the custody, on the
+/// command's owned task, which settles even when the caller stops waiting:
+/// the grant owner it creates is the realm's grant log, which an admission
+/// reads. A held fence refuses
+/// ([`StockGovernanceError::AdmissionInProgress`]) with nothing changed.
 pub async fn govern_stock_realm(
+    realms_root: &Path,
+    realm_id: &str,
+    principals: &StockPrincipals,
+) -> Result<(), StockGovernanceError> {
+    // Only an existing realm is governed: opening it below would create it.
+    if meerkat_store::read_realm_posture_in(realms_root, realm_id).await?
+        == meerkat_store::RealmPosture::NotMaterialized
+    {
+        return Err(meerkat_store::StoreError::RealmNotMaterialized {
+            realm_id: realm_id.to_string(),
+        }
+        .into());
+    }
+    let (realms_root, realm_id) = (realms_root.to_path_buf(), realm_id.to_string());
+    let principals = principals.clone();
+    issuance::on_owned_task(async move {
+        let guard = take_realm_fence::<StockGovernanceError>(&realms_root, &realm_id).await?;
+        govern_under(&guard, &realms_root, &realm_id, &principals).await
+    })
+    .await
+}
+
+/// [`govern_stock_realm`] under `guard`, which holds the realm's fence.
+async fn govern_under(
+    guard: &meerkat_core::AdmissionGuard,
     realms_root: &Path,
     realm_id: &str,
     principals: &StockPrincipals,
@@ -1507,7 +1618,7 @@ pub async fn govern_stock_realm(
         }
         meerkat_store::govern_realm_in(realms_root, realm_id).await?;
     }
-    let store = Arc::new(FileGrantOwnerStore::new(owner_path.clone()));
+    let store = Arc::new(super::realm_grant_owner_store(&paths)?);
     if owner_exists {
         LocalGrantAuthority::restore(store, LocalAuthorizationPublication::new(), clock)
             .map_err(|error| StockGovernanceError::GrantOwner(error.to_string()))?;
@@ -1523,6 +1634,7 @@ pub async fn govern_stock_realm(
         tokio::fs::create_dir_all(parent).await?;
     }
     let owner = LocalGrantAuthority::new_durable(
+        guard,
         LocalGrantConfiguration {
             root: principals.operator.clone(),
             namespace: EvidenceId::new(STOCK_GRANT_NAMESPACE)
@@ -1543,7 +1655,9 @@ pub async fn govern_stock_realm(
 /// stock executor: trusted host configuration naming references in the
 /// realm's grant owner, never the grants themselves. Admission resolves them
 /// through the restored owner; a missing, revoked or mismatched reference
-/// refuses. Written atomically; a later open reads it.
+/// refuses. Written atomically; a later open reads it. The realm's admission
+/// fence is taken first, as for every stock command; a held fence refuses
+/// ([`StockGovernanceError::AdmissionInProgress`]) with nothing written.
 pub async fn record_stock_grant_selection(
     realms_root: &Path,
     realm_id: &str,
@@ -1552,12 +1666,15 @@ pub async fn record_stock_grant_selection(
     // The same exclusive administrative custody as `rkat realm grant` and
     // `revoke-grant`, held across the read, the settled write and its
     // publication, on an owned task so it is never released while that
-    // write can still land, even if the caller stops waiting.
+    // write can still land, even if the caller stops waiting. The realm's
+    // admission fence comes first, before that custody.
     let (realms_root, realm_id) = (realms_root.to_path_buf(), realm_id.to_string());
     let selection = selection.clone();
     issuance::on_owned_task(async move {
+        let guard = take_realm_fence::<StockGovernanceError>(&realms_root, &realm_id).await?;
         let bundle = issuance::administrative_custody(&realms_root, &realm_id).await?;
         let recorded = write_stock_grants(
+            &guard,
             &meerkat_store::realm_paths_in(&realms_root, &realm_id),
             &selection,
         )

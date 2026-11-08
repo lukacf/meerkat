@@ -43,7 +43,7 @@ use meerkat_core::approval::decision::{
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState};
 use meerkat_core::connection::RealmId;
 use meerkat_core::time_compat::Instant;
-use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
+use meerkat_core::{AdmissionGuard, PrincipalKind, PrincipalRef, TrustDomainId};
 
 use super::offer::{
     AccessOfferArguments, AccessOfferError, CallingWork, OperationArguments,
@@ -156,6 +156,7 @@ impl ControllerGrantMutationCustody for AnyCustody {
 }
 
 /// The native custody of a runtime whose branches run no unfinished work.
+/// It takes the grant log's fence without waiting, as the runtime's does.
 struct Custody;
 
 impl ApprovalControllerCustody for Custody {
@@ -165,7 +166,18 @@ impl ApprovalControllerCustody for Custody {
         issuer: &PrincipalRef,
         grant: &GrantLineageRef,
     ) -> Result<(), meerkat_authorization::grants::GrantRefusal> {
-        grants.revoke(issuer, grant, &mut AnyCustody)
+        let guard =
+            AdmissionGuard::try_acquire(grants.admission_fences()).map_err(
+                |refusal| match refusal {
+                    meerkat_core::AdmissionRefusal::InProgress => {
+                        meerkat_authorization::grants::GrantRefusal::AdmissionFence
+                    }
+                    meerkat_core::AdmissionRefusal::Unavailable(_) => {
+                        meerkat_authorization::grants::GrantRefusal::Unavailable
+                    }
+                },
+            )?;
+        grants.revoke(&guard, issuer, grant, &mut AnyCustody)
     }
 }
 
@@ -509,23 +521,110 @@ impl GrantOwnerStore for UncertainJournal {
 
     fn create(
         &self,
+        guard: &AdmissionGuard,
         identity: &meerkat_authorization::grants::GrantOwnerIdentity,
     ) -> Result<(), meerkat_authorization::grants::GrantStoreError> {
-        self.inner.create(identity)
+        self.inner.create(guard, identity)
     }
 
     fn append(
         &self,
+        guard: &AdmissionGuard,
         change: &meerkat_authorization::grants::GrantOwnerChange,
     ) -> Result<(), meerkat_authorization::grants::GrantStoreError> {
         if self.uncertain.load(Ordering::SeqCst) {
             return Err(meerkat_authorization::grants::GrantStoreError::Uncertain);
         }
-        self.inner.append(change)
+        self.inner.append(guard, change)
     }
 
     fn release(&self) {
         self.inner.release();
+    }
+}
+
+/// The grant owner's journal on a realm's grant log in a fresh directory,
+/// which appends only under the log's admission fence, counting every
+/// append it is asked for.
+struct FencedJournal {
+    _directory: tempfile::TempDir,
+    fence: meerkat_core::AdmissionFence,
+    path: std::path::PathBuf,
+    inner: meerkat_authorization::grants::FileGrantOwnerStore,
+    appends: AtomicU64,
+}
+
+impl FencedJournal {
+    fn new() -> Arc<Self> {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let fence = meerkat_core::AdmissionFence::realm(directory.path(), &realm()).expect("fence");
+        let path = fence
+            .directory()
+            .join("authorization")
+            .join("grant-owner.jsonl");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        let inner = meerkat_authorization::grants::FileGrantOwnerStore::new(
+            &path,
+            meerkat_authorization::grants::GrantLogFence::Realm(fence.clone()),
+        );
+        Arc::new(Self {
+            _directory: directory,
+            fence,
+            path,
+            inner,
+            appends: AtomicU64::new(0),
+        })
+    }
+
+    /// An admission's hold of the log's fence.
+    fn hold(&self) -> meerkat_core::AdmissionHold {
+        meerkat_core::AdmissionHold::try_acquire(vec![self.fence.clone()])
+            .expect("an admission holds the log's fence")
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        std::fs::read(&self.path).expect("the grant log")
+    }
+
+    /// How many appends the journal was asked for.
+    fn appends(&self) -> u64 {
+        self.appends.load(Ordering::SeqCst)
+    }
+}
+
+impl GrantOwnerStore for FencedJournal {
+    fn load(
+        &self,
+    ) -> Result<
+        Option<meerkat_authorization::grants::DurableGrantOwner>,
+        meerkat_authorization::grants::GrantStoreError,
+    > {
+        self.inner.load()
+    }
+
+    fn create(
+        &self,
+        guard: &AdmissionGuard,
+        identity: &meerkat_authorization::grants::GrantOwnerIdentity,
+    ) -> Result<(), meerkat_authorization::grants::GrantStoreError> {
+        self.inner.create(guard, identity)
+    }
+
+    fn append(
+        &self,
+        guard: &AdmissionGuard,
+        change: &meerkat_authorization::grants::GrantOwnerChange,
+    ) -> Result<(), meerkat_authorization::grants::GrantStoreError> {
+        self.appends.fetch_add(1, Ordering::SeqCst);
+        self.inner.append(guard, change)
+    }
+
+    fn release(&self) {
+        self.inner.release();
+    }
+
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.inner.admission_fence()
     }
 }
 
@@ -564,8 +663,20 @@ impl Fixture {
             .store
             .unwrap_or_else(|| Arc::new(InMemoryDecisionStore::new()));
         let decisions = crate::decision::DurableDecisionService::with_clock(store, clock.clone());
+        // The host's setup appends under the grant log's own fence, when its
+        // journal has one, held only while it sets up.
+        let setup = AdmissionGuard::try_acquire(
+            terms
+                .grant_store
+                .as_ref()
+                .and_then(|grant_store| grant_store.admission_fence())
+                .into_iter()
+                .collect(),
+        )
+        .expect("the grant log's fence is free at setup");
         let owner = match &terms.grant_store {
             Some(grant_store) => LocalGrantAuthority::new_durable(
+                &setup,
                 grant_configuration(),
                 Arc::clone(grant_store),
                 LocalAuthorizationPublication::new(),
@@ -598,6 +709,7 @@ impl Fixture {
         }
         let offering = if terms.rule {
             owner.issue_root_with_child_rule(
+                &setup,
                 &agent("grant-root"),
                 id("owner-delegation"),
                 owner_agent(),
@@ -610,6 +722,7 @@ impl Fixture {
             )
         } else {
             owner.issue_root(
+                &setup,
                 &agent("grant-root"),
                 id("owner-delegation"),
                 owner_agent(),
@@ -622,6 +735,7 @@ impl Fixture {
         controller_bounds.delegation_depth = DelegationDepth::remaining(terms.controller_depth);
         let controller = owner
             .issue_root(
+                &setup,
                 &agent("grant-root"),
                 id("data-agent-controller"),
                 data_agent(),
@@ -629,6 +743,7 @@ impl Fixture {
                 controller_bounds,
             )
             .expect("the asking agent's controller grant");
+        drop(setup);
         let branches = Arc::new(Branches::default());
         branches.can_branch(
             &data_agent(),
@@ -1044,6 +1159,7 @@ fn access_offer_refuses_a_controller_grant_that_cannot_admit_the_branch() {
     let narrow = fixture
         .owner
         .issue_root(
+            &AdmissionGuard::none(),
             &agent("grant-root"),
             id("data-agent-narrow-controller"),
             data_agent(),
@@ -1108,6 +1224,7 @@ fn access_offer_takes_requester_and_origin_from_the_calling_work() {
     let owner_controller = fixture
         .owner
         .issue_root(
+            &AdmissionGuard::none(),
             &agent("grant-root"),
             id("owner-agent-controller"),
             owner_agent(),
@@ -1266,7 +1383,7 @@ async fn the_branch_controller_grant_is_issued_and_recovered_on_retry() {
     };
     let ChildGrantOutcome::Issued { lineage: first } = fixture
         .owner
-        .issue_or_recover_child_under_exclusion(&intent, || Ok(validity))
+        .issue_or_recover_child_under_exclusion(&AdmissionGuard::none(), &intent, || Ok(validity))
         .expect("the earlier attempt's issuance")
     else {
         panic!("the first attempt issues the branch's controller grant");
@@ -1418,6 +1535,181 @@ async fn an_open_branch_past_its_window_is_retired_by_the_sweep() {
         fixture.grants.sweep_branches().await,
         0,
         "nothing left open"
+    );
+}
+
+/// The executor appends the branch's controller grant and the
+/// approval-carried grant under the grant log's admission fence, taken
+/// without waiting: while an admission holds the fence, the execution is
+/// released before any append is asked for, with neither grant issued and
+/// the decision still approved. Once the hold ends, the next pass executes
+/// it under the fence.
+#[tokio::test]
+async fn a_held_grant_log_fence_releases_the_execution_with_no_grant_issued() {
+    let journal = FencedJournal::new();
+    let fixture = Fixture::with(Terms {
+        grant_store: Some(journal.clone()),
+        ..Terms::default()
+    });
+    let held = fixture.offer(true).expect("held");
+    fixture.decide(&held, true);
+    let appends = journal.appends();
+    let written = journal.bytes();
+
+    let mut hold = journal.hold();
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(held.decision_id.clone(), DecisionPassOutcome::Released)),
+        "the execution is released, to be made again: {pass:?}"
+    );
+    assert_eq!(
+        journal.appends(),
+        appends,
+        "no append was asked for under the held fence"
+    );
+    assert_eq!(journal.bytes(), written, "nothing was written");
+    assert_eq!(
+        fixture.stored(&held.decision_id).state.phase,
+        DecisionPhase::Approved,
+        "the decision stays approved"
+    );
+    assert_eq!(
+        fixture.issued(branch_controller_grant_id(&held.decision_id)),
+        None
+    );
+    assert_eq!(fixture.issued(approval_grant_id(&held.decision_id)), None);
+
+    hold.release();
+    let pass = fixture.executor_loop().pass().await;
+    assert!(
+        pass.outcomes
+            .contains(&(held.decision_id.clone(), DecisionPassOutcome::Executed)),
+        "executed once the hold ends: {pass:?}"
+    );
+    assert!(
+        fixture
+            .issued(branch_controller_grant_id(&held.decision_id))
+            .is_some()
+    );
+    assert!(
+        fixture
+            .issued(approval_grant_id(&held.decision_id))
+            .is_some()
+    );
+    assert!(
+        journal.bytes().len() > written.len(),
+        "both grants are journaled under the fence"
+    );
+}
+
+/// A retired branch's controller grant is revoked under the grant log's
+/// admission fence, which the custody takes without waiting: while an
+/// admission holds the fence, the revocation is left to the next pass
+/// before any append is asked for, and the grant stays unrevoked. Once the
+/// hold ends, the next cleanup revokes it under the fence and settles the
+/// decision's cleanup.
+#[tokio::test]
+async fn a_held_grant_log_fence_leaves_the_controller_revocation_to_the_next_pass() {
+    let journal = FencedJournal::new();
+    let fixture = Fixture::with(Terms {
+        grant_store: Some(journal.clone()),
+        ..Terms::default()
+    });
+    let decision = executed(&fixture).await;
+    let appends = journal.appends();
+
+    let mut hold = journal.hold();
+    assert_eq!(
+        fixture.grants.clean_up(&decision).await,
+        executor::Cleanup::Pending,
+        "the revocation is left to the next pass"
+    );
+    assert_eq!(
+        journal.appends(),
+        appends,
+        "no append was asked for under the held fence"
+    );
+    assert!(
+        controller_current(&fixture, &decision),
+        "the controller grant stays unrevoked"
+    );
+
+    hold.release();
+    assert_eq!(
+        fixture.grants.clean_up(&decision).await,
+        executor::Cleanup::Done
+    );
+    assert!(
+        !controller_current(&fixture, &decision),
+        "revoked under the fence once the hold ends"
+    );
+    assert_eq!(
+        fixture.stored(&decision).state.cleanup,
+        DecisionCleanup::Settled
+    );
+}
+
+/// The runtime's own custody takes the grant log's admission fence without
+/// waiting, before its native custody: while an admission holds the fence, a
+/// revocation is refused at the fence, typed, before any append is asked
+/// for; once the hold ends, the revocation is appended under the fence.
+#[tokio::test]
+async fn the_runtime_custody_takes_the_grant_log_fence_before_its_own() {
+    let journal = FencedJournal::new();
+    let setup = AdmissionGuard::try_acquire(vec![journal.fence.clone()]).expect("the log's fence");
+    let owner = LocalGrantAuthority::new_durable(
+        &setup,
+        grant_configuration(),
+        journal.clone(),
+        LocalAuthorizationPublication::new(),
+        Arc::new(TestClock::default()),
+    )
+    .expect("durable grant owner");
+    let grant = owner
+        .issue_root(
+            &setup,
+            &agent("grant-root"),
+            id("branch-controller"),
+            data_agent(),
+            None,
+            ExecutionRestrictions::unrestricted(),
+        )
+        .expect("a controller grant");
+    drop(setup);
+    let machine = crate::meerkat_machine::MeerkatMachine::ephemeral();
+    let appends = journal.appends();
+    let written = journal.bytes();
+
+    let mut hold = journal.hold();
+    assert_eq!(
+        machine.revoke_controller(&owner, &agent("grant-root"), &grant),
+        Err(meerkat_authorization::grants::GrantRefusal::AdmissionFence),
+        "refused at the held fence"
+    );
+    assert_eq!(
+        journal.appends(),
+        appends,
+        "no append was asked for under the held fence"
+    );
+    assert_eq!(journal.bytes(), written, "nothing was written");
+
+    hold.release();
+    assert_eq!(
+        machine.revoke_controller(&owner, &agent("grant-root"), &grant),
+        Ok(()),
+        "revoked under the fence once the hold ends"
+    );
+    assert!(
+        journal.bytes().len() > written.len(),
+        "the revocation is journaled"
+    );
+    assert!(
+        owner
+            .unrevoked_grants(|candidate| *candidate == id("branch-controller"))
+            .expect("the owner answers")
+            .is_empty(),
+        "the controller grant is revoked"
     );
 }
 

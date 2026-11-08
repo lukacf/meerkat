@@ -4,19 +4,28 @@
 //! (`[realm.<realm>.connector_client.<profile>]`). This module is the one
 //! loader that turns the realm's effective configuration into the connector
 //! owner's client-auth profiles, and the source every host installs so the
-//! owner reads the current profiles at each login and refresh.
+//! owner reads the current profiles at each login and refresh. Its writers
+//! ([`put_connector_client`], [`rotate_connector_client_secret`],
+//! [`remove_connector_client`]) change a client's document entry and its
+//! secret as one guarded operation under the realm's admission fences.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use meerkat_core::connection::{RealmChain, RealmId};
-use meerkat_core::{Config, ConnectorClientAuthMethod, ConnectorClientConfig};
+use meerkat_core::{
+    AdmissionGuard, Config, ConfigError, ConfigRuntime, ConnectorClientAuthMethod,
+    ConnectorClientConfig,
+};
 use meerkat_providers::connector_login::{
     ConnectorClientAuthProfile, ConnectorClientAuthSource, ConnectorClientSecret,
     ConnectorLoginError, clear_connector_client_secret, load_connector_client_secret,
     save_connector_client_secret,
 };
+
+/// The generation sidecar of a realm's own config document, beside it.
+const CONFIG_STATE_FILE: &str = "config_state.json";
 
 /// The connector client-auth profiles `realm` declares in its effective
 /// (realm-chain composed) `config`. The nearest realm defining an id wins.
@@ -163,8 +172,9 @@ pub enum ConnectorClientUpdateError {
     Config(#[from] meerkat_core::ConfigError),
     #[error(transparent)]
     Store(#[from] ConnectorLoginError),
-    /// The profile's update ownership could not be acquired; the update did
-    /// not start.
+    /// The profile's update ownership, or the realm's admission fences (held
+    /// by an admission or another fenced update, or unusable), could not be
+    /// acquired; the update did not start and wrote nothing.
     #[error("connector client update ownership is unavailable: {0}")]
     Ownership(String),
     /// The coordinator lost the update's outcome (for example it reports
@@ -194,18 +204,93 @@ pub enum ConnectorClientUpdateError {
     },
 }
 
-/// Run one update of `realm`'s connector client `id` under the persistence's
-/// existing exclusive-mutation coordinator, keyed by the profile id. Every
-/// put, rotation and removal of that profile (in this or another process
-/// sharing the coordinator) runs one at a time, so an older update can never
-/// clear a secret a newer one published.
-async fn with_profile_update(
+/// One guarded update of `realm`'s connector client `id`: its config
+/// document entry and its secret change under one admission guard.
+///
+/// 1. Before entry, the update takes, in the global order and with the
+///    interactive wait, the fences of the realm's own document by kind (R of
+///    the realm, or the user document fence U for `global`:
+///    [`ConfigRuntime::admission_fences`]) and the credential fence C of the
+///    realm that the persistence's coordinator names. A held or unusable
+///    fence refuses as [`ConnectorClientUpdateError::Ownership`]: nothing
+///    started and nothing is held.
+/// 2. Entered, a task this function spawns owns the guard. It enters the
+///    coordinator's per-profile key with `with_exclusive_mutation_under`,
+///    so every put, rotation and removal of that profile runs one at a time
+///    and an older update can never clear a secret a newer one published.
+///    `update` writes the secret, and the document through the runtime's
+///    `patch_under`, under that guard.
+/// 3. Settled, the task ends and the guard drops; only then does this
+///    future resolve. A caller that stops waiting after step 1 does not stop
+///    step 2, and the fences are released only at its end.
+async fn guarded_profile_update<F, Fut>(
+    documents: Arc<meerkat_store::FilesystemRealmConfigSource>,
     persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
     realm: &RealmId,
     id: &str,
-    update: impl std::future::Future<Output = Result<(), ConnectorClientUpdateError>> + Send + 'static,
-) -> Result<(), ConnectorClientUpdateError> {
-    use meerkat_core::auth::{CredentialMutationFn, CredentialMutationOutcome};
+    update: F,
+) -> Result<(), ConnectorClientUpdateError>
+where
+    F: FnOnce(Arc<AdmissionGuard>, Arc<ConfigRuntime>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), ConnectorClientUpdateError>> + Send + 'static,
+{
+    let document = documents.config_doc_path(realm);
+    let state_path = document.with_file_name(CONFIG_STATE_FILE);
+    let documents: Arc<dyn meerkat_core::RealmConfigSource> = documents;
+    let runtime = Arc::new(ConfigRuntime::new(
+        Arc::new(
+            meerkat_core::FileConfigStore::new(document, meerkat_models::canonical())
+                .with_realm_chain(realm.clone(), documents),
+        ),
+        state_path,
+    ));
+    let mut fences = runtime.admission_fences();
+    if let Some(credentials) = persistence
+        .refresh_coordinator()
+        .credential_fence(realm)
+        .map_err(|error| ConnectorClientUpdateError::Ownership(error.to_string()))?
+    {
+        fences.push(credentials);
+    }
+    let guard = AdmissionGuard::acquire(
+        fences,
+        meerkat_core::realm_admission::INTERACTIVE_FENCE_WAIT,
+    )
+    .await
+    .map_err(|refusal| ConnectorClientUpdateError::Ownership(refusal.to_string()))?;
+    let persistence = persistence.clone();
+    let (realm, id) = (realm.clone(), id.to_owned());
+    tokio::spawn(async move {
+        with_profile_update_under(guard, &persistence, &realm, &id, move |guard| {
+            update(guard, runtime)
+        })
+        .await
+    })
+    .await
+    .unwrap_or_else(|error| {
+        Err(ConnectorClientUpdateError::OutcomeUnknown(format!(
+            "the update's task did not run to its end: {error}"
+        )))
+    })
+}
+
+/// Run one update of `realm`'s connector client `id` under the persistence's
+/// exclusive-mutation coordinator, keyed by the profile id, for an operation
+/// that already holds the realm's credential fence in `guard`. `update`
+/// receives the guard the coordinator hands its closure, which its writes
+/// take.
+async fn with_profile_update_under<F, Fut>(
+    guard: Arc<AdmissionGuard>,
+    persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
+    realm: &RealmId,
+    id: &str,
+    update: F,
+) -> Result<(), ConnectorClientUpdateError>
+where
+    F: FnOnce(Arc<AdmissionGuard>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), ConnectorClientUpdateError>> + Send + 'static,
+{
+    use meerkat_core::auth::{CredentialMutationFn, CredentialMutationOutcome, TokenStoreAccess};
     let key = meerkat_core::auth::TokenKey::connector_client_update(realm.clone(), id).map_err(
         |error| ConnectorClientUpdateError::Invalid {
             id: id.to_owned(),
@@ -214,9 +299,9 @@ async fn with_profile_update(
     )?;
     let outcome = Arc::new(std::sync::Mutex::new(None));
     let slot = Arc::clone(&outcome);
-    let mutation: CredentialMutationFn = Box::new(move || {
+    let mutation: CredentialMutationFn = Box::new(move |guard| {
         Box::pin(async move {
-            let result = update.await;
+            let result = update(guard).await;
             *slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
@@ -225,7 +310,7 @@ async fn with_profile_update(
     });
     let admitted = persistence
         .refresh_coordinator()
-        .with_exclusive_mutation(key, mutation)
+        .with_exclusive_mutation_under(guard, key, TokenStoreAccess::Interactive, mutation)
         .await;
     let result = outcome
         .lock()
@@ -238,9 +323,15 @@ async fn with_profile_update(
         (Err(meerkat_core::auth::CredentialMutationError::LockFailed(error)), None) => {
             Err(ConnectorClientUpdateError::Ownership(error))
         }
-        // Admission was refused while earlier work for the key still runs.
+        // Admission was refused while earlier work for the key still runs,
+        // or the coordinator refused the operation's guard: the update did
+        // not start.
         (
-            Err(error @ meerkat_core::auth::CredentialMutationError::CredentialAccess { .. }),
+            Err(
+                error @ (meerkat_core::auth::CredentialMutationError::CredentialAccess { .. }
+                | meerkat_core::auth::CredentialMutationError::AdmissionInProgress
+                | meerkat_core::auth::CredentialMutationError::AdmissionFenceUnavailable(_)),
+            ),
             None,
         ) => Err(ConnectorClientUpdateError::Ownership(error.to_string())),
         // Anything else (including cancellation) lost the outcome.
@@ -309,8 +400,16 @@ fn connector_client_patch(
 }
 
 /// Configure `realm`'s connector client `id`, writing the client to the
-/// realm's own config document (`config_store`, never a composed view) and
-/// its secret to the realm credential store.
+/// realm's own config document in `documents` (never a composed view) and
+/// its secret to the realm credential store, as one guarded operation.
+///
+/// Before anything starts, the update takes the admission fences of the
+/// realm's own document and the realm's credential fence, in the global
+/// order and waiting up to the interactive bound for a holder; a held or
+/// unusable fence refuses it with nothing written
+/// ([`ConnectorClientUpdateError::Ownership`]). The update then runs on its
+/// own task, one at a time per client: a caller that stops waiting does not
+/// stop it, and the fences are released only after its last write.
 ///
 /// A stored secret is bound to the client's exact non-secret meaning
 /// (issuer, client, mode, parameters, protocol, redirects): `Keep` keeps only
@@ -323,7 +422,7 @@ fn connector_client_patch(
 /// [`ConnectorLoginError::ClientSecretUnavailable`], and a failure after the
 /// first write is reported as the partial outcome it is.
 pub async fn put_connector_client(
-    config_store: Arc<dyn meerkat_core::ConfigStore>,
+    documents: Arc<meerkat_store::FilesystemRealmConfigSource>,
     persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
     realm: &RealmId,
     id: &str,
@@ -332,22 +431,35 @@ pub async fn put_connector_client(
 ) -> Result<(), ConnectorClientUpdateError> {
     let token_store = persistence.token_store();
     let (realm_owned, id_owned) = (realm.clone(), id.to_owned());
-    with_profile_update(persistence, realm, id, async move {
-        put_unowned(
-            config_store.as_ref(),
-            token_store.as_ref(),
-            &realm_owned,
-            &id_owned,
-            client,
-            secret,
-        )
-        .await
-    })
+    guarded_profile_update(
+        documents,
+        persistence,
+        realm,
+        id,
+        move |guard, runtime| async move {
+            put_unowned(
+                &guard,
+                &runtime,
+                token_store.as_ref(),
+                &realm_owned,
+                &id_owned,
+                client,
+                secret,
+            )
+            .await
+        },
+    )
     .await
 }
 
+/// The realm's own document as `runtime` reads it now.
+async fn own_config(runtime: &ConfigRuntime) -> Result<Config, ConfigError> {
+    Ok(runtime.get().await.map_err(ConfigError::from)?.config)
+}
+
 async fn put_unowned(
-    config_store: &dyn meerkat_core::ConfigStore,
+    guard: &Arc<AdmissionGuard>,
+    runtime: &ConfigRuntime,
     token_store: &dyn meerkat_core::auth::TokenStore,
     realm: &RealmId,
     id: &str,
@@ -356,7 +468,7 @@ async fn put_unowned(
 ) -> Result<(), ConnectorClientUpdateError> {
     let binding = client_binding(realm, id, &client)?;
     let sends_secret = client.client_auth == ConnectorClientAuthMethod::ClientSecretPost;
-    let own = config_store.get().await?;
+    let own = own_config(runtime).await?;
     let previous = own
         .realm
         .get(realm.as_str())
@@ -370,7 +482,7 @@ async fn put_unowned(
     let mut stored_new_secret = false;
     match (&secret, sends_secret) {
         (ConnectorClientSecretUpdate::Set(value), true) => {
-            save_connector_client_secret(token_store, realm, &binding, value).await?;
+            save_connector_client_secret(guard, token_store, realm, &binding, value).await?;
             stored_new_secret = true;
         }
         (ConnectorClientSecretUpdate::Keep, true) => {
@@ -387,7 +499,8 @@ async fn put_unowned(
         (ConnectorClientSecretUpdate::Keep, false) => {}
     }
     let patch = connector_client_patch(realm, id, Some(&client))?;
-    if let Err(error) = config_store.patch(patch).await {
+    if let Err(error) = runtime.patch_under(guard, patch, None).await {
+        let error = ConfigError::from(error);
         return Err(if stored_new_secret {
             ConnectorClientUpdateError::ConfigFailedAfterSecretStored {
                 id: id.to_owned(),
@@ -400,7 +513,8 @@ async fn put_unowned(
     if let Some(previous_binding) = previous_binding
         && (!sends_secret || previous_binding != binding)
     {
-        clear_unreferenced_secret(config_store, token_store, realm, id, &previous_binding).await?;
+        clear_unreferenced_secret(guard, runtime, token_store, realm, id, &previous_binding)
+            .await?;
     }
     Ok(())
 }
@@ -409,7 +523,8 @@ async fn put_unowned(
 /// realm's own configuration names that exact client again (a concurrent
 /// writer may have restored it since this update read the configuration).
 async fn clear_unreferenced_secret(
-    config_store: &dyn meerkat_core::ConfigStore,
+    guard: &AdmissionGuard,
+    runtime: &ConfigRuntime,
     token_store: &dyn meerkat_core::auth::TokenStore,
     realm: &RealmId,
     id: &str,
@@ -419,8 +534,7 @@ async fn clear_unreferenced_secret(
         id: id.to_owned(),
         error,
     };
-    let current = config_store
-        .get()
+    let current = own_config(runtime)
         .await
         .map_err(|error| cleanup_failed(ConnectorLoginError::ClientConfig(error.to_string())))?;
     let still_named = current
@@ -434,18 +548,19 @@ async fn clear_unreferenced_secret(
     if still_named {
         return Ok(());
     }
-    clear_connector_client_secret(token_store, realm, binding)
+    clear_connector_client_secret(guard, token_store, realm, binding)
         .await
         .map_err(cleanup_failed)
 }
 
 /// Replace the stored secret of `realm`'s connector client `id`, which must be
-/// defined in the realm's own config document and send a secret. The secret
-/// is stored for the client's current exact definition; the next code
+/// defined in the realm's own config document in `documents` and send a
+/// secret, as one guarded operation (see [`put_connector_client`]). The
+/// secret is stored for the client's current exact definition; the next code
 /// exchange or refresh uses it, and credentials obtained under the old one
 /// stay valid.
 pub async fn rotate_connector_client_secret(
-    config_store: Arc<dyn meerkat_core::ConfigStore>,
+    documents: Arc<meerkat_store::FilesystemRealmConfigSource>,
     persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
     realm: &RealmId,
     id: &str,
@@ -453,27 +568,35 @@ pub async fn rotate_connector_client_secret(
 ) -> Result<(), ConnectorClientUpdateError> {
     let token_store = persistence.token_store();
     let (realm_owned, id_owned, secret) = (realm.clone(), id.to_owned(), secret.to_owned());
-    with_profile_update(persistence, realm, id, async move {
-        rotate_unowned(
-            config_store.as_ref(),
-            token_store.as_ref(),
-            &realm_owned,
-            &id_owned,
-            &secret,
-        )
-        .await
-    })
+    guarded_profile_update(
+        documents,
+        persistence,
+        realm,
+        id,
+        move |guard, runtime| async move {
+            rotate_unowned(
+                &guard,
+                &runtime,
+                token_store.as_ref(),
+                &realm_owned,
+                &id_owned,
+                &secret,
+            )
+            .await
+        },
+    )
     .await
 }
 
 async fn rotate_unowned(
-    config_store: &dyn meerkat_core::ConfigStore,
+    guard: &AdmissionGuard,
+    runtime: &ConfigRuntime,
     token_store: &dyn meerkat_core::auth::TokenStore,
     realm: &RealmId,
     id: &str,
     secret: &str,
 ) -> Result<(), ConnectorClientUpdateError> {
-    let own = config_store.get().await?;
+    let own = own_config(runtime).await?;
     let client = own
         .realm
         .get(realm.as_str())
@@ -486,39 +609,48 @@ async fn rotate_unowned(
         return Err(ConnectorClientUpdateError::SecretNotUsed(id.to_owned()));
     }
     let binding = client_binding(realm, id, client)?;
-    save_connector_client_secret(token_store, realm, &binding, secret).await?;
+    save_connector_client_secret(guard, token_store, realm, &binding, secret).await?;
     Ok(())
 }
 
-/// Remove `realm`'s connector client `id` from its own config document, then
-/// its stored secret. Credentials minted under it stop refreshing.
+/// Remove `realm`'s connector client `id` from its own config document in
+/// `documents`, then its stored secret, as one guarded operation (see
+/// [`put_connector_client`]). Credentials minted under it stop refreshing.
 pub async fn remove_connector_client(
-    config_store: Arc<dyn meerkat_core::ConfigStore>,
+    documents: Arc<meerkat_store::FilesystemRealmConfigSource>,
     persistence: &meerkat_providers::auth_store::ProviderAuthPersistence,
     realm: &RealmId,
     id: &str,
 ) -> Result<(), ConnectorClientUpdateError> {
     let token_store = persistence.token_store();
     let (realm_owned, id_owned) = (realm.clone(), id.to_owned());
-    with_profile_update(persistence, realm, id, async move {
-        remove_unowned(
-            config_store.as_ref(),
-            token_store.as_ref(),
-            &realm_owned,
-            &id_owned,
-        )
-        .await
-    })
+    guarded_profile_update(
+        documents,
+        persistence,
+        realm,
+        id,
+        move |guard, runtime| async move {
+            remove_unowned(
+                &guard,
+                &runtime,
+                token_store.as_ref(),
+                &realm_owned,
+                &id_owned,
+            )
+            .await
+        },
+    )
     .await
 }
 
 async fn remove_unowned(
-    config_store: &dyn meerkat_core::ConfigStore,
+    guard: &Arc<AdmissionGuard>,
+    runtime: &ConfigRuntime,
     token_store: &dyn meerkat_core::auth::TokenStore,
     realm: &RealmId,
     id: &str,
 ) -> Result<(), ConnectorClientUpdateError> {
-    let own = config_store.get().await?;
+    let own = own_config(runtime).await?;
     let previous_binding = own
         .realm
         .get(realm.as_str())
@@ -526,11 +658,13 @@ async fn remove_unowned(
         .filter(|previous| previous.client_auth == ConnectorClientAuthMethod::ClientSecretPost)
         .map(|previous| client_binding(realm, id, previous))
         .transpose()?;
-    config_store
-        .patch(connector_client_patch(realm, id, None)?)
-        .await?;
+    runtime
+        .patch_under(guard, connector_client_patch(realm, id, None)?, None)
+        .await
+        .map_err(ConfigError::from)?;
     if let Some(previous_binding) = previous_binding {
-        clear_unreferenced_secret(config_store, token_store, realm, id, &previous_binding).await?;
+        clear_unreferenced_secret(guard, runtime, token_store, realm, id, &previous_binding)
+            .await?;
     }
     Ok(())
 }
@@ -651,12 +785,9 @@ client_secret = "never-in-config"
 
     #[tokio::test]
     async fn put_rotate_and_remove_keep_config_and_secret_consistent() {
-        use meerkat_core::ConfigStore;
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenStore};
-        let store = Arc::new(meerkat_core::MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
+        let root = tempfile::tempdir().unwrap();
+        let documents = realm_documents(root.path());
         let secrets = Arc::new(EphemeralTokenStore::new());
         let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
             Arc::clone(&secrets) as Arc<dyn TokenStore>,
@@ -672,22 +803,7 @@ client_secret = "never-in-config"
             protocol: protocol.map(str::to_owned),
             registered_redirect_uris: Vec::new(),
         };
-        // The secret the current definition of "desktop" reads, if any.
-        async fn stored(
-            store: &meerkat_core::MemoryConfigStore,
-            secrets: &EphemeralTokenStore,
-        ) -> Option<String> {
-            let profiles =
-                connector_client_auth_profiles(&store.get().await.unwrap(), &RealmId::global())
-                    .unwrap();
-            let profile = profiles.iter().find(|profile| profile.id == "desktop")?;
-            let Some(ConnectorClientSecret::RealmStore { realm }) = &profile.client_secret else {
-                return None;
-            };
-            load_connector_client_secret(secrets, realm, &profile.binding())
-                .await
-                .unwrap()
-        }
+        let stored = || stored_client_secret(&documents, secrets.as_ref(), &realm, "desktop");
         async fn stored_secret_rows(secrets: &EphemeralTokenStore) -> usize {
             secrets
                 .list()
@@ -700,7 +816,7 @@ client_secret = "never-in-config"
 
         // A client sending a secret needs one: nothing is written.
         let refused = put_connector_client(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -713,13 +829,13 @@ client_secret = "never-in-config"
             Err(ConnectorClientUpdateError::SecretRequired(_))
         ));
         assert!(
-            connector_client_auth_profiles(&store.get().await.unwrap(), &realm)
+            connector_client_auth_profiles(&stored_document(&documents, &realm), &realm)
                 .unwrap()
                 .is_empty()
         );
 
         put_connector_client(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -728,21 +844,20 @@ client_secret = "never-in-config"
         )
         .await
         .unwrap();
-        let config = store.get().await.unwrap();
-        let profiles = connector_client_auth_profiles(&config, &realm).unwrap();
+        let profiles =
+            connector_client_auth_profiles(&stored_document(&documents, &realm), &realm).unwrap();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].protocol.as_deref(), Some("slack"));
         assert!(
-            !toml::to_string(&config).unwrap().contains("secret-one"),
+            !std::fs::read_to_string(documents.config_doc_path(&realm))
+                .unwrap()
+                .contains("secret-one"),
             "the secret never reaches the config document"
         );
-        assert_eq!(
-            stored(&store, &secrets).await,
-            Some("secret-one".to_owned())
-        );
+        assert_eq!(stored().await, Some("secret-one".to_owned()));
 
         rotate_connector_client_secret(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -750,10 +865,7 @@ client_secret = "never-in-config"
         )
         .await
         .unwrap();
-        assert_eq!(
-            stored(&store, &secrets).await,
-            Some("secret-two".to_owned())
-        );
+        assert_eq!(stored().await, Some("secret-two".to_owned()));
 
         // Retargeted to another client with Keep: the previous client's
         // secret is not reused, and nothing changes.
@@ -763,7 +875,7 @@ client_secret = "never-in-config"
         };
         assert!(matches!(
             put_connector_client(
-                store.clone(),
+                Arc::clone(&documents),
                 &persistence,
                 &realm,
                 "desktop",
@@ -773,13 +885,10 @@ client_secret = "never-in-config"
             .await,
             Err(ConnectorClientUpdateError::SecretRequired(_))
         ));
-        assert_eq!(
-            stored(&store, &secrets).await,
-            Some("secret-two".to_owned())
-        );
+        assert_eq!(stored().await, Some("secret-two".to_owned()));
         // Retargeted with its own secret: the old client's secret is removed.
         put_connector_client(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -788,15 +897,12 @@ client_secret = "never-in-config"
         )
         .await
         .unwrap();
-        assert_eq!(
-            stored(&store, &secrets).await,
-            Some("replacement-secret".to_owned())
-        );
+        assert_eq!(stored().await, Some("replacement-secret".to_owned()));
         assert_eq!(stored_secret_rows(&secrets).await, 1);
 
         // Redefined without a protocol or a secret: the old values go.
         put_connector_client(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -805,22 +911,29 @@ client_secret = "never-in-config"
         )
         .await
         .unwrap();
-        let profiles = connector_client_auth_profiles(&store.get().await.unwrap(), &realm).unwrap();
+        let profiles =
+            connector_client_auth_profiles(&stored_document(&documents, &realm), &realm).unwrap();
         assert_eq!(profiles[0].protocol, None);
         assert!(profiles[0].client_secret.is_none());
-        assert!(stored(&store, &secrets).await.is_none());
+        assert!(stored().await.is_none());
         assert_eq!(stored_secret_rows(&secrets).await, 0);
         assert!(matches!(
-            rotate_connector_client_secret(store.clone(), &persistence, &realm, "desktop", "x")
-                .await,
+            rotate_connector_client_secret(
+                Arc::clone(&documents),
+                &persistence,
+                &realm,
+                "desktop",
+                "x"
+            )
+            .await,
             Err(ConnectorClientUpdateError::SecretNotUsed(_))
         ));
 
-        remove_connector_client(store.clone(), &persistence, &realm, "desktop")
+        remove_connector_client(Arc::clone(&documents), &persistence, &realm, "desktop")
             .await
             .unwrap();
         assert!(
-            connector_client_auth_profiles(&store.get().await.unwrap(), &realm)
+            connector_client_auth_profiles(&stored_document(&documents, &realm), &realm)
                 .unwrap()
                 .is_empty()
         );
@@ -847,14 +960,16 @@ client_secret = "never-in-config"
         }
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
             tokens: &meerkat_core::auth::PersistedTokens,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
             self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_core::auth::TokenKey,
         ) -> Result<(), meerkat_core::auth::TokenStoreError> {
             let held = self.release.lock().await.take();
@@ -862,7 +977,7 @@ client_secret = "never-in-config"
                 self.entered.notify_one();
                 let _ = release.await;
             }
-            let cleared = self.inner.clear(key).await;
+            let cleared = self.inner.clear(fence, key).await;
             self.clears_done
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             cleared
@@ -899,6 +1014,30 @@ client_secret = "never-in-config"
             self.inner.with_exclusive_mutation(key, mutation_fn).await
         }
 
+        async fn with_exclusive_mutation_under(
+            &self,
+            guard: Arc<meerkat_core::AdmissionGuard>,
+            key: meerkat_core::auth::TokenKey,
+            access: meerkat_core::auth::TokenStoreAccess,
+            mutation_fn: meerkat_core::auth::CredentialMutationFn,
+        ) -> Result<
+            meerkat_core::auth::CredentialMutationOutcome,
+            meerkat_core::auth::CredentialMutationError,
+        > {
+            let _ = self.requested.send(());
+            self.inner
+                .with_exclusive_mutation_under(guard, key, access, mutation_fn)
+                .await
+        }
+
+        fn credential_fence(
+            &self,
+            realm: &RealmId,
+        ) -> Result<Option<meerkat_core::AdmissionFence>, meerkat_core::auth::CredentialMutationError>
+        {
+            self.inner.credential_fence(realm)
+        }
+
         async fn with_refresh(
             &self,
             key: meerkat_core::auth::TokenKey,
@@ -910,12 +1049,9 @@ client_secret = "never-in-config"
 
     #[tokio::test]
     async fn an_older_held_clear_never_removes_a_newer_updates_secret() {
-        use meerkat_core::ConfigStore;
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenStore};
-        let store = Arc::new(meerkat_core::MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
+        let root = tempfile::tempdir().unwrap();
+        let documents = realm_documents(root.path());
         let (release, held) = tokio::sync::oneshot::channel();
         let secrets = Arc::new(HeldClearStore {
             inner: EphemeralTokenStore::new(),
@@ -947,7 +1083,7 @@ client_secret = "never-in-config"
             ..secret_client.clone()
         };
         put_connector_client(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -962,10 +1098,11 @@ client_secret = "never-in-config"
         // and is then held before clearing the old secret.
         *secrets.release.lock().await = Some(held);
         let older = tokio::spawn({
-            let (store, persistence, realm) = (store.clone(), persistence.clone(), realm.clone());
+            let (documents, persistence, realm) =
+                (Arc::clone(&documents), persistence.clone(), realm.clone());
             async move {
                 put_connector_client(
-                    store,
+                    documents,
                     &persistence,
                     &realm,
                     "desktop",
@@ -979,8 +1116,8 @@ client_secret = "never-in-config"
         requests
             .recv()
             .await
-            .expect("the older update requested ownership");
-        // Its caller leaves; the admitted update still completes in order.
+            .expect("the older update entered its profile's ownership");
+        // Its caller leaves; the entered update still completes in order.
         older.abort();
         assert!(
             older.await.is_err_and(|error| error.is_cancelled()),
@@ -992,10 +1129,11 @@ client_secret = "never-in-config"
         let saves_before = secrets.saves.load(std::sync::atomic::Ordering::SeqCst);
         // Newer update: back to the secret client with a new secret.
         let newer = tokio::spawn({
-            let (store, persistence, realm) = (store.clone(), persistence.clone(), realm.clone());
+            let (documents, persistence, realm) =
+                (Arc::clone(&documents), persistence.clone(), realm.clone());
             async move {
                 put_connector_client(
-                    store,
+                    documents,
                     &persistence,
                     &realm,
                     "desktop",
@@ -1005,18 +1143,18 @@ client_secret = "never-in-config"
                 .await
             }
         });
-        // The newer update has reached the coordinator. The signal does not
-        // prove it is polling the profile mutex; what is asserted is that,
-        // while the older cleanup is held, it has written nothing and not
-        // finished, and that it completes only after the cleanup does.
-        requests
-            .recv()
-            .await
-            .expect("the newer update requested ownership");
+        // While the older update's cleanup is held it keeps the realm's
+        // admission fences: the newer update waits for them before it
+        // enters, so it has entered nothing, written nothing and not
+        // finished, and it completes only after the cleanup does.
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
         assert!(!newer.is_finished(), "the newer update has not completed");
+        assert!(
+            requests.try_recv().is_err(),
+            "the newer update has not entered its profile's ownership"
+        );
         assert_eq!(
             secrets.saves.load(std::sync::atomic::Ordering::SeqCst),
             saves_before,
@@ -1032,7 +1170,8 @@ client_secret = "never-in-config"
             "the held cleanup completed its clear"
         );
 
-        let profiles = connector_client_auth_profiles(&store.get().await.unwrap(), &realm).unwrap();
+        let profiles =
+            connector_client_auth_profiles(&stored_document(&documents, &realm), &realm).unwrap();
         assert_eq!(
             load_connector_client_secret(secrets.as_ref(), &realm, &profiles[0].binding())
                 .await
@@ -1044,12 +1183,9 @@ client_secret = "never-in-config"
 
     #[tokio::test]
     async fn an_update_clears_previously_non_empty_lists() {
-        use meerkat_core::ConfigStore;
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenStore};
-        let store = Arc::new(meerkat_core::MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
+        let root = tempfile::tempdir().unwrap();
+        let documents = realm_documents(root.path());
         let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
             Arc::new(EphemeralTokenStore::new()) as Arc<dyn TokenStore>,
             Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
@@ -1068,7 +1204,7 @@ client_secret = "never-in-config"
             registered_redirect_uris: vec!["https://host.example/callback".into()],
         };
         put_connector_client(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -1077,12 +1213,13 @@ client_secret = "never-in-config"
         )
         .await
         .unwrap();
-        let profiles = connector_client_auth_profiles(&store.get().await.unwrap(), &realm).unwrap();
+        let profiles =
+            connector_client_auth_profiles(&stored_document(&documents, &realm), &realm).unwrap();
         assert_eq!(profiles[0].authorize_params.len(), 2);
         assert_eq!(profiles[0].registered_redirect_uris.len(), 1);
 
         put_connector_client(
-            store.clone(),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -1095,7 +1232,8 @@ client_secret = "never-in-config"
         )
         .await
         .unwrap();
-        let profiles = connector_client_auth_profiles(&store.get().await.unwrap(), &realm).unwrap();
+        let profiles =
+            connector_client_auth_profiles(&stored_document(&documents, &realm), &realm).unwrap();
         assert!(profiles[0].authorize_params.is_empty(), "{:?}", profiles[0]);
         assert!(
             profiles[0].registered_redirect_uris.is_empty(),
@@ -1105,12 +1243,11 @@ client_secret = "never-in-config"
     }
 
     /// Replacing a profile with empty lists and no protocol clears what the
-    /// stored profile had, in both config stores, whether that profile was
-    /// written through this API or directly in the document: the patch is
-    /// complete on its own, not shaped by a prior read.
+    /// stored profile had, whether that profile was written through this API
+    /// or directly in the document: the patch is complete on its own, not
+    /// shaped by a prior read.
     #[tokio::test]
     async fn a_replacement_clears_previously_set_lists_and_protocol() {
-        use meerkat_core::ConfigStore;
         use meerkat_providers::auth_store::{EphemeralTokenStore, TokenStore};
         let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
             Arc::new(EphemeralTokenStore::new()) as Arc<dyn TokenStore>,
@@ -1140,13 +1277,11 @@ client_secret = "never-in-config"
                 .cloned()
         };
 
-        // Written through this API, in memory.
-        let memory: Arc<dyn ConfigStore> = Arc::new(meerkat_core::MemoryConfigStore::new(
-            Config::default(),
-            meerkat_models::canonical(),
-        ));
+        // Written through this API, then replaced through it.
+        let through_api = tempfile::tempdir().unwrap();
+        let documents = realm_documents(through_api.path());
         put_connector_client(
-            Arc::clone(&memory),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -1156,11 +1291,11 @@ client_secret = "never-in-config"
         .await
         .unwrap();
         assert_eq!(
-            stored(&memory.get().await.unwrap()),
+            stored(&stored_document(&documents, &realm)),
             Some(populated.clone())
         );
         put_connector_client(
-            Arc::clone(&memory),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -1170,14 +1305,16 @@ client_secret = "never-in-config"
         .await
         .unwrap();
         assert_eq!(
-            stored(&memory.get().await.unwrap()),
+            stored(&stored_document(&documents, &realm)),
             Some(emptied.clone()),
-            "the in-memory replacement clears both lists and the protocol"
+            "the replacement clears both lists and the protocol"
         );
 
-        // Written directly in a file document, then replaced through this API.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+        // Written directly in the document, then replaced through this API.
+        let written_directly = tempfile::tempdir().unwrap();
+        let documents = realm_documents(written_directly.path());
+        let path = documents.config_doc_path(&realm);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
             r#"
@@ -1190,13 +1327,12 @@ registered_redirect_uris = ["https://app.example/callback"]
 "#,
         )
         .unwrap();
-        let file: Arc<dyn ConfigStore> = Arc::new(meerkat_core::FileConfigStore::new(
-            path.clone(),
-            meerkat_models::canonical(),
-        ));
-        assert_eq!(stored(&file.get().await.unwrap()), Some(populated));
+        assert_eq!(
+            stored(&stored_document(&documents, &realm)),
+            Some(populated)
+        );
         put_connector_client(
-            Arc::clone(&file),
+            Arc::clone(&documents),
             &persistence,
             &realm,
             "desktop",
@@ -1206,9 +1342,9 @@ registered_redirect_uris = ["https://app.example/callback"]
         .await
         .unwrap();
         assert_eq!(
-            stored(&file.get().await.unwrap()),
+            stored(&stored_document(&documents, &realm)),
             Some(emptied),
-            "the file replacement clears both lists and the protocol"
+            "the replacement of a directly written profile clears both lists and the protocol"
         );
         let document = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1216,6 +1352,496 @@ registered_redirect_uris = ["https://app.example/callback"]
                 && !document.contains("app.example")
                 && !document.contains("slack"),
             "no old value survives in the document: {document}"
+        );
+    }
+
+    // The guarded writers: one admission guard over the realm's own
+    // document and its credential fence covers the whole config and secret
+    // change; a held fence refuses before anything is written; a caller that
+    // stops waiting after entry leaves the update to settle, and the fences
+    // are released only after its last write.
+
+    /// `root`'s realm documents: each realm's own document under
+    /// `root/realms`, the user document under `root/user`.
+    fn realm_documents(root: &std::path::Path) -> Arc<meerkat_store::FilesystemRealmConfigSource> {
+        Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            root.join("realms"),
+            root.join("user").join("config.toml"),
+            meerkat_models::canonical(),
+        ))
+    }
+
+    /// `realm`'s own document as stored, or the default when there is none.
+    fn stored_document(
+        documents: &meerkat_store::FilesystemRealmConfigSource,
+        realm: &RealmId,
+    ) -> Config {
+        match std::fs::read_to_string(documents.config_doc_path(realm)) {
+            Ok(text) => config(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(error) => panic!("the realm document is unreadable: {error}"),
+        }
+    }
+
+    /// The generation the realm document's sidecar records, 0 before any.
+    fn document_generation(
+        documents: &meerkat_store::FilesystemRealmConfigSource,
+        realm: &RealmId,
+    ) -> u64 {
+        let sidecar = documents
+            .config_doc_path(realm)
+            .with_file_name("config_state.json");
+        match std::fs::read(&sidecar) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .expect("the sidecar parses")["generation"]
+                .as_u64()
+                .expect("the sidecar records a generation"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("the sidecar is unreadable: {error}"),
+        }
+    }
+
+    /// The secret `realm`'s client `id` reads in its own document, if any.
+    async fn stored_client_secret(
+        documents: &meerkat_store::FilesystemRealmConfigSource,
+        secrets: &dyn meerkat_providers::auth_store::TokenStore,
+        realm: &RealmId,
+        id: &str,
+    ) -> Option<String> {
+        let profiles = connector_client_auth_profiles(&stored_document(documents, realm), realm)
+            .expect("the stored clients are valid");
+        let profile = profiles.iter().find(|profile| profile.id == id)?;
+        let Some(ConnectorClientSecret::RealmStore { realm }) = &profile.client_secret else {
+            return None;
+        };
+        load_connector_client_secret(secrets, realm, &profile.binding())
+            .await
+            .expect("the secret store reads")
+    }
+
+    fn secret_client() -> ConnectorClientConfig {
+        ConnectorClientConfig {
+            issuer: "https://issuer.example".into(),
+            client: "client".into(),
+            client_auth: ConnectorClientAuthMethod::ClientSecretPost,
+            authorize_params: Vec::new(),
+            resource_indicator: true,
+            protocol: None,
+            registered_redirect_uris: Vec::new(),
+        }
+    }
+
+    /// A persisted credential store under `root/credentials` that records,
+    /// for each write, whether its guard covers every fence of `fences`.
+    struct CoverageStore {
+        inner: meerkat_providers::auth_store::FileTokenStore,
+        fences: Vec<meerkat_core::AdmissionFence>,
+        writes: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl CoverageStore {
+        fn record(&self, guard: &meerkat_core::AdmissionGuard) {
+            let covered = self.fences.iter().all(|fence| guard.covers(fence).is_ok());
+            self.writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(covered);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_providers::auth_store::TokenStore for CoverageStore {
+        async fn load(
+            &self,
+            key: &meerkat_core::auth::TokenKey,
+        ) -> Result<Option<meerkat_core::auth::PersistedTokens>, meerkat_core::auth::TokenStoreError>
+        {
+            self.inner.load(key).await
+        }
+        async fn save(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            key: &meerkat_core::auth::TokenKey,
+            tokens: &meerkat_core::auth::PersistedTokens,
+        ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+            self.record(guard);
+            self.inner.save(guard, key, tokens).await
+        }
+        async fn clear(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            key: &meerkat_core::auth::TokenKey,
+        ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+            self.record(guard);
+            self.inner.clear(guard, key).await
+        }
+        async fn list(
+            &self,
+        ) -> Result<Vec<meerkat_core::auth::TokenKey>, meerkat_core::auth::TokenStoreError>
+        {
+            self.inner.list().await
+        }
+        fn backend_name(&self) -> &'static str {
+            "coverage"
+        }
+    }
+
+    /// With no holder, a put, a rotation and a removal each take one guard
+    /// that covers both the realm document's fence and the realm's
+    /// credential fence: every secret write runs under it, and every
+    /// document write moves the document's generation.
+    #[tokio::test]
+    async fn put_rotate_remove_take_one_guard_for_config_and_secret() {
+        use meerkat_providers::auth_store::{
+            FileLockCoordinator, FileTokenStore, ProviderAuthPersistence, TokenStore,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let documents = realm_documents(root.path());
+        let team = realm("team");
+        let credentials = root.path().join("credentials");
+        let store = Arc::new(CoverageStore {
+            inner: FileTokenStore::new(&credentials),
+            fences: vec![
+                meerkat_core::AdmissionFence::realm(&root.path().join("realms"), &team).unwrap(),
+                meerkat_core::AdmissionFence::credentials(&credentials, &team).unwrap(),
+            ],
+            writes: std::sync::Mutex::new(Vec::new()),
+        });
+        let persistence = ProviderAuthPersistence::new(
+            Arc::clone(&store) as Arc<dyn TokenStore>,
+            Arc::new(FileLockCoordinator::new(credentials.join("refresh-locks"))),
+        );
+
+        put_connector_client(
+            Arc::clone(&documents),
+            &persistence,
+            &team,
+            "desktop",
+            secret_client(),
+            ConnectorClientSecretUpdate::Set("secret-one".into()),
+        )
+        .await
+        .expect("a put with no holder succeeds");
+        let after_put = document_generation(&documents, &team);
+        assert!(after_put > 0, "the put moved the document's generation");
+        assert_eq!(
+            stored_client_secret(&documents, store.as_ref(), &team, "desktop").await,
+            Some("secret-one".to_owned())
+        );
+
+        rotate_connector_client_secret(
+            Arc::clone(&documents),
+            &persistence,
+            &team,
+            "desktop",
+            "secret-two",
+        )
+        .await
+        .expect("a rotation with no holder succeeds");
+        assert_eq!(
+            document_generation(&documents, &team),
+            after_put,
+            "a rotation writes no document"
+        );
+        assert_eq!(
+            stored_client_secret(&documents, store.as_ref(), &team, "desktop").await,
+            Some("secret-two".to_owned())
+        );
+
+        remove_connector_client(Arc::clone(&documents), &persistence, &team, "desktop")
+            .await
+            .expect("a removal with no holder succeeds");
+        assert_eq!(
+            document_generation(&documents, &team),
+            after_put + 1,
+            "the removal moved the document's generation"
+        );
+        assert!(
+            stored_document(&documents, &team)
+                .realm
+                .get("team")
+                .is_none_or(|section| section.connector_client.is_empty()),
+            "the client is gone from the document"
+        );
+        assert!(
+            store.inner.list().await.unwrap().is_empty(),
+            "the client's secret is gone"
+        );
+        let writes = store
+            .writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            writes,
+            vec![true, true, true],
+            "the put's save, the rotation's save and the removal's clear each ran under the \
+             one guard that covers the document's fence and the credential fence"
+        );
+    }
+
+    /// While an admission holds the realm document's fence, a put, a
+    /// rotation and a removal are refused before anything is written: no
+    /// secret is stored, replaced or cleared and the document is unchanged.
+    /// A held credential fence refuses a put the same way. Once the holder
+    /// releases, the put lands.
+    #[tokio::test]
+    async fn under_a_held_fence_put_rotate_and_remove_refuse_not_started_with_nothing_written() {
+        use meerkat_providers::auth_store::{
+            FileLockCoordinator, FileTokenStore, ProviderAuthPersistence, TokenStore,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let documents = realm_documents(root.path());
+        let team = realm("team");
+        let credentials = root.path().join("credentials");
+        let secrets = Arc::new(FileTokenStore::new(&credentials));
+        let persistence = ProviderAuthPersistence::new(
+            Arc::clone(&secrets) as Arc<dyn TokenStore>,
+            Arc::new(FileLockCoordinator::new(credentials.join("refresh-locks"))),
+        );
+        put_connector_client(
+            Arc::clone(&documents),
+            &persistence,
+            &team,
+            "desktop",
+            secret_client(),
+            ConnectorClientSecretUpdate::Set("secret-one".into()),
+        )
+        .await
+        .expect("a put with no holder succeeds");
+        let document = documents.config_doc_path(&team);
+        let before = std::fs::read(&document).unwrap();
+        let generation = document_generation(&documents, &team);
+
+        let document_fence =
+            meerkat_core::AdmissionFence::realm(&root.path().join("realms"), &team).unwrap();
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![document_fence])
+            .expect("an admission holds the realm document's fence");
+        let retargeted = ConnectorClientConfig {
+            client: "replacement-client".into(),
+            ..secret_client()
+        };
+        let put = put_connector_client(
+            Arc::clone(&documents),
+            &persistence,
+            &team,
+            "desktop",
+            retargeted.clone(),
+            ConnectorClientSecretUpdate::Set("secret-two".into()),
+        )
+        .await;
+        assert!(
+            matches!(put, Err(ConnectorClientUpdateError::Ownership(_))),
+            "a put under a held document fence did not start: {put:?}"
+        );
+        let rotation = rotate_connector_client_secret(
+            Arc::clone(&documents),
+            &persistence,
+            &team,
+            "desktop",
+            "secret-three",
+        )
+        .await;
+        assert!(
+            matches!(rotation, Err(ConnectorClientUpdateError::Ownership(_))),
+            "a rotation under a held document fence did not start: {rotation:?}"
+        );
+        let removal =
+            remove_connector_client(Arc::clone(&documents), &persistence, &team, "desktop").await;
+        assert!(
+            matches!(removal, Err(ConnectorClientUpdateError::Ownership(_))),
+            "a removal under a held document fence did not start: {removal:?}"
+        );
+        assert_eq!(
+            std::fs::read(&document).unwrap(),
+            before,
+            "the document is unchanged"
+        );
+        assert_eq!(document_generation(&documents, &team), generation);
+        assert_eq!(
+            stored_client_secret(&documents, secrets.as_ref(), &team, "desktop").await,
+            Some("secret-one".to_owned()),
+            "the stored secret is unchanged"
+        );
+        assert_eq!(
+            secrets.list().await.unwrap().len(),
+            1,
+            "no secret was added"
+        );
+        hold.release();
+
+        let credential_fence =
+            meerkat_core::AdmissionFence::credentials(&credentials, &team).unwrap();
+        let mut hold = meerkat_core::AdmissionHold::try_acquire(vec![credential_fence])
+            .expect("an admission holds the realm's credential fence");
+        let put = put_connector_client(
+            Arc::clone(&documents),
+            &persistence,
+            &team,
+            "desktop",
+            retargeted.clone(),
+            ConnectorClientSecretUpdate::Set("secret-two".into()),
+        )
+        .await;
+        assert!(
+            matches!(put, Err(ConnectorClientUpdateError::Ownership(_))),
+            "a put under a held credential fence did not start: {put:?}"
+        );
+        assert_eq!(
+            std::fs::read(&document).unwrap(),
+            before,
+            "the document is unchanged"
+        );
+        assert_eq!(
+            secrets.list().await.unwrap().len(),
+            1,
+            "no secret was added"
+        );
+        hold.release();
+
+        put_connector_client(
+            Arc::clone(&documents),
+            &persistence,
+            &team,
+            "desktop",
+            retargeted,
+            ConnectorClientSecretUpdate::Set("secret-two".into()),
+        )
+        .await
+        .expect("the put lands once the holders released");
+        assert_eq!(
+            stored_client_secret(&documents, secrets.as_ref(), &team, "desktop").await,
+            Some("secret-two".to_owned())
+        );
+        assert_eq!(
+            secrets.list().await.unwrap().len(),
+            1,
+            "the retargeted client's secret replaced the old one"
+        );
+    }
+
+    /// A persisted credential store whose first save waits until released.
+    struct HeldSaveStore {
+        inner: meerkat_providers::auth_store::FileTokenStore,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_providers::auth_store::TokenStore for HeldSaveStore {
+        async fn load(
+            &self,
+            key: &meerkat_core::auth::TokenKey,
+        ) -> Result<Option<meerkat_core::auth::PersistedTokens>, meerkat_core::auth::TokenStoreError>
+        {
+            self.inner.load(key).await
+        }
+        async fn save(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            key: &meerkat_core::auth::TokenKey,
+            tokens: &meerkat_core::auth::PersistedTokens,
+        ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+            let held = self.release.lock().await.take();
+            if let Some(release) = held {
+                self.entered.notify_one();
+                let _ = release.await;
+            }
+            self.inner.save(guard, key, tokens).await
+        }
+        async fn clear(
+            &self,
+            guard: &meerkat_core::AdmissionGuard,
+            key: &meerkat_core::auth::TokenKey,
+        ) -> Result<(), meerkat_core::auth::TokenStoreError> {
+            self.inner.clear(guard, key).await
+        }
+        async fn list(
+            &self,
+        ) -> Result<Vec<meerkat_core::auth::TokenKey>, meerkat_core::auth::TokenStoreError>
+        {
+            self.inner.list().await
+        }
+        fn backend_name(&self) -> &'static str {
+            "held-save"
+        }
+    }
+
+    /// A caller that stops waiting once the update has entered does not
+    /// stop it: the update settles (its secret and its document entry both
+    /// land), and its fences are released only after that last write.
+    #[tokio::test]
+    async fn a_caller_that_stops_waiting_after_entry_still_settles_then_releases() {
+        use meerkat_providers::auth_store::{
+            FileLockCoordinator, FileTokenStore, ProviderAuthPersistence, TokenStore,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let documents = realm_documents(root.path());
+        let team = realm("team");
+        let credentials = root.path().join("credentials");
+        let (release, held) = tokio::sync::oneshot::channel();
+        let store = Arc::new(HeldSaveStore {
+            inner: FileTokenStore::new(&credentials),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Mutex::new(Some(held)),
+        });
+        let persistence = ProviderAuthPersistence::new(
+            Arc::clone(&store) as Arc<dyn TokenStore>,
+            Arc::new(FileLockCoordinator::new(credentials.join("refresh-locks"))),
+        );
+        let caller = tokio::spawn({
+            let (documents, persistence, team) =
+                (Arc::clone(&documents), persistence.clone(), team.clone());
+            async move {
+                put_connector_client(
+                    documents,
+                    &persistence,
+                    &team,
+                    "desktop",
+                    secret_client(),
+                    ConnectorClientSecretUpdate::Set("secret-one".into()),
+                )
+                .await
+            }
+        });
+        store.entered.notified().await;
+        caller.abort();
+        assert!(
+            caller.await.is_err_and(|error| error.is_cancelled()),
+            "the caller stopped waiting"
+        );
+        let document_fence =
+            meerkat_core::AdmissionFence::realm(&root.path().join("realms"), &team).unwrap();
+        assert!(
+            matches!(
+                meerkat_core::AdmissionGuard::try_acquire(vec![document_fence.clone()]),
+                Err(meerkat_core::AdmissionRefusal::InProgress)
+            ),
+            "the entered update still holds the realm document's fence"
+        );
+        assert!(release.send(()).is_ok(), "the held save is released");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match meerkat_core::AdmissionGuard::try_acquire(vec![document_fence.clone()]) {
+                Ok(guard) => {
+                    drop(guard);
+                    break;
+                }
+                Err(meerkat_core::AdmissionRefusal::InProgress)
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(refusal) => panic!("the fence was never released: {refusal}"),
+            }
+        }
+        // The fences are free only now, and every write of the update has
+        // already landed.
+        assert_eq!(
+            stored_client_secret(&documents, store.as_ref(), &team, "desktop").await,
+            Some("secret-one".to_owned()),
+            "the secret and the document entry landed before the release"
         );
     }
 }

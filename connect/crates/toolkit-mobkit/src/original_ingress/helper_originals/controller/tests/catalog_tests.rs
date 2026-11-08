@@ -12,6 +12,7 @@ fn issue(f: &Fixture, intent: &ChildGrantIntent) -> Vec<GrantLineageRef> {
             f.owner
                 .grants
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &intent.issuer,
                     intent.parent_lineage.last().unwrap(),
                     intent.id.clone(),
@@ -214,6 +215,7 @@ async fn helper_catalog_revocation_preserves_historical_binding_but_refuses_curr
         f.owner
             .grants
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &crate::original_ingress::tests::principal("admin"),
                 reference,
                 &mut custody,
@@ -277,6 +279,7 @@ async fn helper_catalog_revocation_before_first_binding_preserves_pending_source
         f.owner
             .grants
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &crate::original_ingress::tests::principal("admin"),
                 reference,
                 &mut custody,

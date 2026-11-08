@@ -1860,6 +1860,7 @@ mod tests {
         let base = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 EvidenceId::new("helper-source-base").unwrap(),
                 principal("agent"),

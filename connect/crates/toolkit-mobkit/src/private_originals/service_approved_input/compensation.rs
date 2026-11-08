@@ -78,7 +78,12 @@ impl InstalledServiceTask {
                     Ok(mut custody) => source
                         .owner
                         .grants()
-                        .revoke(cleanup.issuer(), &parent, &mut custody)
+                        .revoke(
+                            &meerkat_core::AdmissionGuard::none(),
+                            cleanup.issuer(),
+                            &parent,
+                            &mut custody,
+                        )
                         .map_err(|_| PrivateOriginalError::Unavailable),
                     Err(_) => Err(PrivateOriginalError::Unavailable),
                 };
@@ -87,7 +92,12 @@ impl InstalledServiceTask {
                         Ok(mut custody) => source
                             .owner
                             .grants()
-                            .revoke(&issuer, &child, &mut custody)
+                            .revoke(
+                                &meerkat_core::AdmissionGuard::none(),
+                                &issuer,
+                                &child,
+                                &mut custody,
+                            )
                             .map_err(|_| PrivateOriginalError::Unavailable),
                         Err(_) => Err(PrivateOriginalError::Unavailable),
                     },
@@ -217,7 +227,12 @@ impl PrivateOriginals {
                         .map_err(|_| PrivateOriginalError::Unavailable)?;
                     self.owner
                         .grants()
-                        .revoke(approved.cleanup.issuer(), parent, &mut custody)
+                        .revoke(
+                            &meerkat_core::AdmissionGuard::none(),
+                            approved.cleanup.issuer(),
+                            parent,
+                            &mut custody,
+                        )
                         .map_err(|_| PrivateOriginalError::Unavailable)
                 };
                 let child_result = {
@@ -226,7 +241,12 @@ impl PrivateOriginals {
                         .map_err(|_| PrivateOriginalError::Unavailable)?;
                     self.owner
                         .grants()
-                        .revoke(&child.0, &child.1, &mut custody)
+                        .revoke(
+                            &meerkat_core::AdmissionGuard::none(),
+                            &child.0,
+                            &child.1,
+                            &mut custody,
+                        )
                         .map_err(|_| PrivateOriginalError::Unavailable)
                 };
                 parent_result.and(child_result)

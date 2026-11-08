@@ -5561,6 +5561,7 @@ async fn a_kept_governed_prompt_whose_controller_grant_was_revoked_is_refused() 
     owners
         .grants
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &controller.root_authority,
             &controller,
             &mut NoControllerCustody,

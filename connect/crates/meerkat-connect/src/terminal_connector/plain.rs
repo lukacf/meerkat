@@ -693,7 +693,9 @@ mod selected_tests {
         };
         let persistence = ProviderAuthPersistence::new(
             Arc::new(FileTokenStore::new(root.join("credentials"))),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage,
@@ -718,7 +720,9 @@ mod selected_tests {
         let native = crate::stdio::tests::realm_native_owner(&storage).await;
         let persistence = ProviderAuthPersistence::new(
             Arc::new(FileTokenStore::new(root.join("credentials"))),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                root.join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup {
             storage,
@@ -1263,7 +1267,14 @@ mod selected_tests {
                             // Change the actual file behind the native runtime
                             // without publishing a generation. Content, not
                             // generation equality alone, must fence this grant.
-                            file.patch(ConfigDelta(json!({"tools":{"mcp_servers":[different]}}))).await.unwrap();
+                            // A store write publishes one, so the changed
+                            // bytes are made on a copy and written by hand.
+                            let copy = root.path().join("changed").join("config.toml");
+                            std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+                            std::fs::copy(&config_path, &copy).unwrap();
+                            FileConfigStore::new(copy.clone(), meerkat_models::canonical())
+                                .patch(ConfigDelta(json!({"tools":{"mcp_servers":[different]}}))).await.unwrap();
+                            std::fs::write(&config_path, std::fs::read(&copy).unwrap()).unwrap();
                             assert_eq!(crate::realm::read_own_mcp_config(&storage).await.unwrap().1, before.1);
                         }
                         let current_config = std::fs::read(&config_path).unwrap();

@@ -1403,7 +1403,14 @@ async fn a_retained_ancestor_grant_bounds_the_setup_operation() {
     // grants: permissive, restrictive and later revoked.
     let issue = |name: &str, restrictions: ExecutionRestrictions| {
         grants
-            .issue_root(&root, id(name), principal("executor"), None, restrictions)
+            .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
+                &root,
+                id(name),
+                principal("executor"),
+                None,
+                restrictions,
+            )
             .expect("issued")
     };
     let permissive = issue("permissive", ExecutionRestrictions::unrestricted());
@@ -1558,7 +1565,12 @@ async fn a_retained_ancestor_grant_bounds_the_setup_operation() {
     }
 
     grants
-        .revoke(&root, &permissive, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &root,
+            &permissive,
+            &mut NoController,
+        )
         .expect("revoked");
     let (result, ran) = run_within(&["p"]);
     assert!(

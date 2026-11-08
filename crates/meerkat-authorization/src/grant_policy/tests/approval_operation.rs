@@ -152,6 +152,14 @@ fn call_stating(digest: Option<Sha256Digest>) -> PreparedAuthorizationBinding {
 /// child rule, and its approval-carried child for the executor, bound to
 /// the exact operation, for the fixture's requester and work.
 fn approved_lineage(fixture: &Fixture) -> Vec<GrantLineageRef> {
+    approved_lineage_under(fixture, &meerkat_core::AdmissionGuard::none())
+}
+
+/// [`approved_lineage`], appended under `guard`.
+fn approved_lineage_under(
+    fixture: &Fixture,
+    guard: &meerkat_core::AdmissionGuard,
+) -> Vec<GrantLineageRef> {
     let approver = ApproverId::new("data-owner").expect("approver id");
     let parent_restrictions = ExecutionRestrictions {
         actions: ExactRestriction::exact([action(TOOL)]),
@@ -162,6 +170,7 @@ fn approved_lineage(fixture: &Fixture) -> Vec<GrantLineageRef> {
     let parent = fixture
         .grants
         .issue_root_with_child_rule(
+            guard,
             &who("root"),
             id("offer-parent"),
             who("owner-agent"),
@@ -220,6 +229,7 @@ fn approved_lineage(fixture: &Fixture) -> Vec<GrantLineageRef> {
     let child = fixture
         .grants
         .issue_approval_child(
+            guard,
             &who("owner-agent"),
             &parent,
             id("approved-child"),
@@ -494,6 +504,112 @@ fn an_owner_composed_without_a_currentness_owner_spends_nothing() {
         Err(meerkat_core::OperationAuthorizationError::Unavailable)
     ));
     assert!(prepares(&context, &approved_call()));
+}
+
+/// A realm's grant log in a fresh directory, and its admission fence: the
+/// store over it appends only under a guard that holds the fence.
+struct FencedLog {
+    _directory: tempfile::TempDir,
+    fence: meerkat_core::AdmissionFence,
+    path: std::path::PathBuf,
+}
+
+impl FencedLog {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::parse("fenced").expect("realm id");
+        let fence = meerkat_core::AdmissionFence::realm(directory.path(), &realm).expect("fence");
+        let path = fence
+            .directory()
+            .join("authorization")
+            .join("grant-owner.jsonl");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        Self {
+            _directory: directory,
+            fence,
+            path,
+        }
+    }
+
+    fn store(&self) -> Arc<dyn crate::grants::GrantOwnerStore> {
+        Arc::new(crate::grants::FileGrantOwnerStore::new(
+            &self.path,
+            crate::grants::GrantLogFence::Realm(self.fence.clone()),
+        ))
+    }
+
+    /// The log's fence, taken now without waiting.
+    fn guard(&self) -> Arc<meerkat_core::AdmissionGuard> {
+        meerkat_core::AdmissionGuard::try_acquire(vec![self.fence.clone()])
+            .expect("the log's fence is free")
+    }
+
+    /// An admission's hold of the log's fence.
+    fn hold(&self) -> meerkat_core::AdmissionHold {
+        meerkat_core::AdmissionHold::try_acquire(vec![self.fence.clone()])
+            .expect("an admission holds the log's fence")
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        std::fs::read(&self.path).expect("the grant log")
+    }
+}
+
+/// The entry takes the grant log's admission fence without waiting before
+/// it spends: while an admission holds the fence, the entry refuses to
+/// rebuild before anything is decided, with the use unspent and nothing
+/// written. Once the hold ends, the same decision's entry spends the use
+/// under the fence, and the spend is journaled.
+#[test]
+fn a_held_grant_log_fence_refuses_the_use_at_entry_and_spends_nothing() {
+    let log = FencedLog::new();
+    let currentness = Currentness::answering(crate::grants::ApprovalUseAnswer::Current);
+    let (fixture, lineage) = {
+        let guard = log.guard();
+        let fixture = Fixture::durable_with(Some(currentness.clone()), log.store(), &guard);
+        let lineage = approved_lineage_under(&fixture, &guard);
+        (fixture, lineage)
+    };
+    let (_policy, context) = approved_work(&fixture, lineage);
+    let prepared = context
+        .authorization()
+        .prepare(&approved_call())
+        .expect("the approved call prepares");
+    let written = log.bytes();
+
+    let mut hold = log.hold();
+    assert!(
+        refused_as(
+            prepared.spend_at_entry(),
+            OperationRefusalKind::ReprepareRequired
+        ),
+        "a held fence refuses the entry to rebuild"
+    );
+    assert_eq!(
+        currentness.asked(),
+        0,
+        "refused before anything was decided: the decider was not asked"
+    );
+    assert_eq!(log.bytes(), written, "nothing was written");
+    assert!(
+        prepares(&context, &approved_call()),
+        "the use is unspent: the approved call still prepares"
+    );
+
+    hold.release();
+    assert!(
+        prepared.spend_at_entry().is_ok(),
+        "the entry spends the use once the hold ends"
+    );
+    assert_eq!(currentness.asked(), 1);
+    assert!(
+        log.bytes().len() > written.len(),
+        "the spend is journaled under the fence"
+    );
+    assert!(
+        denied_at_preparation(&context, &approved_call()),
+        "the one use is spent"
+    );
 }
 
 /// The approved work of `approved_work`, with `edit` applied to its claims.

@@ -263,7 +263,12 @@ async fn explicit_correlated_targets_use_one_review_source_and_real_first_input(
                 owner
                     .source
                     .grants()
-                    .revoke(&parent.root_authority, parent, &mut custody)
+                    .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &parent.root_authority,
+                        parent,
+                        &mut custody,
+                    )
                     .unwrap();
             }
         }

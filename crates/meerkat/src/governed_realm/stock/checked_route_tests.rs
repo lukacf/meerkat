@@ -137,7 +137,14 @@ fn issue(grants: &LocalGrantAuthority, name: &str, target: &StockGrantTarget) ->
     )
     .unwrap();
     grants
-        .issue_root(&operator(), id(name), executor(), None, restrictions)
+        .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
+            &operator(),
+            id(name),
+            executor(),
+            None,
+            restrictions,
+        )
         .unwrap()
 }
 
@@ -577,7 +584,12 @@ async fn a_checked_route_needs_its_own_grant_its_own_session_and_an_open_route()
         .await
         .expect("the reopened route is allowed");
     grants
-        .revoke(&operator(), &checked, &mut NoController)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &operator(),
+            &checked,
+            &mut NoController,
+        )
         .expect("revoke the route's grant");
     let after = ToolCallView {
         id: "call-add-after-revocation",

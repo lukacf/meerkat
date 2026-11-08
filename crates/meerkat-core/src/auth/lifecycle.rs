@@ -547,9 +547,11 @@ pub enum TokenLifecycleClearError {
 }
 
 // Coordinator-private mutation. Its caller owns task completion and the
-// normalized lease guard through physical clear and compensating restoration.
+// normalized lease guard through physical clear and compensating restoration;
+// `admission` is the coordinator's credential-fence guard for the clear.
 #[cfg(not(target_arch = "wasm32"))]
 async fn clear_tokens_and_publish_lifecycle_released_under_guard(
+    admission: &crate::realm_admission::AdmissionGuard,
     store: &dyn TokenStore,
     handle: &GeneratedAuthLeaseHandle,
     credential_identity: &AuthCredentialIdentity,
@@ -591,7 +593,10 @@ async fn clear_tokens_and_publish_lifecycle_released_under_guard(
 
     // Commit: one durable mutation destroys the credential and its lifecycle
     // marker together.
-    if let Err(clear_err) = store.clear_for(&key, TokenStoreAccess::Interactive).await {
+    if let Err(clear_err) = store
+        .clear_for(admission, &key, TokenStoreAccess::Interactive)
+        .await
+    {
         // Pre-commit rollback: durable truth still holds the credential, so
         // restoring the staged release keeps the lease projection aligned.
         if let Err(restore_err) = restore_token_lifecycle_snapshot(handle, &staged) {
@@ -689,7 +694,7 @@ async fn clear_tokens_and_publish_lifecycle_released_coordinated_with_mode(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |admission| {
                 Box::pin(async move {
                     let lease_key = LeaseKey::from_credential_identity(&credential_identity);
                     let guard = acquire_auth_login_lifecycle_guard(&lease_key).await;
@@ -718,6 +723,7 @@ async fn clear_tokens_and_publish_lifecycle_released_coordinated_with_mode(
                         CredentialMutationError::AuthLifecycle(error.to_string())
                     })?;
                     clear_tokens_and_publish_lifecycle_released_under_guard(
+                        &admission,
                         store.as_ref(),
                         &handle,
                         &credential_identity,

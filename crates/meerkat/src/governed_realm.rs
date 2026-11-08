@@ -87,7 +87,7 @@ use std::sync::Arc;
 use meerkat_authorization::clock::LocalAuthorizationClock;
 use meerkat_authorization::grant_policy::OperationPolicyOwner;
 use meerkat_authorization::grants::{
-    FileGrantOwnerStore, GrantDurabilityError, LocalGrantAuthority,
+    FileGrantOwnerStore, GrantDurabilityError, GrantLogFence, LocalGrantAuthority,
 };
 use meerkat_authorization::publication::LocalAuthorizationPublication;
 use meerkat_authorization_contracts::constraints::ResourceDomain;
@@ -207,9 +207,17 @@ pub(crate) async fn governed_composition(
                 as Arc<dyn LocalAuthorizationClock>,
         ),
     };
-    let store = Arc::new(FileGrantOwnerStore::new(grant_owner_store_path(
-        &paths.root,
-    )));
+    let store = match realm_grant_owner_store(paths) {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "governed realm's grant log has no usable admission fence: governed work and \
+                 configured MCP attachments are unavailable"
+            );
+            return GovernedComposition::Unavailable;
+        }
+    };
     let grants = match LocalGrantAuthority::restore(store, publication, clock) {
         Ok(grants) => Arc::new(grants),
         Err(error) => {
@@ -607,6 +615,47 @@ fn restore_failure(error: &GrantDurabilityError) -> &'static str {
         GrantDurabilityError::StoreUnavailable => "unreadable or locked",
         _ => "unavailable",
     }
+}
+
+/// R, the admission fence of the realm whose directory is `paths.root`
+/// (`meerkat_core::realm_admission`): it covers the realm's own config
+/// document and its `authorization/` files, the grant log and the stock
+/// selection among them.
+pub(crate) fn realm_admission_fence(
+    paths: &RealmPaths,
+) -> Result<meerkat_core::AdmissionFence, meerkat_core::AdmissionRefusal> {
+    let invalid = || {
+        meerkat_core::AdmissionRefusal::Unavailable(meerkat_core::FenceUnavailable {
+            path: paths
+                .root
+                .join(meerkat_core::realm_admission::ADMISSION_LOCK_FILE),
+            cause: meerkat_core::FenceUnavailableCause::InvalidName,
+        })
+    };
+    let state_root = paths.root.parent().ok_or_else(invalid)?;
+    let realm = paths
+        .root
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|name| meerkat_core::connection::RealmId::parse(name).ok())
+        .ok_or_else(invalid)?;
+    let fence = meerkat_core::AdmissionFence::realm(state_root, &realm)?;
+    if fence.directory() != paths.root {
+        return Err(invalid());
+    }
+    Ok(fence)
+}
+
+/// The realm's own grant log at `paths`, fenced by the realm's admission
+/// fence ([`GrantLogFence::Realm`]): only an operation whose guard holds it
+/// writes the log. Every opener of a realm's grant owner uses this store.
+pub(crate) fn realm_grant_owner_store(
+    paths: &RealmPaths,
+) -> Result<FileGrantOwnerStore, meerkat_core::AdmissionRefusal> {
+    Ok(FileGrantOwnerStore::new(
+        grant_owner_store_path(&paths.root),
+        GrantLogFence::Realm(realm_admission_fence(paths)?),
+    ))
 }
 
 /// Open a realm through `provider` with the posture the trusted host selected.

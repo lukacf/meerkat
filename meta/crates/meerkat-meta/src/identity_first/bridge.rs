@@ -5556,13 +5556,15 @@ pub trait SessionBridge: Send + Sync {
     /// the session its last member's retirement archived. Read from the
     /// machine state the mob's actor last published: no store read and no
     /// actor command, and it never wakes a member. The resume hold of a
-    /// member Core holds Broken comes from Core's restore diagnostic, which
-    /// [`MobSessionBridge`] reads through `MobHandle::member`: in the one
-    /// actor step before Core records it, that read takes an actor command
-    /// and the answer carries no hold. The identity runtime builds every
-    /// view of an identity's lifecycle from it (`status`, `statuses`,
-    /// `member_health`, the bootstrap status) and chooses an identity's door
-    /// by it.
+    /// member Core holds Broken, and the session whose restore failed, come
+    /// from Core's restore diagnostic, which [`MobSessionBridge`] reads
+    /// through `MobHandle::member`, with no actor command either: until Core
+    /// records that diagnostic (in the same actor step as the Broken fact,
+    /// or, for a warm revival, once the revival's off-actor cleanup commits
+    /// back), the answer reads the member Broken without them. The identity
+    /// runtime builds every view of an identity's lifecycle from it
+    /// (`status`, `statuses`, `member_health`, the bootstrap status) and
+    /// chooses an identity's door by it.
     ///
     /// The default fails closed: a bridge that cannot read Core's entry
     /// answers [`BridgeError::Unsupported`], and every view of an identity
@@ -9925,11 +9927,13 @@ impl SessionBridge for MobSessionBridge {
         // A member Core holds Broken: Core's answer for the member names the
         // failed restore's session and its durable resume hold, which the
         // machine's read does not carry. `MobHandle::member` answers it from
-        // Core's restore diagnostic without the mob actor; in the one actor
-        // step between the machine's Broken fact and that diagnostic it
-        // falls through to `get_member`, an actor command, and the read goes
-        // on without the hold (a Core read of the hold with no actor command
-        // is a tracked follow-up).
+        // Core's restore diagnostic without the mob actor (its fallback,
+        // `get_member`, reads the published state too). Until Core records
+        // the diagnostic (in the same actor step as the Broken fact, or, for
+        // a warm revival, once the revival's off-actor cleanup commits back)
+        // `member` answers the member, and the read goes on without the hold
+        // or the session; carrying the hold in Core's entry read is a tracked
+        // follow-up.
         if let Some(broken) = entry
             .member
             .as_mut()

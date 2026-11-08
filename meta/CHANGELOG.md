@@ -192,23 +192,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `runtime_mode_override`. Ambient memory follows the same mode, where it
   followed the roster's override or profile table.
 - A name this runtime has not registered never reaches the member door when
-  Core holds it for an identity: a send, a dispatch, a member mutation, a
-  console send, a cross-mob send and a schedule fire by the name are refused
-  typed before anything is delivered or changed. The refusal is retryable
-  only when this runtime's next roster pass registers the name: an entry a
-  host declared answers `-32052` (`identity_history_unavailable`,
-  retryable) until this process's roster pass registers it, and so does a
-  name whose read of Core's entry Core could not serve. A name no roster
-  pass of this runtime registers is refused for good: an identity removed
-  and an identity created at runtime (a created entry, whose record the
-  mob's identity store owns; see Known limitations) answer `-32001`
-  (unknown identity), and a name whose record Core cannot read (written by
-  a newer release, or contradicted by the mob's journal) answers `-32014`
+  Core holds it for an identity: nothing is delivered or changed for a
+  send, a dispatch, a member mutation, a console send, a cross-mob send or
+  a schedule fire by the name. The refusal is retryable only when this
+  runtime's next roster pass registers the name: an entry a host declared
+  answers `-32052` (`identity_history_unavailable`, retryable) until this
+  process's roster pass registers it, and so does a name whose read of
+  Core's entry Core could not serve. A name no roster pass of this runtime
+  registers is refused for good: an identity removed and an identity
+  created at runtime (a created entry, whose record the mob's identity
+  store owns; see Known limitations) answer `-32001` (unknown identity),
+  and a name whose record Core cannot read (written by a newer release, or
+  contradicted by the mob's journal) answers `-32014`
   (`identity_name_unreadable`, `remedy: "repair_or_upgrade"`, not
-  retryable). `meta/send_message` answers each of them typed, where it
-  answered the identity door's refusal as an untyped `-32000`, and so do
-  the console's member verbs, where `meta/retire_member` answered some of
-  them as an internal error.
+  retryable). `meta/send_message`, `meta/dispatch` and the RPC and console
+  member verbs answer these codes typed, where `meta/send_message` answered
+  the identity door's refusal as an untyped `-32000` and the console's
+  `meta/retire_member` answered some of them as an internal error; a
+  schedule fire ends typed on a final refusal and stays reclaimable on a
+  retryable one. Two surfaces carry less. A console send
+  (`meta/console/send`) is accepted first and fails in the background: its
+  frame turns `delivery_failed` beside a `message_delivery_failed` frame
+  whose payload carries the refusal's message and its structured data
+  (none for an unknown identity), and no code. A cross-mob send answers the
+  control code `unknown_identity` for an unknown identity and the generic
+  `identity_error` for every other refusal, so a retryable refusal there
+  reads like a final one.
 - A send, a dispatch, a member mutation or a schedule fire by the name of a
   member seated before identity entries existed (a worker whose spawn row
   carries the legacy identity label naming it, or the durable-identity
@@ -357,12 +366,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a created entry, a send to it goes through the identity's door, as for
   any registered identity.
 - `MobSessionBridge::identity_entry` reads the durable resume hold of a
-  member Core holds Broken through `MobHandle::member`. In the one actor
-  step between Core holding the member Broken and recording that hold, the
-  read falls through to an actor command (`MobHandle::get_member`) and
-  answers without the hold; `meta/member_health` then waits for the actor
-  there. A Core read of the hold that issues no actor command is a tracked
-  follow-up.
+  member Core holds Broken, and the session whose restore failed, from
+  Core's restore diagnostic, through `MobHandle::member`. In the gap
+  between Core holding the member Broken and recording that diagnostic (in
+  the same actor step, or, for a warm revival, until the revival's cleanup,
+  which runs off the actor, commits back), the read answers Broken without
+  the hold and without the failed session. The read issues no actor command
+  (`MobHandle::get_member` answers from the published state too), so
+  `meta/member_health` never waits for the mob's actor there. Carrying the
+  hold in Core's entry read is a tracked follow-up.
 
 ## [0.9.10] - 2026-11-04
 

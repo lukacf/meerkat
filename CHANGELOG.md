@@ -235,7 +235,8 @@ them.
 - `meerkat-mob`: `MobHandle::start_governed_input_with_custody_at` and
   `start_internal_governed_input_with_custody_at` submit a bound governed
   input at the member incarnation the caller read (the runtime id and
-  fence token of a `RosterEntry`, and the session it bound the input for),
+  fence token `MobHandle::get_member` answered, and the session it bound
+  the input for),
   where the unpinned forms submit to whichever incarnation is current when
   they run: a member rotated, respawned or retired since the read is
   refused (`MobError::StaleFenceToken`, or `MemberNotFound` once no
@@ -257,7 +258,8 @@ them.
   origin), the unkeyed `mob/member_send` (`send_mob_member_content` in the
   Python SDK, `sendMobMemberContent` in the TypeScript SDK),
   `mob/ingress_interaction`, MCP `meerkat_mob_member_send`, the web
-  runtime's `mob_member_send` (`Mob.send` in the Web SDK),
+  runtime's `mob_member_send` (`Member.send` in the Web SDK,
+  `mob.member(id).send(...)`),
   `MobHandle::start_governed_input*`, and `start_host_human_input*` with an
   External spec. The entry's host delivers to it through its own door, as
   internal work, which MobMachine admits as for any member. MobMachine's

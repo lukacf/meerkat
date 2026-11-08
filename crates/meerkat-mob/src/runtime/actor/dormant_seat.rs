@@ -309,6 +309,18 @@ impl MobActor {
                 "meerkat id '{agent_identity}' uses reserved system identifier namespace"
             )));
         }
+        // A dormant seat never seats an approval branch: only the branch's
+        // opening takes its identity or label.
+        if spec.approval_branch.is_some()
+            || crate::runtime::approval_branch::takes_approval_branch_reservation(
+                &agent_identity,
+                spec.labels.as_ref(),
+            )
+        {
+            return Err(MobError::ApprovalBranchReserved {
+                identity: agent_identity.clone(),
+            });
+        }
         let launch = match &spec.launch_mode {
             crate::launch::MemberLaunchMode::Fresh if mode != SeatPlanMode::SameSession => {
                 DormantSeatLaunch::Fresh
@@ -367,12 +379,21 @@ impl MobActor {
         // AlreadySeated; any other seat is the caller's rotation (a
         // rotation plans its next incarnation over the seated one).
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+        let seated_now = self
+            .dsl_authority
+            .state()
+            .identity_to_runtime
+            .contains_key(&dsl_identity);
+        // The rotation of an identity no member holds is its fresh life, an
+        // ordinary seat of its name: it is checked as a seat is.
+        let seats_the_name =
+            mode == SeatPlanMode::Seat || (mode == SeatPlanMode::Rotation && !seated_now);
         // A seat without the custody of its name's entry never takes an
         // identity entry's name, and no seat takes a reserved name (a
         // removed created entry's, or one whose entry this build cannot
         // read): MobMachine's admission verdict refuses it typed, seated or
         // not.
-        if mode == SeatPlanMode::Seat {
+        if seats_the_name {
             let admission = match admission {
                 Some(admission) => admission?,
                 None => self.member_admission_verdict(
@@ -393,16 +414,13 @@ impl MobActor {
             }
         }
         let state = self.dsl_authority.state();
-        let seated_now = state.identity_to_runtime.contains_key(&dsl_identity);
         // A dormant seat never takes an identity entry its host creates or
         // prepares: one hosted on its first use (placed or externally
         // bound), one awaiting its held creation, or one awaiting its host's
         // preparation, which its settle seats or its held construction's
         // activation publishes (MobMachine's dormant seat refuses them too,
         // unseated_entry_owed_its_seat).
-        if mode == SeatPlanMode::Seat
-            && let Some(cause) = state.identity_entry_unseated.get(&dsl_identity)
-        {
+        if seats_the_name && let Some(cause) = state.identity_entry_unseated.get(&dsl_identity) {
             match cause {
                 mob_dsl::UnseatedEntryCause::HostedOnFirstUse => {
                     return Err(MobError::WiringError(format!(
@@ -1605,6 +1623,16 @@ impl MobActor {
             bridge_session_id: session_id,
             resume_from_role: None,
         };
+        // The build the request carries (a declared role migration's
+        // composed build): the plan takes it into the seat, whose row
+        // journals it for the successor's builds on the kept session.
+        if let Some(inputs) = &request.build_inputs {
+            SeatBuild {
+                inputs: inputs.clone(),
+                local: SeatLocalBuildInputs::default(),
+            }
+            .apply_to(&mut spec);
+        }
         let DormantSeatPlanEntry::Seat(mut candidate) = self
             .plan_dormant_seat(spec, SeatPlanMode::SameSession, None)
             .await?
@@ -2072,12 +2100,12 @@ impl MobActor {
         .with_kickoff_prompt(candidate.kickoff_prompt.clone())
         // A fresh rotation's next session is unborn (CommitMemberRotation
         // records it so): its first wake creates it, applying what the
-        // rotation's spec named. A same-session successor names no build
-        // inputs of its own.
+        // rotation's spec named. A same-session successor names build inputs
+        // only when its request carries a build (a declared role
+        // migration's): its builds on the kept session apply them.
         .with_seat_session_unborn(seat_session_unborn)
         .with_seat_build_inputs(
-            Some(candidate.seat_build.inputs.clone())
-                .filter(|inputs| !inputs.is_empty() && !rotation.keeps_session()),
+            Some(candidate.seat_build.inputs.clone()).filter(|inputs| !inputs.is_empty()),
         );
         spawned.creation = creation;
         spawned.runtime_mode = candidate.runtime_mode;

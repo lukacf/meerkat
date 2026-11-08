@@ -8097,6 +8097,91 @@ comms = true
         assert!(bridge.state.lock().await.pending.is_empty());
     }
 
+    /// The host's error answer to `callback/build_agent` refuses the build
+    /// typed, on both build paths: structured data of Meta's own kind with
+    /// the host's reason, beside the message operators read. A callback that
+    /// never completed (its transport closed) stays the retryable tool
+    /// failure it was.
+    ///
+    /// RED before the builder typed the answer: the host's refusal was a
+    /// tool failure whose text carried it.
+    #[tokio::test(start_paused = true)]
+    async fn the_hosts_build_refusal_is_typed_on_both_build_paths() {
+        for taking_tools in [false, true] {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let (stdout_tx, mut stdout_rx) = mpsc::channel(1);
+            let builder = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let mut build = Box::pin(async {
+                if taking_tools {
+                    builder.build_agent_taking_tools(&mut req, event_tx).await
+                } else {
+                    builder.build_agent(&req, event_tx).await
+                }
+            });
+            assert!(futures::poll!(&mut build).is_pending());
+            let request: Value =
+                serde_json::from_str(&stdout_rx.recv().await.expect("callback request"))
+                    .expect("callback JSON");
+            builder
+                .bridge
+                .route_callback_response(json!({
+                    "id": request["id"], "error": {"message": "the host's gate refused the member"},
+                }))
+                .await;
+            let Err(error) = build.await else {
+                panic!("taking_tools={taking_tools}: the host's refusal fails the build");
+            };
+            let SessionError::FailedWithData { message, data } = &error else {
+                panic!("taking_tools={taking_tools}: the refusal is typed: {error:?}");
+            };
+            assert_eq!(data["kind"], "meta_host_rejected_build", "{data}");
+            assert_eq!(
+                data["reason"], "the host's gate refused the member",
+                "{data}"
+            );
+            assert!(
+                message.contains("the host's gate refused the member"),
+                "{message}"
+            );
+
+            let (stdout_tx, _stdout_rx) = mpsc::channel(1);
+            let closed = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            closed.bridge.close().await;
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let failed = if taking_tools {
+                closed.build_agent_taking_tools(&mut req, event_tx).await
+            } else {
+                closed.build_agent(&req, event_tx).await
+            };
+            let Err(error) = failed else {
+                panic!("taking_tools={taking_tools}: a closed transport fails the build");
+            };
+            assert!(
+                matches!(error, SessionError::Agent(_)),
+                "taking_tools={taking_tools}: a transport failure stays the tool failure: {error:?}"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn callback_reliable_notification_reports_blocked_and_closed_stdout() {
         let (stdout_tx, mut stdout_rx) = mpsc::channel(1);
@@ -9439,6 +9524,8 @@ fn parse_gateway_runtime_options(
         // parse runs (see `run_persistent_inner`).
         "native_realm",
         "member_auth_binding",
+        // Parsed typed by `crate::tool_grant_options` before this parse runs.
+        "tool_grants",
         "http_listen",
         "http_public_base_url",
         "allow_remote",
@@ -12239,6 +12326,26 @@ fn gateway_shutdown_response_at_exit(
     })
 }
 
+/// How a callback round trip failed: the host answered it with an error, or
+/// it never completed (its transport closed, its response channel dropped,
+/// it timed out).
+#[derive(Debug)]
+enum CallbackFailure {
+    /// The host's own error answer, with its message.
+    HostAnswered(String),
+    /// The round trip did not complete.
+    Transport(String),
+}
+
+impl std::fmt::Display for CallbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostAnswered(message) => write!(f, "callback error: {message}"),
+            Self::Transport(detail) => f.write_str(detail),
+        }
+    }
+}
+
 impl StdioCallbackBridge {
     fn new(stdout_tx: mpsc::Sender<GatewayStdoutLine>) -> Self {
         Self {
@@ -12306,6 +12413,14 @@ impl StdioCallbackBridge {
 
     /// Send a callback request to Python and wait for the response.
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call_typed(method, params)
+            .await
+            .map_err(|failure| failure.to_string())
+    }
+
+    /// [`Self::call`], telling the host's own error answer apart from a
+    /// callback that never completed.
+    async fn call_typed(&self, method: &str, params: Value) -> Result<Value, CallbackFailure> {
         // Admission and response share the existing provider callback window.
         let deadline = tokio::time::Instant::now() + PROVIDER_CALLBACK_TIMEOUT;
         let id = self
@@ -12317,7 +12432,9 @@ impl StdioCallbackBridge {
         {
             let mut state = self.state.lock().await;
             if state.closed {
-                return Err("callback transport closed".to_string());
+                return Err(CallbackFailure::Transport(
+                    "callback transport closed".to_string(),
+                ));
             }
             state.pending.insert(id_str.clone(), tx);
         }
@@ -12332,7 +12449,7 @@ impl StdioCallbackBridge {
             Ok(l) => l,
             Err(e) => {
                 self.state.lock().await.pending.remove(&id_str);
-                return Err(e.to_string());
+                return Err(CallbackFailure::Transport(e.to_string()));
             }
         };
         if let Err(error) = self
@@ -12340,31 +12457,33 @@ impl StdioCallbackBridge {
             .await
         {
             self.state.lock().await.pending.remove(&id_str);
-            return Err(error);
+            return Err(CallbackFailure::Transport(error));
         }
 
         // Wait for Python to respond (routed by the stdin multiplexer)
         match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(value)) => {
                 if let Some(error) = value.get("error") {
-                    Err(format!(
-                        "callback error: {}",
+                    Err(CallbackFailure::HostAnswered(
                         error
                             .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown")
+                            .to_string(),
                     ))
                 } else {
                     Ok(value.get("result").cloned().unwrap_or(Value::Null))
                 }
             }
-            Ok(Err(_)) => Err("callback response channel dropped".to_string()),
+            Ok(Err(_)) => Err(CallbackFailure::Transport(
+                "callback response channel dropped".to_string(),
+            )),
             Err(_) => {
                 self.state.lock().await.pending.remove(&id_str);
-                Err(format!(
+                Err(CallbackFailure::Transport(format!(
                     "callback timed out after {}s; execution outcome unknown",
                     PROVIDER_CALLBACK_TIMEOUT.as_secs()
-                ))
+                )))
             }
         }
     }
@@ -15326,7 +15445,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
         // app_context flows from SpawnMemberSpec.context → build.app_context.
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        let callback_result = self.bridge.call("callback/build_agent", params).await;
+        let callback_result = self.bridge.call_typed("callback/build_agent", params).await;
 
         match callback_result {
             Ok(result) => {
@@ -15339,13 +15458,11 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .await?;
                 self.inner.build_agent(&modified_req, event_tx).await
             }
-            Err(err) => {
+            Err(failure) => {
                 // Propagate the error — before_create failure aborts session creation.
                 // This is an intentional breaking change from v0.5.x where failures
                 // were silently swallowed with a fallback to default build.
-                Err(SessionError::Agent(agent_tool_error(format!(
-                    "callback/build_agent failed: {err}"
-                ))))
+                Err(build_callback_failure(failure))
             }
         }
     }
@@ -15383,7 +15500,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
             .and_then(|build| build.external_tools.take());
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        match self.bridge.call("callback/build_agent", params).await {
+        match self.bridge.call_typed("callback/build_agent", params).await {
             Ok(result) => {
                 let mut modified_req = self
                     .answered_build_request(req, owned_tools, &result, &scope_id)
@@ -15392,10 +15509,30 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .build_agent_taking_tools(&mut modified_req, event_tx)
                     .await
             }
-            Err(err) => Err(SessionError::Agent(agent_tool_error(format!(
-                "callback/build_agent failed: {err}"
-            )))),
+            Err(failure) => Err(build_callback_failure(failure)),
         }
+    }
+}
+
+/// The session error a failed `callback/build_agent` round trip refuses the
+/// build with. The host's own error answer is its typed refusal of the
+/// build: structured data of Meta's kind
+/// ([`crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND`]) with the
+/// host's reason, beside the message operators read, which every surface
+/// classifies by the kind. A round trip that never completed stays the
+/// retryable tool failure.
+fn build_callback_failure(failure: CallbackFailure) -> SessionError {
+    match failure {
+        CallbackFailure::HostAnswered(reason) => SessionError::FailedWithData {
+            message: format!("callback/build_agent failed: callback error: {reason}"),
+            data: json!({
+                "kind": crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND,
+                "reason": reason,
+            }),
+        },
+        transport @ CallbackFailure::Transport(_) => SessionError::Agent(agent_tool_error(
+            format!("callback/build_agent failed: {transport}"),
+        )),
     }
 }
 
@@ -15515,20 +15652,27 @@ pub use crate::gateway_mcp_composition::{
 pub const HOST_APP_ROUTES_PREFIX: &str = "/host";
 
 /// Nest the host's read-only routes, if any, under [`HOST_APP_ROUTES_PREFIX`],
-/// under the app's `request_bound`.
+/// under the app's `request_bound`. On an open Console (`posture`) they
+/// answer, like the Console's own routes, only requests addressed to a host
+/// the listener serves.
 fn mount_host_app_routes(
     app: axum::Router,
     host: Option<&Arc<dyn GatewayHostComposition>>,
     viewer: crate::http_console::ConsoleViewerResolver,
     send_precheck: crate::http_console::ConsoleSendPrecheck,
     request_bound: &crate::unified_runtime::http::ReferenceAppRequestBound,
+    posture: crate::gateway_composition::ConsoleAuthPosture,
 ) -> Result<axum::Router, GatewayHostError> {
     let Some(host) = host else {
         return Ok(app);
     };
+    let open = posture == crate::gateway_composition::ConsoleAuthPosture::Open;
     Ok(
         match host.host_app_routes_with_send_precheck(viewer, send_precheck)? {
-            Some(routes) => app.nest(HOST_APP_ROUTES_PREFIX, request_bound.apply(routes)),
+            Some(routes) => app.nest(
+                HOST_APP_ROUTES_PREFIX,
+                crate::http_console::served_hosts_only(request_bound.apply(routes), open),
+            ),
             None => app,
         },
     )
@@ -15545,12 +15689,14 @@ fn gateway_console_app(
     send_precheck: crate::http_console::ConsoleSendPrecheck,
     request_bound: &crate::unified_runtime::http::ReferenceAppRequestBound,
 ) -> Result<axum::Router, GatewayHostError> {
+    let posture = crate::gateway_composition::ConsoleAuthPosture::of(&decisions);
     mount_host_app_routes(
         runtime.reference_app_router_under(decisions, request_bound),
         host,
         viewer,
         send_precheck,
         request_bound,
+        posture,
     )
 }
 
@@ -16231,6 +16377,65 @@ impl GatewayStdioClose {
 }
 
 type GatewayStdioObservation = watch::Receiver<Option<GatewayStdioClose>>;
+
+/// The administration entry of the gateway's stdio connection, for the realm
+/// MCP methods (`meta/realm_mcp/*`). The SDK host on that connection is the
+/// gateway's operator, so a write it sent is admitted while the connection is
+/// open and refused `not_authenticated` once it closed. The write's owner
+/// runs it after the document's locks and the credential owner's exclusion,
+/// immediately before it writes; it reads the stdio close observation and
+/// never waits.
+struct StdioConnectionEntry {
+    closed: GatewayStdioObservation,
+}
+
+impl meerkat_core::AdministrationEntry for StdioConnectionEntry {
+    fn enter(
+        &self,
+    ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal> {
+        if self.closed.borrow().is_some() {
+            return Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated);
+        }
+        Ok(meerkat_core::EnteredAdministration::admitted())
+    }
+}
+
+/// The realm MCP administration the gateway serves: `installation`, entered
+/// through the stdio connection `closed` observes.
+fn stdio_realm_mcp_administration(
+    installation: crate::gateway_mcp_composition::GatewayRealmMcpInstallation,
+    closed: GatewayStdioObservation,
+) -> crate::rpc::realm_mcp_methods::RealmMcpAdministration {
+    crate::rpc::realm_mcp_methods::RealmMcpAdministration::new(
+        installation,
+        Arc::new(StdioConnectionEntry { closed }),
+    )
+}
+
+/// The stdio gateway's own realm MCP installation of `storage`'s realm, over
+/// `factory`'s credential store (the one the launch names, else the default
+/// store). A store that did not open holds no secret value here: the secret
+/// methods answer `realm_mcp_unavailable`.
+fn gateway_realm_mcp_installation(
+    factory: &AgentFactory,
+    storage: &meerkat_core::storage_layout::ResolvedStorage,
+) -> crate::gateway_mcp_composition::GatewayRealmMcpInstallation {
+    let persistence = match factory.resolution_provider_auth_persistence() {
+        Ok(persistence) => persistence,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the launch's provider credential store did not open: the realm MCP secret \
+                 methods answer realm_mcp_unavailable"
+            );
+            None
+        }
+    };
+    crate::gateway_mcp_composition::GatewayRealmMcpInstallation::for_gateway(
+        storage.clone(),
+        persistence,
+    )
+}
 
 #[derive(Clone)]
 struct GatewayStdioOwner {
@@ -17459,6 +17664,9 @@ external_addressable = true
 
     // 3. Both physical stdio owners notify the same retained gateway driver.
     let (stdio, stdio_observation) = GatewayStdioOwner::new(host.cloned());
+    // The realm MCP administration's entry reads the same observation: a
+    // write the SDK host sent is admitted while its connection is open.
+    let realm_mcp_entry_observation = stdio_observation.clone();
     let shutdown_waits_for_drain = stdio.shutdown_waits_for_drain();
     // Raw keeps its established queue ordering and I/O behavior. Only an
     // explicitly composed native owner consumes immediate close observations.
@@ -17531,6 +17739,16 @@ external_addressable = true
     // before that file is read.
     let member_route = crate::native_realm::MemberRoute::from_init_params(&params)
         .map_err(|refusal| fail_member_route(&request_id, &refusal))?;
+    // The scoped tool grants' maximum lifetime, parsed typed so its refusal
+    // names its kind in `error.data`. The runtime takes it as its grant
+    // policy once the runtime exists, before any session.
+    let tool_grant_options = crate::tool_grant_options::ToolGrantLaunchOptions::parse(
+        params
+            .get("runtime_options")
+            .and_then(|options| options.get("tool_grants")),
+        "runtime_options.tool_grants",
+    )
+    .map_err(|error| fail_init_with_data(&request_id, -32602, error.to_string(), error.data()))?;
     let mut gateway_options = parse_gateway_runtime_options(&params, persistent_state.as_deref())
         .map_err(|e| fail_init(&request_id, -32602, e))?;
     gateway_options.native_realm = member_route.native_realm;
@@ -17999,6 +18217,11 @@ external_addressable = true
                 format!("runtime_options.mob_announcements: {error}"),
             )
         })?;
+    // The installation realm's own MCP servers and their secrets, served to
+    // this gateway's SDK host (`meta/realm_mcp/*`): composed with the member
+    // factory, over the factory's own credential store when the launch keeps
+    // one.
+    let realm_mcp_installation;
     let (
         mob_spec,
         _temp_dir,
@@ -18146,6 +18369,9 @@ external_addressable = true
                 )
             })?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         // Match the ephemeral path's capability mask — only comms is enabled
         // by default. Apps control additional capabilities via their mob
         // definition profiles, not the gateway factory.
@@ -18187,6 +18413,7 @@ external_addressable = true
             &member_mcp_custody,
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
+        realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
         // Live (realtime) needs the SAME factory shape for its per-open
         // credential-resolving realtime session factory; clone before
         // the builder consumes it.
@@ -18594,6 +18821,9 @@ external_addressable = true
                 )
             })?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         let process_local_session_store: Arc<dyn meerkat::SessionStore> =
             Arc::new(meerkat::MemoryStore::new());
         let job_store: Arc<dyn meerkat::DetachedJobStore> =
@@ -18638,6 +18868,7 @@ external_addressable = true
             &member_mcp_custody,
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
+        realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
         let runtime_delivery = runtime_delivery.with_consent_notice_issuer(consent_notice_issuer);
         let member_agent_config = gateway_agent_config(&gateway_options);
         let mut inner_builder = crate::gateway_mcp_composition::gateway_member_builder(
@@ -19080,23 +19311,20 @@ external_addressable = true
     } else {
         None
     };
-    // Each identity with a pending first-boot row or a rotation a crash
-    // interrupted waits for the roster pass's seat step: the mob
-    // materializes none of them at start, and refuses their wakes retryable
-    // until the seat step for each ends the mark.
-    let mut host_pending_seeded = Vec::new();
+    // Each identity with a pending first-boot row waits for the roster
+    // pass's declaration of it: the mob materializes none of them at start,
+    // and refuses their wakes retryable until the declaration that carries
+    // the row out ends the mark.
     let mob_spec = match (boot_roster.as_deref(), launch_mob_id.as_deref()) {
-        (Some(roster), Some(launch_mob_id)) => {
+        (Some(roster), Some(_)) => {
             let first_boot = persistent_state
                 .clone()
                 .map(crate::identity_first::first_boot_manifest::FirstBootLocation::StateDir);
             let host_pending = crate::identity_first::runtime::host_pending_members_before_build(
                 first_boot.as_ref(),
-                Some((persistent_metadata.as_ref(), launch_mob_id)),
                 roster,
             )
             .await;
-            host_pending_seeded.clone_from(&host_pending);
             mob_spec.with_host_pending_members(host_pending)
         }
         _ => mob_spec,
@@ -19669,9 +19897,6 @@ external_addressable = true
         member_build_wiring
             .bind(&irt, runtime.mob_runtime().session_service().cloned())
             .await;
-        // Every seat step ends the host-pending mark of each identity seeded
-        // before the mob build.
-        irt.seed_host_pending(std::mem::take(&mut host_pending_seeded));
 
         init_progress.enter(InitPhase::Roster);
         if shutdown_requested.load(Ordering::Acquire) {
@@ -20025,6 +20250,13 @@ external_addressable = true
         }
         detached_jobs.arm_delivery_driver(Arc::clone(&runtime));
     }
+    // The realm MCP administration the SDK host on this gateway's stdio
+    // serves through (`meta/realm_mcp/*`), admitted while that connection
+    // is open.
+    runtime.serve_realm_mcp(stdio_realm_mcp_administration(
+        realm_mcp_installation,
+        realm_mcp_entry_observation,
+    ));
     // Bind the steward's late runtime seams and wire gating decisions back
     // to staged promotion commits (§10.2).
     steward_late_runtime.bind(runtime.clone());
@@ -20074,6 +20306,17 @@ external_addressable = true
             "console requires app auth but trusts no signing key: every console request will be \
              refused with 401. Pass runtime_options.auth_config to trust an issuer, or set \
              runtime_options.console_require_app_auth = false for an explicitly open local console"
+        );
+    }
+    if crate::gateway_composition::ConsoleAuthPosture::of(&decision_state)
+        == crate::gateway_composition::ConsoleAuthPosture::Open
+        && crate::parse_jwks_json(&decision_state.trusted_oidc.jwks_json).is_ok()
+    {
+        tracing::warn!(
+            "runtime_options.console_require_app_auth = false overrides the trusted issuer of \
+             runtime_options.auth_config: the console admits callers without a token as one \
+             anonymous caller, and identifies a caller that volunteers a verified token only \
+             where an access controller is configured"
         );
     }
     let viewer_resolver = runtime.console_viewer_resolver(&decision_state);
@@ -23004,6 +23247,7 @@ mod prepared_application_tests {
 #[cfg(test)]
 mod host_app_routes_tests {
     use super::*;
+    use crate::gateway_composition::ConsoleAuthPosture;
     use axum::body::Body;
     use axum::http::{HeaderMap, Request, StatusCode, Uri};
     use tower::ServiceExt as _;
@@ -23192,6 +23436,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
         assert_eq!(
@@ -23207,6 +23452,7 @@ mod host_app_routes_tests {
             resolver(),
             crate::http_console::ConsoleSendPrecheck::new(read_only, None, None),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
         assert_eq!(
@@ -23225,6 +23471,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .expect("the host's routes mount");
 
@@ -23249,12 +23496,14 @@ mod host_app_routes_tests {
         // refusal of an unauthenticated request.
         let mut decisions = minimal_decision_state();
         decisions.console.require_app_auth = true;
+        let posture = ConsoleAuthPosture::of(&decisions);
         let app = mount_host_app_routes(
             console_app(),
             Some(&host),
             crate::http_console::ConsoleViewerResolver::new(decisions, None),
             precheck(),
             &request_bound(),
+            posture,
         )
         .expect("the host's routes mount");
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::UNAUTHORIZED);
@@ -23268,6 +23517,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .unwrap();
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::NOT_FOUND);
@@ -23279,6 +23529,7 @@ mod host_app_routes_tests {
             resolver(),
             precheck(),
             &request_bound(),
+            ConsoleAuthPosture::Open,
         )
         .unwrap();
         assert_eq!(get(&app, "/host/status").await.0, StatusCode::NOT_FOUND);
@@ -23292,7 +23543,8 @@ mod host_app_routes_tests {
                 Some(&host),
                 resolver(),
                 precheck(),
-                &request_bound()
+                &request_bound(),
+                ConsoleAuthPosture::Open,
             )
             .err(),
             Some(GatewayHostError::Denied)
@@ -23424,6 +23676,75 @@ mod host_app_routes_tests {
         assert_eq!(held.peak(), LIMIT);
         server.abort();
         runtime.shutdown().await;
+    }
+
+    /// On an open Console the host's routes answer, like the Console's own
+    /// routes, only a request addressed to a host the gateway's listener
+    /// serves: a page that rebinds its own name to the listener's address
+    /// reads none of them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::expect_used)]
+    async fn open_console_host_routes_refuse_a_foreign_host() {
+        let definition = MobDefinition::from_toml(
+            "[mob]\nid = \"gateway-host-routes\"\n[profiles.worker]\nmodel = \"gpt-5.5\"\n",
+        )
+        .expect("definition");
+        let runtime = crate::unified_runtime::UnifiedRuntimeBuilder::default()
+            .definition(definition)
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let decisions = RuntimeDecisionState::local_console(
+            ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        );
+        let host: Arc<dyn GatewayHostComposition> = Arc::new(RouteHost { routes: Ok(true) });
+        let app = gateway_console_app(
+            &runtime,
+            decisions.clone(),
+            Some(&host),
+            runtime.console_viewer_resolver(&decisions),
+            runtime.console_send_precheck(&decisions),
+            &request_bound(),
+        )
+        .expect("console app");
+        let binding = crate::gateway_composition::GatewayHttpBinding::bind_loopback()
+            .await
+            .expect("loopback listener");
+        let base = binding.http_base_url();
+        let port = binding.port();
+        let server = binding.serve(app);
+        let client = reqwest::Client::new();
+        let mut answers = Vec::new();
+        for host in [
+            format!("rebound.example.net:{port}"),
+            format!("127.0.0.1:{port}"),
+            format!("localhost:{port}"),
+        ] {
+            let status = client
+                .get(format!("{base}/host/status"))
+                .header(reqwest::header::HOST, host.as_str())
+                .send()
+                .await
+                .expect("host route answer")
+                .status()
+                .as_u16();
+            answers.push((host, status));
+        }
+        let _ = server.shutdown().await;
+        runtime.shutdown().await;
+        assert_eq!(
+            answers,
+            vec![
+                (format!("rebound.example.net:{port}"), 403),
+                (format!("127.0.0.1:{port}"), 200),
+                (format!("localhost:{port}"), 200),
+            ]
+        );
     }
 }
 
@@ -26483,6 +26804,66 @@ mod identity_creation_launch_tests {
                 .unwrap_or_default()
                 .starts_with("identity_creation: identity records are durable"),
             "{response}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stdio_connection_entry_tests {
+    //! The realm MCP administration's entry: the stdio connection admits a
+    //! write while it is open, and refuses `not_authenticated` once it
+    //! closed, however it closed.
+
+    use super::*;
+    use meerkat_core::AdministrationEntry as _;
+
+    #[test]
+    fn the_stdio_entry_admits_while_the_connection_is_open_and_refuses_once_it_closed() {
+        for kind in [
+            GatewayStdioCloseKind::InputLost,
+            GatewayStdioCloseKind::OutputLost,
+            GatewayStdioCloseKind::ShutdownRequested,
+        ] {
+            let (stdio, observation) = GatewayStdioOwner::new(None);
+            let entry = StdioConnectionEntry {
+                closed: observation,
+            };
+            assert!(entry.enter().is_ok(), "{kind:?}: admitted while open");
+            stdio.close(kind, None);
+            assert!(
+                matches!(
+                    entry.enter(),
+                    Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated)
+                ),
+                "{kind:?}: refused once closed"
+            );
+        }
+    }
+
+    /// The administration the gateway serves enters through the stdio
+    /// connection the helper is given: it admits while that connection is
+    /// open and refuses once it closed.
+    #[test]
+    fn the_served_administration_enters_through_the_given_stdio_connection() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let realm = meerkat_core::RealmId::parse("stdio-entry").expect("realm");
+        let installation = crate::gateway_mcp_composition::GatewayRealmMcpInstallation::for_gateway(
+            crate::gateway_mcp_composition::meerkat_level_realm_storage(temp.path(), &realm),
+            None,
+        );
+        let (stdio, observation) = GatewayStdioOwner::new(None);
+        let administration = stdio_realm_mcp_administration(installation, observation);
+        assert!(
+            administration.entry().enter().is_ok(),
+            "admitted while open"
+        );
+        stdio.close(GatewayStdioCloseKind::InputLost, None);
+        assert!(
+            matches!(
+                administration.entry().enter(),
+                Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated)
+            ),
+            "refused once the given connection closed"
         );
     }
 }

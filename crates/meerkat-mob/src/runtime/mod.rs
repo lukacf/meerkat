@@ -206,6 +206,7 @@ mod reconcile_cadence_tests {
 pub(crate) mod actor;
 mod actor_turn_executor;
 mod admission_close;
+mod approval_branch;
 mod boot_plan;
 pub mod bridge;
 pub mod bridge_protocol;
@@ -216,9 +217,9 @@ pub use boot_plan::{
 };
 mod declared_apply;
 pub use declared_apply::{
-    DECLARED_APPLY_CHUNK, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
-    DeclaredEntryRefusal, DeclaredRoster, DeclaredRosterOutcome, FirstBootRequest,
-    UnlistedEntryOutcome,
+    DECLARED_APPLY_CHUNK, DeclaredBuild, DeclaredEntry, DeclaredEntryNote, DeclaredEntryOutcome,
+    DeclaredEntryRefusal, DeclaredEntryVerdict, DeclaredRoster, DeclaredRosterOutcome,
+    FirstBootRequest, NotAdoptedReason, UnlistedEntryOutcome,
 };
 mod dormant_seat;
 pub use dormant_seat::DormantSeatOutcome;
@@ -252,7 +253,8 @@ pub use identity_change::{
     IdentityChangeOutcome, IdentityChangeRefusal, IdentityChangeRequesterInput,
     IdentityCreateOutcome, IdentityGrantEntry, IdentityGrantRequest, IdentityNameHolder,
     IdentityOperation, IdentityRemoval, IdentityRosterChange, IdentityUpdateOutcome,
-    MemberGrantMint, MemberGrantMintRequest, StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
+    MemberGrantMint, MemberGrantMintRequest, NotAdoptableReason, PurgeRefusedReason,
+    StoreOwnedIdentityCreate, StoreOwnedIdentityUpdate,
 };
 mod identity_entry;
 mod identity_preparation;
@@ -260,6 +262,12 @@ pub use identity_preparation::{
     ConstructionEnd, ConstructionFailure, HeldPreparation, IdentityConstructionRequest,
     IdentityPreparationSettle, IdentityPreparationSettled, PreparationSettlement,
 };
+mod adoption;
+pub use adoption::{AdoptionSource, IdentityAdoption};
+mod created_set;
+pub use created_set::{IdentityImport, IdentityImportMode, IdentityRowsPurge};
+mod owned_edges;
+pub use owned_edges::OwnedEdgeEndOutcome;
 mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
@@ -379,8 +387,12 @@ pub use registration_hook::{
 // Flow-spine lane file (remote flow tickets); declared here so the events
 // lane's pump can hand pages to `RemoteFlowTicketRegistry` by name (ADJ-P6-10
 // cross-lane seams). If the flow wave also adds this line, the lead dedups.
+mod member_grant_gate;
 mod placed_completion_reconciler;
 mod placed_kickoff_reconciler;
+pub use member_grant_gate::MemberGrantGate;
+#[cfg(feature = "runtime-adapter")]
+pub use member_grant_gate::{MemberToolGrant, MemberToolGrantError};
 pub mod recovery;
 mod remote_flow_ticket;
 mod remote_turn_reconciler;

@@ -639,13 +639,14 @@ mod file_lock {
     }
 
     /// Take the cross-process lock without parking a thread: poll the
-    /// non-blocking lock until `wait` has passed.
+    /// non-blocking lock until `wait` has passed. A lock directory this
+    /// creates is owner-only, since its lock files name secret slots.
     async fn acquire_lock_file(
         lock_dir: &Path,
         lock_path: &Path,
         wait: Duration,
     ) -> Result<HeldLock, LockAdmission> {
-        tokio::fs::create_dir_all(lock_dir)
+        crate::auth_store::file::create_owner_only_dir(lock_dir)
             .await
             .map_err(LockAdmission::Failed)?;
         let file = OpenOptions::new()
@@ -1410,5 +1411,73 @@ mod tests {
         })
         .await
         .expect("refresh work should finish after the origin waiter is cancelled");
+    }
+
+    /// The refresh lock directory the file coordinator creates is owner-only
+    /// on Unix whatever the process umask: it keeps a lock file named after
+    /// every secret slot that took a refresh or mutation lock.
+    #[cfg(all(unix, feature = "file-lock"))]
+    mod private_lock_directory {
+        use super::*;
+        use crate::auth_store::TokenStoreBackend;
+        use crate::auth_store::umask_test_support::{mode_bits, under_each_umask};
+        use std::os::unix::fs::PermissionsExt;
+
+        /// Take the lock of `key()` once, through an unattended mutation of a
+        /// file coordinator over `lock_dir`.
+        async fn lock_once(lock_dir: &std::path::Path) {
+            FileLockCoordinator::new(lock_dir)
+                .with_exclusive_mutation_for(
+                    key(),
+                    TokenStoreAccess::Unattended,
+                    Box::new(|_guard| Box::pin(async { Ok(CredentialMutationOutcome::Cleared) })),
+                )
+                .await
+                .expect("the mutation under the lock");
+        }
+
+        /// The refresh lock directory of a file backend, created by the
+        /// first lock, is 0700 under any umask. RED before: the coordinator
+        /// created it with the process umask (`create_dir_all`), so under
+        /// umask 022 it was 0755, and another local user could list which
+        /// secret slots took a lock.
+        #[test]
+        fn a_refresh_lock_directory_the_coordinator_creates_is_owner_only_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_refresh_lock_directory_the_coordinator_creates_is_owner_only_under_any_umask",
+                || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("a runtime");
+                    let dir = tempfile::tempdir().expect("a temporary directory");
+                    let lock_dir = TokenStoreBackend::File {
+                        root: dir.path().join("credentials"),
+                    }
+                    .refresh_lock_dir()
+                    .expect("the file backend's refresh lock directory");
+                    runtime.block_on(lock_once(&lock_dir));
+                    assert_eq!(
+                        mode_bits(&lock_dir),
+                        0o700,
+                        "the refresh lock directory the coordinator created is owner-only"
+                    );
+                },
+            );
+        }
+
+        /// A refresh lock directory that already exists keeps its mode: a
+        /// lock creates its lock file in it and changes nothing else.
+        #[tokio::test]
+        async fn an_existing_refresh_lock_directory_keeps_its_mode() {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let lock_dir = dir.path().join("refresh-locks");
+            std::fs::create_dir(&lock_dir).expect("the refresh lock directory");
+            std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o750))
+                .expect("the refresh lock directory's mode");
+            lock_once(&lock_dir).await;
+            assert_eq!(mode_bits(&lock_dir), 0o750);
+        }
     }
 }

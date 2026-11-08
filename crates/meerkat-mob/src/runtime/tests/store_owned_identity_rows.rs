@@ -21,6 +21,14 @@ use crate::runtime::{
 use meerkat_core::service::MobToolAuthorityContext;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+// Adoption into store custody and owned edges (0.9.11): the rows of an
+// adoption, and of an identity change's edges.
+mod adoption;
+// The downgrade cycle (0.9.11): export, purge, the reservation of a purged
+// row's name, and import.
+mod cycle;
+mod owned_edges;
+
 const STEP: Duration = Duration::from_mins(1);
 
 fn id(name: &str) -> AgentIdentity {
@@ -1345,6 +1353,64 @@ async fn a_create_with_preparation_records_the_identity_pending_and_seats_nothin
     ));
 }
 
+/// Row (RED): the removal of an unseated store-owned identity ends the
+/// identity at once (its name is tombstoned), and its live scoped tool
+/// grants end with it in the removal's step.
+#[tokio::test]
+async fn the_removal_of_an_unseated_identity_ends_its_grants() {
+    let mob = StoreOwnedMob::new("remove-unseated-grants").await;
+    let create = StoreOwnedIdentityCreate::new(
+        operation("create-unseated"),
+        IdentityChangeRequesterInput::host("console"),
+        vec![
+            CreatedIdentityRequest::new(spec("alpha", "worker"))
+                .with_preparation(IdentityPreparationMode::Required),
+        ],
+    );
+    committed(mob.create(create, ALLOW).await);
+    mob.unseated_for("alpha", UnseatedEntryCause::PreparationPending)
+        .await;
+    let runtime = mob.service.enable_runtime_adapter();
+    let subject = meerkat_core::tool_grant::ToolGrantSubject::member(
+        mob.mob_id().as_str(),
+        &mob.handle.live_incarnation(),
+        "alpha",
+    );
+    let grant = runtime
+        .grant_tool(
+            meerkat_runtime::tool_grant::ToolGrantRequest {
+                subject: subject.clone(),
+                target: meerkat_core::tool_grant::ToolGrantTarget::Family {
+                    family: "shell".to_string(),
+                    names: std::iter::once(meerkat_core::types::ToolName::from("shell")).collect(),
+                },
+                issuer: meerkat_core::tool_grant::ToolGrantIssuer::Operator {
+                    caller: None,
+                    decision_ref: None,
+                },
+                reason: None,
+                window: meerkat_runtime::tool_grant::ToolGrantWindow::For(Duration::from_mins(10)),
+            },
+            None,
+        )
+        .await
+        .expect("the identity is granted");
+
+    committed(mob.remove("remove-alpha", "alpha").await);
+    mob.removed("alpha").await;
+    let listing = runtime
+        .list_tool_grants(&subject, None)
+        .await
+        .expect("the identity's grants list");
+    assert_eq!(listing.grants.len(), 1, "{listing:?}");
+    assert_eq!(listing.grants[0].record.grant_id, grant.record.grant_id);
+    assert_eq!(
+        listing.grants[0].status,
+        meerkat_runtime::tool_grant::ToolGrantStatus::Revoked,
+        "the removal ended the identity's grant"
+    );
+}
+
 /// Row (guard): a retry of a committed create with the same request replays
 /// its receipt and writes nothing again; another request under the same
 /// operation is refused `operation_reused`.
@@ -2301,13 +2367,19 @@ const ORIGIN_READERS: &[(&str, &[&str], &str)] = &[
     ),
     (
         "runtime/handle.rs",
-        &["pub async fn adopt_legacy_identity_entry("],
+        &["pub(super) async fn adopt_listed_legacy_member("],
         "the legacy adoption's custody guard",
     ),
     (
         "runtime/actor/declared_apply.rs",
         &["pub(super) async fn declare_identity_entries("],
         "the roster writer's custody guard of a store-owned update",
+    ),
+    (
+        "roster.rs",
+        &["impl Roster { > pub fn apply("],
+        "the roster's fold of an adoption's binding row: its Created origin makes the member a \
+         host root, live and on replay",
     ),
 ];
 
@@ -3541,6 +3613,7 @@ fn answer_kind(outcome: &crate::runtime::DeclaredEntryOutcome) -> &'static str {
         Outcome::PreparationPending => "preparation_pending",
         Outcome::HostedOnFirstUse => "hosted_on_first_use",
         Outcome::Deferred { .. } => "deferred",
+        Outcome::BuildRequired => "build_required",
         Outcome::Refused { .. } => "refused",
         Outcome::Noted { .. } => "noted",
         Outcome::Failed { .. } => "failed",

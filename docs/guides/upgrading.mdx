@@ -55,6 +55,272 @@ Meerkat is pre-1.0, and patch releases can carry declared breaking changes.
 - `rkat storage doctor` reports no new problems.
 - An SDK `connect()` succeeds.
 
+## Upgrading to 0.9.11
+
+This section is for systems running 0.9.10. The full list of changes is in
+the CHANGELOG under `## [0.9.11]`.
+
+### Complete rosters retire unlisted legacy members
+
+A complete declared apply (`MobHandle::apply_declared_roster` with
+`DeclaredRoster::complete`, Rust only) now also retires each member the
+roster does not list whose spawn row carries both legacy marks, the
+durable-identity continuity marker and the legacy `agent_identity` label
+naming its own identity, and that no host's intent row names. A local member
+bound to a session is adopted as an entry, and the apply's seal unlists the
+entry and retires the member with the cause `Unlisted`. A member placed on a
+member host, or bound to no session, is retired without becoming an entry,
+and its retirement records no cause. The answer names either as `Retired` in
+`DeclaredRosterOutcome::unlisted`, and a member whose retirement started
+already as `NotAdopted`. Such a member is one a host seated under its
+identity before identity entries existed, whose identity the roster dropped
+before the host first applied it; 0.9.10 left it serving as a worker. A
+member with one mark only, or one a host adopted, is left as it is, and a
+partial roster retires no member it does not list.
+
+The legacy label is also read in the one encoding of a name into a member id:
+it names a member whose id encodes the label's name (`team:alice`, seated as
+`mk--team_calice`). A listed identity's member labelled so is adopted where
+0.9.10 refused its name `NameHeldByWorker` unless the member carried the
+durable-identity marker.
+
+**Do:** before the first complete apply on 0.9.11, make the roster list every
+identity whose member you keep: a member with both legacy marks that the
+roster does not list is retired by that apply.
+
+### Decision executors claim each kind
+
+`DecisionExecutorLoop` claims the executor role of each decision kind it
+registers (`DecisionStore::claim_executor_kind`), where 0.9.10 claimed the
+whole store, so two runtimes on one store each execute their own kinds. A
+second loop of a kind no longer fails at start with
+`DecisionError::ExecutorHeld`: it starts, lists the kind in each pass's
+`DecisionExecutorPass::unclaimed`, reports the kind's decisions as
+`DecisionPassOutcome::KindNotClaimed` (the executor that holds the kind
+executes them), and claims the kind once the first executor of the kind
+ends. The SQLite store keeps one lock file per kind,
+`approval_decisions.executor.<kind>.lock`, beside
+`approval_decisions.executor.lock`, which every loop now holds shared.
+
+A 0.9.10 executor and a 0.9.11 executor never execute on one store at once.
+While a 0.9.10 executor runs, a 0.9.11 loop starts, executes nothing and
+lists every kind as unclaimed, and takes over when the 0.9.10 executor ends.
+While a 0.9.11 loop runs, a 0.9.10 executor is refused at start
+(`ExecutorHeld`).
+
+**Do:**
+
+- Forward `claim_executor_kind` in a `DecisionStore` wrapper. Its default
+  refuses, so no `DecisionExecutorLoop` starts over a wrapper without it
+  (`DecisionError::Unavailable`). `claim_executor` is deprecated; keep
+  forwarding it while code that calls it remains.
+- Upgrade every process that executes decisions on one store together.
+- A host that took a second loop's start refusal as the sign of another
+  executor reads `DecisionExecutorPass::unclaimed` instead.
+- Before a rollback to 0.9.10 or 0.9.9, read the CHANGELOG's upgrade note on
+  durable decisions and a rollback: those releases read a decision decided in
+  a login on 0.9.11 as torn and do not execute it.
+
+### A kept input's max age counts from the stop
+
+The max age of a graceful stop that keeps queued work
+(`UnregisterQueuedInputs::Requeue { max_age }`, or a mob Shutdown's
+`RequeueMaxAge`; every default graceful shutdown uses 15 minutes) now counts
+from the stop that kept an input, not from the input's admission. The next
+start runs a kept input, or resumes a run the stop suspended, unless more
+than `max_age` has passed since that stop; a later graceful stop that keeps
+the input again counts from its own time. 0.9.10 counted from the admission,
+so every run admitted more than 15 minutes before a graceful restart ended
+`requeue_expired`, however short the restart.
+
+**Do:** nothing, unless you relied on `max_age` to limit how old an input may
+be when it runs: a kept input now runs after a restart shorter than
+`max_age`, whenever it was admitted.
+
+### Meta's roster pass declares through Core
+
+Meerkat Meta's roster pass (the bootstrap, each refresh and the held pass)
+declares the host's roster in Core's mob through Core's declared apply, and
+no longer seats, respawns, releases or retires members itself. A send, a
+dispatch or a materialization of an identity Core holds no member for
+declares that identity alone first. What changes for a host:
+
+- A member Meta 0.9.3 spawned carries the identity's `agent_identity` label
+  but not the durable-identity marker. When the roster lists its identity,
+  Core adopts the member as the identity's entry and keeps it as it is: Meta
+  no longer respawns it onto its session to give it the marker, so its
+  session resolves no principal for extension documents until the identity's
+  next fresh life. The roster pass no longer retires such a member when the
+  roster stops listing it either. Every Meta from 0.9.4 to 0.9.10 respawned
+  these members at its first roster pass, so a state directory Meta 0.9.10
+  last ran holds none.
+- A rotation (`reset`, `delete_identity`) a crash interrupted is finished by
+  Core, from its own record, when the mob next starts; Meta's roster pass no
+  longer drives it. Meta still writes its record of the rotation, which a
+  rollback's roster pass reads.
+- An identity a complete roster no longer lists is unlisted by Core's seal,
+  which retires its member; the pass answers each such identity in
+  `RestoreFlowResult::unlisted` (Rust).
+
+**Do:** coming from Meta 0.9.3 or earlier, run Meta 0.9.10 over the state
+directory once before 0.9.11.
+
+### A host's adoption of a declared identity
+
+A host's adoption of an identity a declared roster lists
+(`MobHandle::adopt_member_identity_declaration` over a declared identity
+entry, Rust only) takes the entry over: Core retires the member with the
+cause `MemberRetirementCause::HostAdopted` and materializes it again under
+the host's intent, on its own session, as no entry, and the end of that
+retirement ends the entry. The adoption ends the identity's entry, not the
+identity: the identity continues under the host's intent and keeps its
+scoped tool grants. In 0.9.10 the entry outlived the retirement,
+unseated and owed its seat, and Core refused the host's spawn of the
+identity (`IdentityMember`), so the identity was not served again. From the
+host's intent row on, a declared apply answers the identity host-adopted
+(`DeclaredEntryRefusal::HostAdopted`), and a complete roster's seal leaves
+its entry as it is, whether the roster lists the identity or not.
+
+**Do:** nothing on the upgrade; see the rollback below.
+
+### Rolling back Core to 0.9.10
+
+0.9.10 does not know the cause `HostAdopted`: it replays that retirement as
+one the seal did not start, so it reads the identity a host took over as
+the declared entry again, seated by the member the host's intent
+materialized. The member keeps serving, and a declaration naming the
+identity is refused `HostAdopted`. But a complete roster that does not list
+the identity unlists the entry and retires the member once, and once the
+member retires for any other reason, Core refuses the host's spawn of the
+identity (`IdentityMember`) while the entry stands.
+
+**Do:** after rolling Core back to 0.9.10, unlist each identity that 0.9.10
+reads as a declared entry while a host's identity intent row names it
+(`MemberBindingHistory::identity_management` answers `IntentManaged`), with
+`MobHandle::unlist_declared_identity`: its member retires once (cause
+`Unlisted`), the entry ends, and the host's intent materializes the member
+again, as no entry.
+
+### Rolling back Meta to 0.9.10
+
+Meta 0.9.10 reads what Meta 0.9.11 writes, with one boundary: an identity
+Core holds declared but unseated (its member retired by a seal or by a host,
+its session archived) stays unseated under 0.9.10, whose seat step is
+refused for it typed (`IdentityMember`) and writes nothing, so the identity
+is not served until it is seated again.
+
+**Do:** before rolling back, deliver to or warm (`meta/identity/warm`) each
+identity the roster lists that Core holds unseated, so that Core seats it;
+an identity left unseated is seated again by the first roster pass after the
+next upgrade.
+
+### Host store implementers: token order and conflicted scopes
+
+Two rules of the host store SPI are new or newly enforced in 0.9.11, each
+with a row of the host store chapter in `meerkat-store-conformance`:
+
+- **Token order** (the `token_order` row). Every grant answers a token
+  above every earlier grant of the realm, in either acquire mode and to any
+  caller, a takeover of the caller's own recorded lease included. Core now
+  holds a re-acquire's grant to it: a grant at or below the token the
+  writer holds loses the realm until it is reopened, with a cause that
+  names your store's token order, not another writer.
+- **Conflicted scopes** (the `a_conflicted_scope_is_listed_typed` row). A
+  store that meets obligation 4 by failing a scope's load with a typed
+  conflict (two batches at one of its versions) reports that scope per
+  scope in its listings: `list_heads` answers it in `HeadPage::conflicts`
+  as `ScopeConflict::new(name, version, commit_ids)`, with the version that
+  holds the two batches (the `current` the load's `Conflict` names) and
+  their commit ids, ascending, without repeats and the same each time, or
+  none. It is never listed among the heads and never fails the page, and a
+  page holds at most `limit` entries across both lists. A page the store
+  cannot decide yet (a pending acquire cut) answers `Unavailable`, never a
+  conflict. Core quarantines such a scope and opens the rest of the realm
+  (see [A Conflicted Scope](/reference/host-store-spi#a-conflicted-scope));
+  a store that still fails the page keeps the realm from opening.
+  `HeadPage` is `#[non_exhaustive]`: a struct literal no longer compiles.
+
+**Do:**
+
+- Build each listing page with `HeadPage::new(heads, next)`, and add the
+  conflicted scopes with `HeadPage::with_conflicts`.
+- Answer every grant with a token above every earlier one.
+- Run the host store chapter against your store before you upgrade. A
+  store that decides between two batches for one version only when it
+  folds them implements `HostStoreFactory::fold_now`, so the conflict row
+  sees what its loads and listings show once it folded.
+- To lift a quarantine, repair the scope in your store (keep one of the two
+  batches at that version by your fixed rule, where a lower fence token
+  never beats a higher one, and remove the other), then reopen the realm
+  and open again each mob storage your host found quarantined
+  (`SpiStoredMob::quarantined`). A reopen without the repair quarantines
+  the scope again.
+
+### The downgrade cycle of store-owned identities
+
+A release before 0.9.9 does not read a mob's rows of schema version 2 and
+later: the rows of store-owned identities (present, pending their host's
+preparation or archived) and the tombstones of removed names
+(`IdentityRecordCensus::created_rows`, and the `identity-store-rows`
+finding of `rkat storage doctor`). A downgrade of a mob that holds any to
+such a release is supported through this cycle only, and a host's downgrade
+tooling refuses while the census counts any row. A downgrade to 0.9.9 or
+0.9.10 needs no cycle: they read the rows.
+
+1. Hold the mob's identity changes (`MobHandle::set_identity_changes_held`).
+2. Settle every identity awaiting its host's preparation
+   (`preparations_open`) and every held construction (`constructions_held`),
+   or remove the identity.
+3. Bring each stale seat up to date (`seats_stale`), or remove its identity.
+4. Export the set: `MobHandle::export_created_identities` answers a
+   `CreatedIdentitySetExport` (schema `meerkat.identity.created_set.v1`)
+   that holds every row as sealed, with each identity's session reference
+   (its member's session, or its archived session), sealed with a digest.
+   Keep it: the import needs it. Session contents, memory and decisions are
+   not in it.
+5. Purge: `MobHandle::purge_created_identities` with the export's digest,
+   as the host operator. One store transaction removes every row of the
+   set, and nothing else (no session, journal row or host-adopted intent),
+   only while the rows are still the export's. The mob then refuses every
+   identity change (`purged`) until it restarts. A purge or an import
+   commits at most 256 identities (`IDENTITY_CHANGE_BATCH_MAX`, tombstones
+   included): a mob with more rows is refused `batch_too_large`, with
+   nothing removed, and has no supported downgrade below 0.9.9 in this
+   release.
+6. Downgrade.
+7. After the roll-forward, import the export:
+   `MobHandle::import_created_identities`, as the host operator, under
+   imported consent. A retry of its operation replays it.
+
+Under the older release, after the purge, an adopted identity that its
+host's roster still lists is a roster identity again, on its session. The
+other store-owned members are plain members: its roster pass, a
+`retire_stale` reconcile or a former spawner's retirement may retire them,
+archiving their sessions. The names of removed identities are free there,
+and a roster may seat one.
+
+Rolled forward, a start reads each store-owned identity whose row was purged
+as unreadable: its name is reserved, nothing acts on it and nothing seats it
+until the import restores its row. The import re-creates each record and
+re-binds its session: a member seated under its name is bound in place, on
+its session, a plain member only when it is bound to the session the record
+names (a member on another session, a new worker the older release seated
+or the identity's own on a session the export does not name, is reported
+`name_taken_meanwhile` and left as it is: adopt it to take it into store
+custody); an identity with no member is seated again, Dormant, on its
+archived session, or on a fresh session with the history unavailable notice
+when the session store no longer holds it; pending, archived and removed
+names are restored as recorded; and an adopted identity whose roster
+declared it again returns to store custody by the adoption's step. A name
+another holder keeps (a roster or a member seated on it meanwhile, or
+another row) is left as that holder has it, and the import's receipt reports
+it (`name_taken_meanwhile`). A re-import under a new operation reports a
+record whose restored row differs from it (the import left out an owned edge
+another identity held, or the identity changed since) as
+`name_taken_meanwhile` too: the identity is store-owned already, its row is
+left as it is, and a retry under the import's own operation replays its
+receipt.
+
 ## Upgrading to 0.9.10
 
 This section is for systems running 0.9.9. The full list of changes is in
@@ -983,7 +1249,8 @@ store-owned identity's pending preparation, so the paragraph above applies to
 every mob that holds one. This release has no step that deletes these rows:
 a removal writes the name's tombstone and an archive keeps its row, so a mob
 that holds any (`IdentityRecordCensus::created_rows` above zero) has no
-supported downgrade before the export and purge steps.
+supported downgrade before the export and purge steps, which 0.9.11 adds
+([the downgrade cycle](#the-downgrade-cycle-of-store-owned-identities)).
 `MobHandle::identity_record_census()` counts the rows and what a downgrade
 must settle first: the mob's rows (`created_rows`, the archived ones, the
 tombstones and the unreadable ones), the identities awaiting their host's

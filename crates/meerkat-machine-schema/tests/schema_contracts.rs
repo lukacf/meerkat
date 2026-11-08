@@ -114,6 +114,13 @@ fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
             // mob-set state holds one machine state per quarantined store in
             // memory, and every restore pass derives them again.
             "MobStoreRestoreLifecycleMachine",
+            // Host store writer fence owns the writer fence of ONE realm:
+            // the writer's phase, the token it commits with, the grant it
+            // has not installed, the acquires it gave up on, the holder it
+            // waits out, and why it stopped or lost the realm. Realm-scoped
+            // and volatile, and clock-free: the realm reports time as
+            // inputs.
+            "HostStoreWriterFenceMachine",
         ]
     );
 
@@ -3121,6 +3128,8 @@ mod grant_candidate_wire {
             represented_subject: None,
             issued_revision: 1,
             restrictions: ExecutionRestrictions::unrestricted(),
+            child_approval: None,
+            approval: None,
         };
         let wire = serde_json::to_string(&record).expect("record wire");
         let mut missing_incarnation = serde_json::to_value(&record).expect("record value");

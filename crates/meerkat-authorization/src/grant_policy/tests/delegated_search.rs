@@ -70,6 +70,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for Allowed {
     ) -> Result<(), meerkat_core::OperationAuthorizationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// Allows everything: only the selection keys are under test with it.

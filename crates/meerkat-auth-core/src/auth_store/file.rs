@@ -4,7 +4,9 @@
 //! `<root>/<realm_id>/<binding_id>.json`; profile override credentials live at
 //! `<root>/<realm_id>/<binding_id>@<profile_id>.json`; shared account
 //! credentials live at `<root>/<realm_id>/account~<account_id>.json`.
-//! Permissions: 0o600 on Unix; atomic rename (`.tmp` → target) on save.
+//! Permissions on Unix: a realm directory the store creates is 0o700, set
+//! explicitly whatever the process umask, and credential files are 0o600. A
+//! save writes `<stem>.json.tmp` and renames it onto the target.
 //! Reference-CLI parity: Codex `AuthDotJson` (see
 //! `codex-rs/login/src/auth/auth_dot_json.rs`).
 //!
@@ -62,7 +64,7 @@ impl FileTokenStore {
         tokens: &PersistedTokens,
     ) -> Result<(), TokenStoreError> {
         let dir = self.realm_dir(key.realm().as_str());
-        tokio::fs::create_dir_all(&dir).await?;
+        create_owner_only_dir(&dir).await?;
         let final_path = self.path_for(key);
         let tmp_path = final_path.with_extension("json.tmp");
 
@@ -225,6 +227,43 @@ impl TokenStore for FileTokenStore {
     fn backend_name(&self) -> &'static str {
         "file"
     }
+}
+
+/// Create the credential directory `dir`, and the directories above it that
+/// are missing. A credential directory's listing names secret slots (a realm
+/// directory lists which slots of the realm hold a value, and the refresh
+/// lock directory keeps a lock file named after every slot that took a
+/// lock), so on Unix `dir` is owner-only when this call creates it: 0o700,
+/// set explicitly after the creation so the process umask does not decide
+/// it. A `dir` that already exists keeps its mode, and the directories above
+/// it get the mode the umask gives them, as before.
+#[cfg(unix)]
+pub(crate) async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(parent) = dir.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    // Created no wider than 0o700, so no other user can list it at any time.
+    let mut builder = tokio::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(dir).await {
+        Ok(()) => tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await,
+        // An earlier call, or a concurrent one, created it: it stays as it
+        // is. Anything else at the path is an error, as before.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match tokio::fs::metadata(dir).await {
+                Ok(metadata) if metadata.is_dir() => Ok(()),
+                _ => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn create_owner_only_dir(dir: &Path) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(dir).await
 }
 
 #[cfg(unix)]
@@ -469,5 +508,81 @@ mod tests {
             store.load(&consuming).await.unwrap().is_none(),
             "a consuming child realm must not see the global-owned token"
         );
+    }
+
+    /// The realm directories the store creates are owner-only on Unix
+    /// whatever the process umask: a realm directory lists which secret slots
+    /// of the realm hold a value.
+    #[cfg(unix)]
+    mod private_realm_directories {
+        use super::*;
+        use crate::auth_store::umask_test_support::{mode_bits, under_each_umask};
+        use std::os::unix::fs::PermissionsExt;
+
+        /// A realm directory the store creates for a save is 0700 under any
+        /// umask, and the credential file in it stays 0600. RED before: the
+        /// store created it with the process umask (`create_dir_all`), so
+        /// under umask 022 it was 0755, and another local user could list
+        /// which secret slots of the realm hold a value.
+        #[test]
+        fn a_realm_directory_the_store_creates_is_owner_only_under_any_umask() {
+            under_each_umask(
+                module_path!(),
+                "a_realm_directory_the_store_creates_is_owner_only_under_any_umask",
+                || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("a runtime");
+                    let dir = tempfile::tempdir().expect("a temporary directory");
+                    let root = dir.path().join("credentials");
+                    let store = FileTokenStore::new(&root);
+                    let key = TokenKey::new(
+                        RealmId::parse("global").unwrap(),
+                        BindingId::parse("anthropic").unwrap(),
+                    );
+                    // The save's guard takes the realm's credential fence,
+                    // whose acquisition creates the realm directory first.
+                    let guard = covering(&root, "global");
+                    runtime
+                        .block_on(store.save(&guard, &key, &token("sek")))
+                        .expect("the save");
+                    let realm_dir = root.join("global");
+                    assert_eq!(
+                        mode_bits(&realm_dir),
+                        0o700,
+                        "the realm directory the store created is owner-only"
+                    );
+                    assert_eq!(
+                        mode_bits(&realm_dir.join("anthropic.json")),
+                        0o600,
+                        "the credential file stays owner-only"
+                    );
+                },
+            );
+        }
+
+        /// A realm directory that already exists keeps its mode: a save
+        /// writes its credential file into it and changes nothing else.
+        #[tokio::test]
+        async fn a_save_into_an_existing_realm_directory_keeps_its_mode() {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let realm_dir = dir.path().join("global");
+            std::fs::create_dir(&realm_dir).expect("the realm directory");
+            std::fs::set_permissions(&realm_dir, std::fs::Permissions::from_mode(0o750))
+                .expect("the realm directory's mode");
+            let store = FileTokenStore::new(dir.path());
+            let key = TokenKey::new(
+                RealmId::parse("global").unwrap(),
+                BindingId::parse("anthropic").unwrap(),
+            );
+            let guard = covering(dir.path(), "global");
+            store
+                .save(&guard, &key, &token("sek"))
+                .await
+                .expect("the save");
+            assert_eq!(mode_bits(&realm_dir), 0o750);
+            assert_eq!(mode_bits(&realm_dir.join("anthropic.json")), 0o600);
+        }
     }
 }

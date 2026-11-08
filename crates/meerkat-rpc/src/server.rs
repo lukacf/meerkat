@@ -25,7 +25,7 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::callback_dispatcher::{CallbackRequestEnvelope, CallbackResponseHandoff};
 use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse};
-use crate::router::{MethodRouter, NotificationSink, RoutedRpcResponse};
+use crate::router::{MethodRouter, NotificationSink, ProcessDefaultRoute, RoutedRpcResponse};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{
     AdmittedJsonlMessage, BlockingWriter, JSONL_MAX_FRAME_BYTES, JSONL_SMALL_FRAME_BYTES,
@@ -928,12 +928,27 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
 }
 
+/// A notification whose sender waits until the connection wrote it:
+/// `written` is answered once the line is written and flushed to the client,
+/// and dropped unanswered when it is not (the write failed, or the connection
+/// ended before it). Only a connection's decision operator sends one, so a
+/// build without one never constructs it.
+#[cfg_attr(not(all(unix, feature = "local-authorization")), allow(dead_code))]
+pub(crate) struct AcknowledgedNotification {
+    pub(crate) notification: RpcNotification,
+    pub(crate) written: oneshot::Sender<()>,
+}
+
 /// JSON-RPC server over async reader/writer streams.
 pub struct RpcServer<R, W> {
     transport: JsonlTransport<R, W>,
     router: MethodRouter,
     notification_rx: mpsc::Receiver<RpcNotification>,
     experimental_live_notification_rx: mpsc::Receiver<ExperimentalLiveRpcNotification>,
+    /// Notifications whose senders wait until they are written (the
+    /// connection's decision notices), and the sender half handed to them.
+    acknowledged_notification_rx: mpsc::Receiver<AcknowledgedNotification>,
+    acknowledged_notification_tx: mpsc::Sender<AcknowledgedNotification>,
     /// Channel for responses from concurrently dispatched requests.
     response_rx: mpsc::Receiver<AdmittedRpcResponse>,
     response_tx: mpsc::Sender<AdmittedRpcResponse>,
@@ -1017,6 +1032,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ///
     /// The server reads JSON-RPC requests from `reader`, dispatches them
     /// via the `MethodRouter`, and writes responses/notifications to `writer`.
+    /// Its connection becomes the runtime's process-default `session/event`
+    /// route ([`MethodRouter::new`]): build one server per runtime with it, or
+    /// serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     pub fn new(
         reader: R,
         writer: W,
@@ -1027,6 +1046,9 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 
     /// Create a new RPC server with an optional skill runtime for introspection.
+    ///
+    /// As with [`Self::new`], build one server per runtime with it, or serve
+    /// several connections on one runtime with [`crate::serve_tcp_connection`].
     pub fn new_with_skill_runtime(
         reader: R,
         writer: W,
@@ -1034,12 +1056,36 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         config_store: Arc<dyn ConfigStore>,
         skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     ) -> Result<Self, ServerError> {
+        Self::new_on_connection(
+            reader,
+            writer,
+            runtime,
+            config_store,
+            skill_runtime,
+            ProcessDefaultRoute::Install,
+        )
+    }
+
+    /// [`Self::new_with_skill_runtime`] for one connection of a server that
+    /// may hold several on the same runtime: `default_route` says whether
+    /// this connection also becomes the runtime's process-default
+    /// `session/event` route ([`MethodRouter::new`]).
+    fn new_on_connection(
+        reader: R,
+        writer: W,
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        default_route: ProcessDefaultRoute,
+    ) -> Result<Self, ServerError> {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
         let (experimental_live_notification_tx, experimental_live_notification_rx) =
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         #[cfg(not(feature = "openai-live"))]
         drop(experimental_live_notification_tx);
+        let (acknowledged_notification_tx, acknowledged_notification_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (callback_request_tx, callback_request_rx) =
@@ -1054,9 +1100,14 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             crate::callback_dispatcher::CallbackRoute::new(callback_request_tx.clone());
         let callback_id_counter = callback_route.id_counter();
 
-        let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)?
-            .with_skill_runtime(skill_runtime)
-            .with_callback_route(callback_route);
+        let router = MethodRouter::new_on_connection(
+            Arc::clone(&runtime),
+            config_store,
+            notification_sink,
+            default_route,
+        )?
+        .with_skill_runtime(skill_runtime)
+        .with_callback_route(callback_route);
         #[cfg(feature = "openai-live")]
         let router = router.with_experimental_live_public_observation_publisher(Arc::new(
             ExperimentalLiveRpcObservationPublisher {
@@ -1068,6 +1119,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             router,
             notification_rx,
             experimental_live_notification_rx,
+            acknowledged_notification_rx,
+            acknowledged_notification_tx,
             response_rx,
             response_tx,
             callback_request_rx,
@@ -1103,6 +1156,35 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ) -> Result<Self, meerkat_runtime::RuntimeDriverError> {
         self.router = self.router.with_governed_connection(connection, tools)?;
         Ok(self)
+    }
+
+    /// The sender of notifications this connection acknowledges once it
+    /// wrote them to its client.
+    #[cfg_attr(not(all(unix, feature = "local-authorization")), allow(dead_code))]
+    pub(crate) fn acknowledged_notification_sender(
+        &self,
+    ) -> mpsc::Sender<AcknowledgedNotification> {
+        self.acknowledged_notification_tx.clone()
+    }
+
+    /// Give this stdio connection its operator for durable decisions: the
+    /// process's operating-system user on the runtime's realm. A runtime
+    /// without a realm, or a user that cannot be named as an approver,
+    /// leaves the connection without one.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    fn with_local_decision_operator(mut self) -> Self {
+        let Some(realm) = self.router.runtime().realm_id() else {
+            return self;
+        };
+        if let Some(operator) =
+            crate::handlers::decision::operator::DecisionOperator::for_local_operator(
+                &realm,
+                self.acknowledged_notification_sender(),
+            )
+        {
+            self.router = self.router.with_decision_operator(Arc::new(operator));
+        }
+        self
     }
 
     pub fn with_live_session_factory_opt(
@@ -1181,6 +1263,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     /// `SessionRuntime::init_callback_channel()`. This ensures the callback channel
     /// exists before mob resume (so `ExternalToolsProvider` closures can read it),
     /// while the server owns the receiver for the `tool/execute` dispatch loop.
+    /// Like the process-default callback route, its connection becomes the
+    /// runtime's process-default `session/event` route: build one server per
+    /// runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     pub fn new_with_skill_runtime_and_mob_state(
         reader: R,
         writer: W,
@@ -1196,6 +1282,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         #[cfg(not(feature = "openai-live"))]
         drop(experimental_live_notification_tx);
+        let (acknowledged_notification_tx, acknowledged_notification_rx) =
+            mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let transport = JsonlTransport::new(reader, writer);
         let (response_tx, response_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (long_running_tx, long_running_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
@@ -1231,6 +1319,8 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             router,
             notification_rx,
             experimental_live_notification_rx,
+            acknowledged_notification_rx,
+            acknowledged_notification_tx,
             response_rx,
             response_tx,
             callback_request_rx,
@@ -1528,6 +1618,16 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                     self.transport.write_notification(&notification).await?;
                 }
 
+                // A notification whose sender waits for it: answered once
+                // the line is written and flushed. A failed write ends the
+                // connection and drops the answer, so the sender never
+                // takes the notification as shown.
+                Some(acknowledged) = self.acknowledged_notification_rx.recv() => {
+                    let AcknowledgedNotification { notification, written } = acknowledged;
+                    self.transport.write_notification(&notification).await?;
+                    let _ = written.send(());
+                }
+
                 Some(notification) = self.experimental_live_notification_rx.recv() => {
                     self.write_experimental_live_notification(notification).await?;
                 }
@@ -1562,6 +1662,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // while the handlers and sessions below drain.
         #[cfg(feature = "local-authorization")]
         self.router.close_governed_connection();
+        // So does the connection's operator for durable decisions: a decide
+        // on it that commits from here is not eligible.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        self.router.close_decision_operator();
 
         // EOF or any read/write failure closes the response queue before we
         // return. Dispatch tasks that finish later receive a send error and
@@ -1570,6 +1674,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // connection that failed to deliver its answer.
         self.reject_queued_responses().await;
         self.reject_queued_experimental_live_notifications();
+        // A notification still queued is never written: its sender is told
+        // so (its answer is dropped) before the handlers waiting on it are
+        // drained below.
+        self.reject_queued_acknowledged_notifications();
         // The connection that owns this callback route is gone. Close the
         // route and fail every callback it still owes BEFORE the graceful
         // request shutdown: dispatchers observe a closed route or a dropped
@@ -1786,6 +1894,16 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
     }
 
+    /// Close the acknowledged notification queue and drop what it still
+    /// holds unwritten: each sender's answer is dropped, and a later send
+    /// fails.
+    fn reject_queued_acknowledged_notifications(&mut self) {
+        self.acknowledged_notification_rx.close();
+        while let Ok(unwritten) = self.acknowledged_notification_rx.try_recv() {
+            drop(unwritten);
+        }
+    }
+
     async fn write_long_running_response(&mut self, response: LongRunningResponse) -> bool {
         let cancel_id = response.response.id.clone();
         let to_write = match self
@@ -1914,6 +2032,12 @@ pub async fn serve_stdio_with_options(
     let reader = BufReader::new(stdin);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime)?;
+    // A stdio connection's operator decides durable decisions; a TCP
+    // connection has none.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    {
+        server = server.with_local_decision_operator();
+    }
     if let Some(live) = live {
         if let Some(ws) = live.ws {
             server = server.with_live_ws(ws.state, ws.base_url);
@@ -2028,6 +2152,12 @@ pub async fn serve_stdio_with_options_until(
     let reader = BufReader::new(stdin);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime)?;
+    // A stdio connection's operator decides durable decisions; a TCP
+    // connection has none.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    {
+        server = server.with_local_decision_operator();
+    }
     if let Some(live) = live {
         if let Some(ws) = live.ws {
             server = server.with_live_ws(ws.state, ws.base_url);
@@ -2069,7 +2199,10 @@ pub struct LiveWsConfig {
 ///
 /// The stream is split into read/write halves and wired directly into the
 /// generic `RpcServer`. The caller is responsible for the accept loop —
-/// this function handles exactly one connection lifetime.
+/// this function handles exactly one connection lifetime. The connection is
+/// one of the several a runtime may serve: it receives the `session/event`
+/// copies of the turns its own requests start and of the sessions it holds,
+/// and never becomes the runtime's process-default route.
 pub async fn serve_tcp_connection(
     stream: tokio::net::TcpStream,
     runtime: Arc<SessionRuntime>,
@@ -2115,12 +2248,17 @@ async fn serve_tcp_connection_with_options_and_admission(
 ) -> Result<(), ServerError> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
-    let mut server = RpcServer::new_with_skill_runtime(
+    // One of the connections a shared runtime serves: its turns' session/event
+    // copies reach it through its own requests and the sessions it holds,
+    // and it never becomes the runtime's process-default route, so another
+    // connection's turns never reach it.
+    let mut server = RpcServer::new_on_connection(
         reader,
         write_half,
         runtime,
         config_store,
         skill_runtime,
+        ProcessDefaultRoute::Leave,
     )?;
     if let Some(admission) = admission {
         server = server.with_rpc_request_admission(admission);
@@ -4333,6 +4471,148 @@ mod tests {
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
             Ok(())
+        }
+    }
+
+    /// The decision notices of a stdio connection's operator, through the
+    /// server loop.
+    #[cfg(all(unix, feature = "local-authorization"))]
+    mod decision_notices {
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use std::task::{Context, Poll};
+
+        use meerkat_core::approval::decision::{
+            ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId,
+            DecisionPrincipalKey, DecisionRenderer, DecisionRendering, DecisionRequestBody,
+            DecisionRow, DecisionStore, DecisionSubjectKey, Sha256Digest,
+        };
+        use meerkat_core::connection::RealmId;
+        use meerkat_core::{
+            Config, ConfigStore, MemoryConfigStore, PrincipalKind, PrincipalRef, TrustDomainId,
+        };
+        use tokio::io::AsyncWriteExt as _;
+
+        use crate::router::NotificationSink;
+        use crate::server::RpcServer;
+        use crate::session_runtime::SessionRuntime;
+
+        /// A pipe that refuses every line written to it.
+        struct RefusingPipe;
+
+        impl tokio::io::AsyncWrite for RefusingPipe {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                _: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                Poll::Ready(Err(std::io::Error::other("the pipe refuses the line")))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        /// The server loop answers a decision notice only once its line is
+        /// written. A pipe that refuses the line ends the connection with the
+        /// write error, and the decision records no presentation: the
+        /// operator never takes the notice as shown.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_notice_line_the_pipe_refuses_records_no_presentation() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                root.path(),
+                "decisions",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("open the realm");
+            let store_path = bundle.store_path().expect("a store path").to_path_buf();
+            let runtime = Arc::new(
+                SessionRuntime::new(
+                    meerkat::AgentFactory::minimal(),
+                    Config::default(),
+                    4,
+                    bundle,
+                    NotificationSink::noop(),
+                )
+                .expect("compose the RPC session runtime"),
+            );
+            runtime.set_realm_context(
+                Some(RealmId::parse("decisions").expect("realm id")),
+                None,
+                None,
+            );
+            let requester = PrincipalRef::in_domain(
+                PrincipalKind::PersonalAgent,
+                "builder",
+                TrustDomainId::new("example.org").expect("trust domain"),
+            )
+            .expect("principal");
+            let held = runtime
+                .decision_service()
+                .hold(
+                    DecisionHoldRequest::new(
+                        DecisionKind::new("release").expect("kind"),
+                        DecisionSubjectKey::new("build-1").expect("subject key"),
+                        DecisionOperationId::new("operation:build-1").expect("operation id"),
+                        Sha256Digest::of(br#"{"build":7}"#),
+                        DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
+                            .expect("request body"),
+                        DecisionPrincipalKey::of(&requester).expect("principal key"),
+                        ApproverId::new("operator").expect("approver id"),
+                        u64::MAX / 2,
+                        DecisionRendering::new("Release build 7 to production.")
+                            .expect("rendering"),
+                        DecisionRenderer::new("render.v1").expect("renderer"),
+                    ),
+                    false,
+                )
+                .expect("hold");
+            let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+                Config::default(),
+                meerkat_models::canonical(),
+            ));
+            let (mut client, server_side) = tokio::io::duplex(1 << 16);
+            let mut server = RpcServer::new(
+                tokio::io::BufReader::new(server_side),
+                RefusingPipe,
+                Arc::clone(&runtime),
+                config_store,
+            )
+            .expect("compose the server")
+            .with_local_decision_operator();
+            client
+                .write_all(
+                    b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"decision/list\",\"params\":{}}\n",
+                )
+                .await
+                .expect("write the request");
+
+            let served = tokio::time::timeout(std::time::Duration::from_mins(2), server.run())
+                .await
+                .expect("the connection ends");
+            assert!(served.is_err(), "the refused line ends the connection");
+            let row = match meerkat_store::SqliteDecisionStore::in_store_path(&store_path)
+                .get(&held.decision_id)
+                .expect("read the decision store")
+                .expect("a stored row")
+            {
+                DecisionRow::Readable(row) => *row,
+                DecisionRow::Unreadable(row) => panic!("the stored row is unreadable: {row:?}"),
+            };
+            assert_eq!(row.state.first_presented_to_approver_at_ms, None, "{row:?}");
+            assert!(row.presentations.is_empty(), "{row:?}");
+            drop(client);
         }
     }
 }

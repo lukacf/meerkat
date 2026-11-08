@@ -12,11 +12,12 @@
 //! conflict it reloads the row and applies the input once more; a second
 //! conflict is [`ToolGrantServiceError::Conflict`].
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use meerkat_core::tool_grant::{
-    GatedToolTable, ToolGrantCall, ToolGrantId, ToolGrantIssuer, ToolGrantRecord, ToolGrantRefusal,
+    GatedToolView, ToolGrantCall, ToolGrantId, ToolGrantIssuer, ToolGrantRecord, ToolGrantRefusal,
     ToolGrantSubject, ToolGrantSubjectKey, ToolGrantTarget,
 };
 use meerkat_core::types::ToolNameSet;
@@ -32,7 +33,7 @@ use super::dsl::{
     ToolGrantLifecycleMachineState, ToolGrantPhase, ToolGrantUseRefusal,
 };
 use super::{HostToolGrantClock, ToolGrantClock, ToolGrantPolicy};
-use crate::store::{RuntimeStore, RuntimeStoreError};
+use crate::store::{QuarantinedToolGrant, RuntimeStore, RuntimeStoreError};
 
 /// A grant's status, as its stored row records it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +65,11 @@ pub struct StoredToolGrant {
     /// set exactly when it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at_ms: Option<u64>,
+    /// Whether the grant ended with its subject (`Revoked` with the machine's
+    /// end reason `SubjectEnded`): the identity it was issued to ended. Such a
+    /// grant explains no refusal. Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subject_ended: bool,
 }
 
 impl StoredToolGrant {
@@ -92,13 +98,23 @@ impl StoredToolGrant {
     /// The generated machine, rebuilt from this row. The machine's
     /// invariants refuse a torn row.
     fn authority(&self) -> Result<ToolGrantLifecycleMachineAuthority, ToolGrantServiceError> {
-        let (lifecycle_phase, end_reason) = match self.status {
-            ToolGrantStatus::Active => (ToolGrantPhase::Active, None),
-            ToolGrantStatus::Expired => {
+        let (lifecycle_phase, end_reason) = match (self.status, self.subject_ended) {
+            (ToolGrantStatus::Active, false) => (ToolGrantPhase::Active, None),
+            (ToolGrantStatus::Expired, false) => {
                 (ToolGrantPhase::Expired, Some(ToolGrantEndReason::Deadline))
             }
-            ToolGrantStatus::Revoked => {
+            (ToolGrantStatus::Revoked, false) => {
                 (ToolGrantPhase::Revoked, Some(ToolGrantEndReason::Revoked))
+            }
+            (ToolGrantStatus::Revoked, true) => (
+                ToolGrantPhase::Revoked,
+                Some(ToolGrantEndReason::SubjectEnded),
+            ),
+            (status, true) => {
+                return Err(ToolGrantServiceError::CorruptRow {
+                    grant_id: self.record.grant_id.to_string(),
+                    detail: format!("a {status:?} grant cannot have ended with its subject"),
+                });
             }
         };
         ToolGrantLifecycleMachineAuthority::recover_from_state(ToolGrantLifecycleMachineState {
@@ -137,6 +153,7 @@ impl StoredToolGrant {
             issued_at_ms: state.issued_at_ms,
             expires_at_ms: state.expires_at_ms,
             ended_at_ms: state.ended_at_ms,
+            subject_ended: state.end_reason == Some(ToolGrantEndReason::SubjectEnded),
         })
     }
 }
@@ -352,6 +369,12 @@ fn use_verdict(
                     grant_id: row.record.grant_id.clone(),
                 }));
             }
+            // A grant that ended with its subject explains nothing: a later
+            // life of the subject needs a grant of its own.
+            ToolGrantLifecycleEffect::UseRefused {
+                reason: ToolGrantUseRefusal::SubjectEnded,
+                ..
+            } => return Ok(Err(ToolGrantRefusal::Required)),
             _ => {}
         }
     }
@@ -365,7 +388,8 @@ fn use_verdict(
 
 /// Which refusal explains a refused call when several grants cover its
 /// name: an expired grant, then a revoked one, then an unavailable read;
-/// with none of them the call needs a grant.
+/// with none of them the call needs a grant. A grant that ended with its
+/// subject explains nothing (it answers `Required`).
 fn refusal_rank(refusal: &ToolGrantRefusal) -> u8 {
     match refusal {
         ToolGrantRefusal::Expired { .. } => 3,
@@ -381,13 +405,51 @@ fn unavailable(error: &ToolGrantServiceError) -> ToolGrantRefusal {
     }
 }
 
+/// The row a list reports for a grant whose scope the store quarantined:
+/// its subject and target are unknown, so every subject's list reports it,
+/// among the rows that admit nothing.
+fn quarantined_row(grant: &QuarantinedToolGrant) -> UnreadableToolGrant {
+    UnreadableToolGrant {
+        grant_id: grant
+            .grant_id
+            .clone()
+            .unwrap_or_else(|| grant.refusal.scope.clone()),
+        detail: format!(
+            "the store quarantined the grant's scope, so its subject and target are unknown: {}",
+            grant.refusal
+        ),
+    }
+}
+
+/// The refusal of a call no known live grant admits while the store holds
+/// grants it quarantined: their targets are unknown, so any of them may
+/// have admitted it. Ranked as an unavailable read, below an expired or a
+/// revoked covering grant.
+fn quarantined_refusal(quarantined: &[QuarantinedToolGrant]) -> ToolGrantRefusal {
+    let grants: Vec<String> = quarantined
+        .iter()
+        .map(|grant| {
+            let id = grant.grant_id.as_deref().unwrap_or(&grant.refusal.scope);
+            format!("{id}: {}", grant.refusal)
+        })
+        .collect();
+    ToolGrantRefusal::Unavailable {
+        detail: format!(
+            "tool grants the store quarantined may cover this call, and their rows cannot be \
+             read until each scope is repaired in the store and the realm is reopened ({})",
+            grants.join("; ")
+        ),
+    }
+}
+
 /// A served session's model-request boundary, adjudicated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BoundaryAdjudication {
     /// The gated names a live grant opens now.
     pub(crate) open: ToolNameSet,
-    /// The earliest deadline of the grants that opened them.
-    pub(crate) next_deadline_ms: Option<u64>,
+    /// Per subject, the earliest deadline of the grants of it that opened
+    /// them: when the subject's deadline driver looks again.
+    pub(crate) next_deadlines: BTreeMap<ToolGrantSubjectKey, u64>,
 }
 
 /// A subject's grants, settled at one clock reading.
@@ -421,14 +483,17 @@ pub struct ToolGrantListing {
 }
 
 /// The rows filed under some subjects: the readable ones, and the ones this
-/// binary cannot read.
+/// binary cannot read, and the grants the store quarantined, whose subject
+/// is unknown.
 struct SubjectRows {
     readable: Vec<ReadRow>,
     unreadable: Vec<UnreadableToolGrant>,
+    quarantined: Vec<QuarantinedToolGrant>,
 }
 
 impl SubjectRows {
-    /// Log the rows this binary cannot read: they admit nothing.
+    /// Log the rows this binary cannot read and the grants the store
+    /// quarantined: they admit nothing.
     fn warn_unreadable(&self, adjudication: &'static str) {
         for row in &self.unreadable {
             tracing::warn!(
@@ -436,6 +501,14 @@ impl SubjectRows {
                 detail = %row.detail,
                 adjudication,
                 "an unreadable tool grant row admits nothing"
+            );
+        }
+        for grant in &self.quarantined {
+            tracing::warn!(
+                grant_id = ?grant.grant_id,
+                refusal = %grant.refusal,
+                adjudication,
+                "a tool grant whose scope the store quarantined admits nothing"
             );
         }
     }
@@ -504,6 +577,11 @@ impl ToolGrantService {
 
     /// Issue one grant.
     ///
+    /// The service writes the grant row and consults no mob roster: for a
+    /// mob member identity subject, issue the grant through
+    /// `meerkat_mob::MobHandle::grant_member_tool`, which decides it against
+    /// the mob's live roster as it commits.
+    ///
     /// # Errors
     /// [`ToolGrantServiceError::InvalidWindow`] for a window that is past,
     /// empty or longer than the policy's maximum lifetime,
@@ -513,8 +591,7 @@ impl ToolGrantService {
         &self,
         request: ToolGrantRequest,
     ) -> Result<StoredToolGrant, ToolGrantServiceError> {
-        if request.target.names().next().is_none()
-            || request.target.names().any(|name| name.as_str().is_empty())
+        if request.target.is_empty() || request.target.names().any(|name| name.as_str().is_empty())
         {
             return Err(ToolGrantServiceError::EmptyTarget);
         }
@@ -633,8 +710,86 @@ impl ToolGrantService {
         Ok(RevokedToolGrant { grant, changed })
     }
 
+    /// End every live grant of `subject` with it: its owner ended the subject
+    /// (a mob member identity whose identity ended, or a session that
+    /// identity held). Each grant ends through the machine's
+    /// `EndWithSubject`: revoked, its end reason `SubjectEnded`, so it
+    /// explains no later refusal; a grant at or after its deadline records
+    /// the expiry it reached instead, and a grant that already ended is left
+    /// as it stands. A row this binary cannot read admits nothing and is left
+    /// as it is, logged. A store without the grant domain holds no grant, so
+    /// there it ends none. Answers how many grants this call ended.
+    ///
+    /// # Errors
+    /// Store, clock and conflict failures; a grant the call did not reach
+    /// stays live, so the caller retries the whole end.
+    pub async fn revoke_subject(
+        &self,
+        subject: &ToolGrantSubjectKey,
+        revocation: ToolGrantRevocation,
+    ) -> Result<usize, ToolGrantServiceError> {
+        let rows = match self.subject_rows(std::slice::from_ref(subject)).await {
+            Ok(rows) => rows,
+            Err(ToolGrantServiceError::Store(RuntimeStoreError::Unsupported(_))) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        rows.warn_unreadable("revoke_subject");
+        let mut ended = 0;
+        for read in rows.readable {
+            if read.row.status != ToolGrantStatus::Active {
+                continue;
+            }
+            let now_ms = self.now_ms()?;
+            let effects = match self
+                .apply_and_commit(
+                    read,
+                    &|| ToolGrantLifecycleInput::EndWithSubject { now_ms },
+                    AuditContext::Revocation(&revocation),
+                )
+                .await
+            {
+                Ok((_, effects)) => effects,
+                // A row whose machine refuses to rebuild admits nothing.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "revoke_subject",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    ToolGrantLifecycleEffect::Revoked { .. }
+                        | ToolGrantLifecycleEffect::Expired { .. }
+                )
+            }) {
+                ended += 1;
+            }
+        }
+        Ok(ended)
+    }
+
+    /// One grant as its row stands, read without settling it.
+    ///
+    /// # Errors
+    /// [`ToolGrantServiceError::NotFound`], [`ToolGrantServiceError::CorruptRow`]
+    /// for a row this binary cannot read, and store failures.
+    pub async fn load(
+        &self,
+        grant_id: &ToolGrantId,
+    ) -> Result<StoredToolGrant, ToolGrantServiceError> {
+        Ok(self.load_row(&grant_id.to_string()).await?.row)
+    }
+
     /// Every grant of `subject`, each due one settled as expired first, and
-    /// every row of the subject this binary cannot read.
+    /// every row of the subject this binary cannot read, with every grant
+    /// whose scope the store quarantined (its subject is unknown, so every
+    /// subject's list reports it there).
     ///
     /// # Errors
     /// Store and clock failures.
@@ -707,6 +862,7 @@ impl ToolGrantService {
         let now_ms = self.now_ms()?;
         let mut grants = Vec::with_capacity(rows.readable.len());
         let mut unreadable = rows.unreadable;
+        unreadable.extend(rows.quarantined.iter().map(quarantined_row));
         let mut next_deadline_ms: Option<u64> = None;
         for read in rows.readable {
             let (row, _) = match self
@@ -751,10 +907,11 @@ impl ToolGrantService {
         })
     }
 
-    /// A model-request boundary: the gated names of `gated` a live grant of
-    /// `subjects` opens at this moment. A grant the boundary finds past its
-    /// deadline is settled as expired; a row this binary cannot read opens
-    /// nothing.
+    /// A model-request boundary: the gated names of `view` a live grant of
+    /// `subjects` opens at this moment (a name or family target's gated
+    /// names, and a server target's gated names its server provides now). A
+    /// grant the boundary finds past its deadline is settled as expired; a
+    /// row this binary cannot read opens nothing.
     ///
     /// # Errors
     /// `Unavailable` when the grants cannot be read or settled: the gate
@@ -762,7 +919,7 @@ impl ToolGrantService {
     pub(crate) async fn adjudicate_boundary(
         &self,
         subjects: &[ToolGrantSubjectKey],
-        gated: &GatedToolTable,
+        view: &GatedToolView,
     ) -> Result<BoundaryAdjudication, ToolGrantRefusal> {
         let rows = self
             .subject_rows(subjects)
@@ -772,14 +929,7 @@ impl ToolGrantService {
         let now_ms = self.now_ms().map_err(|error| unavailable(&error))?;
         let mut adjudication = BoundaryAdjudication::default();
         for read in rows.readable {
-            let covered: Vec<_> = read
-                .row
-                .record
-                .target
-                .names()
-                .filter(|name| gated.is_gated(name.as_str()))
-                .cloned()
-                .collect();
+            let covered = view.covered_by(&read.row.record.target);
             if covered.is_empty() {
                 continue;
             }
@@ -811,11 +961,11 @@ impl ToolGrantService {
                 for name in covered {
                     adjudication.open.insert(name);
                 }
-                adjudication.next_deadline_ms = Some(
-                    adjudication
-                        .next_deadline_ms
-                        .map_or(row.expires_at_ms, |next| next.min(row.expires_at_ms)),
-                );
+                adjudication
+                    .next_deadlines
+                    .entry(row.record.subject.key())
+                    .and_modify(|next| *next = (*next).min(row.expires_at_ms))
+                    .or_insert(row.expires_at_ms);
             }
         }
         Ok(adjudication)
@@ -830,7 +980,9 @@ impl ToolGrantService {
     ///
     /// # Errors
     /// The refusal: no live grant covers the name, the covering grant
-    /// expired or was revoked, or the grants could not be read.
+    /// expired or was revoked, the grants could not be read, or no known
+    /// grant admits it while the store holds grants it quarantined (their
+    /// targets are unknown): `Unavailable`, naming them.
     pub(crate) async fn admit_call(
         &self,
         subjects: &[ToolGrantSubjectKey],
@@ -854,14 +1006,20 @@ impl ToolGrantService {
             }
         };
         // Adjudicate every covering grant at this one reading before
-        // anything else awaits: one admitted grant admits the call.
+        // anything else awaits: one admitted grant admits the call. With no
+        // covering grant the call needs one, unless the store quarantined
+        // grants whose targets are unknown: one of them may have admitted it.
         let mut observed_expiries = Vec::new();
-        let mut refusal = ToolGrantRefusal::Required;
+        let mut refusal = if rows.quarantined.is_empty() {
+            ToolGrantRefusal::Required
+        } else {
+            quarantined_refusal(&rows.quarantined)
+        };
         // The subject whose log records the refusal: the explaining grant's,
         // else the session's.
         let mut refusal_subject = subjects.first().cloned();
         for read in rows.readable {
-            if !read.row.record.target.covers(call.name) {
+            if !read.row.record.target.covers(call.name, call.server) {
                 continue;
             }
             let verdict = apply(&read.row, ToolGrantLifecycleInput::AdmitUse { now_ms }).and_then(
@@ -904,6 +1062,73 @@ impl ToolGrantService {
         self.record_refusal(refusal_subject.as_ref(), call, &refusal)
             .await;
         Err(refusal)
+    }
+
+    /// Which of the MCP servers `servers` a live server grant of `subjects`
+    /// covers at this moment, with or without a `tools` subset: a build
+    /// attaches a gated server only while one does. Each covering grant is
+    /// adjudicated as a boundary does (`AdmitUse`); one found past its
+    /// deadline is settled as expired by the build. A row this binary cannot
+    /// read covers nothing.
+    ///
+    /// # Errors
+    /// `Unavailable` when the grants cannot be read or settled: the build
+    /// attaches no gated server.
+    pub(crate) async fn granted_servers(
+        &self,
+        subjects: &[ToolGrantSubjectKey],
+        servers: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, ToolGrantRefusal> {
+        let mut granted = BTreeSet::new();
+        if servers.is_empty() {
+            return Ok(granted);
+        }
+        let rows = self
+            .subject_rows(subjects)
+            .await
+            .map_err(|error| unavailable(&error))?;
+        rows.warn_unreadable("build");
+        let now_ms = self.now_ms().map_err(|error| unavailable(&error))?;
+        for read in rows.readable {
+            let Some(server) = read
+                .row
+                .record
+                .target
+                .mcp_server()
+                .filter(|server| servers.contains(*server) && !granted.contains(*server))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let (row, effects) = match self
+                .apply_and_commit(
+                    read,
+                    &|| ToolGrantLifecycleInput::AdmitUse { now_ms },
+                    AuditContext::Expiry(ToolGrantExpiryDriver::Build),
+                )
+                .await
+            {
+                Ok(applied) => applied,
+                // A row whose machine refuses to rebuild covers nothing.
+                Err(ToolGrantServiceError::CorruptRow { grant_id, detail }) => {
+                    tracing::warn!(
+                        %grant_id,
+                        %detail,
+                        adjudication = "build",
+                        "an unreadable tool grant row admits nothing"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(unavailable(&error)),
+            };
+            if use_verdict(&row, &effects)
+                .map_err(|error| unavailable(&error))?
+                .is_ok()
+            {
+                granted.insert(server);
+            }
+        }
+        Ok(granted)
     }
 
     /// Append a `refused` row for `call` to `subject`'s log. Best effort.
@@ -964,9 +1189,10 @@ impl ToolGrantService {
         })
     }
 
-    /// Every row filed under `subjects`.
     /// Every row filed under `subjects`: the readable ones, and the ones this
-    /// binary cannot decode, which admit nothing and block nothing.
+    /// binary cannot decode, which admit nothing and block nothing; and the
+    /// grants the store quarantined, whose subject is unknown, so that every
+    /// subject's read carries them.
     async fn subject_rows(
         &self,
         subjects: &[ToolGrantSubjectKey],
@@ -974,6 +1200,7 @@ impl ToolGrantService {
         let mut rows = SubjectRows {
             readable: Vec::new(),
             unreadable: Vec::new(),
+            quarantined: Vec::new(),
         };
         for subject in subjects {
             for (grant_id, bytes) in self.store.list_tool_grants(subject.as_str()).await? {
@@ -990,6 +1217,7 @@ impl ToolGrantService {
                 }
             }
         }
+        rows.quarantined = self.store.quarantined_tool_grants();
         Ok(rows)
     }
 

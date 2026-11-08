@@ -262,7 +262,8 @@ fn tamper(
         .rev()
         .find_map(|change| match &mut change.kind {
             durable::GrantOwnerChangeKind::Issued { record } => Some(record),
-            durable::GrantOwnerChangeKind::Revoked { .. } => None,
+            durable::GrantOwnerChangeKind::Revoked { .. }
+            | durable::GrantOwnerChangeKind::Consumed { .. } => None,
         })
         .expect("child row");
     edit(record);

@@ -479,6 +479,7 @@ async fn exercise_stock_persistent(
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             grants: grants.clone(),
             ingress: ingress.clone(),
@@ -1293,6 +1294,7 @@ async fn exercise_stock_persistent(
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             grants: grants.clone(),
             ingress,

@@ -30,6 +30,51 @@
     )
 )]
 
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(
+    test,
+    not(all(
+        feature = "local-authorization",
+        feature = "session-store",
+        feature = "session-compaction",
+        feature = "jsonl-store",
+        feature = "memory-store",
+        feature = "memory-store-session",
+        feature = "comms",
+        feature = "mcp",
+        feature = "skills",
+        feature = "schedule",
+        feature = "workgraph",
+        feature = "atif",
+        feature = "workspace-tests"
+    ))
+))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat --features local-authorization,session-store,session-compaction,jsonl-store,memory-store,memory-store-session,comms,mcp,skills,schedule,workgraph,atif,workspace-tests` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
+
 /// ATIF trajectory export vocabulary (feature `atif`). Gated because the facade
 /// only re-exports it; surfaces that export trajectories (`rkat`, `rkat-rpc`)
 /// depend on `meerkat-atif` directly.
@@ -316,7 +361,8 @@ pub use meerkat_schedule::{
     ScheduleTargetDelivery, ScheduleTargetProbe, ScheduleToolDispatcher, ScheduleToolError,
     ScheduledMobAction, ScheduledMobBackendKind, ScheduledMobRuntimeMode, ScheduledSessionAction,
     SessionMaterializationSpec, SessionTargetBinding, TargetBinding, TargetProbeOutcome,
-    TriggerSpec, UpdateScheduleRequest, handle_schedule_tools_call, schedule_tools_list,
+    TriggerSpec, UpdateScheduleRequest, dispatch_schedule_list_where, handle_schedule_tools_call,
+    schedule_tools_list,
 };
 pub use meerkat_tools::ToolError;
 #[cfg(not(target_arch = "wasm32"))]
@@ -328,43 +374,48 @@ pub use meerkat_workgraph::{
     AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionResult,
     AttentionProjectionText, AttentionPruneRequest, AttentionPruneResult, AttentionReassignRequest,
     AttentionReassignResult, AttentionResumeRequest, AttentionTargetRealmResolver,
-    BreakGlassAttentionReassignRequest, CancelledChildJoinPolicy, ChildJoinDisposition,
-    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, DisabledWorkGraphStore,
-    ExternalWorkRef, FailedChildJoinPolicy, GoalAttentionTarget, GoalBindExistingRequest,
-    GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
-    GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
-    GoalTerminalStatus, LinkWorkItemsRequest, MAX_WORK_CLAIM_LEASE_SECONDS, MemoryWorkGraphStore,
-    MobAgentOwner, ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
-    ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
-    PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WorkAdmission, WorkAdmissionKey,
-    WorkAdmissionOutcome, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine,
-    WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget,
-    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef,
-    WorkExecutionAuthority, WorkExecutionBinding, WorkExecutionBindingFilter,
-    WorkExecutionBindingId, WorkExecutionBridge, WorkExecutionEvidenceKind,
-    WorkExecutionEvidenceProjection, WorkExecutionLifecycleEffect, WorkExecutionLifecycleState,
-    WorkExecutionMachine, WorkExecutionMachineState, WorkExecutionObservation, WorkExecutionTarget,
-    WorkExecutionTransition, WorkGraphError, WorkGraphEvent, WorkGraphEventFilter,
-    WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams,
-    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphMachineState, WorkGraphNamespaceRead,
-    WorkGraphPublicErrorClass, WorkGraphRestRoute, WorkGraphService, WorkGraphSnapshot,
-    WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind, WorkGraphToolCapability,
-    WorkGraphToolContract, WorkGraphToolError, WorkGraphToolErrorCode, WorkGraphToolSource,
-    WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
-    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
-    handle_unscoped_workgraph_tools_call, mob_agent_owner_id_parts, unscoped_workgraph_tools_list,
-    validate_workgraph_attention_projection_current, workgraph_attention_continuation_key,
-    workgraph_attention_projection_from_overlay, workgraph_attention_supersession_key,
-    workgraph_attention_turn_append, workgraph_platform_capability_manifest,
-    workgraph_rest_path_catalog, workgraph_rest_request_response_schema, workgraph_tools_list,
+    BreakGlassAttentionReassignRequest, BreakGlassReleaseWorkItemRequest, CancelledChildJoinPolicy,
+    ChildJoinDisposition, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    DisabledWorkGraphStore, ExternalWorkRef, FailedChildJoinPolicy, GoalAttentionTarget,
+    GoalBindExistingRequest, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
+    GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
+    GoalStatusResult, GoalTerminalStatus, LinkWorkItemsRequest, MAX_WORK_CLAIM_LEASE_SECONDS,
+    MemoryWorkGraphStore, MobAgentOwner, ObserveLeaseExpiryRequest, ObserveReadinessRequest,
+    PolicyEscalateRequest, ProjectedAttentionAuthority, PublicGoalCompletionPolicy,
+    PublicGoalCreateRequest, PublicGoalRequestCloseRequest, ReadyWorkFilter,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY,
+    WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMachineState, WorkAttentionMode,
+    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
+    WorkEdgeKind, WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding,
+    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionBridge,
+    WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection, WorkExecutionLifecycleEffect,
+    WorkExecutionLifecycleState, WorkExecutionMachine, WorkExecutionMachineState,
+    WorkExecutionObservation, WorkExecutionTarget, WorkExecutionTransition, WorkGraphError,
+    WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphEventsResponse,
+    WorkGraphFact, WorkGraphIdParams, WorkGraphItemsResponse, WorkGraphMachine,
+    WorkGraphMachineState, WorkGraphNamespaceRead, WorkGraphPublicErrorClass, WorkGraphRestRoute,
+    WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore,
+    WorkGraphStoreKind, WorkGraphToolCapability, WorkGraphToolContract, WorkGraphToolError,
+    WorkGraphToolErrorCode, WorkGraphToolSource, WorkGraphToolSurface, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
+    WorkStatus, handle_unscoped_workgraph_tools_call, mob_agent_owner_id_parts,
+    unscoped_workgraph_tools_list, validate_workgraph_attention_projection_current,
+    workgraph_attention_continuation_key, workgraph_attention_projection_from_overlay,
+    workgraph_attention_supersession_key, workgraph_attention_turn_append,
+    workgraph_platform_capability_manifest, workgraph_rest_path_catalog,
+    workgraph_rest_request_response_schema, workgraph_tools_list,
 };
 
 // AgentFactory and build_agent types
 #[cfg(not(target_arch = "wasm32"))]
 mod command_hook_confinement;
 #[cfg(not(target_arch = "wasm32"))]
+mod hook_source_trust;
+#[cfg(not(target_arch = "wasm32"))]
 mod host_confinement;
+#[cfg(not(target_arch = "wasm32"))]
+pub use hook_source_trust::{HookSource, HookSourceDecision, HookSourceDigest, HookSourceTrust};
 #[cfg(all(feature = "skills", not(target_arch = "wasm32")))]
 mod skill_stdio_confinement;
 #[cfg(not(target_arch = "wasm32"))]
@@ -413,7 +464,8 @@ pub use factory::{
     GrantGateBuildError, LlmIdentityPreflightError, PreparedAgent, PreparedCatalogEntry,
     PreparedToolCatalog, PreparedToolSurface, decode_llm_client_override_from_service,
     encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
-    resolve_create_session_model, resolve_provider_catalog_default_model, tool_family_names,
+    resolve_create_session_model, resolve_grant_target, resolve_provider_catalog_default_model,
+    tool_family_names,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub use factory::{

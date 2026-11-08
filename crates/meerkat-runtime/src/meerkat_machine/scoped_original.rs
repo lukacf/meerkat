@@ -59,7 +59,8 @@ use meerkat_core::authorization::ControllerReadinessFailure;
 use meerkat_core::{OperationRefusalKind, OperationRefused, PrincipalRef};
 
 use super::local_authorization::{
-    NativeGrantWorkConfiguration, NativeIngressCheck, NativeRetainedResumeCheck,
+    NativeGrantWorkConfiguration, NativeIngressCheck, NativeKeptOriginalCheck,
+    NativeRetainedResumeCheck,
 };
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input::Input;
@@ -565,6 +566,9 @@ pub struct ScopedGrantComposition {
     pub invocation: ScopedInvocation,
     pub operation_owner: Arc<dyn OperationPolicyOwner>,
     pub retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    /// Owner of a kept governed input's controller
+    /// ([`NativeGrantWorkConfiguration::kept_original`]).
+    pub kept_original: Option<Arc<NativeKeptOriginalCheck>>,
 }
 
 impl ScopedGrantComposition {
@@ -587,6 +591,7 @@ impl ScopedGrantComposition {
             invocation_owner,
             operation_owner: self.operation_owner,
             retained_resume: self.retained_resume,
+            kept_original: self.kept_original,
             require_scoped_destination: true,
             configured_mcp_attachment: None,
         }
@@ -1434,7 +1439,7 @@ fn read_lineage<T>(
 /// replay versus conflict.
 #[allow(clippy::too_many_arguments)]
 pub fn bind_scoped_original(
-    mut input: Input,
+    input: Input,
     association: InputAuthorityAssociation,
     event_key: IdempotencyKey,
     requester: PrincipalRef,
@@ -1443,17 +1448,16 @@ pub fn bind_scoped_original(
     authentication: HistoricalEvidenceRef,
     controller: meerkat_core::ControllerModelClient,
 ) -> Result<Input, RuntimeDriverError> {
-    input.header_mut().authority_association = Some(association);
-    input.header_mut().idempotency_key = Some(event_key);
-    let ingress = NativeIngressContext::from_trusted_ingress(
-        &input,
+    crate::input_authority::bind_original_input(
+        input,
+        association,
+        event_key,
         requester,
         ingress_actor,
         realm,
         authentication,
-    )?
-    .with_controller_client(&input, controller)?;
-    input.with_ingress_context(ingress)
+        controller,
+    )
 }
 
 fn refused(kind: OperationRefusalKind) -> NativeAdmissionError {

@@ -43,12 +43,20 @@ const CAPI_EXPIRY_SKEW_SECONDS: i64 = 300;
 const MODEL_DISCOVERY_RETRY_SECONDS: u64 = 30;
 const MODEL_DISCOVERY_REFRESH_SECONDS: u64 = 300;
 const MODEL_DISCOVERY_MAX_RETRY_SECONDS: u64 = 3600;
+/// How long a model discovery a request started off the request path holds
+/// the account's next one off: the listing's own HTTP bound with a margin.
+/// The discovery sets the next deadline when it ends, so one that never ends
+/// (its runtime stopped) is tried again after this.
+const MODEL_DISCOVERY_CLAIM_SECONDS: u64 = 60;
 /// After a token exchange that failed transiently while the current token
 /// still serves, the next attempt waits this long unless the exchange sent
 /// its own `Retry-After`.
 const TOKEN_EXCHANGE_RETRY_SECONDS: u64 = 30;
 /// The shortest wait before that next attempt, whatever `Retry-After` says.
 const TOKEN_EXCHANGE_MIN_RETRY_SECONDS: u64 = 1;
+/// The longest an exchange's `Retry-After` holds the next attempt off once no
+/// token is left to serve.
+const TOKEN_EXCHANGE_MAX_RETRY_SECONDS: u64 = 3600;
 const BEARER_SCHEME: &str = "Bearer";
 const COPILOT_HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MAX_COPILOT_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -135,6 +143,9 @@ enum CopilotModelDiscoveryError {
         rate_limited: bool,
         /// `x-ratelimit-reset`: the epoch second the primary limit resets.
         rate_limit_reset: Option<u64>,
+        /// Whether the answer asks for an action on the account
+        /// ([`github_account_action`]).
+        account_action: bool,
     },
     #[error("invalid Copilot model-discovery request headers")]
     Header(#[source] ProviderAuthError),
@@ -150,6 +161,54 @@ impl CopilotModelDiscoveryError {
             Self::Http { status, .. } => Some(*status),
             Self::Transport(_) | Self::Header(_) | Self::Decode(_) | Self::Protocol(_) => None,
         }
+    }
+
+    /// Whether this listing answer refuses a device sign-in's derived token:
+    /// a 401, or a 403 that asks for an account action. Any other answer, a
+    /// 403 for a policy or a rate limit included, is a discovery failure the
+    /// account retries later.
+    fn refuses_derived_token(&self) -> bool {
+        match self {
+            Self::Http { status: 401, .. } => true,
+            Self::Http {
+                status: 403,
+                account_action,
+                ..
+            } => *account_action,
+            Self::Http { .. }
+            | Self::Transport(_)
+            | Self::Header(_)
+            | Self::Decode(_)
+            | Self::Protocol(_) => false,
+        }
+    }
+
+    /// Whether the next try may answer otherwise: a 408, 502, 503 or 504,
+    /// or a network failure or timeout. The listing tries once more at once
+    /// for these ([`fetch_copilot_models`]).
+    fn worth_an_immediate_retry(&self) -> bool {
+        matches!(
+            self,
+            Self::Http {
+                status: 408 | 502 | 503 | 504,
+                ..
+            } | Self::Transport(
+                CopilotHttpTransportError::Request(_) | CopilotHttpTransportError::Timeout
+            )
+        )
+    }
+
+    /// Whether the listing could not answer now and a later one may, with no
+    /// change to the token or the account: GitHub rate limited it, or the
+    /// failure is worth an immediate retry ([`Self::worth_an_immediate_retry`]).
+    fn clears_on_its_own(&self) -> bool {
+        matches!(
+            self,
+            Self::Http {
+                rate_limited: true,
+                ..
+            }
+        ) || self.worth_an_immediate_retry()
     }
 
     fn retry_delay(&self) -> StdDuration {
@@ -202,6 +261,7 @@ impl CopilotTokenExchangeError {
             message,
             retry_after,
             retryable,
+            not_before: None,
         })
     }
 
@@ -235,6 +295,7 @@ impl CopilotTokenExchangeError {
             message,
             retry_after: None,
             retryable,
+            not_before: None,
         })
     }
 }
@@ -258,6 +319,20 @@ struct CopilotExchangeUnavailable {
     retry_after: Option<StdDuration>,
     /// The retryable class a turn fails with once no valid token is left.
     retryable: meerkat_llm_core::LlmError,
+    /// Once recorded with no token left to serve: the instant before which
+    /// the outage answers in place of the exchange, when the exchange sent
+    /// `Retry-After` ([`exchange_not_before`]).
+    not_before: Option<DateTime<Utc>>,
+}
+
+impl CopilotExchangeUnavailable {
+    /// The outage as a resolution sees it: a credential source that cannot
+    /// answer now, which clears on its own.
+    fn source_unavailable(&self) -> ProviderAuthError {
+        ProviderAuthError::Auth(AuthError::SourceUnavailable {
+            reason: self.message.clone(),
+        })
+    }
 }
 
 #[async_trait]
@@ -312,12 +387,14 @@ impl CopilotHttpTransport for ReqwestCopilotHttpTransport {
                 return Err(CopilotHttpTransportError::ResponseTooLarge);
             }
             let status = response.status().as_u16();
+            // A number of seconds or an HTTP date, read as every provider
+            // answer's `Retry-After` is.
             let retry_after = response
                 .headers()
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(StdDuration::from_secs);
+                .and_then(meerkat_llm_core::LlmError::parse_retry_after)
+                .map(StdDuration::from_millis);
             let rate_limit_reset = header_text(response.headers(), "x-ratelimit-reset")
                 .and_then(|value| value.parse::<u64>().ok());
             let header_rate_limited = github_rate_limited(
@@ -773,11 +850,29 @@ impl CopilotRouteResolution {
         model: &str,
         endpoint: CopilotEndpoint,
     ) -> String {
-        let mut message = format!(
-            "Copilot account does not expose {} for {} model '{model}'",
-            endpoint.path(),
-            provider.as_str(),
-        );
+        // A model the account lists under a policy that is not `enabled` is
+        // refused by naming the state the account states.
+        // So is a model it lists with an empty endpoint list.
+        let listed = self
+            .available_models
+            .as_ref()
+            .and_then(|snapshot| snapshot.model(model));
+        let refusing_state = listed.and_then(|offering| offering.refusing_policy_state());
+        let mut message = match refusing_state {
+            Some(state) => format!(
+                "Copilot account policy state for {} model '{model}' is '{state}', not 'enabled'",
+                provider.as_str(),
+            ),
+            None if listed.is_some_and(|offering| offering.lists_no_endpoints()) => format!(
+                "Copilot account lists no endpoints for {} model '{model}'",
+                provider.as_str(),
+            ),
+            None => format!(
+                "Copilot account does not expose {} for {} model '{model}'",
+                endpoint.path(),
+                provider.as_str(),
+            ),
+        };
         if let Some(snapshot) = self.available_models.as_ref() {
             let mut ids = snapshot.available_model_ids(provider).peekable();
             if ids.peek().is_some() {
@@ -1100,10 +1195,14 @@ impl CopilotRoutedClient {
     /// A Copilot authorization failure as a turn sees it: while the account's
     /// token exchange is temporarily unavailable and no token is left to
     /// serve, the exchange failure's retryable class; otherwise the
-    /// authorizer's own error.
+    /// authorizer's own error. The authorizer reports that outage as
+    /// `SourceUnavailable`, and any other failure it cannot type as
+    /// `RefreshFailed`.
     fn authorization_error(&self, error: AuthError) -> meerkat_llm_core::LlmError {
-        if matches!(error, AuthError::RefreshFailed(_))
-            && let Some(retryable) = self.runtime.exchange_unavailable(&self.connection)
+        if matches!(
+            error,
+            AuthError::RefreshFailed(_) | AuthError::SourceUnavailable { .. }
+        ) && let Some(retryable) = self.runtime.exchange_unavailable(&self.connection)
         {
             return retryable;
         }
@@ -1135,6 +1234,11 @@ impl meerkat_llm_core::LlmClient for CopilotRoutedClient {
     /// The current route's account limit.
     fn output_token_limit(&self) -> Option<u32> {
         self.sync_client().output_token_limit()
+    }
+
+    /// The current route's account prompt limit for `output_budget`.
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+        self.sync_client().prompt_token_limit(output_budget)
     }
 
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1420,6 +1524,22 @@ impl CopilotCapabilityGatedClient {
     }
 }
 
+/// The most input tokens one request that asks for `output_budget` output
+/// tokens may carry on an account model: the tighter of its stated prompt
+/// limit and its context window less that budget, either alone when only
+/// one is stated. The gate's check of a measured prompt (for the request's
+/// own budget) and the limit stated to the factory (for the session's
+/// budget, the compaction threshold) both read it.
+fn account_prompt_limit(limits: &crate::CopilotModelLimits, output_budget: u32) -> Option<u32> {
+    let window_room = limits
+        .max_context_window_tokens
+        .map(|window| window.saturating_sub(output_budget));
+    match (limits.max_prompt_tokens, window_room) {
+        (Some(prompt), Some(room)) => Some(prompt.min(room)),
+        (prompt, room) => prompt.or(room),
+    }
+}
+
 #[async_trait]
 impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
     async fn prepare_controller_credential(&self) -> Result<(), AuthError> {
@@ -1432,6 +1552,14 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
             .limits
             .max_output_tokens
             .or_else(|| self.inner.output_token_limit())
+    }
+
+    /// The account model's own prompt limit ([`account_prompt_limit`]) for
+    /// `output_budget`, the session's output budget: the limit the gate
+    /// enforces on the session's requests, which ask for that budget.
+    fn prompt_token_limit(&self, output_budget: u32) -> Option<u32> {
+        account_prompt_limit(&self.capabilities.limits, output_budget)
+            .or_else(|| self.inner.prompt_token_limit(output_budget))
     }
 
     fn project_replay_messages(
@@ -1452,25 +1580,17 @@ impl meerkat_llm_core::LlmClient for CopilotCapabilityGatedClient {
                 .provider_issued_input_tokens
                 .map(|tokens| (tokens, value))
         }) {
-            let prompt_limit = self
-                .capabilities
-                .limits
-                .max_prompt_tokens
-                .or_else(|| {
-                    self.capabilities
-                        .limits
-                        .max_context_window_tokens
-                        .map(|context| context.saturating_sub(request.max_tokens))
-                })
-                .map(u64::from);
+            let prompt_limit =
+                account_prompt_limit(&self.capabilities.limits, request.max_tokens).map(u64::from);
+            // A prompt the provider measured over the account's limit is a
+            // context refusal, the class the agent compacts on. Copilot's own
+            // answer to such a prompt is not known, so none is assumed.
             if let Some(limit) = prompt_limit
                 && measured.0 > limit
             {
-                return Err(meerkat_llm_core::LlmError::InvalidRequest {
-                    message: format!(
-                        "Copilot account model '{}' allows at most {limit} prompt tokens, measured {}",
-                        request.model, measured.0
-                    ),
+                return Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
+                    max: usize::try_from(limit).unwrap_or(usize::MAX),
+                    requested: usize::try_from(measured.0).unwrap_or(usize::MAX),
                 });
             }
         }
@@ -1689,6 +1809,8 @@ struct CopilotRefreshOutcome {
 enum CopilotTokenError {
     /// The token exchange failed transiently and no valid token is left. The
     /// account recorded the outage; the next use tries the exchange again.
+    /// Carries the outage as `AuthError::SourceUnavailable`, a kind that
+    /// clears on its own.
     ExchangeUnavailable(ProviderAuthError),
     /// Every other failure, an account action included.
     Failed(ProviderAuthError),
@@ -1896,20 +2018,47 @@ impl CopilotAuthorizer {
                         )
                     })?;
                     let now = (self.env.now)();
-                    if let Some(cached) = self.fresh_cached(
-                        source_generation,
-                        Self::device_source_published_at(&source),
-                        now,
-                    ) && !cached.model_discovery_due
+                    let source_published_at_millis = Self::device_source_published_at(&source);
+                    if let Some(cached) =
+                        self.fresh_cached(source_generation, source_published_at_millis, now)
                     {
+                        if cached.model_discovery_due {
+                            self.refresh_models_off_the_request_path(
+                                &cached,
+                                source_generation,
+                                source_published_at_millis,
+                            )
+                            .await;
+                        }
                         return Ok(cached);
+                    }
+                    if let Some(outage) = self.outage_before_its_retry(
+                        source_generation,
+                        source_published_at_millis,
+                        now,
+                    ) {
+                        return Err(outage);
                     }
                     (source_generation, LeaderTask::Device(source))
                 }
                 CopilotCredentialMode::OperatorToken => match self.observe_operator_lease()? {
-                    OperatorObservation::Cached(cached) => return Ok(cached),
-                    OperatorObservation::Flight { generation, flight } => {
-                        (generation, LeaderTask::Operator(flight))
+                    OperatorObservation::Cached {
+                        cached,
+                        generation,
+                        published_at_millis,
+                    } => {
+                        if cached.model_discovery_due {
+                            self.refresh_models_off_the_request_path(
+                                &cached,
+                                generation,
+                                published_at_millis,
+                            )
+                            .await;
+                        }
+                        return Ok(cached);
+                    }
+                    OperatorObservation::Flight { generation } => {
+                        (generation, LeaderTask::Operator)
                     }
                 },
             };
@@ -1950,8 +2099,8 @@ impl CopilotAuthorizer {
                     self.refresh_token_as_leader(source, source_generation)
                         .await
                 }
-                LeaderTask::Operator(flight) => self
-                    .refresh_operator_token_as_leader(*flight, source_generation)
+                LeaderTask::Operator => self
+                    .refresh_operator_token_as_leader()
                     .await
                     .map_err(CopilotTokenError::from),
             };
@@ -1960,11 +2109,9 @@ impl CopilotAuthorizer {
             // generation it ended on, the one its waiters observe next.
             let outcome_generation = match task {
                 LeaderTask::Device(_) => source_generation,
-                LeaderTask::Operator(_) => {
-                    self.auth_lease().map_or(source_generation, |auth_lease| {
-                        auth_lease.snapshot(&self.lease_key()).generation
-                    })
-                }
+                LeaderTask::Operator => self.auth_lease().map_or(source_generation, |auth_lease| {
+                    auth_lease.snapshot(&self.lease_key()).generation
+                }),
             };
             *self.state.last_refresh_outcome.lock() = Some(CopilotRefreshOutcome {
                 flight_id,
@@ -1981,59 +2128,17 @@ impl CopilotAuthorizer {
         source_generation: u64,
     ) -> Result<CachedTokenView, CopilotTokenError> {
         let now = (self.env.now)();
-        if let Some(cached) = self.fresh_cached(
-            source_generation,
-            Self::device_source_published_at(source),
-            now,
-        ) {
+        let source_published_at_millis = Self::device_source_published_at(source);
+        if let Some(cached) = self.fresh_cached(source_generation, source_published_at_millis, now)
+        {
+            // Another flight minted the token this caller waited for.
             if cached.model_discovery_due {
-                let models = self.fetch_models(&cached.api_base, &cached.token).await;
-                let discovery_now = (self.env.now)();
-                let remint = models
-                    .as_ref()
-                    .is_err_and(|error| error.status() == Some(401));
-                let reauth = models
-                    .as_ref()
-                    .is_err_and(|error| error.status() == Some(403));
-                {
-                    let mut cache = self.state.cache.write();
-                    if let Some(current) = cache.as_mut()
-                        && current.source_generation == source_generation
-                        && current.token == cached.token
-                    {
-                        match models {
-                            Ok(snapshot) => {
-                                current.models = Some(Arc::new(snapshot));
-                                current.model_discovery_refresh_at =
-                                    Some(model_discovery_deadline(
-                                        discovery_now,
-                                        StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
-                                    ));
-                            }
-                            Err(error) if !remint && !reauth => {
-                                let retry_delay = error.retry_delay();
-                                tracing::warn!(
-                                    credential_identity = %self.binding.credential_identity(),
-                                    error = %error,
-                                    "Copilot account model discovery retry failed"
-                                );
-                                current.model_discovery_refresh_at =
-                                    Some(model_discovery_deadline(discovery_now, retry_delay));
-                            }
-                            // Copilot refused the token for discovery: it is
-                            // minted anew (401) or the account needs a new
-                            // login (403).
-                            Err(_) => current.refuse(),
-                        }
-                    }
-                }
-                if reauth {
-                    self.mark_account_reauth_required()?;
-                    return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired).into());
-                }
-                if remint {
-                    return self.remint(source, source_generation).await;
-                }
+                self.refresh_models_off_the_request_path(
+                    &cached,
+                    source_generation,
+                    source_published_at_millis,
+                )
+                .await;
             }
             return Ok(cached);
         }
@@ -2052,7 +2157,7 @@ impl CopilotAuthorizer {
         source: &PersistedTokens,
         source_generation: u64,
     ) -> Result<CachedTokenView, CopilotTokenError> {
-        let unavailable = match self.mint_and_cache_token(source, source_generation).await {
+        let mut unavailable = match self.mint_and_cache_token(source, source_generation).await {
             Ok(view) => return Ok(view),
             Err(CopilotTokenExchangeError::Failed(error)) => {
                 if let Some(cached) = self.state.cache.write().as_mut() {
@@ -2064,7 +2169,11 @@ impl CopilotAuthorizer {
         };
         let source_published_at_millis = Self::device_source_published_at(source);
         let now = (self.env.now)();
-        let error = ProviderAuthError::SourceResolutionFailed(unavailable.message.clone());
+        // Recorded below only when no token is left to serve.
+        unavailable.not_before = unavailable
+            .retry_after
+            .map(|retry_after| exchange_not_before(now, retry_after));
+        let error = unavailable.source_unavailable();
         let mut cache = self.state.cache.write();
         let Some(cached) = cache.as_mut() else {
             // No token was minted for this account yet. The outage is kept on
@@ -2143,9 +2252,13 @@ impl CopilotAuthorizer {
             api_base = resolve_api_base(&token)?;
             models_result = self.fetch_models(&api_base, &token.token).await;
         }
+        // A listing that refuses the new token (a 401 again, or a 403 that
+        // asks for an account action) needs a new sign-in; any other failure,
+        // a 403 for a policy or a rate limit included, leaves the token
+        // serving without the list until the next discovery.
         if models_result
             .as_ref()
-            .is_err_and(|error| matches!(error.status(), Some(401 | 403)))
+            .is_err_and(CopilotModelDiscoveryError::refuses_derived_token)
         {
             self.mark_account_reauth_required()?;
             return Err(ProviderAuthError::Auth(AuthError::UserReauthRequired).into());
@@ -2198,6 +2311,31 @@ impl CopilotAuthorizer {
             exchange_unavailable: None,
         });
         Ok(view)
+    }
+
+    /// The account's recorded exchange outage, while it answers in place of
+    /// the exchange: no token is left to serve, the outage was recorded for
+    /// the current sign-in (its record's generation `source_generation`,
+    /// published at `source_published_at_millis`), and the instant its
+    /// exchange's `Retry-After` named is still ahead. Every request until
+    /// then fails with the outage's retryable class without calling the
+    /// exchange.
+    fn outage_before_its_retry(
+        &self,
+        source_generation: u64,
+        source_published_at_millis: Option<u64>,
+        now: DateTime<Utc>,
+    ) -> Option<CopilotTokenError> {
+        let cache = self.state.cache.read();
+        let cached = cache.as_ref()?;
+        let unavailable = cached.exchange_unavailable.as_ref()?;
+        (cached.source_generation == source_generation
+            && cached.source_published_at_millis == source_published_at_millis
+            && now >= cached.expires_at
+            && unavailable
+                .not_before
+                .is_some_and(|not_before| now < not_before))
+        .then(|| CopilotTokenError::ExchangeUnavailable(unavailable.source_unavailable()))
     }
 
     /// The cached token, while it is fresh and was built for the source
@@ -2404,17 +2542,64 @@ impl CopilotAuthorizer {
 
 /// The account's model list: `GET {api_base}/models` with `token` as the
 /// Copilot API bearer.
+/// The account's model list. An answer the next try may change (a 408,
+/// 502, 503 or 504, or a network failure or timeout) gets one immediate
+/// second attempt, inside the listing's one HTTP bound: both attempts
+/// together take at most [`COPILOT_HTTP_TIMEOUT`], the first at most half of
+/// it.
 async fn fetch_copilot_models(
     transport: &dyn CopilotHttpTransport,
     config: &CopilotBackendConfig,
     api_base: &str,
     token: &str,
 ) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
+    fetch_copilot_models_within(transport, config, api_base, token, COPILOT_HTTP_TIMEOUT).await
+}
+
+/// [`fetch_copilot_models`] inside `bound`: the first attempt gets half of
+/// it, so one that does not answer leaves the second attempt the rest.
+async fn fetch_copilot_models_within(
+    transport: &dyn CopilotHttpTransport,
+    config: &CopilotBackendConfig,
+    api_base: &str,
+    token: &str,
+    bound: StdDuration,
+) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
     let url = format!("{}/models", api_base.trim_end_matches('/'));
+    let deadline = tokio::time::Instant::now() + bound;
+    let timed_out = || {
+        Err(CopilotModelDiscoveryError::Transport(
+            CopilotHttpTransportError::Timeout,
+        ))
+    };
+    let first = tokio::time::timeout(
+        bound / 2,
+        list_copilot_models_once(transport, config, &url, token),
+    )
+    .await
+    .unwrap_or_else(|_| timed_out());
+    match first {
+        Err(error) if error.worth_an_immediate_retry() => tokio::time::timeout_at(
+            deadline,
+            list_copilot_models_once(transport, config, &url, token),
+        )
+        .await
+        .unwrap_or_else(|_| timed_out()),
+        answer => answer,
+    }
+}
+
+/// One `GET {api_base}/models` with `token`.
+async fn list_copilot_models_once(
+    transport: &dyn CopilotHttpTransport,
+    config: &CopilotBackendConfig,
+    url: &str,
+    token: &str,
+) -> Result<CopilotModelSnapshot, CopilotModelDiscoveryError> {
     let headers = copilot_inference_headers(config, token, CopilotRequestIntent::ModelAccess)
         .map_err(CopilotModelDiscoveryError::Header)?;
     let response = transport
-        .get(&url, headers)
+        .get(url, headers)
         .await
         .map_err(CopilotModelDiscoveryError::Transport)?;
     if !(200..=299).contains(&response.status) {
@@ -2424,6 +2609,7 @@ async fn fetch_copilot_models(
             retry_after: response.retry_after,
             rate_limited: response.rate_limited,
             rate_limit_reset: response.rate_limit_reset,
+            account_action: github_account_action(&response.body),
         });
     }
     let body: CopilotModelsEnvelope =
@@ -2488,8 +2674,9 @@ impl CopilotAuthorizer {
     /// reads the source. With one the AuthMachine decides: `Authorized` uses
     /// the cache built for the lease's current publication (its generation
     /// and its publication time: a lease that takes another process's stored
-    /// record can keep its generation), and any other verdict has the flight
-    /// read the source again (through the paced check for a source that runs
+    /// record can keep its generation; a model list that is due is refreshed
+    /// off the request path), and any other verdict has the flight read the
+    /// source again (through the paced check for a source that runs
     /// something). `ReauthRequired` first drops the cache built for the
     /// refused publication: the refusal may have come from another account
     /// state on the same lease (another provider registry, another
@@ -2501,7 +2688,6 @@ impl CopilotAuthorizer {
         if self.state.cache.read().is_none() {
             return Ok(OperatorObservation::Flight {
                 generation: auth_lease.snapshot(&lease_key).generation,
-                flight: OperatorFlight::Reload,
             });
         }
         let now = (self.env.now)();
@@ -2509,28 +2695,25 @@ impl CopilotAuthorizer {
         let publication = auth_lease.snapshot(&lease_key);
         let generation = publication.generation;
         let published_at_millis = publication.credential_published_at_millis;
-        let flight = match disposition {
+        match disposition {
             CredentialUseDisposition::Authorized => {
-                match self.fresh_cached(generation, published_at_millis, now) {
-                    Some(cached) if !cached.model_discovery_due => {
-                        return Ok(OperatorObservation::Cached(cached));
-                    }
-                    Some(_) => OperatorFlight::Rediscover {
+                if let Some(cached) = self.fresh_cached(generation, published_at_millis, now) {
+                    return Ok(OperatorObservation::Cached {
+                        cached,
+                        generation,
                         published_at_millis,
-                    },
-                    None => OperatorFlight::Reload,
+                    });
                 }
             }
             CredentialUseDisposition::ReauthRequired => {
                 self.drop_cache_for_source_generation(generation);
-                OperatorFlight::Reload
             }
             CredentialUseDisposition::RefreshRequired
             | CredentialUseDisposition::RefreshDisallowed
             | CredentialUseDisposition::LeaseAbsent
-            | CredentialUseDisposition::AlreadyRefreshing => OperatorFlight::Reload,
-        };
-        Ok(OperatorObservation::Flight { generation, flight })
+            | CredentialUseDisposition::AlreadyRefreshing => {}
+        }
+        Ok(OperatorObservation::Flight { generation })
     }
 
     /// Drop the cached account built for the lease's publication
@@ -2545,22 +2728,7 @@ impl CopilotAuthorizer {
         }
     }
 
-    async fn refresh_operator_token_as_leader(
-        &self,
-        flight: OperatorFlight,
-        generation: u64,
-    ) -> Result<CachedTokenView, ProviderAuthError> {
-        if let OperatorFlight::Rediscover {
-            published_at_millis,
-        } = flight
-            && let Some(cached) =
-                self.fresh_cached(generation, published_at_millis, (self.env.now)())
-        {
-            if !cached.model_discovery_due {
-                return Ok(cached);
-            }
-            return self.rediscover_operator_models(cached, generation).await;
-        }
+    async fn refresh_operator_token_as_leader(&self) -> Result<CachedTokenView, ProviderAuthError> {
         let material = self.load_operator_token().await?;
         if let Some(cached) = self.fresh_cached(
             material.generation,
@@ -2569,12 +2737,15 @@ impl CopilotAuthorizer {
         ) && cached.token == material.token
         {
             // Another flight already built the account for this token.
-            if !cached.model_discovery_due {
-                return Ok(cached);
-            }
-            return self
-                .rediscover_operator_models(cached, material.generation)
+            if cached.model_discovery_due {
+                self.refresh_models_off_the_request_path(
+                    &cached,
+                    material.generation,
+                    material.published_at_millis,
+                )
                 .await;
+            }
+            return Ok(cached);
         }
         self.discover_operator_account(material).await
     }
@@ -2833,9 +3004,7 @@ impl CopilotAuthorizer {
                 *self.state.pacing.identity_retry_at.lock() =
                     Some(operator_models_retry_at(error, discovery_now));
             }
-            return Err(ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
-                "GitHub Copilot model listing failed: {error}"
-            ))));
+            return Err(operator_listing_failure(error));
         }
         let (models, model_discovery_refresh_at) = match models_result {
             Ok(snapshot) => (
@@ -2894,69 +3063,6 @@ impl CopilotAuthorizer {
             exchange_unavailable: None,
         });
         Ok(view)
-    }
-
-    /// Refresh the cached account's model list. A 401 or 403 drops the cache:
-    /// for an installation token a 401 is GitHub refusing the token itself;
-    /// for a user token, a token the identity lookup did not answer
-    /// included, the account is rebuilt through the identity lookup, which
-    /// tells a revoked token from a Copilot refusal.
-    async fn rediscover_operator_models(
-        &self,
-        cached: CachedTokenView,
-        generation: u64,
-    ) -> Result<CachedTokenView, ProviderAuthError> {
-        let installation = cached
-            .identity
-            .as_deref()
-            .is_some_and(|identity| identity.installation);
-        let models = self.fetch_models(&cached.api_base, &cached.token).await;
-        let discovery_now = (self.env.now)();
-        let status = models
-            .as_ref()
-            .err()
-            .and_then(CopilotModelDiscoveryError::status);
-        let refusal = models
-            .as_ref()
-            .err()
-            .and_then(|error| models_refusal(error, installation));
-        {
-            let mut cache = self.state.cache.write();
-            if let Some(current) = cache.as_mut()
-                && current.source_generation == generation
-                && current.token == cached.token
-            {
-                match models {
-                    Ok(snapshot) => {
-                        current.models = Some(Arc::new(snapshot));
-                        current.model_discovery_refresh_at = Some(model_discovery_deadline(
-                            discovery_now,
-                            StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
-                        ));
-                    }
-                    Err(error) if refusal.is_none() => {
-                        tracing::warn!(
-                            credential_identity = %self.binding.credential_identity(),
-                            error = %error,
-                            "Copilot account model discovery retry failed"
-                        );
-                        current.model_discovery_refresh_at =
-                            Some(operator_models_retry_at(&error, discovery_now));
-                    }
-                    Err(_) => {
-                        *cache = None;
-                    }
-                }
-            }
-        }
-        let Some(refusal) = refusal else {
-            return Ok(cached);
-        };
-        if status == Some(401) && !installation {
-            let material = self.load_operator_token().await?;
-            return self.discover_operator_account(material).await;
-        }
-        Err(self.operator_refusal(refusal, &cached.token, generation))
     }
 
     /// Publish GitHub's refusal of `token`, admitted at lease `generation`,
@@ -3123,7 +3229,7 @@ impl CopilotAuthorizer {
             OperatorRefusal::RateLimited { until } => {
                 *self.state.pacing.identity_retry_at.lock() = Some(*until);
             }
-            OperatorRefusal::Refused(_) => {}
+            OperatorRefusal::Refused(_) | OperatorRefusal::Unavailable(_) => {}
         }
         refusal.into_provider_error()
     }
@@ -3192,6 +3298,10 @@ impl HttpAuthorizer for CopilotAuthorizer {
         crate::GITHUB_COPILOT_AUTHORIZER_LABEL
     }
 
+    /// `Copilot-Vision-Request` on a request with images, and `X-Initiator`:
+    /// `agent` when the request continues the agent's own work (its last
+    /// input is a tool result or the assistant's own output, or it is a
+    /// request-local call such as a compaction summary), `user` otherwise.
     fn append_content_headers(
         &self,
         content: meerkat_core::HttpAuthorizationContent,
@@ -3200,6 +3310,11 @@ impl HttpAuthorizer for CopilotAuthorizer {
         if content.has_images {
             headers.push(("Copilot-Vision-Request".to_string(), "true".to_string()));
         }
+        let initiator = match content.initiator {
+            meerkat_core::HttpRequestInitiator::User => "user",
+            meerkat_core::HttpRequestInitiator::Agent => "agent",
+        };
+        headers.push(("X-Initiator".to_string(), initiator.to_string()));
         Ok(())
     }
 
@@ -3219,6 +3334,61 @@ impl HttpAuthorizer for CopilotAuthorizer {
 }
 
 impl CopilotAuthorizer {
+    /// Start the account's due model discovery for `cached`, the token of
+    /// the source publication `source_generation` published at
+    /// `source_published_at_millis`, off the request path. One request
+    /// claims it (the next discovery then waits
+    /// [`MODEL_DISCOVERY_CLAIM_SECONDS`] while this one runs), and every
+    /// request goes on with the token and the model list the account holds
+    /// ([`BackgroundModelDiscovery`]). Without a Tokio runtime to run on, the
+    /// discovery runs before the request goes on.
+    async fn refresh_models_off_the_request_path(
+        &self,
+        cached: &CachedTokenView,
+        source_generation: u64,
+        source_published_at_millis: Option<u64>,
+    ) {
+        let now = (self.env.now)();
+        {
+            let mut cache = self.state.cache.write();
+            let Some(current) = cache.as_mut() else {
+                return;
+            };
+            if current.source_generation != source_generation
+                || current.source_published_at_millis != source_published_at_millis
+                || current.token != cached.token
+                || current
+                    .model_discovery_refresh_at
+                    .is_none_or(|refresh_at| now < refresh_at)
+            {
+                return;
+            }
+            current.model_discovery_refresh_at = Some(model_discovery_deadline(
+                now,
+                StdDuration::from_secs(MODEL_DISCOVERY_CLAIM_SECONDS),
+            ));
+        }
+        let discovery = BackgroundModelDiscovery {
+            state: Arc::clone(&self.state),
+            transport: Arc::clone(&self.transport),
+            env: self.env.clone(),
+            credential_identity: self.binding.credential_identity().clone(),
+            source_generation,
+            source_published_at_millis,
+            token: cached.token.clone(),
+            api_base: cached.api_base.clone(),
+            installation: cached
+                .identity
+                .as_deref()
+                .is_some_and(|identity| identity.installation),
+        }
+        .run();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => std::mem::drop(runtime.spawn(discovery)),
+            Err(_) => discovery.await,
+        }
+    }
+
     async fn authorize_attempt(
         &self,
         request: &mut HttpAuthorizationRequest<'_>,
@@ -3272,6 +3442,14 @@ fn auth_error_from_refresh(error: RefreshError) -> AuthError {
             disposition: meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
             ..
         } => AuthError::UserReauthRequired,
+        // AuthMachine judged the failure transient: GitHub's token endpoint
+        // cannot answer now, and a later refresh can succeed.
+        classified @ RefreshError::Classified {
+            disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+            ..
+        } => AuthError::SourceUnavailable {
+            reason: classified.to_string(),
+        },
         other => AuthError::RefreshFailed(other.to_string()),
     }
 }
@@ -3285,35 +3463,118 @@ struct CachedTokenView {
     identity: Option<Arc<CopilotAccountIdentity>>,
 }
 
+/// One refresh of an account's model list that runs off the request path,
+/// for the token a request found fresh. Its answer applies only while the
+/// account still holds that token for the same source publication (its
+/// generation and publication time): a newer token's own mint listed its
+/// models.
+///
+/// A list replaces the account's, and the next refresh is due five minutes
+/// later. A listing that refuses the token has the next request authorize
+/// again: a device sign-in's derived token is refused, so that request mints
+/// a new one, whose own listing decides (a 401 again, or a 403 that asks for
+/// an account action, needs a new sign-in); a token route's account is
+/// dropped, so that request reads the token and looks the account up again,
+/// and the lookup decides. Any other failure leaves the account's list
+/// serving and schedules the next try.
+struct BackgroundModelDiscovery {
+    state: Arc<CopilotAccountState>,
+    transport: Arc<dyn CopilotHttpTransport>,
+    env: ResolverEnvironment,
+    credential_identity: AuthCredentialIdentity,
+    source_generation: u64,
+    source_published_at_millis: Option<u64>,
+    token: String,
+    api_base: String,
+    /// Token mode: the token is a GitHub App installation token.
+    installation: bool,
+}
+
+impl BackgroundModelDiscovery {
+    async fn run(self) {
+        let models = fetch_copilot_models(
+            self.transport.as_ref(),
+            &self.state.config,
+            &self.api_base,
+            &self.token,
+        )
+        .await;
+        let now = (self.env.now)();
+        let mut cache = self.state.cache.write();
+        let current = match cache.as_mut() {
+            Some(current)
+                if current.source_generation == self.source_generation
+                    && current.source_published_at_millis == self.source_published_at_millis
+                    && current.token == self.token =>
+            {
+                current
+            }
+            _ => return,
+        };
+        let error = match models {
+            Ok(snapshot) => {
+                current.models = Some(Arc::new(snapshot));
+                current.model_discovery_refresh_at = Some(model_discovery_deadline(
+                    now,
+                    StdDuration::from_secs(MODEL_DISCOVERY_REFRESH_SECONDS),
+                ));
+                return;
+            }
+            Err(error) => error,
+        };
+        let refused = match self.state.mode {
+            CopilotCredentialMode::DeviceSignIn => error.refuses_derived_token(),
+            CopilotCredentialMode::OperatorToken => {
+                models_refusal(&error, self.installation).is_some()
+            }
+        };
+        if !refused {
+            tracing::warn!(
+                credential_identity = %self.credential_identity,
+                error = %error,
+                "Copilot account model discovery failed; the account's last model list keeps serving"
+            );
+            current.model_discovery_refresh_at = Some(match self.state.mode {
+                CopilotCredentialMode::DeviceSignIn => {
+                    model_discovery_deadline(now, error.retry_delay())
+                }
+                CopilotCredentialMode::OperatorToken => operator_models_retry_at(&error, now),
+            });
+            return;
+        }
+        tracing::warn!(
+            credential_identity = %self.credential_identity,
+            error = %error,
+            "Copilot refused the account's token for its model list; the next request authorizes again"
+        );
+        match self.state.mode {
+            CopilotCredentialMode::DeviceSignIn => current.refuse(),
+            CopilotCredentialMode::OperatorToken => *cache = None,
+        }
+    }
+}
+
 /// The work an elected leader runs, by the account's credential mode.
 enum LeaderTask {
     /// Device sign-in: derive a Copilot token from this stored GitHub token.
     Device(PersistedTokens),
-    /// Operator token: the flight the fast path asked for.
-    Operator(OperatorFlight),
-}
-
-/// The operator-token flight the fast path asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperatorFlight {
-    /// The cache is admitted for the current lease publication (the observed
-    /// generation, published at `published_at_millis`) and only its model
-    /// list is due.
-    Rediscover { published_at_millis: Option<u64> },
-    /// Read the source token again: there is no cache for the current lease
-    /// publication, or the AuthMachine did not admit the lease as it is.
-    Reload,
+    /// Operator token: read the source token again.
+    Operator,
 }
 
 /// What one pass of the operator-token fast path decided.
 enum OperatorObservation {
-    /// The cache is admitted for the current lease publication and current.
-    Cached(CachedTokenView),
-    /// A flight must run for the lease generation observed.
-    Flight {
+    /// The cache is admitted for the current lease publication (generation
+    /// `generation`, published at `published_at_millis`) and its token is
+    /// fresh.
+    Cached {
+        cached: CachedTokenView,
         generation: u64,
-        flight: OperatorFlight,
+        published_at_millis: Option<u64>,
     },
+    /// A flight must read the source token for the lease generation
+    /// observed.
+    Flight { generation: u64 },
 }
 
 /// An operator token read from its source and admitted by the AuthMachine.
@@ -3343,6 +3604,10 @@ enum OperatorRefusal {
     Refused(String),
     /// GitHub rate limited the identity lookup until `until`.
     RateLimited { until: DateTime<Utc> },
+    /// GitHub could not answer the identity lookup now: a 5xx, a network
+    /// failure or a timeout. Not a credential fact, and nothing is paused:
+    /// the next request asks again.
+    Unavailable(String),
 }
 
 impl OperatorRefusal {
@@ -3351,7 +3616,7 @@ impl OperatorRefusal {
             Self::TokenRejected { status, message } => {
                 format!("GitHub refused this token ({status}): {message}")
             }
-            Self::Refused(detail) => detail.clone(),
+            Self::Refused(detail) | Self::Unavailable(detail) => detail.clone(),
             Self::RateLimited { until } => format!(
                 "GitHub rate limited the Copilot identity lookup until {}",
                 until.to_rfc3339()
@@ -3359,12 +3624,17 @@ impl OperatorRefusal {
         }
     }
 
+    /// A rate limit and an unavailable lookup clear on their own
+    /// (`source_unavailable`); a refusal of the identity needs the account
+    /// fixed (`refresh_failed`), and a refusal of the token a new token.
     fn into_provider_error(self) -> ProviderAuthError {
         match self {
             Self::TokenRejected { .. } => ProviderAuthError::Auth(AuthError::UserReauthRequired),
             Self::Refused(detail) => ProviderAuthError::Auth(AuthError::RefreshFailed(detail)),
-            refusal @ Self::RateLimited { .. } => {
-                ProviderAuthError::Auth(AuthError::RefreshFailed(refusal.detail()))
+            refusal @ (Self::RateLimited { .. } | Self::Unavailable(_)) => {
+                ProviderAuthError::Auth(AuthError::SourceUnavailable {
+                    reason: refusal.detail(),
+                })
             }
         }
     }
@@ -3398,7 +3668,15 @@ async fn lookup_operator_identity(
         .get(url.as_str(), headers)
         .await
         .map_err(|error| {
-            OperatorRefusal::Refused(format!("GitHub Copilot identity lookup failed: {error}"))
+            let detail = format!("GitHub Copilot identity lookup failed: {error}");
+            // A network failure or a timeout may pass; a refused redirect,
+            // an oversized answer or a missing HTTP client will not.
+            match error {
+                CopilotHttpTransportError::Request(_) | CopilotHttpTransportError::Timeout => {
+                    OperatorRefusal::Unavailable(detail)
+                }
+                _ => OperatorRefusal::Refused(detail),
+            }
         })?;
     if response.rate_limited {
         return Err(OperatorRefusal::RateLimited {
@@ -3439,6 +3717,13 @@ async fn lookup_operator_identity(
         status @ 400..=499 => {
             return Err(OperatorRefusal::Refused(format!(
                 "GitHub Copilot refused this token ({status}): {}",
+                github_error_message(&response.body, token)
+            )));
+        }
+        // GitHub unavailable: the next request asks again.
+        status @ 500..=599 => {
+            return Err(OperatorRefusal::Unavailable(format!(
+                "GitHub Copilot identity lookup failed ({status}): {}",
                 github_error_message(&response.body, token)
             )));
         }
@@ -3799,14 +4084,24 @@ async fn verify_operator_token_with(
     match fetch_copilot_models(transport, config, &identity.api_base, token).await {
         Ok(_) => Ok(identity),
         Err(error) => Err(models_refusal(&error, identity.installation).map_or_else(
-            || {
-                ProviderAuthError::Auth(AuthError::RefreshFailed(format!(
-                    "GitHub Copilot model listing failed: {error}"
-                )))
-            },
+            || operator_listing_failure(&error),
             OperatorRefusal::into_provider_error,
         )),
     }
+}
+
+/// A required model listing of an operator token that failed without
+/// refusing the token: one that may answer later (a rate limit, a 408, 502,
+/// 503 or 504, a network failure or a timeout) is a credential source that
+/// cannot answer now, which clears on its own; any other failure is
+/// `refresh_failed`.
+fn operator_listing_failure(error: &CopilotModelDiscoveryError) -> ProviderAuthError {
+    let reason = format!("GitHub Copilot model listing failed: {error}");
+    ProviderAuthError::Auth(if error.clears_on_its_own() {
+        AuthError::SourceUnavailable { reason }
+    } else {
+        AuthError::RefreshFailed(reason)
+    })
 }
 
 /// A Copilot API base: an `https` URL without user information.
@@ -3862,14 +4157,14 @@ fn api_base_from_proxy_token(token: &str) -> Option<String> {
 }
 
 fn token_exchange_requires_account_action(status: u16, body: &[u8]) -> bool {
-    if status == 401 {
-        return true;
-    }
-    if status != 403 {
-        return false;
-    }
-    let envelope = serde_json::from_slice::<CopilotTokenErrorEnvelope>(body).unwrap_or_default();
-    envelope
+    status == 401 || (status == 403 && github_account_action(body))
+}
+
+/// Whether a GitHub answer asks for an action on the account: it names an
+/// `error_details.notification_id`.
+fn github_account_action(body: &[u8]) -> bool {
+    serde_json::from_slice::<CopilotTokenErrorEnvelope>(body)
+        .unwrap_or_default()
         .error_details
         .and_then(|details| details.notification_id)
         .is_some()
@@ -3977,6 +4272,21 @@ fn exchange_retry_at(
         .ok()
         .and_then(|delay| now.checked_add_signed(delay))
         .map_or(expires_at, |retry_at| retry_at.min(expires_at))
+}
+
+/// The instant before which a recorded exchange outage answers in place of
+/// the exchange: `retry_after` (the exchange's own `Retry-After`) from `now`,
+/// at least [`TOKEN_EXCHANGE_MIN_RETRY_SECONDS`] and at most
+/// [`TOKEN_EXCHANGE_MAX_RETRY_SECONDS`].
+fn exchange_not_before(now: DateTime<Utc>, retry_after: StdDuration) -> DateTime<Utc> {
+    let delay = retry_after.clamp(
+        StdDuration::from_secs(TOKEN_EXCHANGE_MIN_RETRY_SECONDS),
+        StdDuration::from_secs(TOKEN_EXCHANGE_MAX_RETRY_SECONDS),
+    );
+    Duration::from_std(delay)
+        .ok()
+        .and_then(|delay| now.checked_add_signed(delay))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 fn insert_header(
@@ -4396,6 +4706,44 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), cases.len());
     }
 
+    /// The production transport reads a `Retry-After` given as an HTTP date
+    /// as the delay until that date, as it reads a number of seconds: an
+    /// exchange outage paces its retry by it, and a 403 that carries one is a
+    /// rate limit. (Fails-old: only a number of seconds was read, so the date
+    /// gave no delay and the 403 was no rate limit.)
+    #[tokio::test]
+    async fn an_http_date_retry_after_is_read_from_a_real_answer() {
+        let at = (Utc::now() + Duration::seconds(120)).format("%a, %d %b %Y %H:%M:%S GMT");
+        let header = format!("retry-after: {at}\r\n");
+        let (base, hits) = spawn_github_answers(vec![
+            github_answer(503, &header, r#"{"message":"service unavailable"}"#),
+            github_answer(403, &header, r#"{"message":"slow down"}"#),
+        ])
+        .await;
+        let transport = ReqwestCopilotHttpTransport::new();
+
+        let outage = transport
+            .get(
+                &format!("{base}/copilot_internal/v2/token"),
+                HeaderMap::new(),
+            )
+            .await
+            .expect("the outage answer");
+        assert!(
+            outage
+                .retry_after
+                .is_some_and(|delay| (100..=120).contains(&delay.as_secs())),
+            "{:?}",
+            outage.retry_after
+        );
+        let limited = transport
+            .get(&format!("{base}/copilot_internal/user"), HeaderMap::new())
+            .await
+            .expect("the rate limit answer");
+        assert!(limited.rate_limited, "{:?}", limited.retry_after);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     use meerkat_core::auth::TokenStore;
     use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
     use meerkat_core::{
@@ -4623,6 +4971,37 @@ mod tests {
         )
     }
 
+    /// Let work the code under test started in the background (a model
+    /// discovery off the request path) run until `done` holds.
+    async fn settle(done: impl Fn() -> bool) {
+        for _ in 0..10_000 {
+            if done() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the background work did not settle");
+    }
+
+    /// A model listing of `gpt-test` and `later_id`.
+    fn models_listing_with(later_id: &str) -> CopilotHttpResponse {
+        json_response(
+            200,
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "gpt-test",
+                        "supported_endpoints": ["/responses", "/chat/completions"]
+                    },
+                    {
+                        "id": later_id,
+                        "supported_endpoints": ["/chat/completions"]
+                    }
+                ]
+            }),
+        )
+    }
+
     fn validated_binding() -> (AuthBindingRef, ValidatedBinding) {
         let auth_binding = AuthBindingRef {
             realm: RealmId::global(),
@@ -4826,6 +5205,7 @@ mod tests {
             retry_after: Some(StdDuration::from_secs(u64::MAX)),
             rate_limited: true,
             rate_limit_reset: None,
+            account_action: false,
         };
 
         let delay = error.retry_delay();
@@ -4924,7 +5304,7 @@ mod tests {
             model_picker_enabled: None,
             capabilities: crate::CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         }])
         .expect("model snapshot");
         *state.cache.write() = Some(CachedCopilotToken {
@@ -5069,7 +5449,7 @@ mod tests {
             model_picker_enabled: None,
             capabilities: crate::CopilotModelCapabilities::default(),
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         }])
         .expect("model snapshot");
         *state.cache.write() = Some(CachedCopilotToken {
@@ -5183,6 +5563,247 @@ mod tests {
         }
     }
 
+    /// The routed client states the account limits of the route it serves:
+    /// the gated route's prompt limit and output limit reach the factory
+    /// through it (the prompt limit bounds the session's compaction
+    /// threshold). The route's model states a context window and no prompt
+    /// limit, so its prompt limit is the window less the session's output
+    /// budget, which the routed client hands on.
+    #[tokio::test]
+    async fn a_routed_client_states_its_routes_account_limits() {
+        let runtime = Arc::new(CopilotRuntime::new());
+        let (auth_binding, binding) = validated_binding();
+        let (env, auth_lease) = resolver_environment(&auth_binding).await;
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "gpt-test".to_string(),
+            vendor: None,
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: crate::CopilotModelCapabilities {
+                limits: crate::CopilotModelLimits {
+                    max_context_window_tokens: Some(128_000),
+                    max_output_tokens: Some(16_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            policy: None,
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_published_at_millis: stored_record_published_at(&auth_lease),
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let authorizer = Arc::new(CopilotAuthorizer {
+            state: Arc::clone(&state),
+            binding: binding.clone(),
+            env,
+            transport: Arc::new(ScriptedTransport::new([])),
+        });
+        let connection = meerkat_llm_core::provider_runtime::ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: binding.backend(),
+            backend_profile: binding.backend_profile().clone(),
+            credential_identity: binding.credential_identity().clone(),
+            auth_lease: Arc::new(
+                meerkat_llm_core::provider_runtime::DynamicLease::from_authorizer(
+                    authorizer,
+                    AuthMetadata::default(),
+                    crate::GITHUB_COPILOT_AUTHORIZER_LABEL,
+                ),
+            ),
+        };
+        runtime.accounts.lock().insert(
+            CopilotAccountCacheKey {
+                persistence_id,
+                credential_identity: binding.credential_identity().clone(),
+            },
+            Arc::downgrade(&state),
+        );
+        let factory: CopilotRouteClientFactory = Arc::new(|_, _| Ok(Arc::new(NoopLlmClient)));
+        let client = routed_client(
+            Arc::clone(&runtime),
+            connection,
+            Provider::OpenAI,
+            "gpt-test".to_string(),
+            factory,
+        )
+        .expect("routed client");
+        assert_eq!(
+            client.prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
+        assert_eq!(client.output_token_limit(), Some(16_000));
+    }
+
+    /// A recorded exchange outage answers in place of the exchange until its
+    /// `Retry-After`, kept between one second and one hour from now.
+    #[test]
+    fn an_outage_not_before_stays_between_a_second_and_an_hour() {
+        let now = Utc::now();
+        assert_eq!(
+            exchange_not_before(now, StdDuration::from_mins(1)),
+            now + Duration::seconds(60)
+        );
+        assert_eq!(
+            exchange_not_before(now, StdDuration::from_hours(2)),
+            now + Duration::seconds(3_600),
+            "an hour at most"
+        );
+        assert_eq!(
+            exchange_not_before(now, StdDuration::ZERO),
+            now + Duration::seconds(1),
+            "a second at least"
+        );
+    }
+
+    /// A device sign-in account holding `token` (and a model list) since
+    /// `now`, for a background model listing to answer about.
+    async fn discovery_account(
+        token: &str,
+        now: DateTime<Utc>,
+    ) -> (
+        Arc<CopilotAccountState>,
+        ResolverEnvironment,
+        AuthCredentialIdentity,
+    ) {
+        let runtime = Arc::new(CopilotRuntime::new());
+        let (auth_binding, binding) = validated_binding();
+        let (mut env, _) = resolver_environment(&auth_binding).await;
+        env.now = Arc::new(move || now);
+        let persistence_id = env
+            .provider_auth_persistence()
+            .expect("test persistence")
+            .authority_id();
+        let state = runtime
+            .account_state(
+                persistence_id,
+                binding.credential_identity(),
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )
+            .expect("account state");
+        let snapshot = CopilotModelSnapshot::from_models(vec![crate::CopilotModel {
+            id: "gpt-test".to_string(),
+            vendor: None,
+            name: None,
+            version: None,
+            model_picker_enabled: None,
+            capabilities: Default::default(),
+            policy: None,
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+        }])
+        .expect("model snapshot");
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 2,
+            token: token.to_string(),
+            source_generation: 1,
+            source_published_at_millis: None,
+            source_expires_at: None,
+            refresh_at: now + Duration::hours(1),
+            expires_at: now + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        (state, env, binding.credential_identity().clone())
+    }
+
+    /// A background model listing answers only for the token it was asked
+    /// with: once the account holds a newer token, the listing's refusal of
+    /// the older one changes nothing, and the newer token and its list keep
+    /// serving.
+    #[tokio::test]
+    async fn a_background_listing_for_an_older_token_leaves_the_newer_one() {
+        let now = Utc::now();
+        let (state, env, credential_identity) = discovery_account("newer", now).await;
+        BackgroundModelDiscovery {
+            state: Arc::clone(&state),
+            transport: Arc::new(ScriptedTransport::new([json_response(
+                401,
+                serde_json::json!({"message": "Bad credentials"}),
+            )])),
+            env,
+            credential_identity,
+            source_generation: 1,
+            source_published_at_millis: None,
+            token: "older".to_string(),
+            api_base: "https://copilot.example.test".to_string(),
+            installation: false,
+        }
+        .run()
+        .await;
+        let cache = state.cache.read();
+        let current = cache.as_ref().expect("the account keeps its token");
+        assert_eq!(current.token, "newer");
+        assert_eq!(
+            current.expires_at,
+            now + Duration::hours(2),
+            "the newer token is not refused"
+        );
+        assert!(current.models.is_some(), "its list keeps serving");
+    }
+
+    /// A device sign-in's background listing that fails without refusing
+    /// the token (here a 503, on both attempts) is tried again only after
+    /// the listing's `Retry-After`, not after the default 30 seconds.
+    #[tokio::test]
+    async fn a_failed_background_listing_waits_for_its_retry_after() {
+        let now = Utc::now();
+        let (state, env, credential_identity) = discovery_account("derived", now).await;
+        let unavailable = || CopilotHttpResponse {
+            retry_after: Some(StdDuration::from_mins(2)),
+            ..json_response(503, serde_json::json!({"message": "unavailable"}))
+        };
+        BackgroundModelDiscovery {
+            state: Arc::clone(&state),
+            transport: Arc::new(ScriptedTransport::new([unavailable(), unavailable()])),
+            env,
+            credential_identity,
+            source_generation: 1,
+            source_published_at_millis: None,
+            token: "derived".to_string(),
+            api_base: "https://copilot.example.test".to_string(),
+            installation: false,
+        }
+        .run()
+        .await;
+        let cache = state.cache.read();
+        let current = cache.as_ref().expect("the account keeps its token");
+        assert_eq!(
+            current.model_discovery_refresh_at,
+            Some(now + Duration::seconds(120))
+        );
+        assert!(current.models.is_some(), "the last list keeps serving");
+    }
+
     /// Structured output on every Copilot route: the routed client (and the
     /// account capability gate in front of the adapter) hands the adapter the
     /// exact request the agent loop composed, schema section and native
@@ -5228,7 +5849,7 @@ mod tests {
                 ..Default::default()
             },
             policy: None,
-            supported_endpoints: vec![CopilotEndpoint::Responses],
+            supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
         }])
         .expect("model snapshot");
         *state.cache.write() = Some(CachedCopilotToken {
@@ -5383,6 +6004,336 @@ mod tests {
             capability_gated_client(Arc::new(NoopLlmClient), None).output_token_limit(),
             None
         );
+    }
+
+    /// The account model's prompt limit is the most input one request may
+    /// carry on the route: the gate states it to the factory (the tighter of
+    /// the prompt limit and the context window, either alone when only one is
+    /// stated), which keeps the session's default compaction threshold below
+    /// it.
+    #[test]
+    fn account_capability_gate_states_the_account_prompt_limit() {
+        let gated = |max_prompt_tokens, max_context_window_tokens| {
+            capability_gated_client(
+                Arc::new(NoopLlmClient),
+                Some(crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_context_window_tokens,
+                        max_prompt_tokens,
+                        ..Default::default()
+                    },
+                    supports: Default::default(),
+                }),
+            )
+        };
+        assert_eq!(
+            gated(Some(64_000), Some(128_000)).prompt_token_limit(0),
+            Some(64_000)
+        );
+        assert_eq!(
+            gated(Some(200_000), Some(128_000)).prompt_token_limit(0),
+            Some(128_000)
+        );
+        assert_eq!(
+            gated(Some(64_000), None).prompt_token_limit(0),
+            Some(64_000)
+        );
+        assert_eq!(
+            gated(None, Some(128_000)).prompt_token_limit(0),
+            Some(128_000)
+        );
+        assert_eq!(gated(None, None).prompt_token_limit(0), None);
+        assert_eq!(
+            capability_gated_client(Arc::new(NoopLlmClient), None).prompt_token_limit(0),
+            None
+        );
+    }
+
+    /// A client that states the provider's own input-token count for every
+    /// request, as a provider with a counting endpoint would.
+    struct MeasuredInputClient {
+        input_tokens: u64,
+    }
+
+    #[async_trait]
+    impl meerkat_llm_core::LlmClient for MeasuredInputClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_llm_core::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn request_pressure(
+            &self,
+            _request: &meerkat_llm_core::LlmRequest,
+        ) -> Result<Option<meerkat_core::ProviderRequestPressure>, meerkat_llm_core::LlmError>
+        {
+            Ok(Some(
+                meerkat_core::ProviderRequestPressure::new(1, None)
+                    .with_provider_issued_input_tokens(self.input_tokens),
+            ))
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _request: &'a meerkat_llm_core::LlmRequest,
+        ) -> meerkat_llm_core::LlmStream<'a> {
+            Box::pin(futures::stream::empty())
+        }
+
+        fn provider(&self) -> Provider {
+            Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_llm_core::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A prompt the provider measured over the account model's prompt limit
+    /// is a context refusal (`ContextLengthExceeded`), the class the agent
+    /// compacts on, not an invalid request; one at the limit goes out. No
+    /// Copilot error body is assumed: the gate decides from the stated limit
+    /// and the provider's own count.
+    #[test]
+    fn a_prompt_measured_over_the_account_limit_is_a_context_refusal() {
+        let gated = |input_tokens| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_prompt_tokens: Some(64_000),
+                        ..Default::default()
+                    },
+                    supports: Default::default(),
+                }),
+            )
+        };
+        let request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        let refused = gated(64_001).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded {
+                    max: 64_000,
+                    requested: 64_001,
+                })
+            ),
+            "{refused:?}"
+        );
+        assert!(gated(64_000).request_pressure(&request).is_ok());
+    }
+
+    /// The gate and the compaction threshold read one prompt limit: the
+    /// tighter of the stated prompt limit and the context window less the
+    /// request's output budget. The gate takes the request's own budget; the
+    /// limit stated to the factory takes the session's budget, which the
+    /// session's requests ask for, so it is the limit the gate enforces on
+    /// them. (Fails-old: with only the window stated the factory read the
+    /// whole window, above the gate's limit; with both stated the gate read
+    /// the prompt limit alone, above the window.)
+    #[test]
+    fn the_gate_and_the_compaction_threshold_read_one_prompt_limit() {
+        let gated = |input_tokens, limits| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits,
+                    supports: Default::default(),
+                }),
+            )
+        };
+        let window_only = crate::CopilotModelLimits {
+            max_context_window_tokens: Some(128_000),
+            max_output_tokens: Some(32_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            gated(0, window_only.clone()).prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
+        let mut request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        request.max_tokens = 32_000;
+        assert!(matches!(
+            gated(96_001, window_only).request_pressure(&request),
+            Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
+        ));
+
+        let prompt_above_window = crate::CopilotModelLimits {
+            max_prompt_tokens: Some(200_000),
+            max_context_window_tokens: Some(128_000),
+            ..Default::default()
+        };
+        request.max_tokens = 8_000;
+        let refused = gated(125_000, prompt_above_window.clone()).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 120_000, .. })
+            ),
+            "the window less the request's output budget binds: {refused:?}"
+        );
+        assert!(
+            gated(120_000, prompt_above_window)
+                .request_pressure(&request)
+                .is_ok()
+        );
+    }
+
+    /// A model whose account states a context window and no output limit:
+    /// the limit stated for a session's output budget is the window less
+    /// that budget, the limit the gate enforces on the session's requests.
+    /// A 128_000 window with a 32_000 budget states 96_000, and the gate
+    /// refuses a measured 96_001-token prompt of a 32_000-token request at
+    /// 96_000. (Fails-old: without an output limit the stated limit took a
+    /// budget of 0, the whole window, so the session's default compaction
+    /// threshold sat above what the gate admits.)
+    #[test]
+    fn a_window_without_an_output_limit_states_the_limit_for_the_session_budget() {
+        let gated = |input_tokens| {
+            capability_gated_client(
+                Arc::new(MeasuredInputClient { input_tokens }),
+                Some(crate::CopilotModelCapabilities {
+                    limits: crate::CopilotModelLimits {
+                        max_context_window_tokens: Some(128_000),
+                        ..Default::default()
+                    },
+                    supports: Default::default(),
+                }),
+            )
+        };
+        assert_eq!(
+            gated(0).prompt_token_limit(32_000),
+            Some(96_000),
+            "the window less the session's output budget"
+        );
+        let mut request = meerkat_llm_core::LlmRequest::new("gpt-test", Vec::new());
+        request.max_tokens = 32_000;
+        let refused = gated(96_001).request_pressure(&request);
+        assert!(
+            matches!(
+                refused,
+                Err(meerkat_llm_core::LlmError::ContextLengthExceeded { max: 96_000, .. })
+            ),
+            "{refused:?}"
+        );
+    }
+
+    /// A model the account lists with a policy state other than `enabled`
+    /// is unavailable on the account's routes, and the refusal names the
+    /// state the account states, with the models the account does offer.
+    #[test]
+    fn an_unavailable_route_names_the_policy_state() {
+        let listed =
+            |id: &str, policy: Option<crate::CopilotModelPolicyState>| crate::CopilotModel {
+                id: id.to_string(),
+                vendor: None,
+                name: None,
+                version: None,
+                model_picker_enabled: None,
+                capabilities: Default::default(),
+                policy: policy.map(|state| crate::CopilotModelPolicy { state }),
+                supported_endpoints: Some(vec![CopilotEndpoint::Responses]),
+            };
+        let snapshot = CopilotModelSnapshot::from_models(vec![
+            listed(
+                "gpt-test",
+                Some(crate::CopilotModelPolicyState::Other(
+                    "unconfigured".to_string(),
+                )),
+            ),
+            listed("gpt-other", None),
+        ])
+        .expect("model snapshot");
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_published_at_millis: None,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let route =
+            resolve_route_for_state(&state, Provider::OpenAI, "gpt-test").expect("a cached route");
+        assert_eq!(route.access, CopilotModelAccess::Unavailable);
+        let message =
+            route.unavailable_message(Provider::OpenAI, "gpt-test", CopilotEndpoint::Responses);
+        assert!(
+            message.contains("policy state for openai model 'gpt-test' is 'unconfigured'"),
+            "{message}"
+        );
+        assert!(message.contains("gpt-other"), "{message}");
+    }
+
+    /// A catalog entry whose endpoint list is empty states that the model has
+    /// no endpoints: no family is served it (an entry that states no list is
+    /// served on Chat Completions), the account's model list refuses it with
+    /// `NoEndpoints`, and a registry model's route says so.
+    #[test]
+    fn an_explicitly_empty_endpoint_list_is_refused() {
+        use meerkat_llm_core::provider_runtime::{AccountModelLookup, AccountModelRefusal};
+        let listed: crate::CopilotModelsEnvelope = serde_json::from_value(serde_json::json!({
+            "data": [
+                {"id": "gpt-test", "supported_endpoints": []},
+                {"id": "gpt-other", "supported_endpoints": ["/responses"]}
+            ]
+        }))
+        .expect("model list");
+        let snapshot = CopilotModelSnapshot::from_models(listed.data).expect("model snapshot");
+        let offering = snapshot.model("gpt-test").expect("listed model");
+        for provider in [Provider::OpenAI, Provider::Gemini, Provider::Anthropic] {
+            assert_eq!(offering.route_for(provider), None, "{provider:?}");
+        }
+        assert_eq!(offering.protocol_provider(), None);
+        let credential = account_identity();
+        assert_eq!(
+            snapshot.account_model(&credential, "gpt-test"),
+            AccountModelLookup::Refused(AccountModelRefusal::NoEndpoints {
+                credential: credential.clone(),
+                model: "gpt-test".to_string(),
+            })
+        );
+
+        let state = Arc::new(CopilotAccountState::new(
+            CopilotBackendConfig::default(),
+            CopilotCredentialMode::DeviceSignIn,
+        ));
+        *state.cache.write() = Some(CachedCopilotToken {
+            generation: 1,
+            token: "derived".to_string(),
+            source_generation: 1,
+            source_published_at_millis: None,
+            source_expires_at: None,
+            refresh_at: Utc::now() + Duration::hours(1),
+            expires_at: Utc::now() + Duration::hours(2),
+            api_base: "https://copilot.example.test".to_string(),
+            models: Some(Arc::new(snapshot)),
+            model_discovery_refresh_at: None,
+            identity: None,
+            exchange_unavailable: None,
+        });
+        let route =
+            resolve_route_for_state(&state, Provider::OpenAI, "gpt-test").expect("a cached route");
+        assert_eq!(route.access, CopilotModelAccess::Unavailable);
+        let message =
+            route.unavailable_message(Provider::OpenAI, "gpt-test", CopilotEndpoint::Responses);
+        assert!(
+            message.contains("lists no endpoints for openai model 'gpt-test'"),
+            "{message}"
+        );
+        assert!(message.contains("gpt-other"), "{message}");
     }
 
     #[test]
@@ -5736,6 +6687,55 @@ mod tests {
             integration_ids,
             vec![Some("vscode-chat".to_string()); 3],
             "token exchange, model listing, inference"
+        );
+    }
+
+    /// Inference names who initiated each request in `X-Initiator`: `agent`
+    /// when the agent continues its own work, `user` otherwise. An image
+    /// request still names vision.
+    #[tokio::test]
+    async fn inference_names_who_initiated_the_request() {
+        use meerkat_core::HttpAuthorizationContent;
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let (auth_binding, binding) = validated_binding();
+        let (env, _auth_lease) = resolver_environment(&auth_binding).await;
+        let authorizer = CopilotAuthorizer {
+            state: Arc::new(CopilotAccountState::new(
+                CopilotBackendConfig::default(),
+                CopilotCredentialMode::DeviceSignIn,
+            )),
+            binding,
+            env,
+            transport: Arc::new(ScriptedTransport::new(Vec::new())),
+        };
+        let headers_for = |has_images, initiator| {
+            let mut headers = Vec::new();
+            authorizer
+                .append_content_headers(
+                    HttpAuthorizationContent {
+                        has_images,
+                        initiator,
+                    },
+                    &mut headers,
+                )
+                .expect("content headers");
+            headers
+        };
+        let header = |name: &str, value: &str| (name.to_string(), value.to_string());
+        assert_eq!(
+            headers_for(false, Agent),
+            vec![header("X-Initiator", "agent")]
+        );
+        assert_eq!(
+            headers_for(false, User),
+            vec![header("X-Initiator", "user")]
+        );
+        assert_eq!(
+            headers_for(true, Agent),
+            vec![
+                header("Copilot-Vision-Request", "true"),
+                header("X-Initiator", "agent")
+            ]
         );
     }
 
@@ -6100,8 +7100,10 @@ mod tests {
     async fn failed_model_discovery_retries_without_reminting_derived_token() {
         let (auth_binding, binding) = validated_binding();
         let (env, _) = resolver_environment(&auth_binding).await;
+        // The listing's 503 is tried once more at once, and fails again.
         let transport = Arc::new(ScriptedTransport::new([
             token_response("derived"),
+            json_response(503, serde_json::json!({"message": "temporary"})),
             json_response(503, serde_json::json!({"message": "temporary"})),
             models_response(),
         ]));
@@ -6119,7 +7121,7 @@ mod tests {
             .prime()
             .await
             .expect("token mint survives discovery failure");
-        assert_eq!(transport.request_count(), 2);
+        assert_eq!(transport.request_count(), 3);
         state
             .cache
             .write()
@@ -6135,17 +7137,19 @@ mod tests {
                 headers: &mut headers,
             })
             .await
-            .expect("discovery retry succeeds");
+            .expect("the request goes out while the discovery is retried");
 
-        assert_eq!(
-            transport.request_count(),
-            3,
-            "discovery retry must reuse the derived token"
-        );
-        assert!(
+        // The retry runs off the request path.
+        settle(|| {
             authorizer
                 .model_snapshot()
                 .is_some_and(|snapshot| snapshot.model("gpt-test").is_some())
+        })
+        .await;
+        assert_eq!(
+            transport.request_count(),
+            4,
+            "discovery retry must reuse the derived token"
         );
     }
 
@@ -6798,6 +7802,15 @@ mod tests {
             match error {
                 ProviderAuthError::Auth(AuthError::RefreshFailed(detail)) => detail,
                 other => panic!("expected refresh_failed, got {other:?}"),
+            }
+        }
+
+        /// The reason of a resolution that failed because GitHub cannot
+        /// answer now (a rate limit, an outage), which clears on its own.
+        fn source_unavailable(error: ProviderAuthError) -> String {
+            match error {
+                ProviderAuthError::Auth(AuthError::SourceUnavailable { reason }) => reason,
+                other => panic!("expected source_unavailable, got {other:?}"),
             }
         }
 
@@ -7777,7 +8790,7 @@ mod tests {
             ]);
             let source = token_file_command(directory.path());
             let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -7788,7 +8801,7 @@ mod tests {
 
             harness.operator.advance(60);
             for _ in 0..3 {
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     resolve()
                         .await
                         .err()
@@ -7813,7 +8826,7 @@ mod tests {
         /// GitHub's secondary rate limit, a 403 whose message says so and that
         /// may carry no `Retry-After` and no rate-limit header, pauses the
         /// account's identity lookup like any rate limit, read through the
-        /// production transport: requests fail as `refresh_failed` without
+        /// production transport: requests fail as `source_unavailable` without
         /// asking GitHub again or running the token's command, for the minute
         /// GitHub asks for at least, and the lookup runs again after it. It
         /// is no refusal of the token.
@@ -7845,7 +8858,7 @@ mod tests {
             );
             let resolve = || runtime.resolve(&binding, &operator.env);
 
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -7857,7 +8870,7 @@ mod tests {
 
             operator.advance(59);
             for _ in 0..3 {
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     resolve()
                         .await
                         .err()
@@ -7907,7 +8920,7 @@ mod tests {
             let resolve = || harness.resolve_from(CopilotProviderRoute::OpenAi, source.clone());
             resolve().await.expect("the token resolves");
             // A later account state's identity lookup is rate limited.
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -7921,7 +8934,7 @@ mod tests {
                 .auth_lease
                 .release_lease(&lease_key())
                 .expect("log out");
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 resolve()
                     .await
                     .err()
@@ -8919,8 +9932,8 @@ mod tests {
         /// after an identity lookup that did not answer the token, which
         /// pauses that token for a minute; chat disabled) is a typed
         /// `refresh_failed` that does not touch the lease, and the same token
-        /// works once that is fixed. A rate limit pauses the identity lookup
-        /// until GitHub's stated time.
+        /// works once that is fixed. A rate limit (a `source_unavailable`)
+        /// pauses the identity lookup until GitHub's stated time.
         #[tokio::test]
         async fn copilot_refusal_is_typed_and_not_sticky() {
             let harness = Harness::new([
@@ -8995,7 +10008,7 @@ mod tests {
                 env: operator.env.clone(),
                 transport: transport.clone(),
             };
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 authorizer
                     .prime()
                     .await
@@ -9003,7 +10016,7 @@ mod tests {
             );
             assert!(detail.contains("rate limited"), "{detail}");
             operator.advance(119);
-            refresh_failure(
+            source_unavailable(
                 authorizer
                     .prime()
                     .await
@@ -9037,7 +10050,7 @@ mod tests {
             harness
                 .operator
                 .set("COPILOT_GITHUB_TOKEN", &user_token("paced"));
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9047,7 +10060,7 @@ mod tests {
             assert!(detail.contains("rate limited"), "{detail}");
 
             harness.operator.advance(60);
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::Anthropic)
                     .await
@@ -9086,7 +10099,7 @@ mod tests {
             let other_store = OperatorEnv::new();
             other_store.set("COPILOT_GITHUB_TOKEN", &token);
             *other_store.clock.lock() = *harness.operator.clock.lock();
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9095,7 +10108,7 @@ mod tests {
             );
             assert!(detail.contains("rate limited"), "{detail}");
 
-            let detail = refresh_failure(
+            let detail = source_unavailable(
                 harness
                     .runtime
                     .resolve(
@@ -9114,10 +10127,77 @@ mod tests {
             );
         }
 
+        /// A real connection failure: a request to a local port nothing
+        /// listens on.
+        async fn refused_connection() -> reqwest::Error {
+            let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = closed.local_addr().unwrap();
+            drop(closed);
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/user"))
+                .send()
+                .await
+                .expect_err("nothing listens on a closed port")
+        }
+
+        /// GitHub unavailable: an identity lookup that answers a 5xx, times
+        /// out or cannot connect fails the resolution as `source_unavailable`,
+        /// which clears on its own: the lease stays valid, nothing pauses the
+        /// account, and the next resolution looks the account up again. A
+        /// lookup answer that refuses the token stays `refresh_failed`.
+        #[tokio::test]
+        async fn an_unavailable_identity_lookup_fails_as_source_unavailable() {
+            let failures: Vec<(&str, Outcome)> = vec![
+                (
+                    "server error",
+                    Ok(json_response(
+                        503,
+                        serde_json::json!({"message": "unavailable"}),
+                    )),
+                ),
+                ("timeout", Err(CopilotHttpTransportError::Timeout)),
+                (
+                    "cannot connect",
+                    Err(CopilotHttpTransportError::Request(
+                        refused_connection().await,
+                    )),
+                ),
+            ];
+            for (label, failure) in failures {
+                let harness = Harness::new([failure, Ok(svc_bot()), Ok(models_response())]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("github-down"));
+                let detail = source_unavailable(
+                    harness
+                        .resolve(CopilotProviderRoute::OpenAi)
+                        .await
+                        .err()
+                        .unwrap_or_else(|| panic!("{label}: the identity lookup failed")),
+                );
+                assert!(
+                    detail.contains("identity lookup failed"),
+                    "{label}: {detail}"
+                );
+                assert_eq!(
+                    harness.operator.lease().phase,
+                    Some(AuthLeasePhase::Valid),
+                    "{label}: an outage marks nothing on the token"
+                );
+                if let Err(error) = harness.resolve(CopilotProviderRoute::OpenAi).await {
+                    panic!("{label}: the next resolution looks the account up again: {error:?}");
+                }
+                assert_eq!(harness.transport.request_count(), 3, "{label}");
+            }
+        }
+
         /// A rate-limited model listing (a 403 with `Retry-After`, GitHub's
         /// secondary limit) is no refusal: the account resolves without its
-        /// model list, which is asked again only after GitHub's stated time,
-        /// with no identity lookup in between.
+        /// model list, which is asked again (off the request path) only after
+        /// GitHub's stated time, with no identity lookup in between.
         #[tokio::test]
         async fn models_rate_limit_waits_for_githubs_time() {
             let harness = Harness::new([
@@ -9147,13 +10227,13 @@ mod tests {
 
             harness.operator.advance(2);
             authorize_once(&authorizer, &url).await;
+            settle(|| authorizer.model_snapshot().is_some()).await;
             assert_eq!(harness.transport.request_count(), 3);
             assert_eq!(
                 harness.transport.urls()[2],
                 format!("{BUSINESS_API}/models"),
                 "only the listing runs again"
             );
-            assert!(authorizer.model_snapshot().is_some());
         }
 
         /// Two authorizers of one operator-token account, as two routes or two
@@ -9265,19 +10345,213 @@ mod tests {
             assert_eq!(lease.generation, 0, "no lease was acquired");
         }
 
+        /// A model listing gets one immediate second attempt for an answer
+        /// the next try may change (a 408, 502, 503 or 504, or a network
+        /// failure or timeout), inside the listing's one HTTP bound; any
+        /// other answer (a 500, a rate limit, a refusal) is the listing's
+        /// answer at once.
+        #[tokio::test]
+        async fn a_model_listing_is_tried_once_more_for_a_transient_failure() {
+            let config = CopilotBackendConfig::default();
+            let transient: Vec<(&str, Outcome)> = vec![
+                (
+                    "408",
+                    Ok(json_response(
+                        408,
+                        serde_json::json!({"message": "timeout"}),
+                    )),
+                ),
+                (
+                    "502",
+                    Ok(json_response(
+                        502,
+                        serde_json::json!({"message": "bad gateway"}),
+                    )),
+                ),
+                (
+                    "503",
+                    Ok(json_response(
+                        503,
+                        serde_json::json!({"message": "unavailable"}),
+                    )),
+                ),
+                (
+                    "504",
+                    Ok(json_response(
+                        504,
+                        serde_json::json!({"message": "gateway timeout"}),
+                    )),
+                ),
+                ("timeout", Err(CopilotHttpTransportError::Timeout)),
+            ];
+            for (label, first) in transient {
+                let transport = OutcomeTransport::new([first, Ok(models_response())]);
+                let snapshot = fetch_copilot_models(
+                    transport.as_ref(),
+                    &config,
+                    DEFAULT_COPILOT_API_BASE,
+                    "listing-token",
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{label}: the second attempt lists the models: {error}")
+                });
+                assert!(snapshot.model("gpt-test").is_some(), "{label}");
+                assert_eq!(transport.request_count(), 2, "{label}");
+            }
+            let answers: Vec<(&str, Outcome)> = vec![
+                (
+                    "500",
+                    Ok(json_response(
+                        500,
+                        serde_json::json!({"message": "internal"}),
+                    )),
+                ),
+                ("429", Ok(rate_limited(429, 60))),
+                (
+                    "403",
+                    Ok(json_response(
+                        403,
+                        serde_json::json!({"message": "forbidden"}),
+                    )),
+                ),
+                (
+                    "401",
+                    Ok(json_response(
+                        401,
+                        serde_json::json!({"message": "Bad credentials"}),
+                    )),
+                ),
+            ];
+            for (label, first) in answers {
+                let transport = OutcomeTransport::new([first, Ok(models_response())]);
+                assert!(
+                    fetch_copilot_models(
+                        transport.as_ref(),
+                        &config,
+                        DEFAULT_COPILOT_API_BASE,
+                        "listing-token",
+                    )
+                    .await
+                    .is_err(),
+                    "{label}: the listing's own answer"
+                );
+                assert_eq!(transport.request_count(), 1, "{label}: no second attempt");
+            }
+        }
+
+        /// A transport whose answers to the listing take `delays[n]` for the
+        /// n-th request (the last delay for every later one), each then the
+        /// model list. A delay is never ready on its first poll, as the
+        /// network is not.
+        struct DelayedListing {
+            delays: Vec<StdDuration>,
+            requests: std::sync::atomic::AtomicUsize,
+        }
+
+        impl DelayedListing {
+            fn new(delays: impl IntoIterator<Item = StdDuration>) -> Self {
+                Self {
+                    delays: delays.into_iter().collect(),
+                    requests: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl CopilotHttpTransport for DelayedListing {
+            async fn get(
+                &self,
+                _url: &str,
+                _headers: HeaderMap,
+            ) -> Result<CopilotHttpResponse, CopilotHttpTransportError> {
+                let request = self.requests.fetch_add(1, Ordering::SeqCst);
+                let delay = self
+                    .delays
+                    .get(request)
+                    .or(self.delays.last())
+                    .copied()
+                    .unwrap_or_default();
+                tokio::time::sleep(delay).await;
+                Ok(models_response())
+            }
+        }
+
+        /// A first listing attempt that does not answer within its half of
+        /// the listing's bound is cut there, and the second attempt answers
+        /// within the rest of the bound, here after 100 ms of its 400.
+        /// (Fails-old: the first attempt used the whole bound, so the second
+        /// had no time to answer and the listing timed out.)
+        #[tokio::test]
+        async fn a_listing_whose_first_attempt_hangs_is_answered_by_the_second() {
+            let transport =
+                DelayedListing::new([StdDuration::from_secs(5), StdDuration::from_millis(100)]);
+            let started = std::time::Instant::now();
+            let snapshot = fetch_copilot_models_within(
+                &transport,
+                &CopilotBackendConfig::default(),
+                DEFAULT_COPILOT_API_BASE,
+                "listing-token",
+                StdDuration::from_millis(800),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("the second attempt lists the models: {error}"));
+            assert!(snapshot.model("gpt-test").is_some());
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+            assert!(
+                started.elapsed() < StdDuration::from_secs(5),
+                "the first attempt was cut within the bound"
+            );
+        }
+
+        /// Two listing attempts that both hang end with the listing's bound,
+        /// not past it: the second attempt gets only what is left of the
+        /// bound.
+        #[tokio::test]
+        async fn a_listing_whose_attempts_both_hang_ends_at_its_bound() {
+            let transport = DelayedListing::new([StdDuration::from_secs(5)]);
+            let started = std::time::Instant::now();
+            let failed = fetch_copilot_models_within(
+                &transport,
+                &CopilotBackendConfig::default(),
+                DEFAULT_COPILOT_API_BASE,
+                "listing-token",
+                StdDuration::from_millis(800),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(
+                    failed,
+                    Err(CopilotModelDiscoveryError::Transport(
+                        CopilotHttpTransportError::Timeout
+                    ))
+                ),
+                "{failed:?}"
+            );
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 2);
+            assert!(
+                elapsed < StdDuration::from_millis(1_100),
+                "the listing ends at its 800 ms bound, not past it: {elapsed:?}"
+            );
+        }
+
         /// T8: a GitHub App installation token (server-to-server) has no
         /// user: it skips the identity lookup and lists models on the default
-        /// host. A later 401 there is GitHub refusing the token itself.
+        /// host. A later 401 there (off the request path) has the next
+        /// request list the models again, and that 401 is GitHub refusing the
+        /// token itself.
         #[tokio::test]
         async fn installation_token_skips_identity_lookup() {
             let installation = format!("ghs_{CANARY}{}", "x".repeat(500));
-            let harness = Harness::new([
-                Ok(models_response()),
+            let bad_credentials = || {
                 Ok(json_response(
                     401,
                     serde_json::json!({"message": "Bad credentials"}),
-                )),
-            ]);
+                ))
+            };
+            let harness =
+                Harness::new([Ok(models_response()), bad_credentials(), bad_credentials()]);
             harness.operator.set("GITHUB_TOKEN", &installation);
 
             let resolved = harness
@@ -9299,8 +10573,15 @@ mod tests {
             assert!(identity.installation);
             assert_eq!(identity.login, None);
 
-            // The model list is due again after five minutes.
+            // The model list is due again after five minutes: the request
+            // that finds it due goes out on the account it holds, and the
+            // listing's 401 drops the account.
             harness.operator.advance(301);
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the request that finds the list due goes out on the account it holds");
+            settle(|| harness.transport.request_count() == 2).await;
             let refused = authorizer
                 .prepare_request()
                 .await
@@ -9310,6 +10591,47 @@ mod tests {
                 harness.operator.lease().phase,
                 Some(AuthLeasePhase::ReauthRequired)
             );
+            assert_eq!(harness.transport.request_count(), 3);
+        }
+
+        /// A token route's model list is refreshed off the request path too:
+        /// a request that finds it due goes out on the account it holds, even
+        /// when the listing then refuses the token; the next request reads
+        /// the token again and looks the account up, which decides.
+        #[tokio::test]
+        async fn operator_model_discovery_runs_off_the_request_path() {
+            let token = user_token("primary");
+            let harness = Harness::new([
+                Ok(svc_bot()),
+                Ok(models_response()),
+                Ok(json_response(
+                    403,
+                    serde_json::json!({"message": "Copilot is not enabled for this organization"}),
+                )),
+                Ok(svc_bot()),
+                Ok(models_response()),
+            ]);
+            harness.operator.set("COPILOT_GITHUB_TOKEN", &token);
+            let resolved = harness
+                .resolve(CopilotProviderRoute::OpenAi)
+                .await
+                .expect("the operator token resolves");
+            let authorizer = resolved.concrete_authorizer();
+
+            // The model list is due again after five minutes.
+            harness.operator.advance(301);
+            authorizer
+                .prepare_request()
+                .await
+                .expect("a request neither waits for nor fails on the account's model discovery");
+            settle(|| harness.transport.request_count() == 3).await;
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the account is built again through the identity lookup");
+            assert_eq!(harness.transport.request_count(), 5);
+            assert_eq!(harness.transport.urls()[3], GITHUB_COPILOT_USER_URL);
+            assert_eq!(harness.operator.lease().phase, Some(AuthLeasePhase::Valid));
         }
 
         /// GitHub's answer when its identity lookup does not answer a token:
@@ -9430,9 +10752,10 @@ mod tests {
         /// the lookup did not answer is Copilot refusing it (`refresh_failed`
         /// with Copilot's message, the lease untouched), and the same token is
         /// not asked about again for a minute; after it, the same token works
-        /// once Copilot accepts it. A 401 from a later listing runs the
-        /// identity lookup again, whose own 401 decides that the token is
-        /// revoked. The CLI's check reports the same Copilot refusal.
+        /// once Copilot accepts it. A 401 from a later listing (off the
+        /// request path) has the next request run the identity lookup again,
+        /// whose own 401 decides that the token is revoked. The CLI's check
+        /// reports the same Copilot refusal.
         #[tokio::test]
         async fn an_unanswered_lookup_then_a_rejected_model_list_refuses_the_token() {
             let permission = || -> Outcome {
@@ -9504,10 +10827,17 @@ mod tests {
                 .resolve(CopilotProviderRoute::OpenAi)
                 .await
                 .expect("the token is used on the default host");
-            // The model list is due again after five minutes.
+            // The model list is due again after five minutes: the request
+            // that finds it due goes out on the account it holds, and the
+            // listing's 401 drops the account.
             later.operator.advance(301);
-            let refused = resolved
-                .concrete_authorizer()
+            let authorizer = resolved.concrete_authorizer();
+            authorizer
+                .prepare_request()
+                .await
+                .expect("the request that finds the list due goes out on the account it holds");
+            settle(|| later.transport.request_count() == 3).await;
+            let refused = authorizer
                 .prepare_request()
                 .await
                 .expect_err("GitHub's identity lookup refused the token");
@@ -9519,7 +10849,7 @@ mod tests {
             assert_eq!(
                 later.transport.request_count(),
                 4,
-                "the later listing's 401 runs the identity lookup again, and its 401 decides"
+                "the later listing's 401 has the next request run the identity lookup again, and its 401 decides"
             );
 
             let check = OutcomeTransport::new([Ok(unanswered_lookup(403)), permission()]);
@@ -9540,34 +10870,44 @@ mod tests {
 
         /// A token the identity lookup does not answer never serves without
         /// its model list: a listing that fails (a server error, a timeout, a
-        /// rate limit) fails the request as `refresh_failed` and leaves the
-        /// lease valid, and a rate limit pauses the lookup until GitHub's
+        /// rate limit) fails the request as `source_unavailable` and leaves
+        /// the lease valid, and a rate limit pauses the lookup until GitHub's
         /// stated time.
         #[tokio::test]
         async fn an_unanswered_lookup_never_serves_without_a_model_list() {
-            let listings: Vec<(&str, Outcome)> = vec![
+            // A transient failure (a 502, a timeout) is tried once more at
+            // once and fails again; a rate limit is final at once.
+            let bad_gateway = || -> Outcome {
+                Ok(json_response(
+                    502,
+                    serde_json::json!({"message": "Bad gateway"}),
+                ))
+            };
+            let listings: Vec<(&str, Vec<Outcome>)> = vec![
+                ("server error", vec![bad_gateway(), bad_gateway()]),
                 (
-                    "server error",
-                    Ok(json_response(
-                        502,
-                        serde_json::json!({"message": "Bad gateway"}),
-                    )),
+                    "timeout",
+                    vec![
+                        Err(CopilotHttpTransportError::Timeout),
+                        Err(CopilotHttpTransportError::Timeout),
+                    ],
                 ),
-                ("timeout", Err(CopilotHttpTransportError::Timeout)),
-                ("rate limit", Ok(rate_limited(429, 120))),
+                ("rate limit", vec![Ok(rate_limited(429, 120))]),
             ];
             for (label, listing) in listings {
-                let harness = Harness::new([Ok(unanswered_lookup(404)), listing]);
+                let attempts = listing.len();
+                let harness =
+                    Harness::new(std::iter::once(Ok(unanswered_lookup(404))).chain(listing));
                 harness
                     .operator
                     .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-down"));
                 let failed = harness.resolve(CopilotProviderRoute::OpenAi).await.err();
                 assert_eq!(
                     harness.transport.request_count(),
-                    2,
+                    1 + attempts,
                     "{label}: the model list was asked"
                 );
-                let detail = refresh_failure(
+                let detail = source_unavailable(
                     failed.unwrap_or_else(|| panic!("{label}: no route without the model list")),
                 );
                 assert!(detail.contains("model listing failed"), "{label}: {detail}");
@@ -9587,7 +10927,7 @@ mod tests {
             harness
                 .operator
                 .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-paced"));
-            refresh_failure(
+            source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9595,7 +10935,7 @@ mod tests {
                     .expect("the model listing is rate limited"),
             );
             harness.operator.advance(119);
-            refresh_failure(
+            source_unavailable(
                 harness
                     .resolve(CopilotProviderRoute::OpenAi)
                     .await
@@ -9613,6 +10953,37 @@ mod tests {
                 .await
                 .expect("the lookup and the listing run again after the wait");
             assert_eq!(harness.transport.request_count(), 4);
+        }
+
+        /// A required model listing that fails for a cause a later listing
+        /// would meet again (a 500 or a 400: neither rate limited nor worth an
+        /// immediate second attempt) stays `refresh_failed`: only a listing
+        /// failure that clears on its own answers `source_unavailable`.
+        #[tokio::test]
+        async fn a_listing_failure_that_does_not_clear_stays_refresh_failed() {
+            for status in [500, 400] {
+                let harness = Harness::new([
+                    Ok(unanswered_lookup(404)),
+                    Ok(json_response(
+                        status,
+                        serde_json::json!({"message": "listing failed"}),
+                    )),
+                ]);
+                harness
+                    .operator
+                    .set("COPILOT_GITHUB_TOKEN", &user_token("unanswered-broken"));
+                let detail = refresh_failure(
+                    harness
+                        .resolve(CopilotProviderRoute::OpenAi)
+                        .await
+                        .err()
+                        .unwrap_or_else(|| panic!("{status}: no route without the model list")),
+                );
+                assert!(
+                    detail.contains("model listing failed"),
+                    "{status}: {detail}"
+                );
+            }
         }
 
         /// T9: the token never goes to an API host outside
@@ -11194,6 +12565,23 @@ mod tests {
                     .map(|unavailable| unavailable.retryable.clone())
             }
 
+            /// Whether the account's current model list names `model`.
+            fn lists_model(&self, model: &str) -> bool {
+                self.runtime
+                    .accounts
+                    .lock()
+                    .values()
+                    .find_map(Weak::upgrade)
+                    .is_some_and(|state| {
+                        state.cache.read().as_ref().is_some_and(|cached| {
+                            cached
+                                .models
+                                .as_ref()
+                                .is_some_and(|models| models.model(model).is_some())
+                        })
+                    })
+            }
+
             /// A new sign-in on the account: another GitHub token, expiring
             /// at `expires_at`, published through AuthMachine and stored, as
             /// a new login does.
@@ -11544,6 +12932,9 @@ mod tests {
             assert_eq!(transport.inner.request_count(), 4);
         }
 
+        /// A discovery 403 that asks for an account action refuses the
+        /// token; once the new token's own listing asks for it again, every
+        /// turn reports the reauthorization the account needs.
         #[tokio::test]
         async fn a_turn_after_a_discovery_403_reports_the_reauthorization_instead_of_a_lost_route()
         {
@@ -11551,35 +12942,33 @@ mod tests {
             let transport = Arc::new(ScriptedTransport::new([
                 token_response("derived-one"),
                 models_response(),
-                json_response(403, serde_json::json!({"message": "forbidden"})),
+                listing_needs_an_account_action(),
+                token_response("derived-two"),
+                listing_needs_an_account_action(),
             ]));
             let account = RouteAccount::new(transport.clone(), &clock).await;
             let session = account.session([]).await;
 
             // Model discovery is due again (300 s); the token is still fresh.
             clock.set(301);
-            let events = session.turn().await;
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
-                ),
-                "{events:?}"
-            );
+            assert!(session.turn().await.is_empty());
+            settle(|| transport.request_count() == 3).await;
+
+            for turn in ["first", "second"] {
+                let events = session.turn().await;
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
+                    ),
+                    "the {turn} turn after the refusal must report the reauthorization the account needs, not a lost route: {events:?}"
+                );
+            }
             assert_eq!(
                 account.source_phase(),
                 Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
             );
-
-            let events = session.turn().await;
-            assert!(
-                matches!(
-                    events.as_slice(),
-                    [Err(meerkat_llm_core::LlmError::AuthenticationFailed { .. })]
-                ),
-                "the next turn must report the reauthorization the account needs, not a lost route: {events:?}"
-            );
-            assert_eq!(transport.request_count(), 3);
+            assert_eq!(transport.request_count(), 5);
         }
 
         #[tokio::test]
@@ -11596,9 +12985,12 @@ mod tests {
             let account = RouteAccount::new(transport.clone(), &clock).await;
             let session = account.session([]).await;
 
-            // Model discovery is due again (300 s) and refuses the token;
-            // the token exchange is unavailable for the new one.
+            // Model discovery is due again (300 s): the turn goes out on the
+            // token while the listing refuses it; the token exchange is then
+            // unavailable for the new one.
             clock.set(301);
+            assert!(session.turn().await.is_empty());
+            settle(|| transport.request_count() == 3).await;
             let events = session.turn().await;
             assert!(matches!(events.as_slice(), [Err(_)]), "{events:?}");
             assert_eq!(transport.request_count(), 4);
@@ -11609,7 +13001,187 @@ mod tests {
                 "the next turn must mint a new token, not fail before it reaches the network: {events:?}"
             );
             assert_eq!(transport.request_count(), 6);
-            assert_eq!(session.bearers(), ["Bearer derived-two"]);
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one", "Bearer derived-two"]
+            );
+        }
+
+        /// A model listing 403 that asks for an account action:
+        /// `error_details.notification_id`, as the token exchange reads it.
+        fn listing_needs_an_account_action() -> CopilotHttpResponse {
+            json_response(
+                403,
+                serde_json::json!({
+                    "message": "Copilot access needs an action on the account",
+                    "error_details": {"notification_id": "copilot_account_action"}
+                }),
+            )
+        }
+
+        /// The account's model list is refreshed off the request path: a turn
+        /// that finds the list due goes out on the token and the list the
+        /// account holds while one discovery runs for the account, and the
+        /// list it brings serves the turns after it.
+        #[tokio::test]
+        async fn periodic_model_discovery_runs_off_the_request_path() {
+            let clock = TestClock::new();
+            let transport = Arc::new(HeldTransport {
+                inner: ScriptedTransport::new([
+                    token_response("derived-one"),
+                    models_response(),
+                    models_listing_with("gpt-later"),
+                ]),
+                hold_at: 2,
+                calls: AtomicU64::new(0),
+                held: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            });
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            // Model discovery is due again (300 s); the token is still fresh.
+            clock.set(301);
+            for turn in ["first", "second"] {
+                let events = tokio::time::timeout(StdDuration::from_secs(5), session.turn())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("the {turn} turn must not wait for the account's model discovery")
+                    });
+                assert!(events.is_empty(), "{turn} turn: {events:?}");
+            }
+            transport.held.notified().await;
+            assert_eq!(
+                transport.calls.load(Ordering::SeqCst),
+                3,
+                "one discovery runs for the account"
+            );
+            assert!(!account.lists_model("gpt-later"));
+
+            transport.release.notify_one();
+            settle(|| account.lists_model("gpt-later")).await;
+            assert_eq!(
+                session.bearers(),
+                ["Bearer derived-one", "Bearer derived-one"]
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+        }
+
+        /// A model listing 403 that asks for no account action (a policy, an
+        /// integration the account does not allow) is a discovery failure:
+        /// the token keeps serving, the sign-in stays valid, and the list is
+        /// asked for again after the retry delay.
+        #[tokio::test]
+        async fn a_discovery_403_without_an_account_action_keeps_the_route() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                models_response(),
+                json_response(
+                    403,
+                    serde_json::json!({"message": "Copilot model listing is not allowed"}),
+                ),
+                models_listing_with("gpt-later"),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            clock.set(301);
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "a model listing 403 without an account action fails no turn: {events:?}"
+            );
+            settle(|| transport.request_count() == 3).await;
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid),
+                "a model listing 403 without an account action needs no new sign-in"
+            );
+
+            // Within the 30 s retry delay nothing lists the models again.
+            clock.set(320);
+            assert!(session.turn().await.is_empty());
+            assert_eq!(transport.request_count(), 3);
+
+            clock.set(332);
+            assert!(session.turn().await.is_empty());
+            settle(|| account.lists_model("gpt-later")).await;
+            assert_eq!(transport.request_count(), 4);
+            assert_eq!(session.bearers(), ["Bearer derived-one"; 3]);
+        }
+
+        /// A model listing 403 that asks for an account action refuses the
+        /// token: the turn that found the list due is served, and the next
+        /// one mints a new token, whose listing decides: the account needs a
+        /// new sign-in.
+        #[tokio::test]
+        async fn a_discovery_403_that_asks_for_an_account_action_needs_a_new_sign_in() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                models_response(),
+                listing_needs_an_account_action(),
+                token_response("derived-two"),
+                listing_needs_an_account_action(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            clock.set(301);
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "the turn that found the list due is served while the list is asked for: {events:?}"
+            );
+            settle(|| transport.request_count() == 3).await;
+
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the next turn fails once: {events:?}");
+            };
+            assert!(
+                matches!(
+                    error.failure_reason(),
+                    meerkat_core::error::LlmFailureReason::AuthError
+                ) && !retried(error),
+                "an account action is an auth failure: {error:?}"
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::ReauthRequired)
+            );
+            assert_eq!(transport.request_count(), 5);
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+        }
+
+        /// A mint whose model listing answers a 403 that asks for no account
+        /// action resolves without the account's list, as for any other
+        /// discovery failure: the sign-in stays valid and the token serves.
+        #[tokio::test]
+        async fn a_mint_whose_model_listing_answers_403_resolves_without_the_list() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_response("derived-one"),
+                json_response(
+                    403,
+                    serde_json::json!({"message": "Copilot model listing is not allowed"}),
+                ),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.try_session([]).await.expect(
+                "a model listing 403 without an account action is a discovery failure, not a new sign-in",
+            );
+            assert_eq!(
+                account.source_phase(),
+                Some(meerkat_core::handles::AuthLeasePhase::Valid)
+            );
+            assert!(session.turn().await.is_empty());
+            assert_eq!(session.bearers(), ["Bearer derived-one"]);
+            assert_eq!(transport.request_count(), 2);
         }
 
         /// The retryable class of the exchange failure the account recorded.
@@ -11670,6 +13242,65 @@ mod tests {
                 "a successful mint clears the record"
             );
             assert_eq!(transport.request_count(), 7);
+        }
+
+        /// A token exchange outage that leaves no token to serve, and whose
+        /// exchange said when to come back (`Retry-After`), answers every
+        /// request until then with its retryable class without calling the
+        /// exchange; the first request after that instant tries it again.
+        #[tokio::test]
+        async fn an_exchange_outage_answers_until_its_retry_after() {
+            let clock = TestClock::new();
+            let transport = Arc::new(ScriptedTransport::new([
+                token_at("derived-one", clock.at(3600), 200),
+                models_response(),
+                with_retry_after(
+                    json_response(503, serde_json::json!({"message": "unavailable"})),
+                    60,
+                ),
+                token_at("derived-two", clock.at(3761 + 3600), 200),
+                models_response(),
+            ]));
+            let account = RouteAccount::new(transport.clone(), &clock).await;
+            let session = account.session([]).await;
+
+            // The token expired; the exchange is unavailable for 60 s.
+            clock.set(3700);
+            let events = session.turn().await;
+            let [Err(error)] = events.as_slice() else {
+                panic!("the turn fails once: {events:?}");
+            };
+            assert!(retried(error), "{error:?}");
+            assert_eq!(transport.request_count(), 3);
+
+            for at in [3701, 3730, 3759] {
+                clock.set(at);
+                let events = session.turn().await;
+                let [Err(error)] = events.as_slice() else {
+                    panic!("{at}: the turn fails once: {events:?}");
+                };
+                assert!(
+                    matches!(
+                        error,
+                        meerkat_llm_core::LlmError::ServerError { status: 503, .. }
+                    ) && retried(error),
+                    "{at}: the recorded outage answers with its retryable class: {error:?}"
+                );
+                assert_eq!(
+                    transport.request_count(),
+                    3,
+                    "{at}: the exchange is not called before its Retry-After"
+                );
+            }
+
+            clock.set(3761);
+            let events = session.turn().await;
+            assert!(
+                events.is_empty(),
+                "after its Retry-After the exchange is tried again: {events:?}"
+            );
+            assert_eq!(transport.request_count(), 5);
+            assert_eq!(session.bearers(), ["Bearer derived-two"]);
         }
 
         #[tokio::test]
@@ -11827,11 +13458,13 @@ mod tests {
                     "a build that needs the account's limits must fail while the exchange is down"
                 );
             };
+            // The outage is typed as one that clears on its own, so a caller
+            // (a mob seat's first create) can try again later.
             assert!(
                 matches!(
                     &error,
-                    ProviderAuthError::SourceResolutionFailed(message)
-                        if message.contains("returned 503")
+                    ProviderAuthError::Auth(AuthError::SourceUnavailable { reason })
+                        if reason.contains("returned 503")
                 ),
                 "{error:?}"
             );
@@ -12068,8 +13701,8 @@ mod tests {
             assert!(
                 matches!(
                     &error,
-                    ProviderAuthError::SourceResolutionFailed(message)
-                        if message.contains("returned 503")
+                    ProviderAuthError::Auth(AuthError::SourceUnavailable { reason })
+                        if reason.contains("returned 503")
                 ),
                 "{error:?}"
             );
@@ -12094,4 +13727,40 @@ fn ce_stale_refresh_remains_stale_credential() {
         auth_error_from_refresh(RefreshError::StalePreparation),
         AuthError::StaleCredential
     ));
+}
+
+/// AuthMachine's verdict on a refresh failure of the sign-in's GitHub token
+/// decides its kind: a transient verdict is a credential source that cannot
+/// answer now, which clears on its own; a permanent one needs a new sign-in.
+/// A failure the machine did not classify stays `refresh_failed`: the
+/// mapper never reads the provider's answer itself.
+#[cfg(test)]
+#[test]
+fn a_classified_source_refresh_failure_maps_by_its_verdict() {
+    let classified = |disposition| RefreshError::Classified {
+        message: "token endpoint answered 503".to_string(),
+        observation: meerkat_core::RefreshFailureObservation::http_status(503),
+        disposition,
+    };
+    let transient = auth_error_from_refresh(classified(
+        meerkat_core::auth::RefreshFailureDisposition::Transient,
+    ));
+    assert!(
+        matches!(
+            &transient,
+            AuthError::SourceUnavailable { reason } if reason.contains("token endpoint answered 503")
+        ),
+        "{transient:?}"
+    );
+    let permanent = auth_error_from_refresh(classified(
+        meerkat_core::auth::RefreshFailureDisposition::ReauthRequired,
+    ));
+    assert_eq!(permanent, AuthError::UserReauthRequired);
+    let unclassified = auth_error_from_refresh(RefreshError::Refresh(
+        "token endpoint answered 503".to_string(),
+    ));
+    assert!(
+        matches!(&unclassified, AuthError::RefreshFailed(_)),
+        "{unclassified:?}"
+    );
 }

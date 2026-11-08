@@ -41,6 +41,7 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     use dsl::detached_job::DetachedJobMachineState;
     use dsl::durable_decision::DurableDecisionMachineState;
     use dsl::forked_participant_lifecycle::ForkedParticipantLifecycleMachineState;
+    use dsl::host_store_writer_fence::HostStoreWriterFenceMachineState;
     use dsl::meerkat_machine::MeerkatMachineState;
     use dsl::mob_host_binding_authority::MobHostBindingAuthorityState;
     use dsl::mob_machine::MobMachineState;
@@ -120,6 +121,10 @@ fn every_catalog_machine_schema_is_constructed_at_most_once() {
     assert_construction_is_cached(
         MobStoreRestoreLifecycleMachineState::schema_static,
         "MobStoreRestoreLifecycleMachine",
+    );
+    assert_construction_is_cached(
+        HostStoreWriterFenceMachineState::schema_static,
+        "HostStoreWriterFenceMachine",
     );
     assert_construction_is_cached(
         SessionPersistenceVersionAuthorityMachineState::schema_static,

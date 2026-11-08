@@ -6,6 +6,7 @@ mod auth;
 mod comms;
 mod config;
 mod connection;
+mod decision;
 mod error;
 mod event;
 mod help;
@@ -83,6 +84,17 @@ pub use connection::{
     WireProviderLoginReady, WireProviderLoginStart, WireProviderLoginTarget,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
     WireScopeEvidence,
+};
+pub use decision::{
+    DECISION_NOTICE_NOTIFICATION, DecisionAudienceRequest, DecisionDecideParams, DecisionGetParams,
+    DecisionListParams, DecisionListResult, DecisionPresentParams, DecisionPresentationRequest,
+    DecisionRenderingParams, DecisionRenderingResult, DecisionResult, DecisionWithdrawParams,
+    WireCanonicalPart, WireDecision, WireDecisionAssurance, WireDecisionEffect,
+    WireDecisionErrorData, WireDecisionEvidence, WireDecisionNotice, WireDecisionNoticeEvent,
+    WireDecisionNoticePresentation, WireDecisionNoticeState, WireDecisionOutcome,
+    WireDecisionPhase, WireDecisionRefusal, WireDecisionReviewVerdict, WireDecisionStage,
+    WireDecisionTier, WirePresentationAudience, WirePresentationLink, WirePresentationRecord,
+    WireUnreadableDecision,
 };
 pub use rpc_surface::{
     ArchiveSessionParams, BlobGetParams, CallbackToolDefinition, DeferredCreateResult,
@@ -190,10 +202,10 @@ pub use mob::{
     MobSpawnManyResultEntry, MobSpawnManyResultPayload, MobSpawnManyResultStatus,
     MobSpawnManySpawnedResult, MobSpawnParams, MobSpawnPolicyInput, MobSpawnReceiptWire,
     MobSpawnResult, MobSpawnSpecParams, MobStatusResult, MobStepOutputFormatInput,
-    MobStreamCloseParams, MobStreamCloseResult, MobStreamOpenParams, MobStreamOpenResult,
-    MobSubmitWorkParams, MobSubmitWorkResult, MobSupervisorSpecInput, MobToolConfigInput,
-    MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams, MobUnwireParams,
-    MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
+    MobStreamCloseParams, MobStreamCloseResult, MobStreamCursor, MobStreamOpenParams,
+    MobStreamOpenResult, MobSubmitWorkParams, MobSubmitWorkResult, MobSupervisorSpecInput,
+    MobToolConfigInput, MobTopologyRuleInput, MobTopologySpecInput, MobTurnStartParams,
+    MobUnwireParams, MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireMembersBatchEdge,
     MobWireMembersBatchParams, MobWireMembersBatchResult, MobWireParams, MobWireResult,
     MobWiringRulesInput, SupervisorRotationIncompleteDataWire,
     SupervisorRotationIncompleteDetailsWire, SupervisorRotationIncompleteKind,
@@ -330,10 +342,11 @@ pub use supervisor_bridge::{
 pub use tool_grant::{
     GrantToolParams, GrantToolResult, ListToolGrantsParams, ListToolGrantsResult,
     RevokeToolGrantParams, RevokeToolGrantResult, ToolGrantAuditParams, ToolGrantAuditResult,
-    ToolGrantSubjectRequest, ToolGrantTargetRequest, WireGrantGatedTools, WireToolGrant,
-    WireToolGrantAuditEvent, WireToolGrantAuditRow, WireToolGrantExpiryDriver, WireToolGrantIssuer,
-    WireToolGrantRefusalKind, WireToolGrantStatus, WireToolGrantSubject, WireToolGrantTarget,
-    WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
+    ToolGrantSubjectRequest, ToolGrantTargetRequest, WireGrantGatedTools, WireMemberToolGrantGate,
+    WireToolGrant, WireToolGrantApplies, WireToolGrantAuditEvent, WireToolGrantAuditRow,
+    WireToolGrantExpiryDriver, WireToolGrantGateEntries, WireToolGrantGateView,
+    WireToolGrantIssuer, WireToolGrantRefusalKind, WireToolGrantStatus, WireToolGrantSubject,
+    WireToolGrantTarget, WireUnreadableToolGrant, WireUnreadableToolGrantAuditRow,
 };
 pub use usage::{WireTurnUsage, WireUsage};
 pub use workgraph::{WorkEventsResult, WorkItemsResult};

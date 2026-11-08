@@ -76,7 +76,8 @@ async fn governed_identity_runtime_as(
             binding: None,
             placement: None,
         })
-        .await;
+        .await
+        .expect("the identity registers");
     (runtime, identity)
 }
 
@@ -281,6 +282,7 @@ async fn send(
         &governance,
     )
     .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
 }
 
 /// The frame's settled delivery status.

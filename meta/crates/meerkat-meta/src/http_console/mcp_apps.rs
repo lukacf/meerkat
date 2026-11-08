@@ -21,6 +21,9 @@ pub(super) struct Request {
     name: Option<String>,
     #[serde(default)]
     arguments: Option<Value>,
+    /// The caller a tool call was made for (`expectedCallerScope`).
+    #[serde(default)]
+    expected_caller_scope: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -391,13 +394,18 @@ async fn handle(
     request: Request,
     operation: Operation,
 ) -> axum::response::Response {
-    let Some(auth) = console_request_auth_context(&state, &headers, &uri) else {
+    let Some(auth) = console_write_auth_context(&state, &headers, &uri) else {
         return console_json_error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "Console app access requires authorization",
         );
     };
+    if operation == Operation::CallTool
+        && let Err(refusal) = auth.refuse_other_caller(request.expected_caller_scope.as_deref())
+    {
+        return refusal.into_response();
+    }
     // A candidate launch calls no member's tool: 409 `candidate_launch`, the
     // REST form of the RPC surfaces' `-32047` refusal. Resolving and reading
     // an app's resource stay open.
@@ -619,6 +627,7 @@ mod tests {
             uri: None,
             name: None,
             arguments: None,
+            expected_caller_scope: None,
         }
     }
 
@@ -880,7 +889,8 @@ mcp_apps_sandbox_url = " "
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let scope = owner
             .materialize(&identity)
             .await?
@@ -981,7 +991,8 @@ mcp_apps_sandbox_url = " "
                 binding: None,
                 placement: None,
             })
-            .await;
+            .await
+            .expect("the identity registers");
         let scope = owner
             .materialize(&identity)
             .await?

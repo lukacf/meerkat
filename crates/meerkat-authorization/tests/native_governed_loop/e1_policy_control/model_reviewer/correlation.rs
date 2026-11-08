@@ -589,6 +589,7 @@ async fn exercise(
     });
     let authorization = |original: &InputId| NativeGrantWorkConfiguration {
         retained_resume: None,
+        kept_original: None,
         require_scoped_destination: false,
         grants: grants.clone(),
         ingress: ingress.clone(),

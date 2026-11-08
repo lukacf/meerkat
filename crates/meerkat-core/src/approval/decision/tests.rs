@@ -5,11 +5,12 @@
 
 use std::num::NonZeroU32;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::parts::part_ranges;
 use super::*;
-use crate::approval::consent::AuthenticatedApprover;
+use crate::approval::consent::{AuthenticatedApprover, HostAuthenticationScope};
 use crate::approval::{ApprovalAssurance, ApprovalStoreError};
 use crate::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
 
@@ -57,24 +58,6 @@ fn hold_request(
         Some(digest) => request.with_expected_subject_digest(digest),
         None => request,
     }
-}
-
-fn attested(approve: bool) -> AttestedDecision {
-    let approver = AuthenticatedApprover::new(
-        principal(PrincipalKind::Human, "alice", "example.org"),
-        ApprovalAssurance::PersonAuthenticated,
-    )
-    .expect("authenticated human");
-    AttestedDecision::new(
-        approver,
-        DecisionIngress::new("console").expect("ingress"),
-        reference("event-1"),
-        7,
-        approver_id(),
-        Sha256Digest::of(b"the rendering"),
-        approve,
-    )
-    .expect("attested decision")
 }
 
 #[test]
@@ -216,6 +199,135 @@ fn a_presentation_missing_a_part_is_incomplete() {
     assert!(!complete.shows_every_part_of(&self::rendering("another rendering")));
 }
 
+/// A summary presentation that shows no canonical part, with a link to the
+/// full presentation of `rendering` that served the rendering whose digest
+/// is `served_digest`.
+fn linked_presentation(
+    rendering: &DecisionRendering,
+    served_digest: Sha256Digest,
+) -> PresentationRecord {
+    PresentationRecord::linked(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        rendering,
+        PresentationLink::new(reference("decision-page:7"), served_digest),
+        reference("chat"),
+        reference("message-1"),
+        5,
+    )
+}
+
+/// A summary with a link is a complete presentation exactly when the link
+/// served the whole, unchanged rendering: its served digest is the
+/// rendering's subject digest. A record that shows every part stays
+/// complete.
+#[test]
+fn a_link_presentation_counts_complete_only_when_its_served_digest_equals_the_subject_digest() {
+    let rendering = rendering(&"Release build 7 to the stable channel. ".repeat(4));
+    let linked = linked_presentation(&rendering, rendering.subject_digest());
+    assert!(linked.parts_shown.is_empty(), "a summary shows no part");
+    assert_eq!(linked.subject_digest, rendering.subject_digest());
+    assert!(!linked.shows_every_part_of(&rendering));
+    assert!(
+        linked.is_complete_for(&rendering),
+        "the link served the whole, unchanged rendering"
+    );
+
+    let shown = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        NonZeroU32::new(16),
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    );
+    assert!(shown.is_complete_for(&rendering));
+}
+
+/// A summary without a link shows only some parts, or none: incomplete.
+#[test]
+fn a_summary_without_a_link_is_incomplete() {
+    let rendering = rendering(&"Release build 7 to the stable channel. ".repeat(4));
+    let complete = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        NonZeroU32::new(16),
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    );
+    assert!(complete.parts_shown.len() > 1);
+
+    let mut summary = complete.clone();
+    summary.parts_shown.truncate(1);
+    assert!(!summary.is_complete_for(&rendering));
+
+    let mut nothing = complete;
+    nothing.parts_shown.clear();
+    assert!(!nothing.is_complete_for(&rendering));
+}
+
+/// A link that served another rendering (the request changed after the
+/// summary was sent) completes nothing, and a link that served this
+/// rendering completes no presentation of another.
+#[test]
+fn a_link_to_a_changed_rendering_is_incomplete() {
+    let rendering = rendering("Release build 7 to the stable channel.");
+    let changed = self::rendering("Release build 8 to the stable channel.");
+
+    let stale = linked_presentation(&rendering, changed.subject_digest());
+    assert!(!stale.is_complete_for(&rendering));
+
+    let served = linked_presentation(&rendering, rendering.subject_digest());
+    assert!(!served.is_complete_for(&changed));
+}
+
+/// The link is part of the record's closed form: it round-trips, a field it
+/// does not know is refused, and a record without a link writes none, so
+/// its stored bytes are those of a record from before links.
+#[test]
+fn a_linked_presentation_record_round_trips_and_refuses_unknown_fields() {
+    let rendering = rendering("Release build 7 to the stable channel.");
+    let linked = linked_presentation(&rendering, rendering.subject_digest());
+    let value = serde_json::to_value(&linked).expect("encode the record");
+    assert_eq!(
+        value["link"],
+        serde_json::json!({
+            "reference": "decision-page:7",
+            "served_digest": rendering.subject_digest().as_str(),
+        })
+    );
+    let back: PresentationRecord =
+        serde_json::from_value(value.clone()).expect("decode the record");
+    assert_eq!(back, linked);
+
+    let mut later = value;
+    later["link"]["a_later_field"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<PresentationRecord>(later).is_err());
+
+    let shown = PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        None,
+        reference("console"),
+        reference("message-1"),
+        5,
+    );
+    assert!(
+        serde_json::to_value(&shown)
+            .expect("encode the record")
+            .get("link")
+            .is_none()
+    );
+}
+
 #[test]
 fn decision_id_derives_from_kind_and_subject_key() {
     let kind = DecisionKind::new("identity.create").expect("kind");
@@ -261,7 +373,7 @@ fn decision_id_derives_from_kind_and_subject_key() {
 
 #[test]
 fn evidence_digest_changes_with_any_evidence_field() {
-    let human = attested(true)
+    let human = attested_in(&HostAuthenticationScope::new("login-1"), true)
         .with_presentation(PresentationRecord::complete(
             PresentationAudience::Approver {
                 approver_id: approver_id(),
@@ -295,7 +407,7 @@ fn evidence_digest_changes_with_any_evidence_field() {
         assert_ne!(evidence, human, "the change must change the evidence");
         evidence.digest().expect("digest")
     };
-    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 13] = [
+    let changes: [(&str, &dyn Fn(&mut DecisionEvidence)); 15] = [
         ("decider", &|evidence| {
             if let DecisionEvidence::Human { decider, .. } = evidence {
                 *decider = key(PrincipalKind::Human, "bob");
@@ -318,6 +430,25 @@ fn evidence_digest_changes_with_any_evidence_field() {
             } = evidence
             {
                 *authentication_scope = Some("login-2".to_owned());
+            }
+        }),
+        ("authentication scope digest", &|evidence| {
+            if let DecisionEvidence::Human {
+                authentication_scope_digest,
+                ..
+            } = evidence
+            {
+                *authentication_scope_digest =
+                    Some(HostAuthenticationScope::new("login-2").digest());
+            }
+        }),
+        ("no authentication scope digest", &|evidence| {
+            if let DecisionEvidence::Human {
+                authentication_scope_digest,
+                ..
+            } = evidence
+            {
+                *authentication_scope_digest = None;
             }
         }),
         ("ingress", &|evidence| {
@@ -512,6 +643,8 @@ fn stored(
         permit_issued: false,
         executed_request_digest: None,
         notice,
+        cleanup: DecisionCleanup::NotOwed,
+        reply_digest: None,
     };
     StoredDecision::held(descriptor, state)
 }
@@ -719,6 +852,10 @@ const REVIEW_EVIDENCE_DIGEST: &str =
 /// session id, a presentation record, a canonical part), serializes changes
 /// these bytes and fails here, before it would tear every decided row. Such
 /// a change needs a new evidence domain and a migration of the stored rows.
+/// The human evidence here keeps the login itself, as evidence recorded
+/// before the login digest did (`the_new_evidence_encoding_and_its_digest_are_pinned`
+/// pins the form recorded now): it still decodes, and keeps its bytes and
+/// its digest.
 #[test]
 fn the_evidence_encoding_and_its_digest_are_pinned() {
     let rendering = rendering("Release build 7.");
@@ -727,6 +864,7 @@ fn the_evidence_encoding_and_its_digest_are_pinned() {
         principal: principal(PrincipalKind::Human, "alice", "example.org"),
         assurance: ApprovalAssurance::PersonAuthenticated,
         authentication_scope: Some("login-1".to_owned()),
+        authentication_scope_digest: None,
         ingress: DecisionIngress::new("web").expect("ingress"),
         event_ref: reference("event-1"),
         observed_at_ms: None,
@@ -850,21 +988,354 @@ fn the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest() 
 }
 
 #[test]
-fn the_in_memory_store_keeps_one_executor_claim_at_a_time() {
+fn the_in_memory_store_keeps_one_executor_claim_per_kind() {
     let store = InMemoryDecisionStore::new();
-    let claim = store.claim_executor().expect("the first claim");
+    let release = DecisionKind::new("release").expect("kind");
+    let deploy = DecisionKind::new("deploy").expect("kind");
+    let claim = store
+        .claim_executor_kind(&release)
+        .expect("the first claim of the kind");
+    assert_eq!(
+        store.claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "one claim of a kind at a time"
+    );
+    let other_kind = store
+        .claim_executor_kind(&deploy)
+        .expect("a claim of another kind is independent");
+    drop(claim);
+    let again = store
+        .claim_executor_kind(&release)
+        .expect("the claim ends when it drops");
+    assert_eq!(
+        store.claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended)
+    );
+    drop((again, other_kind));
+}
+
+#[test]
+#[allow(deprecated)]
+fn the_in_memory_whole_store_claim_and_kind_claims_exclude_each_other() {
+    let store = InMemoryDecisionStore::new();
+    let release = DecisionKind::new("release").expect("kind");
+    let kind_claim = store.claim_executor_kind(&release).expect("a kind claim");
     assert_eq!(
         store.claim_executor().map(|_| ()),
         Err(ApprovalStoreError::Contended),
-        "one claim at a time"
+        "no whole-store claim beside a claim of a kind"
     );
-    drop(claim);
-    let again = store
+    drop(kind_claim);
+    let whole_store = store
         .claim_executor()
-        .expect("the claim ends when it drops");
+        .expect("free once no kind is claimed");
+    assert_eq!(
+        store.claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "no claim of a kind beside the whole-store claim"
+    );
     assert_eq!(
         store.claim_executor().map(|_| ()),
-        Err(ApprovalStoreError::Contended)
+        Err(ApprovalStoreError::Contended),
+        "one whole-store claim at a time"
     );
-    drop(again);
+    drop(whole_store);
+    let _kind_claim = store
+        .claim_executor_kind(&release)
+        .expect("free once the whole-store claim drops");
+}
+
+/// `alice`'s attested decision, approved or rejected, made in `login`.
+fn attested_in(login: &HostAuthenticationScope, approve: bool) -> AttestedDecision {
+    let approver = AuthenticatedApprover::new(
+        principal(PrincipalKind::Human, "alice", "example.org"),
+        ApprovalAssurance::PersonAuthenticated,
+    )
+    .expect("authenticated human")
+    .with_authentication_scope(login.clone());
+    AttestedDecision::new(
+        approver,
+        DecisionIngress::new("console").expect("ingress"),
+        reference("event-1"),
+        7,
+        approver_id(),
+        Sha256Digest::of(b"the rendering"),
+        approve,
+    )
+    .expect("attested decision")
+}
+
+/// A human decision made in a login keeps the digest of that login in its
+/// evidence, as a consent decision does, and never the login itself.
+#[test]
+fn new_evidence_keeps_the_login_digest_not_the_login() {
+    let login = HostAuthenticationScope::new("login-1");
+    let evidence = attested_in(&login, true).evidence();
+    let stored = serde_json::to_value(&evidence).expect("encode");
+    assert_eq!(
+        stored["authentication_scope_digest"],
+        serde_json::json!(login.digest().as_str()),
+        "the evidence keeps the digest of the login"
+    );
+    assert!(
+        stored.get("authentication_scope").is_none(),
+        "the evidence does not keep the login: {stored}"
+    );
+    assert!(
+        !serde_json::to_string(&evidence)
+            .expect("encode")
+            .contains(login.as_str()),
+        "no byte of the evidence names the login"
+    );
+}
+
+/// The pinned JSON of the human evidence of
+/// `the_new_evidence_encoding_and_its_digest_are_pinned`: the evidence of
+/// `HUMAN_OBSERVED_EVIDENCE_JSON` as a decision made in the login `login-1`
+/// records it now, with the digest of the login where evidence recorded
+/// before kept the login.
+const HUMAN_LOGIN_DIGEST_EVIDENCE_JSON: &str = concat!(
+    r#"{"kind":"human","#,
+    r#""decider":"principal:[\"human\",\"example.org\",\"alice\"]","#,
+    r#""principal":{"kind":"human","id":"alice","#,
+    r#""qualification":{"kind":"qualified","trust_domain_id":"example.org"}},"#,
+    r#""assurance":"person_authenticated","#,
+    r#""authentication_scope_digest":"#,
+    r#""sha256:9055b0b547c61f8ee25b0e3412f8df48e31f8ccb1187359932070d9a5d518273","#,
+    r#""ingress":"web","#,
+    r#""event_ref":"event-1","#,
+    r#""observed_at_ms":7,"#,
+    r#""approver_id":"team:owners","#,
+    r#""presented_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""presentation":{"#,
+    r#""audience":{"kind":"approver","approver_id":"team:owners"},"#,
+    r#""subject_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""parts_shown":[{"index":0,"count":1,"#,
+    r#""part_digest":"#,
+    r#""sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"}],"#,
+    r#""channel_ref":"channel-1","#,
+    r#""message_ref":"message-1","#,
+    r#""at_ms":5},"#,
+    r#""approve":true,"#,
+    r#""reason":"looks right"}"#,
+);
+const HUMAN_LOGIN_DIGEST_EVIDENCE_DIGEST: &str =
+    "sha256:79e13deef87155afa569a72fd5e5713909050c8ed389e0dd8177970cd81349de";
+
+/// The evidence an attested decision made in a login records has a pinned
+/// encoding and digest, under the same evidence domain as the evidence
+/// recorded before it, which keeps its own bytes and digest
+/// (`the_evidence_records_the_observed_time_and_older_evidence_keeps_its_digest`).
+#[test]
+fn the_new_evidence_encoding_and_its_digest_are_pinned() {
+    let rendering = rendering("Release build 7.");
+    let approver = AuthenticatedApprover::new(
+        principal(PrincipalKind::Human, "alice", "example.org"),
+        ApprovalAssurance::PersonAuthenticated,
+    )
+    .expect("authenticated human")
+    .with_authentication_scope(HostAuthenticationScope::new("login-1"));
+    let evidence = AttestedDecision::new(
+        approver,
+        DecisionIngress::new("web").expect("ingress"),
+        reference("event-1"),
+        7,
+        approver_id(),
+        rendering.subject_digest(),
+        true,
+    )
+    .expect("attested decision")
+    .with_presentation(PresentationRecord::complete(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        &rendering,
+        None,
+        reference("channel-1"),
+        reference("message-1"),
+        5,
+    ))
+    .with_reason("looks right")
+    .expect("reason")
+    .evidence();
+    assert_eq!(
+        serde_json::to_string(&evidence).expect("encode"),
+        HUMAN_LOGIN_DIGEST_EVIDENCE_JSON,
+        "the evidence's bytes"
+    );
+    assert_eq!(
+        evidence.digest().expect("digest").as_str(),
+        HUMAN_LOGIN_DIGEST_EVIDENCE_DIGEST,
+        "the evidence's digest"
+    );
+    assert_eq!(
+        &serde_json::from_str::<DecisionEvidence>(HUMAN_LOGIN_DIGEST_EVIDENCE_JSON)
+            .expect("the pinned bytes decode"),
+        &evidence,
+        "the evidence decodes from its pinned bytes"
+    );
+}
+
+/// Human decision evidence as Core 0.9.9 and 0.9.10 define it, keeping the
+/// login itself: the shape an older Core decodes a stored row's evidence
+/// with.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum HumanEvidenceBefore0911 {
+    Human {
+        decider: DecisionPrincipalKey,
+        principal: PrincipalRef,
+        assurance: ApprovalAssurance,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authentication_scope: Option<String>,
+        ingress: DecisionIngress,
+        event_ref: DecisionReference,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observed_at_ms: Option<u64>,
+        approver_id: ApproverId,
+        presented_digest: Sha256Digest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<PresentationRecord>,
+        approve: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+/// The digest an older Core computes of the evidence it decoded, and
+/// compares with the digest the row's machine state binds.
+fn digest_before_0911(evidence: &HumanEvidenceBefore0911) -> Sha256Digest {
+    #[derive(Serialize)]
+    struct DigestMaterial<'a> {
+        domain: &'static str,
+        evidence: &'a HumanEvidenceBefore0911,
+    }
+    let bytes = serde_json::to_vec(&DigestMaterial {
+        domain: "meerkat.decision.evidence.v1",
+        evidence,
+    })
+    .expect("encode");
+    Sha256Digest::of(&bytes)
+}
+
+/// A Core before 0.9.11 decodes the evidence of a decision made in a login
+/// (it ignores the field it does not know), but the digest it computes is
+/// not the one the row's machine state binds: it reads the row as torn,
+/// lists it unreadable and never executes it. The older shape is checked
+/// against the older Core's own pinned evidence first, so the difference
+/// is the login digest alone.
+#[test]
+fn a_core_before_0911_reads_new_human_evidence_as_torn() {
+    let own: HumanEvidenceBefore0911 = serde_json::from_str(HUMAN_OBSERVED_EVIDENCE_JSON)
+        .expect("an older Core decodes the evidence it recorded");
+    assert_eq!(
+        digest_before_0911(&own).as_str(),
+        HUMAN_OBSERVED_EVIDENCE_DIGEST,
+        "the older shape digests the older evidence as the older Core does"
+    );
+
+    let evidence = attested_in(&HostAuthenticationScope::new("login-1"), true).evidence();
+    let stored = serde_json::to_string(&evidence).expect("encode");
+    let read: HumanEvidenceBefore0911 =
+        serde_json::from_str(&stored).expect("an older Core decodes the new evidence");
+    assert_ne!(
+        digest_before_0911(&read),
+        evidence.digest().expect("digest"),
+        "an older Core's digest of the new evidence is not the row's: the row is torn"
+    );
+}
+
+/// The bytes of an executed, noticed row that carries neither fact of an
+/// executed decision (a cleanup owed, a reply settled): what a 0.9.10
+/// reader decodes. A kind that never opens the facts writes exactly these.
+const EXECUTED_ROW_WITHOUT_FACTS: &str = concat!(
+    r#"{"decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""descriptor":{"kind":"release","subject_key":"subject-a","operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"team:owners","deadline_at_ms":100,"created_at_ms":10,"#,
+    r#""request":{"build":7},"rendering":"Release build 7.","renderer":"render.v1","#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b"},"#,
+    r#""state":{"phase":"executed","#,
+    r#""decision_id":"decision:7b5c9801b128809378b37d9c399b6bf2afd6799b4ab35ceb31a0568e882f04e4","#,
+    r#""deadline_at_ms":100,"#,
+    r#""subject_digest":"sha256:6d7131a1a32893cc4a947ca6d83471bca641ab725a2ef83dd356f59c0b4e3f5b","#,
+    r#""operation_id":"operation-7","#,
+    r#""request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""requester":"principal:[\"personal_agent\",\"example.org\",\"builder\"]","#,
+    r#""approver_id":"approver:team:owners","reviewer":null,"stage":"human","#,
+    r#""first_presented_to_approver_at_ms":null,"presented_to_reviewer":false,"#,
+    r#""evidence_digest":null,"decided_at_ms":null,"ended_at_ms":50,"permit_issued":false,"#,
+    r#""executed_request_digest":"sha256:7c02a5bac80b53d7403310592c0a3b8e5dd9eff29bcee8ee844eb3bd9b40e6a5","#,
+    r#""notice":"delivered"},"revision":1}"#,
+);
+
+#[test]
+fn a_row_without_the_executed_decisions_facts_keeps_its_bytes() {
+    let mut row = stored(
+        "subject-a",
+        DecisionPhase::Executed,
+        DecisionNotice::Delivered,
+        100,
+    );
+    row.state.executed_request_digest = Some(row.state.request_digest.clone());
+    row.state.ended_at_ms = Some(50);
+    assert_eq!(
+        serde_json::to_string(&row).expect("the row encodes"),
+        EXECUTED_ROW_WITHOUT_FACTS
+    );
+}
+
+/// What sealing a hold of `kind` in a reviewer's review stage answers.
+fn sealed_with_a_reviewer(kind: &str) -> Result<DecisionDescriptor, DecisionContractError> {
+    let mut request = hold_request(rendering("Approve the held operation."), None)
+        .with_reviewer(key(PrincipalKind::SharedAgent, "reviewer"));
+    request.kind = DecisionKind::new(kind).expect("kind");
+    DecisionDescriptor::seal(request, 10)
+}
+
+/// `kind` is decided by people only: a hold of it that names a reviewer is
+/// refused, and nothing is sealed.
+fn assert_decided_by_people_only(kind: &str) {
+    let parsed = DecisionKind::new(kind).expect("kind");
+    assert!(decided_by_people_only(&parsed), "{kind} is listed");
+    assert_eq!(
+        sealed_with_a_reviewer(kind).expect_err("a review stage is refused"),
+        DecisionContractError::ReviewStageNotAllowed { kind: parsed }
+    );
+}
+
+#[test]
+fn a_grant_child_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("grant.child");
+}
+
+#[test]
+fn a_tool_grant_issue_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("tool_grant.issue");
+}
+
+#[test]
+fn a_route_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("route.release");
+}
+
+#[test]
+fn a_gating_release_decision_is_decided_by_people_only() {
+    assert_decided_by_people_only("gating.release");
+}
+
+/// The control: a kind a reviewer may decide keeps its review stage.
+#[test]
+fn a_release_decision_keeps_its_review_stage() {
+    assert!(!decided_by_people_only(
+        &DecisionKind::new("release").expect("kind")
+    ));
+    let sealed = sealed_with_a_reviewer("release").expect("sealed with its review stage");
+    assert_eq!(
+        sealed.reviewer,
+        Some(key(PrincipalKind::SharedAgent, "reviewer"))
+    );
 }

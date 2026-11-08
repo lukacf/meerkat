@@ -11096,7 +11096,7 @@ impl MeerkatMachine {
     }
 
     /// Retire a transport-free context fixture through generated close.
-    #[cfg(all(feature = "test-support", feature = "live"))]
+    #[cfg(all(any(test, feature = "test-support"), feature = "live"))]
     #[doc(hidden)]
     pub async fn __test_close_live_context_channel(
         &self,
@@ -16818,8 +16818,7 @@ impl MeerkatMachine {
             witness,
             held_mutation_gate,
             boundary_handle,
-            expected_run_id,
-            projected_effect,
+            dispatch,
             pending_dispatch,
             dispatch_generation,
             dispatch_lifecycle_phase,
@@ -16997,8 +16996,11 @@ impl MeerkatMachine {
                     return Err(RuntimeDriverError::NotReady { state });
                 }
             };
+            // The machine decided the dispatch: the runtime-loop effect with
+            // no run current, or the exact-run cancel bound to the current
+            // run, which only the exact-run boundary handle delivers.
             let projection =
-                crate::effect::runtime_effect_projection_optional_from_dsl_effects(&staged.effects);
+                crate::effect::boundary_cancel_dispatch_optional_from_dsl_effects(&staged.effects);
             #[cfg(test)]
             let projection = if self
                 .test_fail_next_boundary_cancel_effect_projection
@@ -17008,8 +17010,8 @@ impl MeerkatMachine {
             } else {
                 projection
             };
-            let projected_effect = match projection {
-                Ok(projected_effect) => projected_effect,
+            let dispatch = match projection {
+                Ok(dispatch) => dispatch,
                 Err(error) => {
                     let dispatch_generation = staged
                         .committed_snapshot
@@ -17026,10 +17028,10 @@ impl MeerkatMachine {
                     ));
                 }
             };
-            let Some(projected_effect) = projected_effect else {
+            let Some(dispatch) = dispatch else {
                 // Machine-owned convergence: a boundary-cancel dispatch is
                 // already outstanding, so the machine took the typed
-                // AlreadyPending arm (no RuntimeEffectFact). The request is
+                // AlreadyPending arm (no dispatch effect). The request is
                 // satisfied by the outstanding dispatch — and this bound is
                 // what stops a boundary handle that re-enters
                 // `cancel_after_boundary` from recursing unboundedly.
@@ -17041,18 +17043,12 @@ impl MeerkatMachine {
                 });
                 if !already_pending {
                     return Err(RuntimeDriverError::Internal(
-                        "CancelAfterBoundary emitted neither a RuntimeEffectFact nor BoundaryCancelAlreadyPending"
+                        "CancelAfterBoundary emitted no boundary-cancel dispatch and no BoundaryCancelAlreadyPending"
                             .to_string(),
                     ));
                 }
                 return Ok(true);
             };
-            let expected_run_id = staged
-                .committed_snapshot
-                .state()
-                .current_run_id
-                .as_ref()
-                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl);
             let dispatch_generation = staged
                 .committed_snapshot
                 .state()
@@ -17137,8 +17133,7 @@ impl MeerkatMachine {
                 },
                 held_mutation_gate,
                 entry.boundary_handle(),
-                expected_run_id,
-                projected_effect,
+                dispatch,
                 pending_dispatch,
                 dispatch_generation,
                 dispatch_lifecycle_phase,
@@ -17157,8 +17152,7 @@ impl MeerkatMachine {
                 boundary_handle,
                 member_authority,
                 pending_dispatch,
-                expected_run_id.as_ref(),
-                projected_effect,
+                dispatch,
                 dispatch_generation,
                 dispatch_lifecycle_phase,
                 requested_run_id.is_some(),

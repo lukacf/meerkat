@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::identifiers::LogicalRuntimeId;
 use crate::store::{
-    RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord,
-    RuntimeStore, RuntimeStoreError, UnavailableRuntime,
+    RefusedScope, RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityRecord,
+    RuntimeDeliveryStoreRecord, RuntimeStore, RuntimeStoreError, UnavailableRuntime,
 };
 
 pub mod dsl;
@@ -1997,15 +1997,16 @@ impl RuntimeDeliveryInbox {
     /// caller is asking about.
     ///
     /// A total has no honest answer while the store cannot answer for a
-    /// runtime (a host store whose scope of that runtime is poisoned): the
-    /// total refuses typed ([`RuntimeStoreError::ScopeRefused`], naming those
-    /// runtimes' scopes) until the store is reopened.
+    /// runtime (a host store whose scope of that runtime is poisoned or
+    /// quarantined, named or not): the total refuses typed
+    /// ([`RuntimeStoreError::ScopeRefused`], naming those runtimes' scopes)
+    /// until the store answers for them again.
     pub async fn pending_delivery_total(&self) -> Result<u64, RuntimeDeliveryError> {
         let listing = self
             .store
             .list_runtime_delivery_authorities_or_unavailable()
             .await?;
-        refuse_unavailable(&listing.unavailable)?;
+        refuse_unavailable(&listing.unavailable, &listing.unnamed)?;
         let mut total = 0_u64;
         for (runtime_id, record) in listing.records {
             total = total.saturating_add(pending_delivery_count(&runtime_id, &record)?);
@@ -2029,16 +2030,17 @@ impl RuntimeDeliveryInbox {
         &self,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeDeliveryError> {
         let backlog = self.runtime_delivery_backlog().await?;
-        refuse_unavailable(&backlog.unavailable)?;
+        refuse_unavailable(&backlog.unavailable, &backlog.unnamed)?;
         Ok(backlog.pending)
     }
 
     /// [`Self::runtimes_with_pending_deliveries`], answered per runtime: every
-    /// runtime holding committed-but-unapplied deliveries, and every runtime
-    /// the store cannot answer for until it is reopened (a host store whose
-    /// scope of that runtime is poisoned). An unavailable runtime may hold
-    /// pending rows: a drain cannot reach it, and nothing reads it as holding
-    /// none. Both ordered by runtime id.
+    /// runtime holding committed-but-unapplied deliveries, every runtime the
+    /// store refuses (a host store whose scope of that runtime is poisoned or
+    /// quarantined), and every refused runtime scope it cannot name by
+    /// runtime id. A refused runtime may hold pending rows: a drain cannot
+    /// reach it, and nothing reads it as holding none. The first two ordered
+    /// by runtime id.
     pub async fn runtime_delivery_backlog(
         &self,
     ) -> Result<RuntimeDeliveryBacklog, RuntimeDeliveryError> {
@@ -2072,9 +2074,13 @@ pub struct RuntimeDeliveryBacklog {
     /// Every runtime holding committed-but-unapplied deliveries, by runtime
     /// id.
     pub pending: Vec<LogicalRuntimeId>,
-    /// Every runtime the store cannot answer for until it is reopened, by
-    /// runtime id. Any of them may hold pending deliveries.
+    /// Every runtime the store refuses, by runtime id. Any of them may hold
+    /// pending deliveries.
     pub unavailable: Vec<UnavailableRuntime>,
+    /// Every refused runtime scope the store cannot name by runtime id
+    /// ([`RuntimeStore::unnamed_refused_runtimes`]), by its scope. Any of
+    /// them may hold pending deliveries.
+    pub unnamed: Vec<RefusedScope>,
 }
 
 /// The backlog of `store` per runtime: the answer of
@@ -2098,13 +2104,30 @@ pub(crate) async fn runtime_delivery_backlog_in(
     Ok(RuntimeDeliveryBacklog {
         pending,
         unavailable,
+        unnamed: listing.unnamed,
     })
+}
+
+/// Whether `runtime_id` holds committed-but-unapplied deliveries in `store`:
+/// [`runtime_delivery_backlog_in`] for one runtime, from its own delivery
+/// authority. A runtime with no authority holds none.
+pub(crate) async fn runtime_delivery_pending_in(
+    store: &dyn RuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+) -> Result<bool, RuntimeDeliveryError> {
+    let Some(record) = store.load_runtime_delivery_authority(runtime_id).await? else {
+        return Ok(false);
+    };
+    Ok(pending_delivery_count(runtime_id, &record)? > 0)
 }
 
 /// Refuse a store-wide answer while runtimes are unavailable: the typed
 /// refusal naming their scopes.
-fn refuse_unavailable(unavailable: &[UnavailableRuntime]) -> Result<(), RuntimeDeliveryError> {
-    if unavailable.is_empty() {
+fn refuse_unavailable(
+    unavailable: &[UnavailableRuntime],
+    unnamed: &[RefusedScope],
+) -> Result<(), RuntimeDeliveryError> {
+    if unavailable.is_empty() && unnamed.is_empty() {
         return Ok(());
     }
     Err(RuntimeDeliveryError::Store(
@@ -2112,6 +2135,7 @@ fn refuse_unavailable(unavailable: &[UnavailableRuntime]) -> Result<(), RuntimeD
             scopes: unavailable
                 .iter()
                 .map(|runtime| runtime.refusal.clone())
+                .chain(unnamed.iter().cloned())
                 .collect(),
         },
     ))

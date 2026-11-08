@@ -320,6 +320,27 @@ mod losing {
                 .await
         }
 
+        fn members_holding_run_starts_for_published_tools(
+            &self,
+        ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+            self.inner.members_holding_run_starts_for_published_tools()
+        }
+
+        fn member_holds_run_starts_for_published_tools(
+            &self,
+            member_id: &MobAgentIdentity,
+        ) -> Result<bool, BridgeError> {
+            self.inner
+                .member_holds_run_starts_for_published_tools(member_id)
+        }
+
+        async fn resolve_member_build_preparation(
+            &self,
+            member_id: &MobAgentIdentity,
+        ) -> Result<(), BridgeError> {
+            self.inner.resolve_member_build_preparation(member_id).await
+        }
+
         async fn member_durability(
             &self,
             session_id: &meerkat_core::types::SessionId,
@@ -586,6 +607,16 @@ mod losing {
                 .unregister_session_runtime_state(session_id)
                 .await
         }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+        ) -> Result<
+            meerkat_meta::identity_first::DeclaredRosterAnswer,
+            meerkat_meta::identity_first::BridgeError,
+        > {
+            self.inner.apply_declared_roster(roster).await
+        }
     }
 }
 
@@ -668,7 +699,8 @@ async fn governed_runtime_composed(
             binding: None,
             placement: None,
         })
-        .await;
+        .await
+        .expect("the identity registers");
     (runtime, identity)
 }
 

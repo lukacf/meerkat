@@ -376,7 +376,7 @@
       "result_type": "HelpResponse"
     },
     {
-      "description": "Grant a session's grant-gated tool name or built-in tool family for a bounded window",
+      "description": "Grant a session's or a mob member identity's grant-gated tool name, built-in tool family or MCP server for a bounded window",
       "name": "tool_grants/grant",
       "params_type": "GrantToolParams",
       "result_type": "GrantToolResult"
@@ -388,16 +388,46 @@
       "result_type": "RevokeToolGrantResult"
     },
     {
-      "description": "List a session's scoped tool grants, each due grant settled as expired first",
+      "description": "List a session's or a mob member identity's scoped tool grants, each due grant settled as expired first",
       "name": "tool_grants/list",
       "params_type": "ListToolGrantsParams",
       "result_type": "ListToolGrantsResult"
     },
     {
-      "description": "Read a page of the audit log of a session's scoped tool grants",
+      "description": "Read a page of the audit log of a session's or a mob member identity's scoped tool grants",
       "name": "tool_grants/audit",
       "params_type": "ToolGrantAuditParams",
       "result_type": "ToolGrantAuditResult"
+    },
+    {
+      "description": "List a page of durable decisions, filtered by kind, phase, approver id or requester",
+      "name": "decision/list",
+      "params_type": "DecisionListParams",
+      "result_type": "DecisionListResult"
+    },
+    {
+      "description": "Get one durable decision, its expiry recorded when its deadline passed",
+      "name": "decision/get",
+      "params_type": "DecisionGetParams",
+      "result_type": "DecisionResult"
+    },
+    {
+      "description": "Get a durable decision's rendering and its canonical parts for a part size",
+      "name": "decision/rendering",
+      "params_type": "DecisionRenderingParams",
+      "result_type": "DecisionRenderingResult"
+    },
+    {
+      "description": "Record a host presenter's presentation of a durable decision's rendering",
+      "name": "decision/present",
+      "params_type": "DecisionPresentParams",
+      "result_type": "DecisionResult"
+    },
+    {
+      "description": "Withdraw an open durable decision as the host",
+      "name": "decision/withdraw",
+      "params_type": "DecisionWithdrawParams",
+      "result_type": "DecisionResult"
     },
     {
       "description": "Fetch raw blob payload metadata and bytes by blob id",
@@ -1106,6 +1136,10 @@
     {
       "description": "One recorded R3 human consent transition (requested, approved, denied, used, withdrawn) of an approval this connection's approver decides",
       "name": "approval/consent_notice"
+    },
+    {
+      "description": "One durable decision this stdio connection presented to its operator, with the whole rendering, written before the decision/list answer that caused it",
+      "name": "decision/notice"
     },
     {
       "description": "Opaque playback handle for one admitted assistant output (measured playback)",

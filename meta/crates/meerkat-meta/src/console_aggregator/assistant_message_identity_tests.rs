@@ -1921,7 +1921,7 @@ async fn status_unknown_refresh_is_redriven_by_the_next_typed_change_not_a_tick(
             .status_unknown_redrives
             .lock()
             .map_err(|_| std::io::Error::other("fixture re-drive lock"))?
-            .contains(&retry_key),
+            .contains_key(&retry_key),
         "a fired re-drive releases its key"
     );
     runtime.mob_handle().stop().await?;
@@ -2154,7 +2154,7 @@ async fn draining_refresh_skips_its_read_and_is_redriven_by_the_next_typed_chang
             .status_unknown_redrives
             .lock()
             .map_err(|_| std::io::Error::other("fixture re-drive lock"))?
-            .contains(&fixture.retry_key),
+            .contains_key(&fixture.retry_key),
         "the fired re-drive disarms"
     );
     fixture.runtime.mob_handle().stop().await?;
@@ -2292,7 +2292,7 @@ async fn a_member_stopped_while_draining_is_refreshed_and_converges() -> Console
             .status_unknown_redrives
             .lock()
             .map_err(|_| std::io::Error::other("fixture re-drive lock"))?
-            .contains(&fixture.retry_key),
+            .contains_key(&fixture.retry_key),
         "no waiter stays armed for the stopped member"
     );
     tokio::time::timeout(
@@ -2344,4 +2344,352 @@ async fn running_refresh_reads_once_and_arms_a_typed_change_redrive() -> Console
     );
     fixture.runtime.mob_handle().stop().await?;
     Ok(())
+}
+
+/// A stress runtime with `names` seated idle (no initial message), registered
+/// with a new aggregator directly (so no discovery loop runs), and each
+/// member's identity, identity record and session id, in `names` order.
+struct SeatedMembers {
+    _temp: tempfile::TempDir,
+    runtime: Arc<UnifiedRuntime>,
+    service: super::tests::DelayedHistorySessionService,
+    aggregator: MetaConsoleAggregator,
+    entry: RuntimeEntry,
+    members: Vec<(AgentIdentity, ConsoleIdentityRecord, String)>,
+}
+
+impl SeatedMembers {
+    async fn seat(names: &[&str]) -> ConsoleLogResult<Self> {
+        let (temp, runtime, service) = super::tests::build_stress_runtime(0, Duration::ZERO).await;
+        for name in names {
+            runtime
+                .spawn(meerkat_mob::SpawnMemberSpec::from_wire(
+                    "worker".to_string(),
+                    (*name).to_string(),
+                    None,
+                    None,
+                    None,
+                ))
+                .await?;
+        }
+        let aggregator = MetaConsoleAggregator::new(Arc::new(InMemoryConsoleLogStore::new()));
+        let mut entry = super::tests::runtime_entry_for_test(RUNTIME, &runtime);
+        entry.identity_namespace.clear();
+        aggregator
+            .inner
+            .runtimes
+            .write()
+            .map_err(|_| std::io::Error::other("runtime fixture lock"))?
+            .insert(RUNTIME.into(), entry.clone());
+        let handle = runtime.mob_handle();
+        let snapshot = handle.list_members_observation_snapshot().await;
+        let mut members = Vec::new();
+        for name in names {
+            let member = snapshot
+                .iter()
+                .find(|member| member.agent_identity.as_str() == *name)
+                .ok_or("fixture member missing")?;
+            let record = identity_record_for_member(&entry, &handle, member)
+                .await
+                .ok_or("fixture identity missing")?;
+            let session_id = record.session_id.clone().ok_or("fixture session missing")?;
+            members.push((member.agent_identity.clone(), record, session_id));
+        }
+        Ok(Self {
+            _temp: temp,
+            runtime,
+            service,
+            aggregator,
+            entry,
+            members,
+        })
+    }
+
+    /// A recovery refresh of the member at `index`.
+    fn recovery_target(&self, index: usize) -> SessionBackfillTarget {
+        let (_, record, session_id) = &self.members[index];
+        SessionBackfillTarget {
+            assistant_refresh: assistant_history_refresh::AssistantHistoryRefreshReason::Recovery,
+            provenance: None,
+            entry: self.entry.clone(),
+            record: record.clone(),
+            session_id: session_id.clone(),
+        }
+    }
+}
+
+/// A member whose event subscription is refused (as when its session's store
+/// scope was refused and its session actor is gone) while its status still
+/// reads a run open is not read again on other members' changes. The
+/// re-drive armed for it used to wake on every change of the mob, and an
+/// answered status read of another member is one, so 100 status reads of an
+/// idle peer made a status read of the refused member each: the loop behind
+/// a status-read storm. (A run-open read re-drives a session boundary, which
+/// a pass still in flight for the session keeps for after it, so the base's
+/// loop does not stop at the first overlap.)
+#[tokio::test]
+async fn a_refused_member_is_not_reread_on_other_members_changes() -> ConsoleLogResult<()> {
+    let fixture = SeatedMembers::seat(&["agent-refused", "agent-peer"]).await?;
+    let (refused, _, refused_session) = &fixture.members[0];
+    let (peer, _, _) = &fixture.members[1];
+    let handle = fixture.runtime.mob_handle();
+    assistant_history_refresh::core_status_reads::answer_run_open(refused_session);
+    fixture
+        .service
+        .refuse_session_events(&meerkat_core::SessionId::parse(refused_session)?);
+    assert!(
+        handle.subscribe_agent_events(refused).await.is_err(),
+        "the fixture refuses the member's event subscription"
+    );
+    let reads = || assistant_history_refresh::core_status_reads::count(refused_session);
+
+    backfill_one_session_history(
+        fixture.aggregator.inner.clone(),
+        fixture.recovery_target(0),
+        false,
+    )
+    .await?;
+    let recovery_reads = reads();
+    assert!(
+        recovery_reads >= 1,
+        "the recovery pass read the refused member's status"
+    );
+    assert_eq!(
+        fixture
+            .aggregator
+            .inner
+            .status_unknown_redrive_tasks
+            .lock()
+            .map_err(|_| std::io::Error::other("fixture re-drive lock"))?
+            .len(),
+        1,
+        "and armed one re-drive for it"
+    );
+
+    // 100 changes of the mob that touch only the peer: each status read of
+    // the idle peer records its observation, which publishes machine state.
+    // Each change waits for a read it caused and for the session's backfill
+    // to end, so no change lands while a pass for the session still runs (a
+    // pass in flight takes over the re-drive such a change wakes).
+    let inner = fixture.aggregator.inner.clone();
+    let mut changes = handle.machine_state_changes();
+    let _ = futures::FutureExt::now_or_never(changes.changed());
+    let mut published = 0;
+    for _ in 0..100 {
+        let before = reads();
+        handle.member_status(peer).await?;
+        if matches!(
+            futures::FutureExt::now_or_never(changes.changed()),
+            Some(Ok(()))
+        ) {
+            published += 1;
+        }
+        let read_deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while reads() == before && tokio::time::Instant::now() < read_deadline {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let idle_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !inner.targeted_session_backfills.lock().await.is_empty() {
+            if tokio::time::Instant::now() >= idle_deadline {
+                return Err("the refused member's backfill did not end within 10 s".into());
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+    assert!(
+        published >= 50,
+        "the peer's status reads change the mob's state ({published} of 100 did)"
+    );
+    let reads = reads();
+    assert!(
+        reads <= recovery_reads + 1,
+        "the refused member's status was read {reads} times ({recovery_reads} by the \
+         recovery pass) while only its peer changed the mob ({published} changes)"
+    );
+    handle.stop().await?;
+    Ok(())
+}
+
+/// A live member whose status reads go unanswered (as under contention) is
+/// read again on the mob's changes no sooner than 1 s after the read that did
+/// not answer, and that wait doubles while its status stays unknown. The
+/// re-drive used to read it again on the next change of any member.
+#[tokio::test]
+async fn a_status_unknown_member_is_reread_only_after_its_backoff() -> ConsoleLogResult<()> {
+    let fixture = SeatedMembers::seat(&["agent-unknown", "agent-peer"]).await?;
+    let (_, _, unknown_session) = &fixture.members[0];
+    let (peer, _, _) = &fixture.members[1];
+    assistant_history_refresh::core_status_reads::leave_unanswered(unknown_session);
+    let reads = || assistant_history_refresh::core_status_reads::count(unknown_session);
+
+    backfill_one_session_history(
+        fixture.aggregator.inner.clone(),
+        fixture.recovery_target(0),
+        false,
+    )
+    .await?;
+    assert_eq!(reads(), 1, "the recovery pass read the member's status");
+
+    // Other members keep changing the mob until the member's status was read
+    // three times or 10 s passed. The waits are taken between the instants
+    // the reads themselves recorded.
+    let handle = fixture.runtime.mob_handle();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while reads() < 3 && tokio::time::Instant::now() < deadline {
+        handle.member_status(peer).await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let read_at = assistant_history_refresh::core_status_reads::instants(unknown_session);
+    assert!(
+        read_at.len() >= 2,
+        "the member's status was read again within 10 s"
+    );
+    let first_wait = read_at[1] - read_at[0];
+    assert!(
+        first_wait >= Duration::from_secs(1),
+        "the member's status was read again {first_wait:?} after a read that did not \
+         answer; the first wait is 1 s"
+    );
+    assert!(read_at.len() >= 3, "and a third time within 10 s");
+    let second_wait = read_at[2] - read_at[1];
+    assert!(
+        second_wait >= Duration::from_secs(2),
+        "the member's status was read a third time {second_wait:?} after the second \
+         unanswered read; the wait doubles to 2 s"
+    );
+    handle.stop().await?;
+    Ok(())
+}
+
+/// A member whose event subscription is refused, whose status read did not
+/// answer: the pass arms one re-drive for it, parked until the member's own
+/// state changes. Answers the fixture and that re-drive's task.
+async fn park_a_refused_member_redrive()
+-> ConsoleLogResult<(SeatedMembers, tokio::task::JoinHandle<()>)> {
+    let fixture = SeatedMembers::seat(&["agent-refused"]).await?;
+    let (refused, _, refused_session) = fixture.members[0].clone();
+    let handle = fixture.runtime.mob_handle();
+    assistant_history_refresh::core_status_reads::leave_unanswered(&refused_session);
+    fixture
+        .service
+        .refuse_session_events(&meerkat_core::SessionId::parse(&refused_session)?);
+    assert!(
+        handle.subscribe_agent_events(&refused).await.is_err(),
+        "the fixture refuses the member's event subscription"
+    );
+    backfill_one_session_history(
+        fixture.aggregator.inner.clone(),
+        fixture.recovery_target(0),
+        false,
+    )
+    .await?;
+    let mut redrives =
+        BoundaryFixture::take_tasks(&fixture.aggregator.inner.status_unknown_redrive_tasks)?;
+    assert_eq!(
+        redrives.len(),
+        1,
+        "the pass armed one re-drive for the member"
+    );
+    let redrive = redrives.remove(0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !redrive.is_finished(),
+        "the re-drive waits for a change of the member's own state"
+    );
+    Ok((fixture, redrive))
+}
+
+/// A re-drive parked for a member the console cannot follow ends when its
+/// runtime is unregistered. It used to stay parked until the member's own
+/// state changed or its mob's actor ended, so each unregistration (or
+/// replacement) of the runtime left such a waiter behind, holding the mob's
+/// handle for a registration that no longer existed.
+#[tokio::test]
+async fn a_parked_redrive_ends_when_its_runtime_is_unregistered() -> ConsoleLogResult<()> {
+    let (fixture, redrive) = park_a_refused_member_redrive().await?;
+    fixture.aggregator.unregister_runtime(RUNTIME);
+    tokio::time::timeout(Duration::from_secs(5), redrive)
+        .await
+        .map_err(|_| "the parked re-drive outlived its runtime's registration by 5 s")??;
+    fixture.runtime.mob_handle().stop().await?;
+    Ok(())
+}
+
+/// A re-drive parked for a member the console cannot follow still fires once
+/// the member's own state changes: retiring the member wakes it and its pass
+/// runs. The narrowed wait ignores other members' changes, not the member's
+/// own.
+#[tokio::test]
+async fn a_refused_members_redrive_fires_when_its_own_state_changes() -> ConsoleLogResult<()> {
+    let (fixture, redrive) = park_a_refused_member_redrive().await?;
+    let (refused, _, _) = fixture.members[0].clone();
+    fixture.runtime.mob_handle().retire(refused).await?;
+    // A parked re-drive ends by firing, or when its runtime's registration
+    // or its mob's actor ends; neither of the last two happens here.
+    tokio::time::timeout(Duration::from_secs(10), redrive)
+        .await
+        .map_err(|_| "the re-drive did not fire within 10 s of the member's retirement")??;
+    fixture.runtime.mob_handle().stop().await?;
+    Ok(())
+}
+
+/// The wait before a member's status is read again after unanswered reads in
+/// a row: 1 s, doubled for each further one, at most 30 s.
+#[test]
+fn the_status_unknown_backoff_doubles_from_one_second_to_thirty() {
+    let waits = (1..=7).map(status_unknown_backoff_wait).collect::<Vec<_>>();
+    assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
+    assert_eq!(
+        status_unknown_backoff_wait(u32::MAX),
+        Duration::from_secs(30)
+    );
+}
+
+/// An unanswered status read holds the member's next read back for its
+/// backoff, and a further one in a row doubles it. A pass that asked for no
+/// status keeps the backoff, it ends at its instant, and an answered read
+/// starts the next one from 1 s again.
+#[tokio::test(start_paused = true)]
+async fn an_answered_status_read_ends_the_status_read_backoff() {
+    use assistant_history_refresh::AssistantHistoryRefreshGate as Gate;
+    let aggregator = MetaConsoleAggregator::new(Arc::new(InMemoryConsoleLogStore::new()));
+    let inner = &aggregator.inner;
+    let key = (
+        uuid::Uuid::new_v4(),
+        RUNTIME.to_string(),
+        "agent-backoff".to_string(),
+        "session-backoff".to_string(),
+    );
+    let start = tokio::time::Instant::now();
+    assert_eq!(status_read_not_before(inner, &key), None);
+    note_status_read(inner, &key, Gate::StatusUnknown);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(start + Duration::from_secs(1))
+    );
+    note_status_read(inner, &key, Gate::StatusUnknown);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(start + Duration::from_secs(2)),
+        "a further unanswered read in a row doubles the wait"
+    );
+    note_status_read(inner, &key, Gate::PositiveOnly);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(start + Duration::from_secs(2)),
+        "a pass that asked for no status keeps the backoff"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        None,
+        "the backoff ends at its instant"
+    );
+    note_status_read(inner, &key, Gate::Settled);
+    note_status_read(inner, &key, Gate::StatusUnknown);
+    assert_eq!(
+        status_read_not_before(inner, &key),
+        Some(tokio::time::Instant::now() + Duration::from_secs(1)),
+        "after an answered read the next unanswered one waits 1 s again"
+    );
 }

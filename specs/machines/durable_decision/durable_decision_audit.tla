@@ -20,7 +20,15 @@
 \* one carries no presentation or one shown at 0, 1 or 2 (0 is no reading),
 \* and its ingress observed it at any time in 0..2, before, at or after each
 \* presentation; one with a defect carries a presentation shown at 1,
-\* observed at 1. A complete presentation of the held subject to the
+\* observed at 1. A carried presentation shows every part; the valid one
+\* also carries, at 1 and observed at 1, a summary whose link served the
+\* held subject's rendering, and each that does not count: shown to another
+\* audience, of another subject, a summary with no link, or one whose link
+\* served another rendering. A presentation shows every canonical part, or is a
+\* summary that shows none, with a link to the full presentation that served
+\* the held subject's rendering or another one, or with no link; it is
+\* complete when it shows every part or its link served the held subject. A
+\* complete presentation of the held subject to the
 \* approver was shown at 0, 1 or 2, any other at 1, whatever clock reading
 \* records it; the first presentation is the earliest reading. A review
 \* verdict is the
@@ -34,20 +42,22 @@
 \* the execution. An authorization carries the host's answer for the
 \* approver who decided: still current, or no longer current. Any other
 \* party's input, a deadline observation and a replayed settlement may still
-\* arrive.
+\* arrive. The owner may open a cleanup, settle it, and settle a reply (with
+\* the held digest or another) in any phase and order: the machine decides.
 \*
 \* Properties. Each step property is checked on every step by its wrapper,
 \* which records the property in audit_broken when the step breaks it; the
 \* invariant of the same name requires that it never was:
 \*
 \*   AuditTerminalsLatch: an ended decision (Rejected, Expired, Withdrawn,
-\*     Executed, ExecutionRefused) never moves again; only its owed notice
-\*     settles.
+\*     Executed, ExecutionRefused) never moves again; only its owed notice,
+\*     its owed cleanup and an executed decision's reply settle.
 \*   AuditApprovalIsAttested: an approval comes only from an open decision,
 \*     before its deadline, by an attested decision bound to the held
 \*     subject digest: a human acting for the sealed approver id, eligible,
-\*     not the requester, shown a complete presentation (carried or
-\*     recorded); or the sealed reviewer, shown one; with its evidence and
+\*     not the requester, shown a complete presentation (carried, when it
+\*     counts, or recorded); or the sealed reviewer, shown one; with its
+\*     evidence and
 \*     decision time recorded (I-C7).
 \*   AuditRejectionIsAttested: the same for a rejection, which also ends it.
 \*   AuditExecutedOnlyFromApprovedWithHeldBinding: an execution is recorded
@@ -72,14 +82,23 @@
 \*   AuditDecisionFollowsPresentation: a human decision is decided only when
 \*     its ingress observed it at or after the approver's first presentation
 \*     (the earliest the audit saw recorded, or the one the decision
-\*     carries, a time of 0 being none), and is refused for the order only
-\*     when observed before it.
+\*     carries when it counts, a complete presentation of the held subject
+\*     to the approver id read from the input's facts, a time of 0 being
+\*     none), and is refused for the order only when observed before it.
 \*   AuditPermitOnlyForCurrentApprover: a permit is issued, or issued again,
 \*     only for an approver who is still current. For one who is no longer
 \*     current, an authorization of the held binding on an approved decision
 \*     before its deadline ends the decision refused when no permit is
 \*     outstanding, and changes nothing while one is: the owner settles it
 \*     first, and a commit made under it still settles as executed.
+\*   AuditCleanupOwedUnderPermit: a cleanup is opened only by the owner
+\*     holding its permit on an approved decision, from nothing owed.
+\*   AuditCleanupSettledAfterTheEnd: an owed cleanup is never dropped, a
+\*     settled one never reopens (settling it again is refused), and a
+\*     cleanup settles only by its settlement once the decision ended
+\*     (executed, refused or expired).
+\*   AuditReplySettledOnce: an executed decision's reply settles once, by
+\*     its settlement, to the digest it names, and never changes after.
 \* and two state invariants:
 \*   AuditCommittedIsSettleable: once the owner committed, the decision is
 \*     Executed, or Approved with the permit still outstanding, so the commit
@@ -94,7 +113,7 @@
 \*     that fired.
 \*
 \* Reachability (the runner): every wrapper fires in the bounded space,
-\* checked from TLC's coverage, and seventeen scenarios are checked as
+\* checked from TLC's coverage, and twenty-two scenarios are checked as
 \* expected violations of their negations: a human approval executed and its
 \* notice delivered; an execution retried after a release; an approval
 \* closed by the owner's permanent refusal; a review escalated and then
@@ -107,11 +126,16 @@
 \* the deadline refused; a decision observed before the first presentation
 \* refused and then an approval; an approval observed in the same
 \* millisecond as the first presentation; an approver no longer current
-\* whose decision ends refused with no permit; and an approver no longer
+\* whose decision ends refused with no permit; an approver no longer
 \* current while a permit is outstanding, whose commit still settles as
-\* executed. With --mutants the runner seeds one defect per property into a
-\* copy of the generated model and requires TLC to refuse each with that
-\* property.
+\* executed; a cleanup opened under the permit and settled after the
+\* execution, and after an expiry; an executed decision's reply settled,
+\* then another refused; a summary whose link served the held subject's
+\* rendering recorded as the approver's presentation, then an approval; and
+\* a decision carrying a presentation that does not count, with none
+\* recorded, refused as incomplete, then an approval. With --mutants the
+\* runner seeds one defect per property into a copy of the generated model
+\* and requires TLC to refuse each with that property.
 \*
 \* The executor's obligations. The machine records that a permit is
 \* outstanding, not who holds it or whether a commit landed under it. The
@@ -169,16 +193,31 @@ AuditHoldInputs ==
       n \in AuditTimes, d \in 1..2,
       r \in {None, Some(AuditReviewer), Some(AuditRequester)}, b \in BOOLEAN }
 
+\* What a presentation shows: every canonical part, or a summary of none
+\* with a link to the full presentation that served the held subject's
+\* rendering or another one, or with no link.
+AuditPresentShapes ==
+    { [complete |-> TRUE, link |-> None],
+      [complete |-> FALSE, link |-> None],
+      [complete |-> FALSE, link |-> Some(AuditHeld)],
+      [complete |-> FALSE, link |-> Some(AuditOther)] }
+
+\* Whether a presentation is complete for the held subject: it showed every
+\* canonical part, or its link served the held subject's rendering.
+AuditCompleteFor(complete, link, subject) == complete \/ link = Some(subject)
+
 \* A complete presentation of the held subject to the approver is shown at
 \* 0 (no reading) or at a reading; any other presentation records no time,
 \* so it is shown at 1.
 AuditPresentInputs ==
-    UNION { { [audience |-> a, digest |-> g, complete |-> c, presented_at_ms |-> p,
-               now_ms |-> n] :
-              p \in IF a = AuditApprover /\ g = AuditHeld /\ c THEN AuditTimes ELSE {1},
+    UNION { { [audience |-> a, digest |-> g, complete |-> s.complete,
+               link_served_digest |-> s.link, presented_at_ms |-> p, now_ms |-> n] :
+              p \in IF a = AuditApprover /\ g = AuditHeld
+                       /\ AuditCompleteFor(s.complete, s.link, AuditHeld)
+                    THEN AuditTimes ELSE {1},
               n \in AuditTimes } :
-            <<a, g, c>> \in {AuditRequester, AuditApprover} \X {AuditHeld, AuditOther}
-                             \X BOOLEAN }
+            <<a, g, s>> \in {AuditRequester, AuditApprover} \X {AuditHeld, AuditOther}
+                             \X AuditPresentShapes }
 
 AuditValidDecision ==
     [approver_id |-> AuditApprover, decider |-> AuditApprover,
@@ -193,20 +232,47 @@ AuditDecideShapes ==
       [AuditValidDecision EXCEPT !.eligible = FALSE],
       [AuditValidDecision EXCEPT !.decider = AuditRequester] }
 
-\* The valid decision carries no presentation, one at 0 (no reading), or
-\* one shown at either reading, and was observed at any time: before, at or
-\* after each presentation. A decision with a defect is refused whatever
-\* its times, so it carries a presentation it was observed at.
+\* What a presentation a decision carries shows, and to whom: a complete
+\* presentation of the held subject to the approver (every part shown, or a
+\* summary whose link served the held subject's rendering), or one that
+\* does not count (shown to another audience, of another subject, a summary
+\* with no link, or one whose link served another rendering).
+AuditCountedFacts ==
+    [audience |-> Some(AuditApprover), digest |-> Some(AuditHeld),
+     complete |-> TRUE, link |-> None]
+AuditCarriedFacts ==
+    { AuditCountedFacts,
+      [AuditCountedFacts EXCEPT !.complete = FALSE, !.link = Some(AuditHeld)],
+      [AuditCountedFacts EXCEPT !.audience = Some(AuditRequester)],
+      [AuditCountedFacts EXCEPT !.digest = Some(AuditOther)],
+      [AuditCountedFacts EXCEPT !.complete = FALSE],
+      [AuditCountedFacts EXCEPT !.complete = FALSE, !.link = Some(AuditOther)] }
+\* A decision that carries no presentation carries none of its facts.
+AuditNoCarriedFacts == [audience |-> None, digest |-> None, complete |-> FALSE, link |-> None]
+
+\* The valid decision carries no presentation, a complete one at 0 (no
+\* reading), or a complete one shown at either reading, and was observed at
+\* any time: before, at or after each presentation. It also carries, once
+\* each, at 1 and observed at 1, a summary whose link served the held
+\* subject's rendering and each presentation that does not count. A
+\* decision with a defect is refused whatever its times, so it carries a
+\* complete presentation it was observed at.
 AuditDecideTimes(s) ==
     IF s = AuditValidDecision
-    THEN { [carried |-> c, observed |-> o] :
+    THEN { [carried |-> c, observed |-> o,
+            facts |-> IF c = None THEN AuditNoCarriedFacts ELSE AuditCountedFacts] :
            c \in {None} \cup {Some(t) : t \in AuditTimes}, o \in AuditTimes }
-    ELSE { [carried |-> Some(1), observed |-> 1] }
+         \cup { [carried |-> Some(1), observed |-> 1, facts |-> f] :
+                f \in AuditCarriedFacts \ {AuditCountedFacts} }
+    ELSE { [carried |-> Some(1), observed |-> 1, facts |-> AuditCountedFacts] }
 
 AuditDecideInputs ==
     UNION { { [approve |-> a, approver_id |-> s.approver_id, decider |-> s.decider,
                digest |-> s.digest, evidence_digest |-> s.evidence_digest,
                eligible |-> s.eligible, carried_presentation_at_ms |-> t.carried,
+               carried_audience |-> t.facts.audience, carried_digest |-> t.facts.digest,
+               carried_complete |-> t.facts.complete,
+               carried_link_served_digest |-> t.facts.link,
                observed_at_ms |-> t.observed, now_ms |-> n] :
               a \in BOOLEAN, t \in AuditDecideTimes(s), n \in AuditTimes } :
             s \in AuditDecideShapes }
@@ -246,16 +312,25 @@ AuditAuthorizeInputs ==
 
 AuditNoticeInputs == { [delivered |-> b] : b \in BOOLEAN }
 
+\* A reply settles by its digest: the held one, or another.
+AuditReplyInputs == { [digest |-> d] : d \in {AuditHeld, AuditOther} }
+
+\* The input of an arm that takes no fields: no property reads one.
+AuditNoInput == [none |-> TRUE]
+
 \* One application of a generated arm to an input record, per input.
 HoldArm(Arm(_, _, _, _, _, _, _, _, _, _), in) ==
     Arm(in.decision_id, in.now_ms, in.deadline_at_ms, in.subject_digest,
         in.operation_id, in.request_digest, in.requester, in.approver_id,
         in.reviewer, in.notice_routable)
-PresentArm(Arm(_, _, _, _, _), in) ==
-    Arm(in.audience, in.digest, in.complete, in.presented_at_ms, in.now_ms)
-DecideArm(Arm(_, _, _, _, _, _, _, _, _), in) ==
+PresentArm(Arm(_, _, _, _, _, _), in) ==
+    Arm(in.audience, in.digest, in.complete, in.link_served_digest, in.presented_at_ms,
+        in.now_ms)
+DecideArm(Arm(_, _, _, _, _, _, _, _, _, _, _, _, _), in) ==
     Arm(in.approve, in.approver_id, in.decider, in.digest, in.evidence_digest,
-        in.eligible, in.carried_presentation_at_ms, in.observed_at_ms, in.now_ms)
+        in.eligible, in.carried_presentation_at_ms, in.carried_audience,
+        in.carried_digest, in.carried_complete, in.carried_link_served_digest,
+        in.observed_at_ms, in.now_ms)
 ReviewArm(Arm(_, _, _, _, _), in) ==
     Arm(in.verdict, in.reviewer, in.digest, in.evidence_digest, in.now_ms)
 WithdrawArm(Arm(_, _, _), in) == Arm(in.withdrawer, in.by_host, in.now_ms)
@@ -266,6 +341,7 @@ ReleaseExecutionArm(Arm(_), in) == Arm(in.now_ms)
 RecordExecutedArm(Arm(_, _, _), in) == Arm(in.operation_id, in.request_digest, in.now_ms)
 CloseRefusedArm(Arm(_), in) == Arm(in.now_ms)
 SettleNoticeArm(Arm(_), in) == Arm(in.delivered)
+SettleReplyArm(Arm(_), in) == Arm(in.digest)
 
 \* --- step properties --------------------------------------------------
 \* Each reads the step's input record, the state before (unprimed) and the
@@ -288,6 +364,19 @@ AuditLatchKept ==
         /\ \/ notice' = notice
            \/ notice = "Owed" /\ notice' \in {"Delivered", "Failed"}
 
+\* The presentation a decision carries, when it counts: its facts make it a
+\* complete presentation of the held subject to the approver id, read from
+\* the input itself and never from the arm that fired. Read only for a
+\* Decide input.
+AuditCountedCarried(in) ==
+    IF /\ in.carried_presentation_at_ms # None
+       /\ in.carried_audience = Some(approver_id)
+       /\ in.carried_digest = Some(subject_digest)
+       /\ AuditCompleteFor(in.carried_complete, in.carried_link_served_digest,
+                           subject_digest)
+    THEN in.carried_presentation_at_ms
+    ELSE None
+
 \* The attestation an approval and a rejection share.
 AuditDecisionAttested(kind, in) ==
     /\ kind \in {"Decide", "Review"}
@@ -302,7 +391,7 @@ AuditDecisionAttested(kind, in) ==
              /\ in.approver_id = approver_id
              /\ in.eligible
              /\ in.decider # requester
-             /\ (in.carried_presentation_at_ms # None
+             /\ (AuditCountedCarried(in) # None
                  \/ first_presented_to_approver_at_ms # None))
        ELSE (/\ stage = "Review"
              /\ reviewer = Some(in.reviewer)
@@ -396,6 +485,33 @@ AuditApproverCurrentKept(kind, arm, in) ==
               ELSE /\ phase' = "ExecutionRefused"
                    /\ ended_at_ms' = Some(in.now_ms)
 
+\* A cleanup is opened only by the owner holding its permit on an approved
+\* decision, from nothing owed.
+AuditCleanupOpenedUnderPermit(kind) ==
+    (cleanup # "Owed" /\ cleanup' = "Owed") =>
+        /\ kind = "OweCleanup"
+        /\ phase = "Approved"
+        /\ permit_issued
+        /\ cleanup = "NotOwed"
+
+\* An owed cleanup is never dropped, a settled one never reopens, and a
+\* cleanup settles only by its settlement, once the decision ended.
+AuditCleanupKeptUntilTheEnd(kind) ==
+    /\ cleanup = "Owed" => cleanup' \in {"Owed", "Settled"}
+    /\ cleanup = "Settled" => cleanup' = "Settled"
+    /\ (cleanup # "Settled" /\ cleanup' = "Settled") =>
+           /\ kind = "SettleCleanup"
+           /\ phase \in {"Executed", "ExecutionRefused", "Expired"}
+
+\* An executed decision's reply settles once, by its settlement, to the
+\* digest it names; a settled reply never changes.
+AuditReplyKeptOnce(kind, in) ==
+    /\ reply_digest # None => reply_digest' = reply_digest
+    /\ (reply_digest = None /\ reply_digest' # None) =>
+           /\ kind = "SettleReply"
+           /\ phase = "Executed"
+           /\ reply_digest' = Some(in.digest)
+
 \* The time of a present optional time. It never names the option's value
 \* field: TLC compares record fields in the order their names were first
 \* seen, and the model's None must keep comparing its tag first.
@@ -407,12 +523,12 @@ AuditEarliest(a, b) ==
     ELSE IF b = None THEN a
     ELSE IF AuditTimeOf(b) < AuditTimeOf(a) THEN b ELSE a
 
-\* The presentation a decision carries, when its time is a reading (0 is
-\* none). Read only for a Decide input.
+\* The presentation a decision carries, when it counts and its time is a
+\* reading (0 is none). Read only for a Decide input.
 AuditTimedCarried(in) ==
-    IF in.carried_presentation_at_ms # None
-       /\ AuditTimeOf(in.carried_presentation_at_ms) > 0
-    THEN in.carried_presentation_at_ms
+    IF AuditCountedCarried(in) # None
+       /\ AuditTimeOf(AuditCountedCarried(in)) > 0
+    THEN AuditCountedCarried(in)
     ELSE None
 
 \* The approver's first presentation as a human decision sees it: the
@@ -423,7 +539,9 @@ AuditFirstShown(in) == AuditEarliest(audit_first_presented, AuditTimedCarried(in
 \* A presentation the approver's first presentation time comes from, read
 \* from the input itself and never from the arm that fired: on an open
 \* human-stage decision before its deadline, a complete presentation of
-\* the held subject to the approver id, shown at a reading other than 0.
+\* the held subject to the approver id (every part shown, or a summary
+\* whose link served the held subject's rendering), shown at a reading
+\* other than 0.
 AuditApproverPresentation(kind, in) ==
     /\ kind = "Present"
     /\ phase = "Open"
@@ -431,7 +549,7 @@ AuditApproverPresentation(kind, in) ==
     /\ in.now_ms < deadline_at_ms
     /\ in.audience = approver_id
     /\ in.digest = subject_digest
-    /\ in.complete
+    /\ AuditCompleteFor(in.complete, in.link_served_digest, subject_digest)
     /\ in.presented_at_ms > 0
 
 AuditPresentationOrderKept(kind, arm, in) ==
@@ -469,6 +587,9 @@ AuditBreaks(kind, arm, in) ==
           ELSE {"DecisionFollowsPresentation"})
     \cup (IF AuditApproverCurrentKept(kind, arm, in) THEN {}
           ELSE {"PermitOnlyForCurrentApprover"})
+    \cup (IF AuditCleanupOpenedUnderPermit(kind) THEN {} ELSE {"CleanupOwedUnderPermit"})
+    \cup (IF AuditCleanupKeptUntilTheEnd(kind) THEN {} ELSE {"CleanupSettledAfterTheEnd"})
+    \cup (IF AuditReplyKeptOnce(kind, in) THEN {} ELSE {"ReplySettledOnce"})
 
 \* The scenario marks a step leaves for the witnesses.
 AuditMarks(arm, in) ==
@@ -495,6 +616,12 @@ AuditMarks(arm, in) ==
           THEN {"ApproverRevokedRefused"} ELSE {})
     \cup (IF arm = "AuthorizeExecutionRefusedRevokedSettlementOwed"
           THEN {"RevokedSettlementOwed"} ELSE {})
+    \cup (IF arm = "SettleReplyRefusedOther" THEN {"ReplyRefused"} ELSE {})
+    \cup (IF arm = "PresentToApprover" /\ ~in.complete THEN {"LinkedPresented"} ELSE {})
+    \cup (IF arm = "DecideRefusedPresentationIncomplete"
+              /\ in.carried_presentation_at_ms # None
+              /\ AuditCountedCarried(in) = None
+          THEN {"UncountedCarriedRefused"} ELSE {})
 
 \* Every wrapper ends with this step: the step properties it broke, the
 \* marks it left and the earliest approver presentation accepted.
@@ -896,6 +1023,67 @@ AuditSettleNoticeRefusedNotEnded(in) ==
        \/ SettleNoticeArm(SettleNoticeRefusedNotEndedApproved, in)
     /\ AuditStep("SettleNotice", "SettleNoticeRefusedNotEnded", in)
 
+AuditOweCleanup ==
+    /\ OweCleanup
+    /\ AuditStep("OweCleanup", "OweCleanup", AuditNoInput)
+
+AuditOweCleanupReplayed ==
+    /\ OweCleanupReplayed
+    /\ AuditStep("OweCleanup", "OweCleanupReplayed", AuditNoInput)
+
+AuditOweCleanupRefusedNotAuthorized ==
+    /\ OweCleanupRefusedNotAuthorized
+    /\ AuditStep("OweCleanup", "OweCleanupRefusedNotAuthorized", AuditNoInput)
+
+AuditOweCleanupRefusedNotApproved ==
+    /\ \/ OweCleanupRefusedNotApprovedOpen
+       \/ OweCleanupRefusedNotApprovedRejected
+       \/ OweCleanupRefusedNotApprovedExpired
+       \/ OweCleanupRefusedNotApprovedWithdrawn
+       \/ OweCleanupRefusedNotApprovedExecuted
+       \/ OweCleanupRefusedNotApprovedExecutionRefused
+    /\ AuditStep("OweCleanup", "OweCleanupRefusedNotApproved", AuditNoInput)
+
+AuditSettleCleanup ==
+    /\ \/ SettleCleanupExecuted
+       \/ SettleCleanupExecutionRefused
+       \/ SettleCleanupExpired
+    /\ AuditStep("SettleCleanup", "SettleCleanup", AuditNoInput)
+
+AuditSettleCleanupRefusedNotOwed ==
+    /\ \/ SettleCleanupRefusedNotOwedRejected
+       \/ SettleCleanupRefusedNotOwedExpired
+       \/ SettleCleanupRefusedNotOwedWithdrawn
+       \/ SettleCleanupRefusedNotOwedExecuted
+       \/ SettleCleanupRefusedNotOwedExecutionRefused
+    /\ AuditStep("SettleCleanup", "SettleCleanupRefusedNotOwed", AuditNoInput)
+
+AuditSettleCleanupRefusedNotEnded ==
+    /\ \/ SettleCleanupRefusedNotEndedOpen
+       \/ SettleCleanupRefusedNotEndedApproved
+    /\ AuditStep("SettleCleanup", "SettleCleanupRefusedNotEnded", AuditNoInput)
+
+AuditSettleReply(in) ==
+    /\ SettleReplyArm(SettleReply, in)
+    /\ AuditStep("SettleReply", "SettleReply", in)
+
+AuditSettleReplyReplayed(in) ==
+    /\ SettleReplyArm(SettleReplyReplayed, in)
+    /\ AuditStep("SettleReply", "SettleReplyReplayed", in)
+
+AuditSettleReplyRefusedOther(in) ==
+    /\ SettleReplyArm(SettleReplyRefusedOther, in)
+    /\ AuditStep("SettleReply", "SettleReplyRefusedOther", in)
+
+AuditSettleReplyRefusedNotExecuted(in) ==
+    /\ \/ SettleReplyArm(SettleReplyRefusedNotExecutedOpen, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedApproved, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedRejected, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedExpired, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedWithdrawn, in)
+       \/ SettleReplyArm(SettleReplyRefusedNotExecutedExecutionRefused, in)
+    /\ AuditStep("SettleReply", "SettleReplyRefusedNotExecuted", in)
+
 AuditNext ==
     \/ \E in \in AuditHoldInputs : AuditHoldHuman(in)
     \/ \E in \in AuditHoldInputs : AuditHoldReview(in)
@@ -970,6 +1158,17 @@ AuditNext ==
     \/ \E in \in AuditNoticeInputs : AuditSettleNoticeReplayed(in)
     \/ \E in \in AuditNoticeInputs : AuditSettleNoticeRefused(in)
     \/ \E in \in AuditNoticeInputs : AuditSettleNoticeRefusedNotEnded(in)
+    \/ AuditOweCleanup
+    \/ AuditOweCleanupReplayed
+    \/ AuditOweCleanupRefusedNotAuthorized
+    \/ AuditOweCleanupRefusedNotApproved
+    \/ AuditSettleCleanup
+    \/ AuditSettleCleanupRefusedNotOwed
+    \/ AuditSettleCleanupRefusedNotEnded
+    \/ \E in \in AuditReplyInputs : AuditSettleReply(in)
+    \/ \E in \in AuditReplyInputs : AuditSettleReplyReplayed(in)
+    \/ \E in \in AuditReplyInputs : AuditSettleReplyRefusedOther(in)
+    \/ \E in \in AuditReplyInputs : AuditSettleReplyRefusedNotExecuted(in)
     \/ AuditCommit
 
 AuditSpec == AuditInit /\ [][AuditNext]_<<vars, auditVars>>
@@ -992,6 +1191,9 @@ AuditNoPermitAtOrAfterDeadline == "NoPermitAtOrAfterDeadline" \notin audit_broke
 AuditReleaseClearsPermit == "ReleaseClearsPermit" \notin audit_broken
 AuditDecisionFollowsPresentation == "DecisionFollowsPresentation" \notin audit_broken
 AuditPermitOnlyForCurrentApprover == "PermitOnlyForCurrentApprover" \notin audit_broken
+AuditCleanupOwedUnderPermit == "CleanupOwedUnderPermit" \notin audit_broken
+AuditCleanupSettledAfterTheEnd == "CleanupSettledAfterTheEnd" \notin audit_broken
+AuditReplySettledOnce == "ReplySettledOnce" \notin audit_broken
 
 AuditCommittedIsSettleable ==
     audit_committed => (phase = "Executed" \/ (phase = "Approved" /\ permit_issued))
@@ -1052,6 +1254,24 @@ AuditWitnessApproverRevokedEndsRefused ==
 \* executed.
 AuditWitnessRevokedPermitSettledExecuted ==
     audit_committed /\ phase = "Executed" /\ "RevokedSettlementOwed" \in audit_seen
+\* A cleanup opened under the permit, owed through the commit and settled
+\* after the execution.
+AuditWitnessCleanupSettledAfterExecution ==
+    audit_committed /\ phase = "Executed" /\ cleanup = "Settled"
+\* A cleanup opened under the permit, owed through a release at the
+\* deadline (the expiry), and settled after it.
+AuditWitnessCleanupSettledAfterExpiry == phase = "Expired" /\ cleanup = "Settled"
+\* An executed decision's reply settled, then another reply refused.
+AuditWitnessReplySettledThenAnotherRefused ==
+    phase = "Executed" /\ reply_digest # None /\ "ReplyRefused" \in audit_seen
+\* A summary whose link served the held subject's rendering, recorded as the
+\* approver's presentation, then an approval.
+AuditWitnessLinkedPresentationThenApproved ==
+    phase = "Approved" /\ "LinkedPresented" \in audit_seen
+\* A decision carrying a presentation that does not count, with none
+\* recorded, refused as incomplete, then an approval.
+AuditWitnessUncountedCarriedThenApproved ==
+    phase = "Approved" /\ "UncountedCarriedRefused" \in audit_seen
 
 NotAuditWitnessHumanApprovalExecutedAndNoticed == ~AuditWitnessHumanApprovalExecutedAndNoticed
 NotAuditWitnessRetriedAfterRelease == ~AuditWitnessRetriedAfterRelease
@@ -1071,4 +1291,9 @@ NotAuditWitnessDecidedBeforePresentationRefused ==
 NotAuditWitnessApprovedAtThePresentation == ~AuditWitnessApprovedAtThePresentation
 NotAuditWitnessApproverRevokedEndsRefused == ~AuditWitnessApproverRevokedEndsRefused
 NotAuditWitnessRevokedPermitSettledExecuted == ~AuditWitnessRevokedPermitSettledExecuted
+NotAuditWitnessCleanupSettledAfterExecution == ~AuditWitnessCleanupSettledAfterExecution
+NotAuditWitnessCleanupSettledAfterExpiry == ~AuditWitnessCleanupSettledAfterExpiry
+NotAuditWitnessReplySettledThenAnotherRefused == ~AuditWitnessReplySettledThenAnotherRefused
+NotAuditWitnessLinkedPresentationThenApproved == ~AuditWitnessLinkedPresentationThenApproved
+NotAuditWitnessUncountedCarriedThenApproved == ~AuditWitnessUncountedCarriedThenApproved
 ====

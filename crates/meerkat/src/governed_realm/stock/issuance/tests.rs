@@ -2186,6 +2186,10 @@ async fn a_reviewed_installation_is_granted_only_while_it_is_unchanged() {
         )
         .unwrap();
     let operator = principals.operator.clone();
+    // The grant's window opens at its own issuance clock, read after
+    // `issued_after` and as much later as issuance took: check the bounds
+    // at that opening instant.
+    let opened_at_ms = resolved.restrictions().lifetime.not_before_ms;
     let covers = |op: &str| {
         resolved
             .restrictions()
@@ -2198,7 +2202,7 @@ async fn a_reviewed_installation_is_granted_only_while_it_is_unchanged() {
                 audience: &AudienceRef::Principal {
                     principal: operator.clone(),
                 },
-                now_ms: issued_after + 1,
+                now_ms: opened_at_ms,
             })
             .is_ok()
     };

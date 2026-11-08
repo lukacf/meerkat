@@ -69,7 +69,20 @@
 // know, a feature the package does not declare) leaves the package un-narrowed.
 // A target whose every test is #[ignore]d runs nothing by default: it is
 // named with its lanes (`#[ignore = "lane:NAME"]`) and reasons, as is a
-// target that declares no test.
+// target that declares no test. CI still runs a feature-bearing integration
+// suite of a narrowed package (INTEGRATION_SUITES), so the narrowed targets
+// that suite holds run again with its features and CI's row profile, unless
+// the narrowed run already enables them all.
+//
+// Test features. Every test run here passes its packages' test features
+// (scripts/ci-products.mjs testFeaturesOf: the package's
+// [package.metadata.meerkat.standalone-tests] features and `workspace-tests`
+// when it declares that feature), as CI's rows do: no dev-dependency turns
+// them on, and a test build without them would leave the tests they gate out
+// (the crate's canary stops a lib test build without them). The closure run
+// names them per package (testFeatureArgs); a narrowed or reader run of one
+// package adds them to its own features. An integration suite that adds no
+// feature beyond them runs nothing the closure run does not.
 //
 // Generated files and TLC. The generators run first, and TLC follows the
 // specs: the machines and compositions whose specs/ files changed, the
@@ -106,7 +119,7 @@ import {
 } from "./ci-cargo-lanes.mjs";
 import { excludedTestsFilter, parseFilter, profileFilter } from "./ci-hook-coverage.mjs";
 import { loadNonRustReaders, readerSelectionsFor } from "./ci-non-rust-readers.mjs";
-import { CORE, loadProducts, productOfPath, productRootPrefixes } from "./ci-products.mjs";
+import { CORE, loadProducts, productOfPath, productRootPrefixes, testFeatureArgs, testFeaturesOf } from "./ci-products.mjs";
 import {
   normalizePath,
   packageDir,
@@ -665,6 +678,24 @@ function targetFeatures(target) {
   return [...new Set([...target.requiredFeatures, ...(target.gate?.state === "needs" ? target.gate.features : [])])].sort();
 }
 
+// A package's test features (scripts/ci-products.mjs testFeaturesOf), which
+// every test run of it passes; none for a name the context does not hold.
+function testFeaturesOfPackage(ctx, name) {
+  const pkg = ctx.packages.get(name);
+  return pkg ? testFeaturesOf(pkg) : [];
+}
+
+// The narrowed targets of an integration suite row's package that the row
+// runs: the ones its `--test NAME` list names, or all of them when it runs
+// every test target.
+function suiteHeldTargets(row, narrowedRun) {
+  const kept = narrowedRun.get(row.packages[0]);
+  if (!kept) return [];
+  const words = (row.test_flags ?? "").split(" ").filter(Boolean);
+  const listed = words.flatMap((word, index) => (word === "--test" && !["*", "'*'"].includes(words[index + 1]) ? [words[index + 1]] : []));
+  return [...kept].filter((name) => listed.length === 0 || listed.includes(name)).sort();
+}
+
 // Why a target whose every test is ignored runs nothing here: its lanes
 // (`#[ignore = "lane:NAME"]`, with the Make target that runs each) and its
 // other reasons.
@@ -789,6 +820,7 @@ export function selectCommands({ paths, push, pr, ctx }) {
   const specialBinaries = new Set(specialRows.flatMap((row) => row.binaries));
   const makeTargets = new Set([...(ctx.readText("Makefile") ?? "").matchAll(/^([A-Za-z0-9_-]+):/gm)].map((match) => match[1]));
   const narrowedRun = new Map();
+  const narrowedFeatures = new Map();
   for (const [name, targets] of narrowed) {
     if (inClosure.has(name)) continue;
     const kept = targets.filter((target) => {
@@ -820,7 +852,8 @@ export function selectCommands({ paths, push, pr, ctx }) {
     });
     if (kept.length === 0) continue;
     narrowedRun.set(name, new Set(kept.map((target) => target.name)));
-    const features = [...new Set(kept.flatMap(targetFeatures))].sort();
+    const features = [...new Set([...kept.flatMap(targetFeatures), ...testFeaturesOfPackage(ctx, name)])].sort();
+    narrowedFeatures.set(name, new Set(features));
     add(
       "tests",
       nextestCommand(ctx, {
@@ -835,7 +868,7 @@ export function selectCommands({ paths, push, pr, ctx }) {
     add(
       "tests",
       nextestCommand(ctx, {
-        flags: names.flatMap((name) => ["-p", name]),
+        flags: [...names.flatMap((name) => ["-p", name]), ...testFeatureArgs(names.map((name) => ctx.packages.get(name) ?? { name }))],
         profile: TEST_PROFILE,
         filter: hostedExclusions(names, notes),
         noTests: "pass",
@@ -868,12 +901,27 @@ export function selectCommands({ paths, push, pr, ctx }) {
       push.mode === "workspace" ||
       suite.triggers.some((name) => seedSet.has(name)) ||
       (suite.paths ?? []).some((prefix) => paths.some((path) => path.startsWith(prefix)));
+    const flags = row.package_flags.split(" ");
+    const hasFeatures = flags.includes("--features");
+    const suiteFeatures = hasFeatures ? flags[flags.indexOf("--features") + 1].split(",") : [];
     if (!selected) {
-      notes.push(`integration suite ${row.name}: only test targets of its trigger packages changed`);
+      // CI runs a feature-bearing suite for its package even when only test
+      // targets changed: the narrowed targets it holds run again with its
+      // features, unless the narrowed run already enables them all.
+      const held = hasFeatures ? suiteHeldTargets(row, narrowedRun) : [];
+      const enabled = narrowedFeatures.get(row.packages[0]) ?? new Set();
+      if (held.length === 0 || suiteFeatures.every((feature) => enabled.has(feature))) {
+        notes.push(`integration suite ${row.name}: only test targets of its trigger packages changed`);
+        continue;
+      }
+      notes.push(`integration suite ${row.name}: runs the changed ${held.join(", ")} with its features`);
+      add("tests", nextestCommand(ctx, { flags, targets: held.flatMap((target) => ["--test", target]), profile: ROW_PROFILE, noTests: "fail" }));
       continue;
     }
-    const hasFeatures = row.package_flags.split(" ").includes("--features");
-    if (!hasFeatures && inClosure.has(row.packages[0])) continue;
+    // The closure run passes its packages' test features: a suite whose
+    // features are only those runs nothing that run does not.
+    const testFeatures = new Set(testFeaturesOfPackage(ctx, row.packages[0]));
+    if (suiteFeatures.every((feature) => testFeatures.has(feature)) && inClosure.has(row.packages[0])) continue;
     add(
       "tests",
       nextestCommand(ctx, {
@@ -940,10 +988,11 @@ export function selectCommands({ paths, push, pr, ctx }) {
       (wide) => wide !== row && wide.whole && !wide.filter && wide.package === row.package && wide.features.join(",") === row.features.join(","),
     );
     if (subsumed) continue;
+    const features = [...new Set([...row.features, ...testFeaturesOfPackage(ctx, row.package)])];
     add(
       "tests",
       nextestCommand(ctx, {
-        flags: ["-p", row.package, ...(row.features.length > 0 ? ["--features", row.features.join(",")] : [])],
+        flags: ["-p", row.package, ...(features.length > 0 ? ["--features", features.join(",")] : [])],
         targets: row.targets,
         profile: row.whole ? TEST_PROFILE : ROW_PROFILE,
         filter: row.filter,
@@ -1072,6 +1121,9 @@ export function buildContext() {
           targets: pkg.targets.map((target) => ({ name: target.name, kind: target.kind })),
           devDependsOnFixture: pkg.dependencies.some((dep) => dep.name === FIXTURE_PACKAGE && dep.kind === "dev"),
           workspaceDeps: pkg.dependencies.filter((dep) => dep.source === null && byName.has(dep.name)).map((dep) => dep.name),
+          // What testFeaturesOf reads: the package's features and metadata.
+          features: pkg.features,
+          metadata: pkg.metadata,
         },
       ]),
     ),

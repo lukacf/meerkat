@@ -11045,6 +11045,59 @@ fn s101_committed_responses(
     committed
 }
 
+/// Each heard S101 response, in heard order: a `response_end` whose final
+/// transcript has letters or digits, with its response index, that
+/// transcript, and the number of input finals that preceded the response.
+fn s101_heard_responses(timeline: &[TimelineEntry]) -> Vec<(Option<u64>, &str, usize)> {
+    let input_finals: Vec<u64> = timeline
+        .iter()
+        .filter(|entry| entry.kind == TimelineKind::InputFinal)
+        .map(|entry| entry.detail_u64("t_ms").unwrap_or(entry.t_ms))
+        .collect();
+    let mut heard = Vec::new();
+    for (position, response) in timeline
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.kind == TimelineKind::ResponseEnd)
+    {
+        let text = response.detail_str("text").unwrap_or_default();
+        if s101_compact(text).is_empty() {
+            continue;
+        }
+        let index = response.detail_u64("index");
+        let audio_start = timeline.iter().find(|entry| {
+            entry.kind == TimelineKind::AssistantAudioStart
+                && index.is_some()
+                && entry.detail_u64("response") == index
+        });
+        let after_inputs = match audio_start {
+            // The response began at its first audio; an input final before
+            // that preceded it.
+            Some(start) => {
+                let started_ms = start.t_ms.min(response.t_ms);
+                input_finals.iter().filter(|t| **t < started_ms).count()
+            }
+            // No audio was detected (the playback duck muted the whole
+            // response, or it stayed under the energy threshold), so no
+            // start time orders it. Its end time does not either: the peer
+            // pushes `response_end` when the next user transcript delta
+            // arrives, right after stamping that delta, so a one-delta
+            // utterance after the response can carry the earlier stamp.
+            // The input finals already on the timeline then are the
+            // utterances heard before the response: its first output delta
+            // closed any open one, and the first user delta after it ended
+            // the response.
+            None => timeline
+                .iter()
+                .take(position)
+                .filter(|entry| entry.kind == TimelineKind::InputFinal)
+                .count(),
+        };
+        heard.push((index, text, after_inputs));
+    }
+    heard
+}
+
 /// Outcome claims spoken (provider output transcript, sideband clock) before
 /// the provider learned the job was complete: the job's first commentary
 /// append after its "Started" narration, i.e. its "Finished" narration or
@@ -11669,36 +11722,10 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
                 spoken_at.len()
             ));
         }
-        let input_finals: Vec<u64> = timeline
-            .iter()
-            .filter(|entry| entry.kind == TimelineKind::InputFinal)
-            .map(|entry| entry.detail_u64("t_ms").unwrap_or(entry.t_ms))
-            .collect();
-        let mut heard = Vec::new();
-        let mut heard_index = Vec::new();
-        for response in timeline
-            .iter()
-            .filter(|entry| entry.kind == TimelineKind::ResponseEnd)
-        {
-            let text = response.detail_str("text").unwrap_or_default();
-            if s101_compact(text).is_empty() {
-                continue;
-            }
-            let index = response.detail_u64("index");
-            // The response began at its first audio, or at its end when no
-            // audio was detected; an input final before that preceded it.
-            let started_ms = timeline
-                .iter()
-                .find(|entry| {
-                    entry.kind == TimelineKind::AssistantAudioStart
-                        && index.is_some()
-                        && entry.detail_u64("response") == index
-                })
-                .map_or(response.t_ms, |entry| entry.t_ms.min(response.t_ms));
-            let after_inputs = input_finals.iter().filter(|t| **t < started_ms).count();
-            heard.push((text, after_inputs));
-            heard_index.push(index);
-        }
+        let (heard_index, heard): (Vec<_>, Vec<_>) = s101_heard_responses(&timeline)
+            .into_iter()
+            .map(|(index, text, after_inputs)| (index, (text, after_inputs)))
+            .unzip();
         let mut responses = Vec::new();
         for ((index, (text, after_inputs)), committed) in heard_index
             .into_iter()
@@ -15338,6 +15365,117 @@ mod config_tests {
             super::s101_committed_responses(&once, &[0], &[("Okay.", 1), ("Okay.", 1)]),
             [true, false]
         );
+    }
+
+    /// S101's browser timeline and committed history from Live gate run
+    /// 42297657299 (first attempt, on fb42a469), with the arrival of the
+    /// one-delta utterance " and" stamped `and_arrival_ms` (24917 there).
+    /// The reply " Checking on that" played while the user was speaking, so
+    /// the playback duck muted it for its whole length and the peer saw no
+    /// audio for it. The peer ends a response when the next user transcript
+    /// delta arrives, and pushed this one's `response_end` (24918) right
+    /// after stamping that delta. The runtime committed the reply, then the
+    /// "and" row, in the order the transcripts arrived.
+    fn s101_ducked_reply_run(
+        and_arrival_ms: u64,
+    ) -> (Vec<super::TimelineEntry>, Vec<serde_json::Value>) {
+        use serde_json::json;
+        let entries = timeline(&[
+            (11387, "input_final", json!({"index": 0, "t_ms": 11386})),
+            (11782, "assistant_audio_start", json!({"response": 0})),
+            (
+                17640,
+                "response_end",
+                json!({"index": 0, "text": " Okay, starting I'm on it, and I'll let you know when it's done."}),
+            ),
+            (23601, "input_final", json!({"index": 1, "t_ms": 23600})),
+            (24486, "playback_hint", json!({"hint": "duck"})),
+            (
+                24918,
+                "response_end",
+                json!({"index": 1, "text": " Checking on that"}),
+            ),
+            (
+                24956,
+                "input_final",
+                json!({"index": 2, "t_ms": and_arrival_ms, "closed_by": "response"}),
+            ),
+            (25425, "response_end", json!({"index": 2, "text": "."})),
+            (26991, "playback_hint", json!({"hint": "restore"})),
+            (36570, "input_final", json!({"index": 3, "t_ms": 36568})),
+            (37072, "assistant_audio_start", json!({"response": 3})),
+            (
+                69613,
+                "response_end",
+                json!({"index": 3, "text": " Got it, starting another one now, and I'm on it. And for your file question: there are 0 files. And the marker one dot txt file is created. And marker two dot txt is created."}),
+            ),
+        ]);
+        let user = |text: &str| json!({"role": "user", "content": text});
+        let spoken = |text: &str| json!({"role": "block_assistant", "blocks": [{"block_type": "transcript", "data": {"text": text, "source": {"kind": "spoken"}}}]});
+        let messages = vec![
+            json!({"role": "system", "content": "voice"}),
+            user(
+                "start a slow job for me in the shell sleep for twenty five seconds and then create a file called marker one dot txt and tell me when it s done",
+            ),
+            spoken(" Okay, starting I'm"),
+            spoken(" on it, and I'll let you know when it's done."),
+            user(
+                "while that runs how many files are in your working directory right now answer as there are n files",
+            ),
+            spoken(" Checking"),
+            spoken(" on that"),
+            user("and"),
+            spoken("."),
+            user(
+                "hand the executor a second slow job right away don t wait for the first one sleep twenty seconds and create marker two dot txt and tell me when that one is done too",
+            ),
+            spoken(" Got it, starting"),
+            spoken(" another one now,"),
+            spoken(" and I'm on it. And for your file question: there are 0 files. And"),
+            spoken(" the marker one dot txt file is created. And"),
+            spoken(" marker two dot txt is created."),
+        ];
+        (entries, messages)
+    }
+
+    /// The S101 history check over `s101_ducked_reply_run`, as the scenario
+    /// runs it: every heard response is committed as its own assistant text
+    /// after the spoken user row of the last input that preceded it.
+    fn assert_s101_ducked_reply_committed(and_arrival_ms: u64) {
+        let (entries, messages) = s101_ducked_reply_run(and_arrival_ms);
+        let heard = super::s101_heard_responses(&entries);
+        let pairs: Vec<(&str, usize)> = heard
+            .iter()
+            .map(|&(_, text, after_inputs)| (text, after_inputs))
+            .collect();
+        assert_eq!(
+            super::s101_committed_responses(&messages, &[1, 4, 7, 9], &pairs),
+            [true, true, true],
+            "heard (index, text, input finals before it): {heard:?}"
+        );
+        assert_eq!(
+            heard
+                .iter()
+                .map(|&(index, _, after_inputs)| (index, after_inputs))
+                .collect::<Vec<_>>(),
+            [(Some(0), 1), (Some(1), 2), (Some(3), 4)]
+        );
+    }
+
+    /// The run as it was stamped: the reply's end entry 1 ms after the
+    /// arrival of the input that ended it. Dated by that end, the reply
+    /// counted " and" as heard before it, and its text was looked for only
+    /// after the "and" row.
+    #[test]
+    fn s101_a_ducked_reply_ended_a_millisecond_after_the_next_input_arrived() {
+        assert_s101_ducked_reply_committed(24917);
+    }
+
+    /// The same run with both stamps in one millisecond: the reply precedes
+    /// " and" here too.
+    #[test]
+    fn s101_a_ducked_reply_ended_in_the_millisecond_the_next_input_arrived() {
+        assert_s101_ducked_reply_committed(24918);
     }
 
     /// The barge-in reply is judged by content: "done" in assistant speech

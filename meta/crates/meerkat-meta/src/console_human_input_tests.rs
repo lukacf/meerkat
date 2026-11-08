@@ -1574,7 +1574,10 @@ async fn console_send_selected_skills_refused_before_reservation_for_external_or
     placed.placement = Some(meerkat_contracts::WireHostRef("remote-host".to_string()));
     for spec in [external, placed] {
         let identity = spec.identity.to_string();
-        h.identity_runtime.register(spec).await;
+        h.identity_runtime
+            .register(spec)
+            .await
+            .expect("the identity registers");
         let request = ConsoleSendRequest {
             identity: identity.clone(),
             skill_refs: vec![selected_skill()],
@@ -1736,6 +1739,7 @@ async fn a_governed_console_send_reaches_only_the_hosts_binder_for_the_verified_
                 &governance,
             )
             .await
+            .map_err(super::CheckedConsoleSendError::into_send_error)
         }
     };
 
@@ -1898,6 +1902,7 @@ async fn send_pinned(
         &governance,
     )
     .await
+    .map_err(super::CheckedConsoleSendError::into_send_error)
 }
 
 /// The host's per-send hook receives exactly the request's client key and

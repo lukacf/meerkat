@@ -162,6 +162,22 @@ pub struct RosterEntry {
     /// it. The default (`applies`) is omitted from the serialized entry.
     #[serde(default, skip_serializing_if = "crate::DefinitionWiring::is_applies")]
     pub definition_wiring: crate::DefinitionWiring,
+    /// The decision whose approval branch this member is: its typed creation
+    /// source, from its `MemberSpawned` row, which only the branch's own
+    /// opening records ([`Self::approval_branch`]).
+    #[serde(skip)]
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
+}
+
+impl RosterEntry {
+    /// The decision whose approval branch this member is, when its typed
+    /// creation source records one: only
+    /// [`crate::MobHandle::open_approval_branch`] seats such a member, and
+    /// nothing wires, unwires or respawns it.
+    #[must_use]
+    pub fn approval_branch(&self) -> Option<&meerkat_core::approval::decision::DecisionId> {
+        self.approval_branch.as_ref()
+    }
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -186,6 +202,7 @@ pub(crate) struct RosterAddEntry {
     pub(crate) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(crate) fork_overlay: crate::runtime::ForkOverlayOrigin,
     pub(crate) definition_wiring: crate::DefinitionWiring,
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -219,6 +236,15 @@ pub struct Roster {
     /// reads the declaration as nothing to migrate.
     #[serde(skip)]
     resume_from_roles: BTreeMap<AgentIdentity, (Generation, ProfileName)>,
+    /// The build each identity's incarnation applies at its builds on a
+    /// session a build created, with that incarnation's generation, from
+    /// its `MemberSpawned` row (`MemberSpawnedEvent::seat_build_inputs` on
+    /// a row whose session is not unborn): a same-session successor's
+    /// declared role migration carries its composed build so. Every build
+    /// of that incarnation sets it on its request before the host's spawn
+    /// customizer is asked ([`Self::next_build`]).
+    #[serde(skip)]
+    incarnation_builds: BTreeMap<AgentIdentity, (Generation, Arc<crate::runtime::SeatBuild>)>,
     /// What each unborn seat session carries to its first build, keyed by
     /// the session: the build inputs its seat rows journaled
     /// (`MemberSpawnedEvent::seat_build_inputs`, a later seat of the same
@@ -287,6 +313,7 @@ impl Roster {
                     fork_source: member_spawned.fork_source.clone(),
                     fork_overlay: member_spawned.fork_overlay,
                     definition_wiring: member_spawned.definition_wiring,
+                    approval_branch: member_spawned.approval_branch().cloned(),
                 });
             }
             // Retirement admission is not roster terminality. Keep the spawn
@@ -360,6 +387,13 @@ impl Roster {
                 {
                     self.resume_from_roles.remove(agent_identity);
                 }
+                if self
+                    .incarnation_builds
+                    .get(agent_identity)
+                    .is_some_and(|(spawned, _)| spawned == generation)
+                {
+                    self.incarnation_builds.remove(agent_identity);
+                }
             }
             MobEventKind::RespawnTopologyAbandoned { agent_identity, .. } => {
                 // A stale abandonment marker can replay after a successor
@@ -408,6 +442,14 @@ impl Roster {
                         self.sessions_with_recorded_endpoint
                             .insert(bridge_session_id.clone());
                     }
+                }
+                // An adoption into store custody (the row's Created origin)
+                // makes the member a host root, live and on replay: its
+                // former spawner no longer reaches it.
+                if recovered.identity_entry == Some(crate::runtime::IdentityEntryOrigin::Created)
+                    && let Some(entry) = self.entries.get_mut(&recovered.agent_identity)
+                {
+                    entry.spawned_by = None;
                 }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
@@ -482,6 +524,7 @@ impl Roster {
                 self.owed_kickoff_prompts.clear();
                 self.spawn_continuity.clear();
                 self.resume_from_roles.clear();
+                self.incarnation_builds.clear();
                 self.seat_builds.clear();
                 self.sessions_with_recorded_endpoint.clear();
             }
@@ -517,6 +560,7 @@ impl Roster {
                     fork_source: entry.fork_source,
                     fork_overlay: entry.fork_overlay,
                     definition_wiring: entry.definition_wiring,
+                    approval_branch: entry.approval_branch,
                 },
             )
             .is_none()
@@ -529,6 +573,7 @@ impl Roster {
             owed_kickoff_prompts: BTreeMap::new(),
             spawn_continuity: BTreeMap::new(),
             resume_from_roles: BTreeMap::new(),
+            incarnation_builds: BTreeMap::new(),
             seat_builds: BTreeMap::new(),
             sessions_with_recorded_endpoint: BTreeSet::new(),
             entries: entries
@@ -659,6 +704,22 @@ impl Roster {
         (self.entries.get(agent_identity)?.generation == *generation).then_some(role)
     }
 
+    /// What the next build of `agent_identity`'s current incarnation sets on
+    /// its request before the host's spawn customizer is asked: what its
+    /// unborn session carries to its first build ([`Self::seat_build`]), or,
+    /// on a session a build created, the build its own `MemberSpawned` row
+    /// carried (a same-session successor's declared role migration), which
+    /// every build of that incarnation applies.
+    pub(crate) fn next_build(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<Arc<crate::runtime::SeatBuild>> {
+        self.seat_build(agent_identity).or_else(|| {
+            let (generation, build) = self.incarnation_builds.get(agent_identity)?;
+            (self.entries.get(agent_identity)?.generation == *generation).then(|| Arc::clone(build))
+        })
+    }
+
     /// What the session `agent_identity` is bound to carries to its first
     /// build, while no build has created it: the inputs its seat named (see
     /// [`crate::runtime::SeatBuild`]). Whether the session is still unborn
@@ -786,6 +847,28 @@ impl Roster {
             }
             None => {
                 self.resume_from_roles.remove(identity);
+            }
+        }
+        // An unborn session's inputs are its seat build's (above); on a
+        // session a build created, they are this incarnation's own.
+        match member_spawned
+            .seat_build_inputs()
+            .filter(|_| !member_spawned.seat_session_unborn())
+        {
+            Some(inputs) => {
+                self.incarnation_builds.insert(
+                    identity.clone(),
+                    (
+                        member_spawned.generation,
+                        Arc::new(crate::runtime::SeatBuild {
+                            inputs: inputs.clone(),
+                            local: crate::runtime::SeatLocalBuildInputs::default(),
+                        }),
+                    ),
+                );
+            }
+            None => {
+                self.incarnation_builds.remove(identity);
             }
         }
         Some(member_ref)
@@ -1103,6 +1186,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
         }
     }
 
@@ -1688,6 +1772,7 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
             direct_member_fence: None,
         };
         let json = serde_json::to_string(&entry).unwrap();

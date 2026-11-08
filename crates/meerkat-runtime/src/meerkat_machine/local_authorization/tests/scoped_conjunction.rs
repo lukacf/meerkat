@@ -512,6 +512,7 @@ async fn named_contributor(case: NamedContributor) {
             },
         }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     // This fixture binds no scoped session document; destination currency
@@ -916,6 +917,7 @@ async fn a_cancelled_original_refuses_its_own_operations_and_readmission() {
             },
         }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     composed.require_scoped_destination = false;
@@ -1407,6 +1409,7 @@ async fn delegated_contributor(case: DelegatedContributor) {
             helper_expires_ms: owner_ms,
         }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     // This fixture binds no scoped session document; destination currency

@@ -22,6 +22,8 @@ pub mod runtime;
 #[cfg(test)]
 mod structured_output_request_tests;
 #[cfg(test)]
+mod thinking_binding_tests;
+#[cfg(test)]
 mod tool_choice_request_tests;
 #[cfg(test)]
 mod tool_input_schema_request_tests;

@@ -46,7 +46,7 @@ use meerkat_core::{
 };
 
 use crate::McpRouterAdapter;
-use crate::router::{CheckedEntry, CheckedOperation, McpRouter};
+use crate::router::{CheckedEntry, CheckedOperation, McpRouter, call_request_digest};
 
 static NEXT_CHECKED_ROUTE_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -381,6 +381,7 @@ impl AgentToolDispatcher for CheckedMcpRoute {
         let target = router
             .checked_operation_target(&self.spec.route, &self.spec.server, &offered.raw_operation)
             .ok_or_else(unavailable)?;
+        let digest = call_request_digest(&target, call);
         let occurrence = self.next_occurrence.fetch_add(1, Ordering::AcqRel);
         let witness = meerkat_core::ToolExecutionOwnerWitness::new(
             self.authority_key(occurrence),
@@ -389,6 +390,10 @@ impl AgentToolDispatcher for CheckedMcpRoute {
         )
         .map_err(meerkat_core::ToolExecutionResolutionError::from)?
         .with_operation_target(target);
+        let witness = match digest {
+            Some(digest) => witness.with_request_digest(digest),
+            None => witness,
+        };
         entry
             .execution
             .resolve_default(resolution_context.deadlines().clone())
@@ -482,7 +487,8 @@ impl AgentToolDispatcher for CheckedMcpRoute {
         };
         let witnessed = witness.owner_key() == call.name
             && witness.binding_fingerprint() == &live
-            && witness.operation_target() == Some(target);
+            && witness.operation_target() == Some(target)
+            && witness.request_digest() == call_request_digest(target, call).as_ref();
         if !witnessed {
             return Err(changed());
         }

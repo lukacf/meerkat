@@ -5,6 +5,11 @@ Candidate construction still refuses unbound inputs before product execution.
 Acceptance has no write credentials. Publication only adds the selected bytes
 of an accepted installed preview to an existing public release; it never creates
 a release/tag, rebuilds a product, or rewrites producer records.
+
+Release mode scans the exact release payload for private text before attestation
+or upload: privacy-scan, and assemble-cli for its own product, run the pinned
+engine through every nested container with the private rules and exemptions
+given on the command line, and refuse without them.
 """
 from pathlib import Path, PurePosixPath
 import argparse
@@ -822,7 +827,8 @@ def stage_cli(work):
     cli_producer_inputs(work)
 
 
-def assemble_cli(work, review, review_sha256, output):
+def assemble_cli(work, review, review_sha256, output, *, rules=None, exemptions=None, accepted_findings=None):
+    privacy = privacy_inputs(rules, exemptions, accepted_findings)
     value, _, resources = cli_producer_inputs(work)
     cli = work / "cli"
     staged = read_json(cli / "stage/staging.json")
@@ -861,6 +867,49 @@ def assemble_cli(work, review, review_sha256, output):
             and final["release_version"] == value["connect_version"]
             and final["qualification"]["candidate"] == candidate
             and final["qualification"]["cli_tty_qualified"] is False, "CLI assembly scope or candidate differs")
+    # Release mode: the assembled product counts as assembled only after its privacy scan. A refused
+    # product is moved aside, so no product or assembly record stays at the release location.
+    archive = output / "assembled" / final["archive"]
+    try:
+        privacy_scan([archive, archive.with_name(archive.name + ".sha256")], privacy, output / "privacy-scan")
+    except ValueError:
+        (output / "assembled").rename(output / "assembled.refused")
+        raise
+
+
+# The release privacy scan: the pinned engine (release-evidence-privacy-scan.py, unchanged)
+# through every nested container of the exact release payload. The rules and exemptions are
+# private and never committed, so release mode takes them on the command line and refuses
+# without them. An accepted-findings file kept beside the rules may accept findings in exact
+# file digests; without one nothing is accepted.
+PRIVACY_SCAN = ROOT / "scripts/release-payload-privacy-scan.py"
+
+
+def privacy_inputs(rules, exemptions, accepted_findings):
+    require(rules is not None and exemptions is not None,
+            "release mode requires --rules and --exemptions (private files, never committed)")
+    for path in (rules, exemptions, accepted_findings):
+        require(path is None or (path.is_file() and not path.is_symlink()),
+                "privacy scan rules, exemptions and accepted findings must be regular files")
+    return rules, exemptions, accepted_findings
+
+
+def privacy_scan(payload, privacy, output):
+    """Scan the exact payload files. The report holds counts only; the detail holds the matched
+    strings and stays private (mode 0600). Refuses unless the scan is clean."""
+    rules, exemptions, accepted_findings = privacy
+    require(payload and all(path.is_file() and not path.is_symlink() for path in payload),
+            "regular payload files required")
+    require(output.is_absolute() and not output.exists(), "fresh privacy scan output required")
+    output.mkdir(mode=0o700)
+    command = [sys.executable, "-I", PRIVACY_SCAN, "--rules", rules, "--exemptions", exemptions,
+               "--report", output / "report.json", "--detail", output / "detail.json", "--work", output]
+    if accepted_findings is not None:
+        command += ["--accepted-findings", accepted_findings]
+    code = subprocess.run([str(item) for item in [*command, *payload]], stdin=subprocess.DEVNULL).returncode
+    require(code == 0 and read_json(output / "report.json")["status"] == "clean",
+            f"the release privacy scan refused the payload (exit {code}); counts in {output / 'report.json'}")
+    return read_json(output / "report.json")
 
 
 def fetch_built():
@@ -1330,13 +1379,17 @@ def publish_accepted(directory, expected_sha256, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("preflight", "build", "stage-cli", "assemble-cli", "fetch-built", "accept-publication", "publish-accepted"))
-    for name in ("request", "candidate", "meta-source", "accepted", "output", "candidate-work", "shutdown-review"):
+    parser.add_argument("command", choices=("preflight", "build", "stage-cli", "assemble-cli", "fetch-built",
+                                            "accept-publication", "publish-accepted", "privacy-scan"))
+    for name in ("request", "candidate", "meta-source", "accepted", "output", "candidate-work", "shutdown-review",
+                 "rules", "exemptions", "accepted-findings"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--acceptance-sha256")
     parser.add_argument("--shutdown-review-sha256")
-    args = parser.parse_args()
+    parser.add_argument("payload", nargs="*", type=Path, help="privacy-scan only: the exact release payload files")
+    args = parser.parse_intermixed_args()
     command = args.command
+    require(command == "privacy-scan" or not args.payload, "payload files are taken by privacy-scan only")
     if command == "preflight":
         preflight(native=True)
     elif command == "build":
@@ -1347,7 +1400,12 @@ def main():
     elif command == "assemble-cli":
         require(all((args.candidate_work, args.shutdown_review, args.shutdown_review_sha256, args.output)),
                 "retained producer, exact independent review and output required")
-        assemble_cli(args.candidate_work, args.shutdown_review, args.shutdown_review_sha256, args.output)
+        assemble_cli(args.candidate_work, args.shutdown_review, args.shutdown_review_sha256, args.output,
+                     rules=args.rules, exemptions=args.exemptions, accepted_findings=args.accepted_findings)
+    elif command == "privacy-scan":
+        privacy = privacy_inputs(args.rules, args.exemptions, args.accepted_findings)
+        require(args.output and args.payload, "privacy scan output and payload files required")
+        privacy_scan(args.payload, privacy, args.output)
     elif command == "fetch-built":
         fetch_built()
     elif command == "accept-publication":

@@ -17,6 +17,15 @@
 //! failure never fails the pass. An unchanged roster writes nothing: no
 //! journal row, no wake.
 //!
+//! A declaration carries its identity's member build as its host composed
+//! it, or the identity's lifecycle facts only ([`DeclaredBuild`]). No member
+//! is ever built from facts only: a verdict that would seat or rotate such
+//! an identity's member takes no member step and answers
+//! [`DeclaredEntryOutcome::BuildRequired`], and the host declares the
+//! identity again with its composed build. A host whose builds are costly
+//! to compose composes only the identities it expects the apply to seat or
+//! rotate.
+//!
 //! The same verdicts realize a store-owned identity's update
 //! ([`super::MobHandle::update_store_owned_identity`]): a declared apply of
 //! that one identity under created custody, whose declaration step writes
@@ -207,6 +216,10 @@ pub struct DeclaredEntry {
     /// none, and a `constructed` one by activating its held construction
     /// ([`super::MobHandle::settle_identity_preparation`]).
     pub preparation: crate::identity::IdentityPreparationMode,
+    /// What the spec carries of the identity's member build: the build its
+    /// host composed, or the identity's lifecycle facts only. No member is
+    /// built from facts only ([`DeclaredBuild::FactsOnly`]).
+    pub build: DeclaredBuild,
 }
 
 impl DeclaredEntry {
@@ -218,7 +231,16 @@ impl DeclaredEntry {
             spec,
             held_creation: false,
             preparation: crate::identity::IdentityPreparationMode::None,
+            build: DeclaredBuild::Composed,
         }
+    }
+
+    /// What the spec carries of the identity's member build
+    /// ([`Self::build`]).
+    #[must_use]
+    pub fn with_build(mut self, build: DeclaredBuild) -> Self {
+        self.build = build;
+        self
     }
 
     /// The host's preparation of the identity before its first seat
@@ -237,6 +259,43 @@ impl DeclaredEntry {
     pub fn with_held_creation(mut self, held_creation: bool) -> Self {
         self.held_creation = held_creation;
         self
+    }
+}
+
+/// What a declaration carries of its identity's member build
+/// ([`DeclaredEntry::build`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeclaredBuild {
+    /// The spec is the identity's member build as its host composed it: a
+    /// verdict that seats, rotates or migrates the identity's member builds
+    /// the member from it (a role migration's successor builds with the
+    /// spec's build inputs on the kept session).
+    #[default]
+    Composed,
+    /// The spec carries the identity's lifecycle facts (its identity, role,
+    /// runtime mode, and placement or binding) and none of its member build.
+    /// A verdict that would seat, rotate or migrate its member (an owed
+    /// seat, a rotation onto a fresh session, a role migration on the
+    /// member's own session, a first-boot `Fresh` request's fresh life)
+    /// takes no member step and answers
+    /// [`DeclaredEntryOutcome::BuildRequired`]. Every other verdict answers
+    /// as for a composed declaration, since it builds nothing from the spec:
+    /// a kept member, a runtime-mode restamp on the member's own session
+    /// (which keeps the build inputs its session's builds recorded), a hold,
+    /// a refusal.
+    FactsOnly,
+}
+
+impl DeclaredBuild {
+    /// Whether the declaration carries the identity's member build, so a
+    /// verdict may build the member from its spec. Every kind answers here,
+    /// so a kind added later builds no member until it does.
+    fn carries_member_build(self) -> bool {
+        match self {
+            Self::Composed => true,
+            Self::FactsOnly => false,
+        }
     }
 }
 
@@ -265,8 +324,11 @@ pub enum DeclaredEntryRefusal {
     /// host adoption): the declared apply does not drive it.
     HostAdopted,
     /// This composition of the mob is not authoritative (a candidate): it
-    /// declares nothing.
-    NonAuthoritative,
+    /// declares nothing. `would_be` is the verdict an authoritative
+    /// composition would give the same declaration over the same state,
+    /// decided by MobMachine's one verdict rule: it is reported and never
+    /// applied.
+    NonAuthoritative { would_be: DeclaredEntryVerdict },
     /// The roster declares the identity more than once.
     DuplicateDeclaration,
     /// The roster carries a first-boot request for an identity it does not
@@ -279,6 +341,85 @@ pub enum DeclaredEntryRefusal {
     /// The name's entry is one this build cannot read
     /// ([`super::IdentityEntryRead::Unreadable`]): nothing acts on it.
     NameUnreadable,
+}
+
+/// The verdict an authoritative composition of the mob would give one
+/// declaration ([`DeclaredEntryRefusal::NonAuthoritative`]'s `would_be`): what
+/// its declared apply would do with the identity over the same state. A
+/// candidate composition reports it and applies nothing. The vocabulary is
+/// closed, so a host's projection of it matches every verdict: a new verdict
+/// is a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredEntryVerdict {
+    /// The identity's member keeps its seat ([`DeclaredEntryOutcome::Kept`]),
+    /// or starts its fresh life when a first-boot `Fresh` request names it.
+    Kept,
+    /// The identity is owed its seat: it is seated Dormant, on a first-boot
+    /// request's session, its archived session or a fresh one
+    /// ([`DeclaredEntryOutcome::Seated`]).
+    SeatOwed,
+    /// The identity is hosted on its first use
+    /// ([`DeclaredEntryOutcome::HostedOnFirstUse`]).
+    HostedOnFirstUse,
+    /// The identity awaits its held creation
+    /// ([`DeclaredEntryOutcome::AwaitingHeldCreation`]).
+    AwaitHeldCreation,
+    /// The identity, never seated, awaits its host's preparation
+    /// ([`DeclaredEntryOutcome::PreparationPending`]).
+    PreparationPending,
+    /// The member is restamped with its declared runtime mode on its own
+    /// session ([`DeclaredEntryOutcome::Restamped`]).
+    RuntimeModeRestamp,
+    /// The member is restamped under its declared role on its own session
+    /// ([`DeclaredEntryOutcome::RoleMigrated`]).
+    RoleMigrate,
+    /// The member moves to a fresh session under its declared role
+    /// ([`DeclaredEntryOutcome::RoleRotated`]).
+    RoleRotate,
+    /// The member's role move is held: the roster declares no migration from
+    /// its role ([`DeclaredEntryOutcome::RoleMigrationHeld`]).
+    RoleMigrationHeld,
+    /// The member's spawn, wake, retirement, removal or archive, or the
+    /// identity's held construction, is in flight: the apply leaves it to
+    /// the next one ([`DeclaredEntryOutcome::Deferred`]).
+    LifecycleInFlight,
+    /// A worker member holds the name
+    /// ([`DeclaredEntryRefusal::NameHeldByWorker`]).
+    NameHeldByWorker,
+    /// The identity store manages the identity
+    /// ([`DeclaredEntryRefusal::HostAdopted`]).
+    HostAdopted,
+    /// A store-owned update of an archived identity, or of one awaiting its
+    /// host's preparation: its row is the whole change.
+    RecordOnly,
+}
+
+impl DeclaredEntryVerdict {
+    /// The public form of MobMachine's verdict for a declaration an
+    /// authoritative composition decided; `None` for a verdict only a
+    /// candidate composition, a stopped mob or a reserved name answers.
+    fn of_authoritative(verdict: mob_dsl::IdentityEntryVerdict) -> Option<Self> {
+        Some(match verdict {
+            mob_dsl::IdentityEntryVerdict::Kept => Self::Kept,
+            mob_dsl::IdentityEntryVerdict::SeatOwed => Self::SeatOwed,
+            mob_dsl::IdentityEntryVerdict::HostedOnFirstUse => Self::HostedOnFirstUse,
+            mob_dsl::IdentityEntryVerdict::AwaitHeldCreation => Self::AwaitHeldCreation,
+            mob_dsl::IdentityEntryVerdict::PreparationPending => Self::PreparationPending,
+            mob_dsl::IdentityEntryVerdict::RuntimeModeRestamp => Self::RuntimeModeRestamp,
+            mob_dsl::IdentityEntryVerdict::RoleMigrate => Self::RoleMigrate,
+            mob_dsl::IdentityEntryVerdict::RoleRotate => Self::RoleRotate,
+            mob_dsl::IdentityEntryVerdict::RoleMigrationHeld => Self::RoleMigrationHeld,
+            mob_dsl::IdentityEntryVerdict::LifecycleInFlight => Self::LifecycleInFlight,
+            mob_dsl::IdentityEntryVerdict::RefusedNameHeldByWorker => Self::NameHeldByWorker,
+            mob_dsl::IdentityEntryVerdict::RefusedHostAdopted => Self::HostAdopted,
+            mob_dsl::IdentityEntryVerdict::RecordOnly => Self::RecordOnly,
+            mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative
+            | mob_dsl::IdentityEntryVerdict::MobNotRunning
+            | mob_dsl::IdentityEntryVerdict::RefusedNameOwnedByCreated
+            | mob_dsl::IdentityEntryVerdict::RefusedNameTombstoned
+            | mob_dsl::IdentityEntryVerdict::RefusedNameUnreadable => return None,
+        })
+    }
 }
 
 /// The declared apply's answer for one identity.
@@ -353,6 +494,13 @@ pub enum DeclaredEntryOutcome {
     /// Realizing the identity's verdict failed, typed: an apply runs it
     /// again only once the cause is fixed.
     Failed { error: MobError },
+    /// The identity's verdict seats, rotates or migrates its member, and its
+    /// declaration carried the identity's lifecycle facts only
+    /// ([`DeclaredBuild::FactsOnly`]): no member step was taken, so a
+    /// first-boot request that the seat or the fresh life would carry out is
+    /// not carried out. Its declaration was decided as any other's. The host
+    /// declares the identity again with its composed build.
+    BuildRequired,
 }
 
 /// Why the declared apply left a listed identity as it is
@@ -368,19 +516,40 @@ pub enum DeclaredEntryNote {
 }
 
 /// What the seal did with one Declared entry the complete roster does not
-/// list ([`DeclaredRosterOutcome::unlisted`]).
+/// list, or the apply with one unlisted legacy member
+/// ([`DeclaredRosterOutcome::unlisted`]).
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum UnlistedEntryOutcome {
     /// Its member was retired (the journal records the cause
     /// [`super::MemberRetirementCause::Unlisted`]), and the end of the
-    /// retirement ended the entry.
+    /// retirement ended the entry. An unlisted legacy member placed on a
+    /// member host, or bound to no session, is retired at its incarnation
+    /// through the ordinary retirement without becoming an entry: its
+    /// retirement records no cause, and its name is left free (no entry, no
+    /// tombstone).
     Retired,
     /// No member held it: the entry was removed at once.
     Removed,
     /// Its member's retirement failed: the entry stays marked, and the next
-    /// complete apply retires it again.
+    /// complete apply retires it again. For a legacy member the complete
+    /// roster does not list, its adoption or its retirement failed: it stays
+    /// a member, no entry, and the next complete apply decides it again.
     Failed { error: MobError },
+    /// An unlisted legacy member (both marks, no host's intent row) that
+    /// MobMachine neither adopted nor retired, for `reason`. It stays as it
+    /// is, and the next complete apply decides it again.
+    NotAdopted { reason: NotAdoptedReason },
+}
+
+/// Why MobMachine neither adopted nor retired an unlisted legacy member
+/// ([`UnlistedEntryOutcome::NotAdopted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NotAdoptedReason {
+    /// The member's retirement started already, and its end ends the
+    /// member.
+    Retiring,
 }
 
 /// The answer of [`super::MobHandle::apply_declared_roster`].
@@ -434,6 +603,16 @@ pub(in crate::runtime) struct IdentityDeclaration {
     /// its first seat ([`DeclaredEntry::preparation`]): a roster's
     /// declaration only, never a store-owned identity's.
     pub(in crate::runtime) preparation_required: bool,
+    /// The listed legacy member's observation the declared apply's
+    /// adoption decided on: the generation of the member's incarnation and
+    /// the legacy marks on its spawn row. `None` when the apply offered no
+    /// adoption (no member holds the identity, it is an entry already, the
+    /// identity store manages it, or a store-owned update declares it),
+    /// which declares neither mark. MobMachine reads it only in a candidate
+    /// composition, whose adoption adopts nothing: it decides the verdict
+    /// an authoritative composition would give on the basis that
+    /// composition's adoption of the member gives.
+    pub(in crate::runtime) legacy: Option<super::identity_entry::ObservedLegacyMember>,
 }
 
 impl IdentityDeclaration {
@@ -442,6 +621,14 @@ impl IdentityDeclaration {
         &self,
         runtime_mode: crate::MobRuntimeMode,
     ) -> mob_dsl::MobMachineInput {
+        // No observation declares neither mark: MobMachine adopts no member
+        // on it, whatever the generation.
+        let legacy = self
+            .legacy
+            .unwrap_or(super::identity_entry::ObservedLegacyMember {
+                generation: crate::ids::Generation::INITIAL,
+                marks: super::identity_entry::LegacyRosterMarks::default(),
+            });
         mob_dsl::MobMachineInput::DeclareIdentityEntry {
             agent_identity: mob_dsl::AgentIdentity::from_domain(&self.agent_identity),
             profile_name: self.profile_name.as_str().to_string(),
@@ -461,6 +648,9 @@ impl IdentityDeclaration {
             first_boot: self.first_boot,
             created_custody: self.created_custody,
             preparation_required: self.preparation_required,
+            legacy_marker: legacy.marks.durable_identity,
+            legacy_label: legacy.marks.own_identity_label,
+            legacy_generation: mob_dsl::Generation::from_domain(legacy.generation),
         }
     }
 }
@@ -480,11 +670,14 @@ pub(in crate::runtime) struct DeclarationStep {
     pub(in crate::runtime) change: Option<super::identity_change::DeclaredChangeAnswer>,
 }
 
-/// One decided declaration ([`DeclarationVerdict`]).
+/// One decided declaration ([`DeclarationVerdict`]). `would_be` is the
+/// verdict MobMachine's candidate refusal reports an authoritative
+/// composition would give ([`DeclaredEntryRefusal::NonAuthoritative`]).
 pub(in crate::runtime) struct DecidedDeclaration {
     pub(in crate::runtime) verdict: mob_dsl::IdentityEntryVerdict,
     pub(in crate::runtime) runtime_mode: crate::MobRuntimeMode,
     pub(in crate::runtime) archived_session: Option<SessionId>,
+    pub(in crate::runtime) would_be: Option<mob_dsl::IdentityEntryVerdict>,
 }
 
 /// The seal's answer: its verdict, the Declared entries it marked (their
@@ -513,6 +706,30 @@ pub(super) fn placement_kind(spec: &SpawnMemberSpec) -> mob_dsl::EntryPlacementK
 /// apply rather than failed.
 fn apply_error_is_retryable(error: &MobError) -> bool {
     super::builder::restore_error_is_retryable(error)
+}
+
+/// The declared identities the identity store manages: a host-adopted
+/// intent row in `history`, readable or not, names them. A created entry's
+/// row is not one: MobMachine refuses a created name itself. A mob without an
+/// identity store has none.
+fn declared_apply_intent_managed(
+    history: Option<&super::MemberBindingHistory>,
+    declared: &BTreeMap<AgentIdentity, DeclaredEntry>,
+) -> BTreeSet<AgentIdentity> {
+    let Some(history) = history else {
+        return BTreeSet::new();
+    };
+    declared
+        .keys()
+        .filter(|identity| {
+            matches!(
+                history.identity_management(identity),
+                super::MemberIdentityManagement::IntentManaged
+                    | super::MemberIdentityManagement::IntentUnreadable
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 /// A declared identity's answer for an error of its realization.
@@ -659,8 +876,9 @@ impl super::MobHandle {
     /// ([`DeclaredEntryOutcome`]): one identity's refusal or failure never
     /// fails the pass. The call fails as a whole only for what no identity
     /// could be answered without: a mob that is not running, the identity
-    /// store's intent rows that cannot be read now (retryable), or another
-    /// apply of the mob that is running (retryable, see below).
+    /// store's intent rows and member binding history (one read) that cannot
+    /// be read now (retryable), or another apply of the mob that is running
+    /// (retryable, see below).
     ///
     /// - A seated entry whose role and runtime mode match its declaration
     ///   keeps its seat, and nothing is written: its descriptive facets
@@ -716,7 +934,24 @@ impl super::MobHandle {
     ///   that commits the new role, so a deferred or refused restamp keeps it.
     /// - A legacy member listed under its own name is adopted as an entry
     ///   first ([`Self::adopt_legacy_identity_entry`]); a worker holding a
-    ///   listed name refuses that identity alone.
+    ///   listed name refuses that identity alone. A complete roster also
+    ///   offers MobMachine each member it does not list whose spawn row
+    ///   carries a legacy mark, and MobMachine decides: a member with both
+    ///   marks (the durable-identity continuity marker and the legacy
+    ///   identity label naming it) that no host's intent row names is
+    ///   adopted, so the seal unlists the entry and retires the member, or,
+    ///   placed on a member host or bound to no session, retired at its
+    ///   incarnation without becoming an entry
+    ///   ([`UnlistedEntryOutcome::Retired`]); one retiring already is
+    ///   answered [`UnlistedEntryOutcome::NotAdopted`]; a member with one
+    ///   mark only, or one a host's intent row names, is left as it is.
+    /// - No member is built from a declaration of the identity's lifecycle
+    ///   facts only ([`DeclaredBuild::FactsOnly`]): a verdict that would seat
+    ///   it, rotate its member onto a fresh session, migrate it to another
+    ///   role on its own session or start its first-boot fresh life answers
+    ///   [`DeclaredEntryOutcome::BuildRequired`] and takes no member step;
+    ///   the host declares it again with its composed build. A role
+    ///   migration's successor builds with the declaration's build inputs.
     /// - A store-owned identity's name is left as it is, with a typed note
     ///   ([`DeclaredEntryOutcome::Noted`] with
     ///   [`DeclaredEntryNote::OwnedByStore`]): a quiet steady state that
@@ -741,13 +976,14 @@ impl super::MobHandle {
     /// does not list whose member is seated is retired (its start row records
     /// the cause [`super::MemberRetirementCause::Unlisted`]), and the end of
     /// the retirement ends the entry; one no member holds is removed at once.
-    /// A worker is never unlisted, and neither is a created entry. An entry whose member's retirement started
-    /// for another reason is left to it: the entry outlives that retirement,
-    /// unseated, and a later complete apply removes it. An entry whose spawn
-    /// is still in flight is left to a later complete apply, and the answer
-    /// does not name it: once the spawn completes, that apply retires the
-    /// member; when the spawn fails, the entry is left unseated, and that
-    /// apply removes it.
+    /// A worker is never unlisted, but for an unlisted legacy member
+    /// MobMachine adopted first (above), and neither is a created entry.
+    /// An entry whose member's retirement started for another reason is left
+    /// to it: the entry outlives that retirement, unseated, and a later
+    /// complete apply removes it. An entry whose spawn is still in flight is
+    /// left to a later complete apply, and the answer does not name it: once
+    /// the spawn completes, that apply retires the member; when the spawn
+    /// fails, the entry is left unseated, and that apply removes it.
     ///
     /// The apply decides and seats in chunks of [`DECLARED_APPLY_CHUNK`]
     /// identities, each one MobMachine step. Applies of one mob run one at a
@@ -998,14 +1234,20 @@ impl super::MobHandle {
         }
 
         // The raw observations MobMachine decides by: the identity store's
-        // intent rows (read once; a read that fails fails the pass, never
-        // reads as no row) and the session service's durability.
-        let intent_managed = self.declared_apply_intent_managed(&declared).await?;
+        // intent rows, read once with the member binding history (a read
+        // that fails fails the pass, never reads as no row), and the session
+        // service's durability.
+        let history = self.declared_apply_history().await?;
+        let intent_managed = declared_apply_intent_managed(history.as_ref(), &declared);
         let session_memory_only = !self.session_service.keeps_durable_member_sessions();
 
         // A legacy member listed under its own name is adopted first, once:
         // MobMachine then declares it as the entry it is. A store-owned
         // update's declaration adopts nothing: its identity is the store's.
+        // The identity's declaration carries the observation the adoption
+        // decided on: a candidate composition adopts nothing, and MobMachine
+        // decides the verdict it reports an authoritative composition would
+        // give on the basis that composition's adoption gives.
         let legacy: Vec<AgentIdentity> = {
             let state = self.machine_state_watch_rx.borrow();
             declared
@@ -1020,10 +1262,66 @@ impl super::MobHandle {
                 .map(|(identity, _)| identity.clone())
                 .collect()
         };
+        let mut legacy_observed: BTreeMap<
+            AgentIdentity,
+            super::identity_entry::ObservedLegacyMember,
+        > = BTreeMap::new();
         for identity in legacy {
-            if let Err(error) = self.adopt_legacy_identity_entry(&identity).await {
-                declared.remove(&identity);
-                outcome.entries.insert(identity, failure_outcome(error));
+            match self.adopt_listed_legacy_member(&identity).await {
+                Ok((_, Some(observed))) => {
+                    legacy_observed.insert(identity, observed);
+                }
+                Ok((_, None)) => {}
+                Err(error) => {
+                    declared.remove(&identity);
+                    outcome.entries.insert(identity, failure_outcome(error));
+                }
+            }
+        }
+        // A complete roster also offers MobMachine each member it does not
+        // list that carries a legacy mark: members a host seated under their
+        // identities before identity entries existed, whose identities the
+        // roster dropped before this build first applied it. MobMachine
+        // decides from the adoption's own observation (both marks and no
+        // host's intent row): it adopts the member, so the seal unlists the
+        // entry and retires it, or retires one placed or bound to no session
+        // at its incarnation without its adoption, or answers a retiring one
+        // not adoptable; a member with one mark, or one an intent row names,
+        // is a host's own and left as it is. Each candidate is first observed
+        // in the history the pass read: one read for the whole pass, and a
+        // fresh one only after a stale answer.
+        if complete {
+            for identity in self.unlisted_legacy_candidates(history.as_ref(), &listed) {
+                let answer = match self
+                    .adopt_observed_legacy_member(&identity, false, history.as_ref())
+                    .await
+                {
+                    Ok((
+                        generation,
+                        _,
+                        mob_dsl::LegacyIdentityEntryAdoptionKind::RetireUnadopted,
+                    )) => {
+                        match self
+                            .retire_unadopted_legacy_member(&identity, generation)
+                            .await
+                        {
+                            Ok(()) => UnlistedEntryOutcome::Retired,
+                            Err(error) => UnlistedEntryOutcome::Failed { error },
+                        }
+                    }
+                    // The one unlisted legacy member MobMachine does not
+                    // adopt: its retirement started already.
+                    Ok((_, _, mob_dsl::LegacyIdentityEntryAdoptionKind::NotAdoptable)) => {
+                        UnlistedEntryOutcome::NotAdopted {
+                            reason: NotAdoptedReason::Retiring,
+                        }
+                    }
+                    // Adopted: the seal answers it. Any other verdict leaves
+                    // the member as it is.
+                    Ok(_) => continue,
+                    Err(error) => UnlistedEntryOutcome::Failed { error },
+                };
+                outcome.unlisted.insert(identity, answer);
             }
         }
 
@@ -1079,6 +1377,7 @@ impl super::MobHandle {
             created_custody: entry.spec.created_custody,
             preparation_required: !entry.spec.created_custody
                 && super::identity_preparation::preparation_required(entry.preparation),
+            legacy: legacy_observed.get(&entry.spec.identity).copied(),
         };
         let declarations: Vec<IdentityDeclaration> = declared.values().map(declare).collect();
         let (verdicts, change) = self.declare_identity_entries(declarations, change).await?;
@@ -1107,6 +1406,7 @@ impl super::MobHandle {
                 verdict,
                 runtime_mode,
                 archived_session,
+                would_be,
             } = match verdict {
                 Ok(decided) => decided,
                 Err(error) => {
@@ -1120,6 +1420,34 @@ impl super::MobHandle {
                 // A store-owned update of an archived or pending identity:
                 // its row is the whole change, and no member is acted on.
                 (mob_dsl::IdentityEntryVerdict::RecordOnly, _) => {}
+                // A candidate composition declares nothing: its refusal
+                // carries the verdict MobMachine reports an authoritative
+                // composition would give.
+                (mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative, _) => {
+                    let answer = match would_be.and_then(DeclaredEntryVerdict::of_authoritative) {
+                        Some(would_be) => DeclaredEntryOutcome::Refused {
+                            refusal: DeclaredEntryRefusal::NonAuthoritative { would_be },
+                        },
+                        None => DeclaredEntryOutcome::Failed {
+                            error: MobError::Internal(format!(
+                                "MobMachine refused '{agent_identity}' as a candidate's \
+                                 declaration without the verdict it would give \
+                                 ({would_be:?})"
+                            )),
+                        },
+                    };
+                    outcome.entries.insert(agent_identity, answer);
+                }
+                // A member is never built from a declaration of facts only:
+                // the seat waits for the host's composed build, and nothing
+                // of the seat is done (an archived session is not let go).
+                (mob_dsl::IdentityEntryVerdict::SeatOwed, _)
+                    if !entry.build.carries_member_build() =>
+                {
+                    outcome
+                        .entries
+                        .insert(agent_identity, DeclaredEntryOutcome::BuildRequired);
+                }
                 // An unseated identity owed its seat: on a first-boot
                 // request's session, on its archived session, or fresh.
                 (mob_dsl::IdentityEntryVerdict::SeatOwed, request) => {
@@ -1151,6 +1479,13 @@ impl super::MobHandle {
                     | mob_dsl::IdentityEntryVerdict::RoleMigrationHeld,
                     Some(FirstBootRequest::Fresh),
                 ) if self.seated_now(&agent_identity) => {
+                    // The fresh life is a rotation built from the spec.
+                    if !entry.build.carries_member_build() {
+                        outcome
+                            .entries
+                            .insert(agent_identity, DeclaredEntryOutcome::BuildRequired);
+                        continue;
+                    }
                     let answer = self.fresh_life_of_seated(entry).await;
                     if matches!(answer, DeclaredEntryOutcome::FreshLife { .. }) {
                         outcome
@@ -1213,7 +1548,9 @@ impl super::MobHandle {
         }
 
         if complete {
-            self.seal_declared_roster(listed, &mut outcome).await?;
+            let intent_named = self.declared_apply_intent_named_entries(history.as_ref());
+            self.seal_declared_roster(listed, intent_named, &mut outcome)
+                .await?;
         }
         Ok((outcome, change))
     }
@@ -1316,23 +1653,27 @@ impl super::MobHandle {
             }))
     }
 
-    /// The declared identities the identity store manages: a host-adopted
-    /// intent row, readable or not, names them. A created entry's row is not
-    /// one: MobMachine refuses a created name itself. A mob without an
-    /// identity store has none.
-    async fn declared_apply_intent_managed(
+    /// The Declared entries a host's identity intent row names, readable or
+    /// not, in the apply's one read (`history`): the seal leaves them as they
+    /// are, since the roster does not own them (an adoption takes the entry
+    /// over, and a row this build cannot read is never driven). A mob
+    /// without an identity store names none.
+    fn declared_apply_intent_named_entries(
         &self,
-        declared: &BTreeMap<AgentIdentity, DeclaredEntry>,
-    ) -> Result<BTreeSet<AgentIdentity>, MobError> {
-        let Some(store) = self.identity_member.as_ref() else {
-            return Ok(BTreeSet::new());
+        history: Option<&super::MemberBindingHistory>,
+    ) -> BTreeSet<AgentIdentity> {
+        let Some(history) = history else {
+            return BTreeSet::new();
         };
-        let history = self
-            .member_binding_fold
-            .read(store.as_ref(), self.mob_id())
-            .await?;
-        Ok(declared
+        let entries: Vec<AgentIdentity> = self
+            .machine_state_watch_rx
+            .borrow()
+            .identity_entry_origins
             .keys()
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
+            .collect();
+        entries
+            .into_iter()
             .filter(|identity| {
                 matches!(
                     history.identity_management(identity),
@@ -1340,8 +1681,92 @@ impl super::MobHandle {
                         | super::MemberIdentityManagement::IntentUnreadable
                 )
             })
-            .cloned()
-            .collect())
+            .collect()
+    }
+
+    /// The member binding history the apply reads its raw observations
+    /// from, with the identity store's intent rows in the same store read:
+    /// `None` for a mob without an identity store. A read that fails fails
+    /// the pass.
+    async fn declared_apply_history(
+        &self,
+    ) -> Result<Option<super::MemberBindingHistory>, MobError> {
+        let Some(store) = self.identity_member.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.member_binding_fold
+                .read(store.as_ref(), self.mob_id())
+                .await?,
+        ))
+    }
+
+    /// The members a complete roster offers MobMachine's legacy adoption:
+    /// seated, no identity entry, not `listed`, and the spawn row of the
+    /// last binding of the identity in `history` carries a legacy mark
+    /// ([`super::identity_entry::LegacyRosterMarks::any`]): a member with
+    /// neither is no legacy member under any of MobMachine's rules.
+    /// MobMachine decides each from the adoption's own observation. A mob
+    /// without an identity store has none.
+    fn unlisted_legacy_candidates(
+        &self,
+        history: Option<&super::MemberBindingHistory>,
+        listed: &BTreeSet<AgentIdentity>,
+    ) -> Vec<AgentIdentity> {
+        let Some(history) = history else {
+            return Vec::new();
+        };
+        let state = self.machine_state_watch_rx.borrow();
+        state
+            .identity_to_runtime
+            .keys()
+            .filter(|identity| !state.identity_entry_origins.contains_key(*identity))
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
+            .filter(|identity| {
+                !listed.contains(identity)
+                    && history.last_binding(identity).is_some_and(|binding| {
+                        super::identity_entry::legacy_roster_member(binding).any()
+                    })
+            })
+            .collect()
+    }
+
+    /// Retire the unlisted legacy member MobMachine answered
+    /// `RetireUnadopted` for, at the incarnation it decided on
+    /// (`generation`), through the ordinary retirement. A member bound to a
+    /// session (placed on a member host) is retired at its delivery scope,
+    /// captured now: the scope must still name that incarnation, and the
+    /// scoped retirement checks it again in the step that retires the
+    /// member. A member bound to no session has no delivery scope: it is
+    /// retired at that generation ([`Self::retire_at_generation`]), whose
+    /// own step retires the exact incarnation it read, so a respawn seated
+    /// after MobMachine's verdict is never retired here. A moved incarnation
+    /// is refused retryable, and the next complete apply decides its member
+    /// again.
+    async fn retire_unadopted_legacy_member(
+        &self,
+        identity: &AgentIdentity,
+        generation: Generation,
+    ) -> Result<(), MobError> {
+        let bound = self
+            .machine_state_watch_rx
+            .borrow()
+            .member_session_bindings
+            .contains_key(&mob_dsl::AgentIdentity::from_domain(identity));
+        if bound {
+            let scope = self.capture_member_delivery_scope(identity).await?;
+            if scope.generation() != generation {
+                return Err(MobError::LifecycleOperationPending {
+                    intent: format!(
+                        "retire unlisted legacy member '{identity}': its incarnation changed \
+                         after MobMachine decided its retirement"
+                    ),
+                });
+            }
+            return self.retire_at_scope(&scope).await;
+        }
+        self.retire_at_generation(identity.clone(), generation)
+            .await
     }
 
     /// MobMachine's verdicts for `declarations`, one chunk per actor step,
@@ -1670,6 +2095,12 @@ impl super::MobHandle {
             mob_dsl::IdentityEntryVerdict::PreparationPending => {
                 DeclaredEntryOutcome::PreparationPending
             }
+            // A role migration's successor builds under its new role with the
+            // spec's build inputs: never from facts only, and the member is
+            // not released for it.
+            mob_dsl::IdentityEntryVerdict::RoleMigrate if !entry.build.carries_member_build() => {
+                DeclaredEntryOutcome::BuildRequired
+            }
             mob_dsl::IdentityEntryVerdict::RuntimeModeRestamp
             | mob_dsl::IdentityEntryVerdict::RoleMigrate => {
                 // A restamp waits for the member to be idle: the release is
@@ -1678,8 +2109,13 @@ impl super::MobHandle {
                     return failure_outcome(error);
                 }
                 let mut request = super::MemberRespawn::new();
+                // A role migration carries the spec's build inputs to its
+                // successor, whose builds on the kept session apply them; a
+                // restamp of the runtime mode builds nothing from the spec.
                 if verdict == mob_dsl::IdentityEntryVerdict::RoleMigrate {
-                    request = request.with_profile(entry.spec.role_name.clone());
+                    request = request
+                        .with_profile(entry.spec.role_name.clone())
+                        .with_build_inputs(super::SeatBuildInputs::of_spec(&entry.spec));
                 }
                 request = request.with_runtime_mode(runtime_mode);
                 // A store-owned identity's restamp seats its row's labels:
@@ -1700,6 +2136,11 @@ impl super::MobHandle {
                     }
                     Err(error) => failure_outcome(error),
                 }
+            }
+            // The rotation builds the next incarnation from the spec: never
+            // from facts only, and the member is not released for it.
+            mob_dsl::IdentityEntryVerdict::RoleRotate if !entry.build.carries_member_build() => {
+                DeclaredEntryOutcome::BuildRequired
             }
             mob_dsl::IdentityEntryVerdict::RoleRotate => {
                 if let Err(error) = self.release_member(identity).await {
@@ -1779,11 +2220,6 @@ impl super::MobHandle {
             mob_dsl::IdentityEntryVerdict::RefusedHostAdopted => DeclaredEntryOutcome::Refused {
                 refusal: DeclaredEntryRefusal::HostAdopted,
             },
-            mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative => {
-                DeclaredEntryOutcome::Refused {
-                    refusal: DeclaredEntryRefusal::NonAuthoritative,
-                }
-            }
             // A store-owned identity's name: the roster's listing of it is a
             // quiet steady state (the store is its owner), not a refusal.
             mob_dsl::IdentityEntryVerdict::RefusedNameOwnedByCreated => {
@@ -1797,10 +2233,12 @@ impl super::MobHandle {
             mob_dsl::IdentityEntryVerdict::RefusedNameUnreadable => DeclaredEntryOutcome::Refused {
                 refusal: DeclaredEntryRefusal::NameUnreadable,
             },
-            // A seat verdict is realized by the seat step, and a mob that is
-            // not running fails the declaration step itself.
+            // A seat verdict is realized by the seat step, a candidate's
+            // refusal is answered with its would-be verdict there too, and a
+            // mob that is not running fails the declaration step itself.
             mob_dsl::IdentityEntryVerdict::SeatOwed
             | mob_dsl::IdentityEntryVerdict::RecordOnly
+            | mob_dsl::IdentityEntryVerdict::RefusedNonAuthoritative
             | mob_dsl::IdentityEntryVerdict::MobNotRunning => DeclaredEntryOutcome::Failed {
                 error: MobError::Internal(format!(
                     "the declared apply realized '{identity}''s verdict {verdict:?} outside its \
@@ -1815,11 +2253,13 @@ impl super::MobHandle {
     async fn seal_declared_roster(
         &self,
         listed: BTreeSet<AgentIdentity>,
+        intent_named: BTreeSet<AgentIdentity>,
         outcome: &mut DeclaredRosterOutcome,
     ) -> Result<(), MobError> {
         let answer = self
             .send_actor_command(|reply_tx| MobCommand::SealDeclaredRoster {
                 desired: listed,
+                intent_named,
                 reply_tx,
             })
             .await??;

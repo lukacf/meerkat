@@ -142,6 +142,17 @@ pub trait LlmClient: Send + Sync {
         None
     }
 
+    /// The most input (prompt) tokens one request that asks for
+    /// `output_budget` output tokens may carry on this client's selected
+    /// account and model, when the provider states a limit (for example a
+    /// Copilot account model's prompt limit, or its context window less that
+    /// budget). `None` states none. A session's default compaction threshold
+    /// stays below the limit for the session's own output budget. Wrappers
+    /// delegate to the client they wrap.
+    fn prompt_token_limit(&self, _output_budget: u32) -> Option<u32> {
+        None
+    }
+
     /// Return an exact witness for the largest serialized JSON body this
     /// invocation may send. The default is unavailable for custom providers.
     fn request_pressure(
@@ -281,6 +292,9 @@ pub struct PreparedLlmRequest {
     authorization: Option<meerkat_core::LlmRequestAuthorization>,
     authorization_target:
         Option<Arc<crate::request_authorization::ResolvedModelAuthorizationTarget>>,
+    /// The request is the agent's own work whatever its messages are
+    /// ([`Self::agent_initiated`]).
+    agent_initiated: bool,
 }
 
 impl PreparedLlmRequest {
@@ -291,11 +305,32 @@ impl PreparedLlmRequest {
             route_witness: projection.route_witness,
             authorization: None,
             authorization_target: None,
+            agent_initiated: false,
         }
     }
 
     pub fn request(&self) -> &LlmRequest {
         &self.request
+    }
+
+    /// Mark this request as the agent's own work whatever its messages are:
+    /// a request-local call that commits no transcript message, such as a
+    /// compaction summary or a tool's own model call.
+    #[must_use]
+    pub fn agent_initiated(mut self) -> Self {
+        self.agent_initiated = true;
+        self
+    }
+
+    /// Who this request continues: the agent for a request
+    /// [`Self::agent_initiated`] marked, otherwise as its messages say
+    /// ([`LlmRequest::initiator`]).
+    pub fn initiator(&self) -> meerkat_core::HttpRequestInitiator {
+        if self.agent_initiated {
+            meerkat_core::HttpRequestInitiator::Agent
+        } else {
+            self.request.initiator()
+        }
     }
 
     /// Attach the current work only to this immutable request. There is no
@@ -329,6 +364,7 @@ impl PreparedLlmRequest {
             route_witness: self.route_witness.clone(),
             authorization: self.authorization.clone(),
             authorization_target: self.authorization_target.clone(),
+            agent_initiated: self.agent_initiated,
         }
     }
 
@@ -630,6 +666,20 @@ impl LlmRequest {
         })
     }
 
+    /// Who this request continues, as its last message says: the agent when
+    /// that is a tool result or the assistant's own output, the user when it
+    /// is a user message, a system message or notice, or when there is none.
+    pub fn initiator(&self) -> meerkat_core::HttpRequestInitiator {
+        match self.messages.last() {
+            Some(Message::ToolResults { .. } | Message::BlockAssistant(_)) => {
+                meerkat_core::HttpRequestInitiator::Agent
+            }
+            Some(Message::User(_) | Message::System(_) | Message::SystemNotice(_)) | None => {
+                meerkat_core::HttpRequestInitiator::User
+            }
+        }
+    }
+
     /// Set provider-specific parameters (replaces any existing params).
     pub fn with_provider_params(mut self, params: ProviderTag) -> Self {
         self.provider_params = Some(params);
@@ -920,6 +970,69 @@ impl ToolCallBuffer {
 mod tests {
     use super::*;
 
+    /// A request continues the agent's work after a tool result or the
+    /// assistant's own output and the user's after anything else; a prepared
+    /// request marked agent-initiated is the agent's whatever its messages,
+    /// and the mark survives provider lowering.
+    #[test]
+    fn request_initiator_follows_the_last_message_unless_marked_agent_initiated() {
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let assistant = Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "partial".to_string(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::MaxTokens,
+        ));
+        let tool_results = Message::tool_results(vec![meerkat_core::ToolResult::new(
+            "call_1".to_string(),
+            "ok".to_string(),
+            false,
+        )]);
+        let user = Message::User(meerkat_core::UserMessage::text("hello"));
+        let system = Message::System(meerkat_core::SystemMessage::new("be brief"));
+        let notice = Message::SystemNotice(meerkat_core::SystemNoticeMessage::new(
+            meerkat_core::SystemNoticeKind::Generic,
+            "job finished",
+        ));
+        for (case, messages, initiator) in [
+            ("no message", vec![], User),
+            ("a user message", vec![user.clone()], User),
+            (
+                "a tool result",
+                vec![user.clone(), tool_results.clone()],
+                Agent,
+            ),
+            (
+                "the assistant's output",
+                vec![user.clone(), assistant],
+                Agent,
+            ),
+            ("a system message", vec![tool_results.clone(), system], User),
+            ("a system notice", vec![tool_results, notice], User),
+        ] {
+            assert_eq!(
+                LlmRequest::new("model", messages).initiator(),
+                initiator,
+                "{case}"
+            );
+        }
+
+        let prepared = PreparedLlmRequest::from_projection(
+            LlmRequest::new("model", Vec::new()),
+            LlmReplayProjection::new(vec![user.clone()]),
+        );
+        assert_eq!(prepared.initiator(), User, "a user turn is the user's");
+        let marked = prepared.agent_initiated();
+        assert_eq!(marked.initiator(), Agent, "marked agent-initiated");
+        assert_eq!(
+            marked
+                .with_lowered_request(LlmRequest::new("model", vec![user]))
+                .initiator(),
+            Agent,
+            "the mark survives provider lowering"
+        );
+    }
     #[test]
     fn request_image_detection_includes_nested_system_notice_content() {
         let request = LlmRequest::new(

@@ -1719,6 +1719,29 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 
     fn stage_add(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;
 
+    /// Stage `surface_id` as a grant-time live attach of a gated MCP server
+    /// stages it (`SurfaceStageGatedAdd`): the ordinary add stage, admitted
+    /// only for a server the build's scoped tool grant gate gates. It is the
+    /// live attach's check, and its caller lands with the live attach; a
+    /// build never calls it, since whether a build stages a gated server it
+    /// configures (lazy residency) is the factory's build-composition filter.
+    /// It answers the transition, whose `StageRecorded` effect names the
+    /// lineage the stager now holds.
+    ///
+    /// The default refuses: a handle without the generated machine's gate
+    /// cannot judge the server.
+    fn stage_gated_add(
+        &self,
+        surface_id: String,
+        now_ms: u64,
+    ) -> Result<ExternalToolSurfaceTransition, DslTransitionError> {
+        let _ = (surface_id, now_ms);
+        Err(DslTransitionError::no_matching(
+            "stage_gated_add",
+            "this surface handle has no tool grant gate",
+        ))
+    }
+
     fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;
 
     fn stage_reload(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError>;

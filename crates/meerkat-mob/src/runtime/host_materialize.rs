@@ -678,6 +678,7 @@ fn decompile_portable_spec_with_env(
             mcp_servers: decompile_mcp_servers(&spec.profile.tools.mcp_servers, env_lookup)?,
             rust_bundles: Vec::new(),
             bundles: Vec::new(),
+            grant_gated: Default::default(),
         },
         peer_description: spec.profile.peer_description.clone(),
         external_addressable: spec.profile.external_addressable,

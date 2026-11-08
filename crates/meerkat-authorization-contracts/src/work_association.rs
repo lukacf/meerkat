@@ -153,6 +153,22 @@ pub enum GrantTarget {
         route: String,
         capability: meerkat_core::ServerToolKind,
     },
+    /// Holds of a decision for the approver id `approver_id`: the target of
+    /// the owner-produced `DecisionHold` (an access offer). A hold asks a
+    /// person for a decision and grants nothing; its lineage covers no
+    /// other operation, and the base never covers a hold. A
+    /// [`WorkAuthorityBasis::GrantLineage`] basis's one lineage covers a
+    /// hold too, for any approver id: the approver id binds nothing there,
+    /// and Core derives it (the offering grant's child rule), never the
+    /// model.
+    DecisionHold {
+        approver_id: meerkat_core::approval::decision::ApproverId,
+    },
+    /// Replies of an approval-carried work to its own requester: the target
+    /// of the owner-produced `RequesterReply`. Its authority is Core's rule
+    /// for that work, never a grant lineage: no basis selects one, and
+    /// outside an approval-carried work it is denied.
+    RequesterReply,
 }
 
 /// One target's selected exact lineage.
@@ -217,6 +233,10 @@ impl WorkAuthorityBasis {
                                         | meerkat_core::ServerToolKind::GoogleSearch
                                 )
                         }
+                        // The approver id is validated where it is built.
+                        GrantTarget::DecisionHold { .. } => true,
+                        // A reply's authority is never a selected lineage.
+                        GrantTarget::RequesterReply => false,
                     };
                     if !named {
                         return Err(AssociationError::Shape);

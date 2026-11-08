@@ -2414,7 +2414,7 @@ impl MobActor {
         // The member's session is disposed for good (#1500); a same-session
         // rotation keeps it for the next incarnation.
         if !continuation.keeps_session() {
-            self.unstage_departed_member_mob_stop(&continuation.entry)
+            self.unstage_departed_member_run_start_holds(&continuation.entry)
                 .await;
         }
         continuation.archive_disposal = Some(disposal);
@@ -7279,6 +7279,7 @@ mod tests {
                 fork_source: None,
                 fork_overlay: Default::default(),
                 definition_wiring: crate::DefinitionWiring::Applies,
+                approval_branch: None,
             };
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(
                 crate::roster::Roster::from_projected_entries([entry]),

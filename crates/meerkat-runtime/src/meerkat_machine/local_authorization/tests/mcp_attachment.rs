@@ -235,6 +235,7 @@ impl Fixture {
                 invocation: crate::meerkat_machine::ScopedInvocation::from_policy(mandate),
                 operation_owner: servers.clone(),
                 retained_resume: None,
+                kept_original: None,
             }
             .into_configuration()
         } else {
@@ -711,6 +712,7 @@ async fn the_scoped_composition_resolves_the_attachment_mandate() {
         })),
         operation_owner: Arc::clone(&configuration.operation_owner),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let control = fixture.control();

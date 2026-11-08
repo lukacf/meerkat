@@ -21,6 +21,10 @@ impl PreparedOperationAuthorization for Allowed {
     ) -> Result<(), OperationAuthorizationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 struct Owner;
@@ -289,6 +293,10 @@ async fn started_observation_precedes_review_and_failure_keeps_the_reviewer_unen
                 }
                 self.0.started.lock().push(attempt_ref);
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

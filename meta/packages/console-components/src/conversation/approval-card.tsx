@@ -1,5 +1,6 @@
 import * as React from "react";
-import type { ApprovalAction, ApprovalDecisionState, PendingApproval, PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
+import { approvalAudience } from "../../../console-core/src/pending-approvals";
+import type { ApprovalAction, ApprovalAudience, ApprovalDecisionState, ApprovalViewer, DepartedApproval, PendingApproval, PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
 import type { HostAttentionItem, HostAttentionSourceConfig, HostDecideLink } from "../../../console-core/src/host-attention";
 import {
   AgentAvatar,
@@ -37,11 +38,29 @@ export const HostDecideSourcesProvider = HostDecideSourcesContext.Provider;
 export function useHostDecideSources(): readonly HostAttentionSourceConfig[] | undefined {
   return React.useContext(HostDecideSourcesContext);
 }
+
+const ApprovalViewerContext = React.createContext<ApprovalViewer | undefined>(undefined);
+/** Who looks at the approvals (`meta/console/whoami`): the cards then say
+ * whether a request waits for them, and "Needs you" counts only those. While
+ * it is unknown, the cards show no such mark and every request counts. */
+export const ApprovalViewerProvider = ApprovalViewerContext.Provider;
+export function useApprovalViewer(): ApprovalViewer | undefined {
+  return React.useContext(ApprovalViewerContext);
+}
+/** Whom `request` waits for, for the viewer in context: `null` while the
+ * viewer is unknown. */
+function useApprovalAudience(request: PendingApproval): ApprovalAudience | null {
+  const viewer = useApprovalViewer();
+  return viewer ? approvalAudience(request, viewer) : null;
+}
 export interface ApprovalCardProps {
   request: PendingApproval;
   resourceStatus: PendingApprovalSnapshot["status"];
   decision?: ApprovalDecisionState;
   readOnly?: boolean;
+  /** Why the card is read-only, when known: `sign_in` names what lets the
+   *  caller decide (only a signed-in person decides). */
+  readOnlyReason?: PendingApprovalSnapshot["readOnlyReason"];
   /** Host pages where a read-only session's decision is made instead. */
   decideLinks?: readonly HostDecideLink[];
   onDecide(pendingId: string, action: ApprovalAction): void | Promise<void>;
@@ -187,11 +206,18 @@ function AskedLine({ request, waiting, testId }: { request: PendingApproval; wai
 }
 
 /** The same request and decision owner can feed an inbox and several panes. */
-export function ApprovalCard({ request, resourceStatus, decision, readOnly = false, decideLinks, onDecide }: ApprovalCardProps) {
+export function ApprovalCard({ request, resourceStatus, decision, readOnly = false, readOnlyReason, decideLinks, onDecide }: ApprovalCardProps) {
   const now = useApprovalClock([request.deadlineAtMs]);
   const pending = request.status === "pending" && decision?.phase !== "settled";
   const submitting = decision?.phase === "submitting";
   const stale = resourceStatus !== "ready";
+  // Personal cards: a request routed to an approver the viewer does not hold
+  // waits for that approver and offers this viewer no decision; one for the
+  // viewer says so when they decide in this console.
+  const viewer = useApprovalViewer();
+  const audience = useApprovalAudience(request);
+  const waitingFor = pending && audience?.kind === "other" ? audience.approver : null;
+  const forYou = pending && audience?.kind === "you" && viewer?.decides === true;
   // A session that cannot decide shows the host's decide pages, never a dead Approve.
   const hostDecide = readOnly && pending && decideLinks?.length ? decideLinks : null;
   const state: ApprovalCardState = submitting ? "submitting"
@@ -238,6 +264,13 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
           {risk ? (
             <Chip tone={riskTone(request.riskTier)} mark title={risk.title} className="cc-approval__risk">{risk.text}</Chip>
           ) : null}
+          {forYou ? (
+            <Chip tone="info" className="cc-approval__audience" testId={`gating-for-you:${request.pendingId}`}>For you</Chip>
+          ) : waitingFor ? (
+            <Chip className="cc-approval__audience" title={`This request asks ${waitingFor} to decide it`} testId={`gating-waiting-for:${request.pendingId}`}>
+              {`Waiting for ${waitingFor}`}
+            </Chip>
+          ) : null}
         </div>
         {deadline !== undefined ? (
           <DeadlineChip deadlineAtMs={deadline} now={now} testId={`gating-countdown:${request.pendingId}`} />
@@ -278,7 +311,9 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
           Escalated to a new request <TechnicalId value={decision.result.next_pending_id} label="Request ID" />
         </Notice>
       ) : null}
-      {readOnly && !hostDecide ? <Notice tone="locked">Read-only access</Notice> : null}
+      {readOnly && !hostDecide ? (
+        <Notice tone="locked">{readOnlyReason === "sign_in" ? "Sign in as yourself to decide" : "Read-only access"}</Notice>
+      ) : null}
       {resourceStatus === "forbidden" ? <Notice tone="locked">Approval access denied</Notice> : null}
       <footer className="cc-approval__footer">
         <span className="cc-approval__status" role="status">
@@ -295,7 +330,7 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
           >
             Decide in {link.label}
           </a>
-        ))}</div> : pending ? <div className="cc-approval__actions">{shownActions.map((action) => {
+        ))}</div> : pending && !waitingFor ? <div className="cc-approval__actions">{shownActions.map((action) => {
           const noRoute = action === "escalate" && noEscalationRoute;
           return (
             <Button
@@ -332,6 +367,37 @@ export function ApprovalCard({ request, resourceStatus, decision, readOnly = fal
             <pre>{JSON.stringify(request.raw, null, 2)}</pre>
           </div>
         </RowDetails>
+      </footer>
+    </article>
+  );
+}
+
+const DECIDED_WORDS: Record<NonNullable<DepartedApproval["decided"]>["action"], { text: string; tone: Tone }> = {
+  approve: { text: "Approved", tone: "ok" },
+  reject: { text: "Rejected", tone: "warn" },
+  escalate: { text: "Escalated", tone: "info" },
+  expired: { text: "Expired before anyone decided", tone: "neutral" },
+};
+
+/** A request decided elsewhere: its card stays where it was, saying who
+ * decided it (from the gating audit), and offers nothing to decide. */
+export function DepartedApprovalCard({ departed }: { departed: DepartedApproval }) {
+  const { request, decided } = departed;
+  const titleIsId = request.action === request.actionId;
+  const title = titleIsId ? humanizeEnum(request.actionId) || request.action : request.action;
+  const words = decided ? DECIDED_WORDS[decided.action] : { text: "Decided elsewhere", tone: "neutral" as Tone };
+  const text = decided && decided.action !== "expired" ? `${words.text} ${decided.by ? `by ${decided.by}` : "elsewhere"}` : words.text;
+  return (
+    <article className="cc-approval cc-approval--departed" data-state="departed" data-testid={`gating-departed:${request.pendingId}`}>
+      <header className="cc-approval__header">
+        <div className="cc-approval__heading">
+          <strong className="cc-approval__title" title={titleIsId ? request.actionId : undefined}>{title}</strong>
+        </div>
+      </header>
+      <footer className="cc-approval__footer">
+        <span className="cc-approval__status" role="status">
+          <Chip tone={words.tone} mark>{text}</Chip>
+        </span>
       </footer>
     </article>
   );
@@ -385,8 +451,13 @@ export function ApprovalAttention({ snapshot, onOpen, hostItems = 0 }: {
   // Approvals count only where the connection can show them; host items
   // count on any connection, so an aggregate console still names them.
   const approvalsShown = Boolean(snapshot) && snapshot?.status !== "forbidden" && snapshot?.status !== "unsupported";
+  // A request routed to an approver the viewer does not hold waits for
+  // someone else: it does not need this viewer.
+  const viewer = useApprovalViewer();
   if (!approvalsShown && hostItems === 0) return null;
-  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending" && snapshot.decisions[request.pendingId]?.phase !== "settled") : [];
+  const requests = approvalsShown && snapshot ? snapshot.requests.filter((request) => request.status === "pending"
+    && snapshot.decisions[request.pendingId]?.phase !== "settled"
+    && (!viewer || approvalAudience(request, viewer).kind === "you")) : [];
   const ready = !approvalsShown || snapshot?.status === "ready";
   const approvalStatus = !approvalsShown ? "" : ready ? `${requests.length} pending approval${requests.length === 1 ? "" : "s"}` : snapshot?.status === "loading" ? "Checking approvals" : snapshot?.status === "stale" ? "Approvals may be out of date" : "Approvals unavailable";
   const hostStatus = hostItems ? `${hostItems} item${hostItems === 1 ? "" : "s"} from the host` : "";

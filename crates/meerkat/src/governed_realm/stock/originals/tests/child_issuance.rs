@@ -190,6 +190,7 @@ impl Fixture {
             invocation: ScopedInvocation::from_policy(Arc::new(Policy)),
             operation_owner,
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         let policy = Arc::new(GrantBackedWorkPolicy::new(

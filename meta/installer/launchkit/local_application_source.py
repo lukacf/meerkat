@@ -239,7 +239,10 @@ def create_local_application_source(*, guide_store, guide_id, guide_version,
     # This is a new logical application source identity, not an existing user
     # discovered from the machine or an authenticated principal.
     subject = "forge-" + guide_id
-    console = {"authentication": "local-password"}
+    # Named accounts: the installation's own account is this operator, from
+    # the two private fields below, and each further person gets an account
+    # of their own. A single shared account decides nothing in the Console.
+    console = {"authentication": "local-accounts"}
     configuration = {"fields": [
         {"key": "CONSOLE_USER_ID", "label": "Console user",
             "description": "Use " + subject + ", the user selected for this application. Enter it in protected Install settings.",

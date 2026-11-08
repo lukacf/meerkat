@@ -527,6 +527,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RequestUntilChangedSwitchTurnApprovalDeniedRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnPendingConflictIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnPendingConflictAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestUntilChangedSwitchTurnPendingConflictRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `CompleteUntilChangedSwitchTurnReconfigureIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -534,6 +543,27 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `CompleteUntilChangedSwitchTurnReconfigureRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteUntilChangedSwitchTurnReconfigureRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompleteUntilChangedSwitchTurnReconfigureStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AbortUntilChangedSwitchTurnReconfigureStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ImportCommittedModelRoutingHandoffFirstIdle`
@@ -3195,6 +3225,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SurfaceStageAddRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SurfaceStageRemoveIdle`
@@ -6353,6 +6392,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReplaceToolGrantGateStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ApplyToolGrantOpenSetChangedIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -8255,6 +8324,105 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReleaseInputControllerStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SettleRetainedRunAcceptedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunAcceptedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyDrainingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyDrainingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyStaleRunIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyStaleRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunInertDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -9043,6 +9211,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InputControllerReleased`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RetainedRunSettleResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExactRunBoundaryCancel`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
@@ -9213,6 +9387,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `input_controller_holds_are_kept_unstaged_governed_inputs`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `resumed_run_admission_hold_names_the_marked_run`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `live_boundary_delivery_only_for_queued_steer`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9274,6 +9451,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `tool_grant_open_names_are_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_not_mounted_are_not_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_ungated_servers_are_not_gated`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

@@ -7,8 +7,12 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use meerkat_contracts::{
+    DecisionAudienceRequest, DecisionPresentationRequest, WirePresentationLink,
+};
 use meerkat_core::approval::consent::{
     AuthenticatedApprover, ConsentEligibility, ConsentEligibilityAnswer, ConsentIneligible,
+    HostAuthenticationScope,
 };
 use meerkat_core::approval::decision::{
     ApproverId, AttestedDecision, AttributedReview, ConsentProvenance, DecisionContractError,
@@ -17,7 +21,8 @@ use meerkat_core::approval::decision::{
     DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionRenderer, DecisionRendering,
     DecisionRequestBody, DecisionReviewVerdict, DecisionRow, DecisionStage, DecisionStore,
     DecisionSubjectKey, DecisionTier, InMemoryDecisionStore, PresentationAudience,
-    PresentationRecord, Sha256Digest, StoredDecision, decision_is_due, decision_owes_work,
+    PresentationLink, PresentationRecord, Sha256Digest, StoredDecision, decision_is_due,
+    decision_owes_work,
 };
 use meerkat_core::approval::{ApprovalAssurance, ApprovalConsentDeliveryState, ApprovalStoreError};
 use meerkat_core::{PrincipalKind, PrincipalRef, SessionId, TrustDomainId};
@@ -28,6 +33,7 @@ use super::dsl::{
     DurableDecisionMachineMutator, DurableDecisionMachineState, DurableDecisionPhase,
 };
 use super::service::{issued_permit, machine_state};
+use super::wire::{presentation_from_wire, wire_decision};
 use super::{
     APPROVER_NOT_CURRENT_REFUSAL, DecisionClock, DecisionClockError, DecisionError,
     DecisionRefusal, DecisionWithdrawer, DecisionWriteMode, DurableDecisionService,
@@ -141,6 +147,15 @@ impl DecisionStore for CountingStore {
         false
     }
 
+    fn claim_executor_kind(
+        &self,
+        kind: &DecisionKind,
+    ) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        self.record("claim_executor_kind");
+        self.inner.claim_executor_kind(kind)
+    }
+
+    #[allow(deprecated)]
     fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
         self.record("claim_executor");
         self.inner.claim_executor()
@@ -238,8 +253,27 @@ fn hold_of(
     rendering: &DecisionRendering,
     deadline_at_ms: u64,
 ) -> DecisionHoldRequest {
+    hold_of_kind(
+        "release",
+        subject,
+        requester,
+        reviewer,
+        rendering,
+        deadline_at_ms,
+    )
+}
+
+/// The hold of `subject` of `kind` by `requester`, until `deadline_at_ms`.
+fn hold_of_kind(
+    kind: &str,
+    subject: &str,
+    requester: DecisionPrincipalKey,
+    reviewer: Option<DecisionPrincipalKey>,
+    rendering: &DecisionRendering,
+    deadline_at_ms: u64,
+) -> DecisionHoldRequest {
     let request = DecisionHoldRequest::new(
-        DecisionKind::new("release").expect("kind"),
+        DecisionKind::new(kind).expect("kind"),
         DecisionSubjectKey::new(subject).expect("subject key"),
         operation_id(),
         request_digest(),
@@ -361,9 +395,19 @@ fn approved_subject(
     rendering: &DecisionRendering,
     subject: &str,
 ) -> DecisionId {
+    approved_of_kind(service, rendering, "release", subject)
+}
+
+/// Hold, present and approve the routable decision of `subject` of `kind`.
+fn approved_of_kind(
+    service: &DurableDecisionService,
+    rendering: &DecisionRendering,
+    kind: &str,
+    subject: &str,
+) -> DecisionId {
     let decision_id = service
         .hold(
-            hold_of(subject, requester(), None, rendering, DEADLINE),
+            hold_of_kind(kind, subject, requester(), None, rendering, DEADLINE),
             true,
         )
         .expect("hold")
@@ -771,6 +815,50 @@ fn a_decide_with_no_presentation_keeps_the_presentation_incomplete_refusal() {
     }
 }
 
+/// Row: a decided decision keeps the presentation it carried only when
+/// DurableDecisionMachine counted it. A carried presentation shown to
+/// another audience, or a summary whose link served another rendering, is
+/// not kept: the row keeps the recorded presentation the decision was
+/// ordered after.
+#[test]
+fn a_decision_keeps_a_carried_presentation_only_when_the_machine_counted_it() {
+    let rendering = rendering();
+    let changed =
+        DecisionRendering::new("Release build 8 to the stable channel.").expect("rendering");
+    let to_another_audience = PresentationRecord::complete(
+        PresentationAudience::Reviewer {
+            reviewer: requester(),
+        },
+        &rendering,
+        None,
+        reference("chat"),
+        reference("message-1"),
+        PRESENTED_AT,
+    );
+    let stale = linked_presentation_at(&rendering, changed.subject_digest(), PRESENTED_AT);
+    for carried in [to_another_audience, stale] {
+        let (_store, _clock, service) = fixture();
+        let decision_id = service
+            .hold(hold_request(&rendering), true)
+            .expect("hold")
+            .decision_id;
+        let recorded = presentation_at(&rendering, PRESENTED_AT);
+        service
+            .present(&decision_id, &recorded)
+            .expect("the approver is shown the decision");
+        let decision = attested_at("alice", rendering.subject_digest(), true, PRESENTED_AT)
+            .with_presentation(carried.clone());
+        let decided = service
+            .decide(&decision_id, &decision, &Eligibility::current())
+            .expect("approved on the recorded presentation");
+        assert_eq!(
+            decided.presentations,
+            vec![recorded],
+            "the carried {carried:?} is not kept"
+        );
+    }
+}
+
 /// A presentation time of 0 is no reading: a presentation recorded at 0 is
 /// refused `presentation_incomplete` and records nothing, and a decision
 /// carrying a presentation at 0 is refused the same way, even after a
@@ -808,6 +896,235 @@ fn a_presentation_time_of_zero_is_no_presentation() {
         store.stored(&decision_id),
         presented,
         "the refusal changes nothing"
+    );
+}
+
+/// A size-limited surface's summary of `rendering` to the approver id, shown
+/// at `at_ms`: no canonical part, and a link to the full presentation that
+/// served the rendering whose digest is `served`.
+fn linked_presentation_at(
+    rendering: &DecisionRendering,
+    served: Sha256Digest,
+    at_ms: u64,
+) -> PresentationRecord {
+    PresentationRecord::linked(
+        PresentationAudience::Approver {
+            approver_id: approver_id(),
+        },
+        rendering,
+        PresentationLink::new(reference("decision-page"), served),
+        reference("chat"),
+        reference("message-1"),
+        at_ms,
+    )
+}
+
+/// A summary whose link served the whole, unchanged rendering is a complete
+/// presentation: recorded, it is the approver's first presentation and a
+/// decision observed after it approves; carried by the decision event, it
+/// decides the same way.
+#[test]
+fn a_linked_presentation_that_served_the_rendering_lets_the_approver_decide() {
+    let (_store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let hold = |subject: &str| {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold")
+            .decision_id
+    };
+    let linked = linked_presentation_at(&rendering, digest.clone(), PRESENTED_AT);
+
+    let recorded = hold("subject:recorded");
+    let presented = service
+        .present(&recorded, &linked)
+        .expect("a summary whose link served the rendering is complete");
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(PRESENTED_AT)
+    );
+    assert_eq!(presented.presentations, vec![linked.clone()]);
+    let decided = service
+        .decide(
+            &recorded,
+            &attested_at("alice", digest.clone(), true, PRESENTED_AT),
+            &Eligibility::current(),
+        )
+        .expect("approve after the linked presentation");
+    assert_eq!(decided.state.phase, DecisionPhase::Approved);
+
+    let carried = hold("subject:carried");
+    let decision =
+        attested_at("alice", digest, true, PRESENTED_AT).with_presentation(linked.clone());
+    let decided = service
+        .decide(&carried, &decision, &Eligibility::current())
+        .expect("approve on the carried linked presentation");
+    assert_eq!(decided.state.phase, DecisionPhase::Approved);
+    assert_eq!(
+        decided.state.first_presented_to_approver_at_ms,
+        Some(PRESENTED_AT)
+    );
+    assert_eq!(decided.presentations, vec![linked]);
+}
+
+/// The observed-time order applies to a linked presentation's time as to a
+/// shown one: a decision observed before it is refused
+/// `decided_before_presentation`, recorded or carried.
+#[test]
+fn a_decide_observed_before_a_linked_presentation_is_refused() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let hold = |subject: &str| {
+        service
+            .hold(
+                hold_of(subject, requester(), None, &rendering, DEADLINE),
+                true,
+            )
+            .expect("hold")
+            .decision_id
+    };
+    let linked = linked_presentation_at(&rendering, digest.clone(), PRESENTED_AT);
+
+    let recorded = hold("subject:recorded");
+    let presented = service
+        .present(&recorded, &linked)
+        .expect("present the summary");
+    let refused = service
+        .decide(
+            &recorded,
+            &attested_at("alice", digest.clone(), true, PRESENTED_AT - 1),
+            &Eligibility::current(),
+        )
+        .expect_err("a decision observed before the linked presentation");
+    assert_eq!(refusal(&refused).as_str(), "decided_before_presentation");
+    assert_eq!(
+        store.stored(&recorded),
+        presented,
+        "the refusal changes nothing"
+    );
+
+    let carried = hold("subject:carried");
+    let held = store.stored(&carried);
+    let decision = attested_at("alice", digest, true, PRESENTED_AT - 1).with_presentation(linked);
+    let refused = service
+        .decide(&carried, &decision, &Eligibility::current())
+        .expect_err("a decision observed before the linked presentation it carries");
+    assert_eq!(refusal(&refused).as_str(), "decided_before_presentation");
+    assert_eq!(store.stored(&carried), held, "the refusal changes nothing");
+}
+
+/// A summary whose link served another rendering (the request changed
+/// after the summary was sent) is no presentation of the held one: it is
+/// refused `presentation_incomplete` and records nothing, and a decision
+/// carrying it stays `presentation_incomplete`.
+#[test]
+fn a_link_to_a_changed_rendering_is_refused_presentation_incomplete() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let changed =
+        DecisionRendering::new("Release build 8 to the stable channel.").expect("rendering");
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    let held = store.stored(&decision_id);
+    let stale = linked_presentation_at(&rendering, changed.subject_digest(), PRESENTED_AT);
+
+    let refused = service
+        .present(&decision_id, &stale)
+        .expect_err("a link that served a changed rendering");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+
+    let decision = attested_at("alice", rendering.subject_digest(), true, PRESENTED_AT)
+        .with_presentation(stale);
+    let refused = service
+        .decide(&decision_id, &decision, &Eligibility::current())
+        .expect_err("a decision carrying the stale summary");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+}
+
+/// The summary a host presenter states on the wire with its link.
+fn stated_summary(subject: &Sha256Digest, served: &str) -> DecisionPresentationRequest {
+    DecisionPresentationRequest {
+        audience: DecisionAudienceRequest::Approver {
+            approver_id: approver_id().to_string(),
+        },
+        subject_digest: subject.to_string(),
+        max_part_bytes: None,
+        parts_shown: Vec::new(),
+        link: Some(WirePresentationLink {
+            reference: "decision-page".into(),
+            served_digest: served.to_owned(),
+        }),
+        channel_ref: "chat".into(),
+        message_ref: "message-1".into(),
+        at_ms: PRESENTED_AT,
+    }
+}
+
+/// A host presenter states a summary and its link on the wire: the stated
+/// record carries the link, so it is complete when the link served the held
+/// rendering, and a read projects the link back. A stated link that served
+/// another rendering is refused `presentation_incomplete`, and one whose
+/// served digest is no digest is not read.
+#[test]
+fn a_summary_stated_on_the_wire_carries_its_link_both_ways() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let digest = rendering.subject_digest();
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    let held = store.stored(&decision_id);
+
+    let record =
+        presentation_from_wire(&stated_summary(&digest, &digest.to_string())).expect("stated");
+    assert_eq!(
+        record,
+        linked_presentation_at(&rendering, digest.clone(), PRESENTED_AT),
+        "the stated summary is the record with its link"
+    );
+    let changed =
+        DecisionRendering::new("Release build 8 to the stable channel.").expect("rendering");
+    let stale = presentation_from_wire(&stated_summary(
+        &digest,
+        &changed.subject_digest().to_string(),
+    ))
+    .expect("stated");
+    let refused = service
+        .present(&decision_id, &stale)
+        .expect_err("a stated link that served a changed rendering");
+    assert_eq!(refusal(&refused), DecisionRefusal::PresentationIncomplete);
+    assert_eq!(store.stored(&decision_id), held, "nothing is recorded");
+
+    let presented = service
+        .present(&decision_id, &record)
+        .expect("the stated link served the held rendering");
+    assert_eq!(
+        presented.state.first_presented_to_approver_at_ms,
+        Some(PRESENTED_AT)
+    );
+    let projected = wire_decision(&presented, false);
+    assert_eq!(projected.presentations.len(), 1);
+    assert_eq!(
+        projected.presentations[0].link,
+        Some(WirePresentationLink {
+            reference: "decision-page".into(),
+            served_digest: digest.to_string(),
+        })
+    );
+
+    assert!(
+        presentation_from_wire(&stated_summary(&digest, "not-a-digest")).is_err(),
+        "a served digest that is no digest is invalid"
     );
 }
 
@@ -1108,8 +1425,14 @@ fn a_candidate_reads_without_writing_and_refuses_every_write() {
     );
     assert_eq!(
         candidate
-            .claim_executor()
-            .expect_err("claim the executor role"),
+            .claim_executor_kind(&DecisionKind::new("release").expect("kind"))
+            .expect_err("claim the executor role of a kind"),
+        DecisionError::CandidateLaunch
+    );
+    #[allow(deprecated)]
+    let whole_store = candidate.claim_executor().map(|_| ());
+    assert_eq!(
+        whole_store.expect_err("claim the executor role of the store"),
         DecisionError::CandidateLaunch
     );
     assert!(store.calls().is_empty(), "a refused write reads nothing");
@@ -1325,6 +1648,88 @@ fn a_torn_row_is_unreadable_and_never_executes() {
             .expect_err("an invariant refuses the row"),
         DecisionError::Unreadable { .. }
     ));
+}
+
+/// Every file under `dir`, recursively.
+fn files_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read the directory") {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// A decision made in a login keeps the digest of that login, never the
+/// login itself: the decided row reads back with the digest, and no byte of
+/// any file the SQLite store wrote names the login.
+#[test]
+fn a_decision_made_in_a_login_stores_its_digest_and_never_the_login() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store: Arc<dyn DecisionStore> = Arc::new(SqliteDecisionStore::in_store_path(dir.path()));
+    let clock: Arc<dyn DecisionClock> = ManualClock::at(HELD_AT);
+    let service = DurableDecisionService::with_clock(store, clock);
+    let rendering = rendering();
+    let decision_id = service
+        .hold(hold_request(&rendering), true)
+        .expect("hold")
+        .decision_id;
+    service
+        .present(&decision_id, &presentation(&rendering))
+        .expect("present");
+    let login = HostAuthenticationScope::new("login-of-alice-7f3a");
+    let approver = AuthenticatedApprover::new(
+        principal(PrincipalKind::Human, "alice"),
+        ApprovalAssurance::PersonAuthenticated,
+    )
+    .expect("authenticated human")
+    .with_authentication_scope(login.clone());
+    let decision = AttestedDecision::new(
+        approver,
+        DecisionIngress::new("console").expect("ingress"),
+        reference("event-1"),
+        OBSERVED_AT,
+        approver_id(),
+        rendering.subject_digest(),
+        true,
+    )
+    .expect("attested decision");
+    service
+        .decide(&decision_id, &decision, &Eligibility::current())
+        .expect("approve");
+
+    let row = service
+        .get(&decision_id)
+        .expect("the decided row reads back");
+    let Some(outcome) = row.outcome.as_ref() else {
+        panic!("an approved row has its outcome");
+    };
+    let evidence = serde_json::to_value(&outcome.evidence).expect("encode the evidence");
+    assert_eq!(
+        evidence["authentication_scope_digest"],
+        serde_json::json!(login.digest().as_str()),
+        "the evidence keeps the digest of the login"
+    );
+    assert!(
+        evidence.get("authentication_scope").is_none(),
+        "the evidence does not keep the login: {evidence}"
+    );
+    let files = files_under(dir.path());
+    assert!(!files.is_empty(), "the store wrote its files");
+    for path in files {
+        let bytes = std::fs::read(&path).expect("read a store file");
+        assert!(
+            !bytes
+                .windows(login.as_str().len())
+                .any(|window| window == login.as_str().as_bytes()),
+            "{} names the login",
+            path.display()
+        );
+    }
 }
 
 #[test]

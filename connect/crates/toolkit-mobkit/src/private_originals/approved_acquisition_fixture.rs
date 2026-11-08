@@ -763,25 +763,40 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             materialized.push((helper_spec, helper, helper_session));
         } else if !durable {
             assert!(configured_report);
-            // Match Meta's lazy roster registration: the helper identity is
-            // owned but has no embodiment, session or lease yet. The actual
-            // governed dispatch below must still materialize it natively.
-            runtime.register(helper_spec).await;
+            // Meta's registration declares the helper identity in Core, which
+            // seats it Dormant: Core holds its member on a session, and nothing
+            // is embodied or leased yet. The actual governed dispatch below must
+            // still materialize it natively.
+            let answer = runtime
+                .register(helper_spec)
+                .await
+                .expect("the identity registers");
+            let seated_session = match &answer {
+                meerkat_mobkit::identity_first::DeclaredIdentityAnswer::Seated {
+                    session_id,
+                    ..
+                } => session_id.clone(),
+                other => panic!("Core seats the helper identity Dormant: {other:?}"),
+            };
             let status = runtime.status(&helper).await.unwrap();
-            assert_eq!(status.state, IdentityLifecycleState::Dormant);
-            assert!(status.session_id.is_none());
-            assert!(status.agent_runtime_id.is_none());
+            assert_eq!(status.session_id, Some(seated_session));
             assert_eq!(
                 runtime
                     .owned_identity_for_member_alias(helper.as_str())
                     .await,
                 Some(helper)
             );
-            assert!(handle.get_member(&helper_member).await.unwrap().is_none());
+            assert!(
+                handle.get_member(&helper_member).await.unwrap().is_some(),
+                "Core holds the helper's Dormant seat"
+            );
         }
         for (spec, selected_identity, selected_session) in materialized {
             // Core already owns this spawned member and session; registration adds its roster spec.
-            runtime.register(spec).await;
+            runtime
+                .register(spec)
+                .await
+                .expect("the identity registers");
             let status = runtime.status(&selected_identity).await.unwrap();
             assert_eq!(status.state, IdentityLifecycleState::Active);
             assert_eq!(status.session_id, Some(selected_session.clone()));

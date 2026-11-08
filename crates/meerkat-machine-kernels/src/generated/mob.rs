@@ -2367,6 +2367,72 @@ impl std::fmt::Display for Generation {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum HostAdoptionEntryVerdict {
+    #[default]
+    #[serde(rename = "Adopting")]
+    Adopting,
+    #[serde(rename = "Ended")]
+    Ended,
+    #[serde(rename = "Deferred")]
+    Deferred,
+    #[serde(rename = "NotADeclaredEntry")]
+    NotADeclaredEntry,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl HostAdoptionEntryVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Adopting => "Adopting",
+            Self::Ended => "Ended",
+            Self::Deferred => "Deferred",
+            Self::NotADeclaredEntry => "NotADeclaredEntry",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for HostAdoptionEntryVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Adopting" => Ok(Self::Adopting),
+            "Ended" => Ok(Self::Ended),
+            "Deferred" => Ok(Self::Deferred),
+            "NotADeclaredEntry" => Ok(Self::NotADeclaredEntry),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid HostAdoptionEntryVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for HostAdoptionEntryVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for HostAdoptionEntryVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum HostBindPhase {
     #[default]
     #[serde(rename = "Requested")]
@@ -2456,6 +2522,138 @@ impl std::convert::TryFrom<String> for HostPreparationCause {
     }
 }
 impl std::fmt::Display for HostPreparationCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityAdoptionSource {
+    #[default]
+    #[serde(rename = "Roster")]
+    Roster,
+    #[serde(rename = "Worker")]
+    Worker,
+}
+impl IdentityAdoptionSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Roster => "Roster",
+            Self::Worker => "Worker",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityAdoptionSource {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Roster" => Ok(Self::Roster),
+            "Worker" => Ok(Self::Worker),
+            other => Err(format!("invalid IdentityAdoptionSource value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityAdoptionSource {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityAdoptionSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityAdoptionVerdict {
+    #[default]
+    #[serde(rename = "Adopted")]
+    Adopted,
+    #[serde(rename = "NotAdoptable")]
+    NotAdoptable,
+    #[serde(rename = "PredecessorMismatch")]
+    PredecessorMismatch,
+    #[serde(rename = "AdmissionUnsettled")]
+    AdmissionUnsettled,
+    #[serde(rename = "DeclaredApplyOpen")]
+    DeclaredApplyOpen,
+    #[serde(rename = "NameUnreadable")]
+    NameUnreadable,
+    #[serde(rename = "NameTombstoned")]
+    NameTombstoned,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl IdentityAdoptionVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Adopted => "Adopted",
+            Self::NotAdoptable => "NotAdoptable",
+            Self::PredecessorMismatch => "PredecessorMismatch",
+            Self::AdmissionUnsettled => "AdmissionUnsettled",
+            Self::DeclaredApplyOpen => "DeclaredApplyOpen",
+            Self::NameUnreadable => "NameUnreadable",
+            Self::NameTombstoned => "NameTombstoned",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityAdoptionVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Adopted" => Ok(Self::Adopted),
+            "NotAdoptable" => Ok(Self::NotAdoptable),
+            "PredecessorMismatch" => Ok(Self::PredecessorMismatch),
+            "AdmissionUnsettled" => Ok(Self::AdmissionUnsettled),
+            "DeclaredApplyOpen" => Ok(Self::DeclaredApplyOpen),
+            "NameUnreadable" => Ok(Self::NameUnreadable),
+            "NameTombstoned" => Ok(Self::NameTombstoned),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid IdentityAdoptionVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityAdoptionVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityAdoptionVerdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -2566,6 +2764,8 @@ pub enum IdentityChangeAdmissionKind {
     MobNotRunning,
     #[serde(rename = "StaleSpec")]
     StaleSpec,
+    #[serde(rename = "RowsPurged")]
+    RowsPurged,
 }
 impl IdentityChangeAdmissionKind {
     pub fn as_str(&self) -> &'static str {
@@ -2581,6 +2781,7 @@ impl IdentityChangeAdmissionKind {
             Self::GrantRevoked => "GrantRevoked",
             Self::MobNotRunning => "MobNotRunning",
             Self::StaleSpec => "StaleSpec",
+            Self::RowsPurged => "RowsPurged",
         }
     }
 }
@@ -2599,6 +2800,7 @@ impl std::convert::TryFrom<&str> for IdentityChangeAdmissionKind {
             "GrantRevoked" => Ok(Self::GrantRevoked),
             "MobNotRunning" => Ok(Self::MobNotRunning),
             "StaleSpec" => Ok(Self::StaleSpec),
+            "RowsPurged" => Ok(Self::RowsPurged),
             other => Err(format!(
                 "invalid IdentityChangeAdmissionKind value `{other}`"
             )),
@@ -3200,6 +3402,100 @@ impl std::fmt::Display for IdentityExternalTrustCondition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum IdentityImportVerdict {
+    #[default]
+    #[serde(rename = "RestoredInPlace")]
+    RestoredInPlace,
+    #[serde(rename = "RestoredOwedSeat")]
+    RestoredOwedSeat,
+    #[serde(rename = "RestoredPending")]
+    RestoredPending,
+    #[serde(rename = "RestoredArchived")]
+    RestoredArchived,
+    #[serde(rename = "RestoredTombstone")]
+    RestoredTombstone,
+    #[serde(rename = "RestoredByAdoption")]
+    RestoredByAdoption,
+    #[serde(rename = "Unchanged")]
+    Unchanged,
+    #[serde(rename = "NameTakenMeanwhile")]
+    NameTakenMeanwhile,
+    #[serde(rename = "Unsettled")]
+    Unsettled,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "RowsPurged")]
+    RowsPurged,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl IdentityImportVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RestoredInPlace => "RestoredInPlace",
+            Self::RestoredOwedSeat => "RestoredOwedSeat",
+            Self::RestoredPending => "RestoredPending",
+            Self::RestoredArchived => "RestoredArchived",
+            Self::RestoredTombstone => "RestoredTombstone",
+            Self::RestoredByAdoption => "RestoredByAdoption",
+            Self::Unchanged => "Unchanged",
+            Self::NameTakenMeanwhile => "NameTakenMeanwhile",
+            Self::Unsettled => "Unsettled",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::RowsPurged => "RowsPurged",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityImportVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RestoredInPlace" => Ok(Self::RestoredInPlace),
+            "RestoredOwedSeat" => Ok(Self::RestoredOwedSeat),
+            "RestoredPending" => Ok(Self::RestoredPending),
+            "RestoredArchived" => Ok(Self::RestoredArchived),
+            "RestoredTombstone" => Ok(Self::RestoredTombstone),
+            "RestoredByAdoption" => Ok(Self::RestoredByAdoption),
+            "Unchanged" => Ok(Self::Unchanged),
+            "NameTakenMeanwhile" => Ok(Self::NameTakenMeanwhile),
+            "Unsettled" => Ok(Self::Unsettled),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "RowsPurged" => Ok(Self::RowsPurged),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid IdentityImportVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityImportVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityImportVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentityInitialDeliveryCondition {
     #[default]
     #[serde(rename = "NotRequired")]
@@ -3336,6 +3632,90 @@ impl std::convert::TryFrom<String> for IdentityLeaseCondition {
     }
 }
 impl std::fmt::Display for IdentityLeaseCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum IdentityNotAdoptableReason {
+    #[default]
+    #[serde(rename = "StoreOwned")]
+    StoreOwned,
+    #[serde(rename = "NotAnIdentity")]
+    NotAnIdentity,
+    #[serde(rename = "RosterOwned")]
+    RosterOwned,
+    #[serde(rename = "NotAMember")]
+    NotAMember,
+    #[serde(rename = "Placed")]
+    Placed,
+    #[serde(rename = "NoSession")]
+    NoSession,
+    #[serde(rename = "HostedOnFirstUse")]
+    HostedOnFirstUse,
+    #[serde(rename = "AwaitingHeldCreation")]
+    AwaitingHeldCreation,
+    #[serde(rename = "AwaitingHostPreparation")]
+    AwaitingHostPreparation,
+    #[serde(rename = "ProfileOverride")]
+    ProfileOverride,
+}
+impl IdentityNotAdoptableReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StoreOwned => "StoreOwned",
+            Self::NotAnIdentity => "NotAnIdentity",
+            Self::RosterOwned => "RosterOwned",
+            Self::NotAMember => "NotAMember",
+            Self::Placed => "Placed",
+            Self::NoSession => "NoSession",
+            Self::HostedOnFirstUse => "HostedOnFirstUse",
+            Self::AwaitingHeldCreation => "AwaitingHeldCreation",
+            Self::AwaitingHostPreparation => "AwaitingHostPreparation",
+            Self::ProfileOverride => "ProfileOverride",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityNotAdoptableReason {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StoreOwned" => Ok(Self::StoreOwned),
+            "NotAnIdentity" => Ok(Self::NotAnIdentity),
+            "RosterOwned" => Ok(Self::RosterOwned),
+            "NotAMember" => Ok(Self::NotAMember),
+            "Placed" => Ok(Self::Placed),
+            "NoSession" => Ok(Self::NoSession),
+            "HostedOnFirstUse" => Ok(Self::HostedOnFirstUse),
+            "AwaitingHeldCreation" => Ok(Self::AwaitingHeldCreation),
+            "AwaitingHostPreparation" => Ok(Self::AwaitingHostPreparation),
+            "ProfileOverride" => Ok(Self::ProfileOverride),
+            other => Err(format!(
+                "invalid IdentityNotAdoptableReason value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityNotAdoptableReason {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityNotAdoptableReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -3696,6 +4076,84 @@ impl std::fmt::Display for IdentityResourceCondition {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum IdentityRowsPurgeVerdict {
+    #[default]
+    #[serde(rename = "Purged")]
+    Purged,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "Replayed")]
+    Replayed,
+    #[serde(rename = "OperationReused")]
+    OperationReused,
+    #[serde(rename = "RowsPurged")]
+    RowsPurged,
+    #[serde(rename = "NotHostOperator")]
+    NotHostOperator,
+    #[serde(rename = "ChangesNotHeld")]
+    ChangesNotHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+    #[serde(rename = "NothingToPurge")]
+    NothingToPurge,
+}
+impl IdentityRowsPurgeVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Purged => "Purged",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::Replayed => "Replayed",
+            Self::OperationReused => "OperationReused",
+            Self::RowsPurged => "RowsPurged",
+            Self::NotHostOperator => "NotHostOperator",
+            Self::ChangesNotHeld => "ChangesNotHeld",
+            Self::MobNotRunning => "MobNotRunning",
+            Self::NothingToPurge => "NothingToPurge",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for IdentityRowsPurgeVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Purged" => Ok(Self::Purged),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "Replayed" => Ok(Self::Replayed),
+            "OperationReused" => Ok(Self::OperationReused),
+            "RowsPurged" => Ok(Self::RowsPurged),
+            "NotHostOperator" => Ok(Self::NotHostOperator),
+            "ChangesNotHeld" => Ok(Self::ChangesNotHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            "NothingToPurge" => Ok(Self::NothingToPurge),
+            other => Err(format!("invalid IdentityRowsPurgeVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for IdentityRowsPurgeVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for IdentityRowsPurgeVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum IdentitySessionCondition {
     #[default]
     #[serde(rename = "Unavailable")]
@@ -3748,6 +4206,118 @@ impl std::convert::TryFrom<String> for IdentitySessionCondition {
     }
 }
 impl std::fmt::Display for IdentitySessionCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ImportedRecordKind {
+    #[default]
+    #[serde(rename = "Present")]
+    Present,
+    #[serde(rename = "PendingPreparation")]
+    PendingPreparation,
+    #[serde(rename = "Archived")]
+    Archived,
+    #[serde(rename = "Tombstone")]
+    Tombstone,
+}
+impl ImportedRecordKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Present => "Present",
+            Self::PendingPreparation => "PendingPreparation",
+            Self::Archived => "Archived",
+            Self::Tombstone => "Tombstone",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ImportedRecordKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Present" => Ok(Self::Present),
+            "PendingPreparation" => Ok(Self::PendingPreparation),
+            "Archived" => Ok(Self::Archived),
+            "Tombstone" => Ok(Self::Tombstone),
+            other => Err(format!("invalid ImportedRecordKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ImportedRecordKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ImportedRecordKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum ImportedRowState {
+    #[default]
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Same")]
+    Same,
+    #[serde(rename = "Other")]
+    Other,
+}
+impl ImportedRowState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Absent => "Absent",
+            Self::Same => "Same",
+            Self::Other => "Other",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for ImportedRowState {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Absent" => Ok(Self::Absent),
+            "Same" => Ok(Self::Same),
+            "Other" => Ok(Self::Other),
+            other => Err(format!("invalid ImportedRowState value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for ImportedRowState {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for ImportedRowState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -4048,6 +4618,8 @@ pub enum LegacyIdentityEntryAdoptionKind {
     NonAuthoritative,
     #[serde(rename = "MobNotRunning")]
     MobNotRunning,
+    #[serde(rename = "RetireUnadopted")]
+    RetireUnadopted,
 }
 impl LegacyIdentityEntryAdoptionKind {
     pub fn as_str(&self) -> &'static str {
@@ -4060,6 +4632,7 @@ impl LegacyIdentityEntryAdoptionKind {
             Self::NotSeated => "NotSeated",
             Self::NonAuthoritative => "NonAuthoritative",
             Self::MobNotRunning => "MobNotRunning",
+            Self::RetireUnadopted => "RetireUnadopted",
         }
     }
 }
@@ -4075,6 +4648,7 @@ impl std::convert::TryFrom<&str> for LegacyIdentityEntryAdoptionKind {
             "NotSeated" => Ok(Self::NotSeated),
             "NonAuthoritative" => Ok(Self::NonAuthoritative),
             "MobNotRunning" => Ok(Self::MobNotRunning),
+            "RetireUnadopted" => Ok(Self::RetireUnadopted),
             other => Err(format!(
                 "invalid LegacyIdentityEntryAdoptionKind value `{other}`"
             )),
@@ -5484,6 +6058,56 @@ impl std::convert::TryFrom<String> for MemberSessionDisposal {
     }
 }
 impl std::fmt::Display for MemberSessionDisposal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum MemberUnwireAdmission {
+    #[default]
+    #[serde(rename = "Admitted")]
+    Admitted,
+    #[serde(rename = "OwnedIdentityEdge")]
+    OwnedIdentityEdge,
+}
+impl MemberUnwireAdmission {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admitted => "Admitted",
+            Self::OwnedIdentityEdge => "OwnedIdentityEdge",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for MemberUnwireAdmission {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Admitted" => Ok(Self::Admitted),
+            "OwnedIdentityEdge" => Ok(Self::OwnedIdentityEdge),
+            other => Err(format!("invalid MemberUnwireAdmission value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for MemberUnwireAdmission {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for MemberUnwireAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -7838,6 +8462,292 @@ impl std::fmt::Display for OperatorInstructionRefusal {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeDeclareVerdict {
+    #[default]
+    #[serde(rename = "Declared")]
+    Declared,
+    #[serde(rename = "AlreadyOwned")]
+    AlreadyOwned,
+    #[serde(rename = "PeerUnknown")]
+    PeerUnknown,
+    #[serde(rename = "OwnerInvalid")]
+    OwnerInvalid,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl OwnedEdgeDeclareVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Declared => "Declared",
+            Self::AlreadyOwned => "AlreadyOwned",
+            Self::PeerUnknown => "PeerUnknown",
+            Self::OwnerInvalid => "OwnerInvalid",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeDeclareVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Declared" => Ok(Self::Declared),
+            "AlreadyOwned" => Ok(Self::AlreadyOwned),
+            "PeerUnknown" => Ok(Self::PeerUnknown),
+            "OwnerInvalid" => Ok(Self::OwnerInvalid),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid OwnedEdgeDeclareVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeDeclareVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeDeclareVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeEndCause {
+    #[default]
+    #[serde(rename = "OwnerChange")]
+    OwnerChange,
+    #[serde(rename = "PolicyDenied")]
+    PolicyDenied,
+}
+impl OwnedEdgeEndCause {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OwnerChange => "OwnerChange",
+            Self::PolicyDenied => "PolicyDenied",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeEndCause {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OwnerChange" => Ok(Self::OwnerChange),
+            "PolicyDenied" => Ok(Self::PolicyDenied),
+            other => Err(format!("invalid OwnedEdgeEndCause value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeEndCause {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeEndCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeEndVerdict {
+    #[default]
+    #[serde(rename = "Ended")]
+    Ended,
+    #[serde(rename = "NotOwner")]
+    NotOwner,
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "NonAuthoritative")]
+    NonAuthoritative,
+    #[serde(rename = "ChangesHeld")]
+    ChangesHeld,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl OwnedEdgeEndVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ended => "Ended",
+            Self::NotOwner => "NotOwner",
+            Self::Absent => "Absent",
+            Self::NonAuthoritative => "NonAuthoritative",
+            Self::ChangesHeld => "ChangesHeld",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeEndVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Ended" => Ok(Self::Ended),
+            "NotOwner" => Ok(Self::NotOwner),
+            "Absent" => Ok(Self::Absent),
+            "NonAuthoritative" => Ok(Self::NonAuthoritative),
+            "ChangesHeld" => Ok(Self::ChangesHeld),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid OwnedEdgeEndVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeEndVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeEndVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeRealization {
+    #[default]
+    #[serde(rename = "Realize")]
+    Realize,
+    #[serde(rename = "NotOwned")]
+    NotOwned,
+    #[serde(rename = "EndNotAnIdentity")]
+    EndNotAnIdentity,
+}
+impl OwnedEdgeRealization {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Realize => "Realize",
+            Self::NotOwned => "NotOwned",
+            Self::EndNotAnIdentity => "EndNotAnIdentity",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeRealization {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Realize" => Ok(Self::Realize),
+            "NotOwned" => Ok(Self::NotOwned),
+            "EndNotAnIdentity" => Ok(Self::EndNotAnIdentity),
+            other => Err(format!("invalid OwnedEdgeRealization value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeRealization {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeRealization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OwnedEdgeRestoreVerdict {
+    #[default]
+    #[serde(rename = "Restored")]
+    Restored,
+    #[serde(rename = "Skipped")]
+    Skipped,
+    #[serde(rename = "MobNotRunning")]
+    MobNotRunning,
+}
+impl OwnedEdgeRestoreVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Restored => "Restored",
+            Self::Skipped => "Skipped",
+            Self::MobNotRunning => "MobNotRunning",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OwnedEdgeRestoreVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Restored" => Ok(Self::Restored),
+            "Skipped" => Ok(Self::Skipped),
+            "MobNotRunning" => Ok(Self::MobNotRunning),
+            other => Err(format!("invalid OwnedEdgeRestoreVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OwnedEdgeRestoreVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OwnedEdgeRestoreVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 pub type PeerAddress = meerkat_machine_schema::catalog::dsl::mob_machine::PeerAddress;
 pub type PeerId = meerkat_machine_schema::catalog::dsl::mob_machine::PeerId;
 #[allow(non_camel_case_types)]
@@ -10108,6 +11018,7 @@ pub struct State {
     pub member_rotation_profile_names: std::collections::BTreeMap<AgentIdentity, String>,
     pub identity_entry_unseated: std::collections::BTreeMap<AgentIdentity, UnseatedEntryCause>,
     pub identity_entry_retiring: std::collections::BTreeSet<AgentIdentity>,
+    pub identity_entry_adopting: std::collections::BTreeSet<AgentIdentity>,
     pub identity_entry_archived_sessions: std::collections::BTreeMap<AgentIdentity, SessionId>,
     pub declared_apply_open: bool,
     pub identity_entry_tombstones: std::collections::BTreeSet<AgentIdentity>,
@@ -10118,6 +11029,9 @@ pub struct State {
     pub identity_entry_archiving: std::collections::BTreeSet<AgentIdentity>,
     pub identity_entry_constructions_held: std::collections::BTreeMap<AgentIdentity, u64>,
     pub identity_entry_constructions_activating: std::collections::BTreeMap<AgentIdentity, u64>,
+    pub identity_edge_owners: std::collections::BTreeMap<WiringEdge, AgentIdentity>,
+    pub identity_rows_purged: bool,
+    pub identity_entry_rowless: std::collections::BTreeSet<AgentIdentity>,
     pub operator_instruction_revision: std::collections::BTreeMap<String, u64>,
     pub operator_instruction_effect: std::collections::BTreeMap<String, InstructionEffect>,
     pub operator_instruction_digest: std::collections::BTreeMap<String, String>,
@@ -11606,7 +12520,10 @@ pub mod inputs {
     pub struct AdoptLegacyIdentityEntry {
         pub agent_identity: AgentIdentity,
         pub generation: Generation,
-        pub legacy_roster_member: bool,
+        pub durable_identity_marker: bool,
+        pub own_identity_label: bool,
+        pub listed: bool,
+        pub intent_row: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAgentLaneMemberAdmission {
@@ -11626,10 +12543,14 @@ pub mod inputs {
         pub first_boot: FirstBootRequestKind,
         pub created_custody: bool,
         pub preparation_required: bool,
+        pub legacy_marker: bool,
+        pub legacy_label: bool,
+        pub legacy_generation: Generation,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SealDeclaredRoster {
         pub desired: std::collections::BTreeSet<AgentIdentity>,
+        pub intent_named: std::collections::BTreeSet<AgentIdentity>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ForgetArchivedSession {
@@ -11699,6 +12620,59 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct UnlistIdentityEntry {
         pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct TakeOverIdentityEntry {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveMemberBuildPreparation {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclareOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct EndOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
+        pub cause: OwnedEdgeEndCause,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitMemberUnwire {
+        pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdoptIdentityIntoStore {
+        pub agent_identity: AgentIdentity,
+        pub source: IdentityAdoptionSource,
+        pub generation: Option<Generation>,
+        pub spawn_overridden: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct PurgeIdentityRows {
+        pub receipt: IdentityChangeReceiptKind,
+        pub host_operator: bool,
+        pub rows_present: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ImportIdentityRecord {
+        pub agent_identity: AgentIdentity,
+        pub kind: ImportedRecordKind,
+        pub adopted_from_roster: bool,
+        pub row: ImportedRowState,
+        pub last_session: Option<SessionId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmitOwnedEdgeRealization {
+        pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RestoreOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
     }
 }
 
@@ -11958,6 +12932,16 @@ pub enum Input {
     SettleHostPreparation(inputs::SettleHostPreparation),
     EndPreparationConstruction(inputs::EndPreparationConstruction),
     UnlistIdentityEntry(inputs::UnlistIdentityEntry),
+    TakeOverIdentityEntry(inputs::TakeOverIdentityEntry),
+    ResolveMemberBuildPreparation(inputs::ResolveMemberBuildPreparation),
+    DeclareOwnedIdentityEdge(inputs::DeclareOwnedIdentityEdge),
+    EndOwnedIdentityEdge(inputs::EndOwnedIdentityEdge),
+    AdmitMemberUnwire(inputs::AdmitMemberUnwire),
+    AdoptIdentityIntoStore(inputs::AdoptIdentityIntoStore),
+    PurgeIdentityRows(inputs::PurgeIdentityRows),
+    ImportIdentityRecord(inputs::ImportIdentityRecord),
+    AdmitOwnedEdgeRealization(inputs::AdmitOwnedEdgeRealization),
+    RestoreOwnedIdentityEdge(inputs::RestoreOwnedIdentityEdge),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -12292,6 +13276,16 @@ impl Input {
             Self::SettleHostPreparation(_) => InputKind::SettleHostPreparation,
             Self::EndPreparationConstruction(_) => InputKind::EndPreparationConstruction,
             Self::UnlistIdentityEntry(_) => InputKind::UnlistIdentityEntry,
+            Self::TakeOverIdentityEntry(_) => InputKind::TakeOverIdentityEntry,
+            Self::ResolveMemberBuildPreparation(_) => InputKind::ResolveMemberBuildPreparation,
+            Self::DeclareOwnedIdentityEdge(_) => InputKind::DeclareOwnedIdentityEdge,
+            Self::EndOwnedIdentityEdge(_) => InputKind::EndOwnedIdentityEdge,
+            Self::AdmitMemberUnwire(_) => InputKind::AdmitMemberUnwire,
+            Self::AdoptIdentityIntoStore(_) => InputKind::AdoptIdentityIntoStore,
+            Self::PurgeIdentityRows(_) => InputKind::PurgeIdentityRows,
+            Self::ImportIdentityRecord(_) => InputKind::ImportIdentityRecord,
+            Self::AdmitOwnedEdgeRealization(_) => InputKind::AdmitOwnedEdgeRealization,
+            Self::RestoreOwnedIdentityEdge(_) => InputKind::RestoreOwnedIdentityEdge,
         }
     }
 }
@@ -12543,6 +13537,16 @@ pub enum InputKind {
     SettleHostPreparation,
     EndPreparationConstruction,
     UnlistIdentityEntry,
+    TakeOverIdentityEntry,
+    ResolveMemberBuildPreparation,
+    DeclareOwnedIdentityEdge,
+    EndOwnedIdentityEdge,
+    AdmitMemberUnwire,
+    AdoptIdentityIntoStore,
+    PurgeIdentityRows,
+    ImportIdentityRecord,
+    AdmitOwnedEdgeRealization,
+    RestoreOwnedIdentityEdge,
 }
 
 pub mod signals {
@@ -13119,6 +14123,20 @@ pub mod signals {
     pub struct ResolveMemberCustodyRestored {
         pub agent_identity: AgentIdentity,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverIdentityEntryAdopting {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverOwnedIdentityEdge {
+        pub edge: WiringEdge,
+        pub owner: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRowlessCreatedEntry {
+        pub agent_identity: AgentIdentity,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -13228,6 +14246,9 @@ pub enum Signal {
     ResolveMemberInstructionRelease(signals::ResolveMemberInstructionRelease),
     RecordMemberCustodyUnrestored(signals::RecordMemberCustodyUnrestored),
     ResolveMemberCustodyRestored(signals::ResolveMemberCustodyRestored),
+    RecoverIdentityEntryAdopting(signals::RecoverIdentityEntryAdopting),
+    RecoverOwnedIdentityEdge(signals::RecoverOwnedIdentityEdge),
+    RecoverRowlessCreatedEntry(signals::RecoverRowlessCreatedEntry),
 }
 impl Signal {
     pub fn kind(&self) -> SignalKind {
@@ -13373,6 +14394,9 @@ impl Signal {
             Self::ResolveMemberInstructionRelease(_) => SignalKind::ResolveMemberInstructionRelease,
             Self::RecordMemberCustodyUnrestored(_) => SignalKind::RecordMemberCustodyUnrestored,
             Self::ResolveMemberCustodyRestored(_) => SignalKind::ResolveMemberCustodyRestored,
+            Self::RecoverIdentityEntryAdopting(_) => SignalKind::RecoverIdentityEntryAdopting,
+            Self::RecoverOwnedIdentityEdge(_) => SignalKind::RecoverOwnedIdentityEdge,
+            Self::RecoverRowlessCreatedEntry(_) => SignalKind::RecoverRowlessCreatedEntry,
         }
     }
 }
@@ -13479,6 +14503,9 @@ pub enum SignalKind {
     ResolveMemberInstructionRelease,
     RecordMemberCustodyUnrestored,
     ResolveMemberCustodyRestored,
+    RecoverIdentityEntryAdopting,
+    RecoverOwnedIdentityEdge,
+    RecoverRowlessCreatedEntry,
 }
 
 pub mod effects {
@@ -14451,6 +15478,7 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: IdentityEntryVerdict,
         pub archived_session: Option<SessionId>,
+        pub would_be: Option<IdentityEntryVerdict>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DeclaredRosterSealed {
@@ -14562,6 +15590,62 @@ pub mod effects {
         pub agent_identity: AgentIdentity,
         pub verdict: UnlistEntryVerdict,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEntryTakenOver {
+        pub agent_identity: AgentIdentity,
+        pub verdict: HostAdoptionEntryVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberBuildPreparationRetryArmed {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnedIdentityEdgeDeclared {
+        pub edge: WiringEdge,
+        pub verdict: OwnedEdgeDeclareVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnedIdentityEdgeEnded {
+        pub edge: WiringEdge,
+        pub cause: OwnedEdgeEndCause,
+        pub verdict: OwnedEdgeEndVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MemberUnwireAdmissionResolved {
+        pub edge: WiringEdge,
+        pub verdict: MemberUnwireAdmission,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityAdoptionResolved {
+        pub agent_identity: AgentIdentity,
+        pub verdict: IdentityAdoptionVerdict,
+        pub reason: Option<IdentityNotAdoptableReason>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityRowsPurgeResolved {
+        pub verdict: IdentityRowsPurgeVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityRecordImportResolved {
+        pub agent_identity: AgentIdentity,
+        pub verdict: IdentityImportVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnedEdgeRealizationResolved {
+        pub edge: WiringEdge,
+        pub verdict: OwnedEdgeRealization,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct OwnedIdentityEdgeRestored {
+        pub edge: WiringEdge,
+        pub verdict: OwnedEdgeRestoreVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct IdentityEnded {
+        pub agent_identity: AgentIdentity,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DeclaredRosterSealRefused {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14762,6 +15846,18 @@ pub enum Effect {
     PreparationSettleResolved(effects::PreparationSettleResolved),
     PreparationConstructionEnded(effects::PreparationConstructionEnded),
     IdentityEntryUnlisted(effects::IdentityEntryUnlisted),
+    IdentityEntryTakenOver(effects::IdentityEntryTakenOver),
+    MemberBuildPreparationRetryArmed(effects::MemberBuildPreparationRetryArmed),
+    OwnedIdentityEdgeDeclared(effects::OwnedIdentityEdgeDeclared),
+    OwnedIdentityEdgeEnded(effects::OwnedIdentityEdgeEnded),
+    MemberUnwireAdmissionResolved(effects::MemberUnwireAdmissionResolved),
+    IdentityAdoptionResolved(effects::IdentityAdoptionResolved),
+    IdentityRowsPurgeResolved(effects::IdentityRowsPurgeResolved),
+    IdentityRecordImportResolved(effects::IdentityRecordImportResolved),
+    OwnedEdgeRealizationResolved(effects::OwnedEdgeRealizationResolved),
+    OwnedIdentityEdgeRestored(effects::OwnedIdentityEdgeRestored),
+    IdentityEnded(effects::IdentityEnded),
+    DeclaredRosterSealRefused(effects::DeclaredRosterSealRefused),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -14957,6 +16053,18 @@ pub enum EffectKind {
     PreparationSettleResolved,
     PreparationConstructionEnded,
     IdentityEntryUnlisted,
+    IdentityEntryTakenOver,
+    MemberBuildPreparationRetryArmed,
+    OwnedIdentityEdgeDeclared,
+    OwnedIdentityEdgeEnded,
+    MemberUnwireAdmissionResolved,
+    IdentityAdoptionResolved,
+    IdentityRowsPurgeResolved,
+    IdentityRecordImportResolved,
+    OwnedEdgeRealizationResolved,
+    OwnedIdentityEdgeRestored,
+    IdentityEnded,
+    DeclaredRosterSealRefused,
 }
 
 pub mod command_capabilities {
@@ -16999,6 +18107,113 @@ pub enum TransitionId {
     UnlistIdentityEntryMobNotRunningStopped,
     UnlistIdentityEntryMobNotRunningCompleted,
     UnlistIdentityEntryMobNotRunningDestroyed,
+    AdoptLegacyIdentityEntryAdoptedUnlisted,
+    AdoptLegacyIdentityEntryRetireUnadopted,
+    ObserveMemberRetirementArchivedLiveHostAdopted,
+    ObserveMemberRetirementArchivedRetiredHostAdopted,
+    TakeOverIdentityEntryAdopting,
+    TakeOverIdentityEntryEnded,
+    TakeOverIdentityEntryDeferred,
+    TakeOverIdentityEntryNotADeclaredEntry,
+    TakeOverIdentityEntryNonAuthoritative,
+    TakeOverIdentityEntryMobNotRunningStopped,
+    TakeOverIdentityEntryMobNotRunningCompleted,
+    TakeOverIdentityEntryMobNotRunningDestroyed,
+    RecoverIdentityEntryAdoptingMarkedRunning,
+    RecoverIdentityEntryAdoptingStaleRunning,
+    ResolveMemberRevivalRetryableBuildPreparationRunning,
+    ResolveMemberBuildPreparationRunning,
+    ResolveMemberBuildPreparationStopped,
+    ResolveMemberBuildPreparationCompleted,
+    DeclareOwnedIdentityEdgeDeclared,
+    DeclareOwnedIdentityEdgeAlreadyOwned,
+    DeclareOwnedIdentityEdgePeerUnknown,
+    DeclareOwnedIdentityEdgeOwnerInvalid,
+    DeclareOwnedIdentityEdgeMobNotRunningStopped,
+    DeclareOwnedIdentityEdgeMobNotRunningCompleted,
+    DeclareOwnedIdentityEdgeMobNotRunningDestroyed,
+    EndOwnedIdentityEdgeEnded,
+    EndOwnedIdentityEdgeNotOwner,
+    EndOwnedIdentityEdgeAbsent,
+    EndOwnedIdentityEdgeNonAuthoritative,
+    EndOwnedIdentityEdgeChangesHeld,
+    EndOwnedIdentityEdgeMobNotRunningStopped,
+    EndOwnedIdentityEdgeMobNotRunningCompleted,
+    EndOwnedIdentityEdgeMobNotRunningDestroyed,
+    AdmitMemberUnwireAdmittedRunning,
+    AdmitMemberUnwireAdmittedStopped,
+    AdmitMemberUnwireAdmittedCompleted,
+    AdmitMemberUnwireAdmittedDestroyed,
+    AdmitMemberUnwireOwnedEdgeRunning,
+    AdmitMemberUnwireOwnedEdgeStopped,
+    AdmitMemberUnwireOwnedEdgeCompleted,
+    AdmitMemberUnwireOwnedEdgeDestroyed,
+    RecoverOwnedIdentityEdgeRecoveredRunning,
+    RecoverOwnedIdentityEdgeRecoveredStopped,
+    RecoverOwnedIdentityEdgeSkippedRunning,
+    RecoverOwnedIdentityEdgeSkippedStopped,
+    AdoptIdentityIntoStoreAdopted,
+    AdoptIdentityIntoStoreNotAdoptable,
+    AdoptIdentityIntoStorePredecessorMismatch,
+    AdoptIdentityIntoStoreAdmissionUnsettled,
+    AdoptIdentityIntoStoreDeclaredApplyOpen,
+    AdoptIdentityIntoStoreNameUnreadable,
+    AdoptIdentityIntoStoreNameTombstoned,
+    AdoptIdentityIntoStoreNonAuthoritative,
+    AdoptIdentityIntoStoreChangesHeld,
+    AdoptIdentityIntoStoreMobNotRunningStopped,
+    AdoptIdentityIntoStoreMobNotRunningCompleted,
+    AdoptIdentityIntoStoreMobNotRunningDestroyed,
+    AdmitIdentityChangeRowsPurged,
+    PurgeIdentityRowsPurged,
+    PurgeIdentityRowsNonAuthoritative,
+    PurgeIdentityRowsReplayed,
+    PurgeIdentityRowsOperationReused,
+    PurgeIdentityRowsRowsPurged,
+    PurgeIdentityRowsNotHostOperator,
+    PurgeIdentityRowsChangesNotHeld,
+    PurgeIdentityRowsMobNotRunningStopped,
+    PurgeIdentityRowsMobNotRunningCompleted,
+    PurgeIdentityRowsMobNotRunningDestroyed,
+    RecoverRowlessCreatedEntryReservedRunning,
+    RecoverRowlessCreatedEntryReservedStopped,
+    RecoverRowlessCreatedEntryKeptRunning,
+    RecoverRowlessCreatedEntryKeptStopped,
+    ImportIdentityRecordRestoredInPlace,
+    ImportIdentityRecordRestoredOwedSeat,
+    ImportIdentityRecordRestoredPending,
+    ImportIdentityRecordRestoredArchived,
+    ImportIdentityRecordRestoredTombstone,
+    ImportIdentityRecordRestoredByAdoption,
+    ImportIdentityRecordUnchanged,
+    ImportIdentityRecordNameTakenMeanwhile,
+    ImportIdentityRecordUnsettled,
+    ImportIdentityRecordNonAuthoritative,
+    ImportIdentityRecordChangesHeld,
+    ImportIdentityRecordRowsPurged,
+    ImportIdentityRecordMobNotRunningStopped,
+    ImportIdentityRecordMobNotRunningCompleted,
+    ImportIdentityRecordMobNotRunningDestroyed,
+    AdmitOwnedEdgeRealizationRealizeRunning,
+    AdmitOwnedEdgeRealizationRealizeStopped,
+    AdmitOwnedEdgeRealizationRealizeCompleted,
+    AdmitOwnedEdgeRealizationRealizeDestroyed,
+    AdmitOwnedEdgeRealizationNotOwnedRunning,
+    AdmitOwnedEdgeRealizationNotOwnedStopped,
+    AdmitOwnedEdgeRealizationNotOwnedCompleted,
+    AdmitOwnedEdgeRealizationNotOwnedDestroyed,
+    AdmitOwnedEdgeRealizationEndNotAnIdentityRunning,
+    AdmitOwnedEdgeRealizationEndNotAnIdentityStopped,
+    AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted,
+    AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed,
+    RestoreOwnedIdentityEdgeRestored,
+    RestoreOwnedIdentityEdgeSkipped,
+    RestoreOwnedIdentityEdgeMobNotRunningStopped,
+    RestoreOwnedIdentityEdgeMobNotRunningCompleted,
+    RestoreOwnedIdentityEdgeMobNotRunningDestroyed,
+    PurgeIdentityRowsNothingToPurge,
+    SealDeclaredRosterRefused,
+    ObserveRespawnTopologyAbandonedStaleEndedSuccessor,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -17381,6 +18596,7 @@ pub fn initial_state() -> State {
         member_rotation_profile_names: Default::default(),
         identity_entry_unseated: Default::default(),
         identity_entry_retiring: Default::default(),
+        identity_entry_adopting: Default::default(),
         identity_entry_archived_sessions: Default::default(),
         declared_apply_open: false,
         identity_entry_tombstones: Default::default(),
@@ -17391,6 +18607,9 @@ pub fn initial_state() -> State {
         identity_entry_archiving: Default::default(),
         identity_entry_constructions_held: Default::default(),
         identity_entry_constructions_activating: Default::default(),
+        identity_edge_owners: Default::default(),
+        identity_rows_purged: false,
+        identity_entry_rowless: Default::default(),
         operator_instruction_revision: Default::default(),
         operator_instruction_effect: Default::default(),
         operator_instruction_digest: Default::default(),

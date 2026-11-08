@@ -95,8 +95,8 @@ use meerkat_core::BlobStore;
 use meerkat_core::mcp_attachment::{ConfiguredMcpAttachmentAuthority, McpAttachmentRefusal};
 use meerkat_core::{ConfigRuntime, FileConfigStore, McpRealmPersistTarget, McpServerConfig};
 use meerkat_runtime::meerkat_machine::{
-    AuthenticatedOriginalSource, NativeRetainedResumeCheck, ScopedGrantComposition,
-    ScopedInvocation,
+    AuthenticatedOriginalSource, NativeKeptOriginalCheck, NativeRetainedResumeCheck,
+    ScopedGrantComposition, ScopedInvocation,
 };
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError, RuntimeStore};
 use meerkat_store::{RealmBackend, RealmOrigin, RealmPaths, grant_owner_store_path};
@@ -125,6 +125,14 @@ pub struct GovernedRealmBootstrap {
     /// `ScopedRetainedResume`, as `ScopedGrantComposition::with_retained_resume`
     /// does. [`RealmGovernance::Stock`] builds its own.
     pub retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    /// The controller of a kept governed input: the check that supplies again
+    /// the controller client of an input admitted under its own association
+    /// (a governed prompt) that a stop kept, or a restart found, in the
+    /// store. Without it every such input ends as a refused resume. Build it
+    /// with the retained-resume check above, over the same owners
+    /// (`ScopedRetainedResume::into_checks`). [`RealmGovernance::Stock`]
+    /// builds its own.
+    pub kept_original: Option<Arc<NativeKeptOriginalCheck>>,
     /// The restarted host's fresh publication, shared with its other owners.
     pub publication: LocalAuthorizationPublication,
     pub clock: Arc<dyn LocalAuthorizationClock>,
@@ -235,6 +243,7 @@ pub(crate) async fn governed_composition(
                 invocation: bootstrap.invocation,
                 operation_owner: bootstrap.operation_owner,
                 retained_resume: bootstrap.retained_resume,
+                kept_original: bootstrap.kept_original,
             }
         }
         RealmGovernance::Stock(stock) => {

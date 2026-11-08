@@ -857,6 +857,7 @@ fn both_faces_of_the_invocation_policy_follow_one_grant_publication() {
         invocation: ScopedInvocation::from_policy(Arc::clone(&policy)),
         operation_owner: Arc::new(NoOperations),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     assert!(configuration.require_scoped_destination);
@@ -1464,6 +1465,7 @@ impl Fixture {
             invocation: ScopedInvocation::from_policy(Arc::new(AllowWork)),
             operation_owner: Arc::new(ExactOperation(operation)),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         let policy = GrantBackedWorkPolicy::new(
@@ -1862,6 +1864,7 @@ fn the_installed_work_owner_forwards_the_policy_mandate_under_the_contributor_ch
         invocation: ScopedInvocation::from_policy(Arc::new(MandateWork)),
         operation_owner: Arc::new(ExactOperation(f.helper_operation("setup-report"))),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = GrantBackedWorkPolicy::new(
@@ -1954,6 +1957,7 @@ fn a_contributor_narrowed_mandate_past_four_kib_is_material_and_past_the_bound_u
         invocation: ScopedInvocation::from_policy(Arc::new(MandateWork)),
         operation_owner: Arc::new(ExactOperation(f.helper_operation("setup-report"))),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let policy = GrantBackedWorkPolicy::new(
@@ -2053,6 +2057,7 @@ fn the_contributor_ceilings_narrow_the_review_material() {
         invocation: ScopedInvocation::from_policy(Arc::new(MandateWork)),
         operation_owner: Arc::new(ExactOperation(f.helper_operation("setup-report"))),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     let mandate = |claims: &InputAuthorityAssociationCandidate| {
@@ -2547,6 +2552,7 @@ impl Fixture {
             invocation: ScopedInvocation::from_policy(Arc::new(AllowWork)),
             operation_owner: Arc::new(ExactOperation(operation)),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         Arc::new(GrantBackedWorkPolicy::new(

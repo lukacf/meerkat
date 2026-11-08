@@ -8916,6 +8916,60 @@ impl std::fmt::Display for RegistrationPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RetainedRunSettleVerdict {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Busy")]
+    Busy,
+    #[serde(rename = "NotRetained")]
+    NotRetained,
+}
+impl RetainedRunSettleVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Busy => "Busy",
+            Self::NotRetained => "NotRetained",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RetainedRunSettleVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Busy" => Ok(Self::Busy),
+            "NotRetained" => Ok(Self::NotRetained),
+            other => Err(format!("invalid RetainedRunSettleVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RetainedRunSettleVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RetainedRunSettleVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RoutingApprovalParentKind {
     #[default]
     #[serde(rename = "SwitchTurn")]
@@ -10130,6 +10184,8 @@ pub enum RunStartHoldReason {
     ToolsNotPublished,
     #[serde(rename = "HostPreparation")]
     HostPreparation,
+    #[serde(rename = "HostRecovery")]
+    HostRecovery,
 }
 impl RunStartHoldReason {
     pub fn as_str(&self) -> &'static str {
@@ -10137,6 +10193,7 @@ impl RunStartHoldReason {
             Self::MobStop => "MobStop",
             Self::ToolsNotPublished => "ToolsNotPublished",
             Self::HostPreparation => "HostPreparation",
+            Self::HostRecovery => "HostRecovery",
         }
     }
 }
@@ -10147,6 +10204,7 @@ impl std::convert::TryFrom<&str> for RunStartHoldReason {
             "MobStop" => Ok(Self::MobStop),
             "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
             "HostPreparation" => Ok(Self::HostPreparation),
+            "HostRecovery" => Ok(Self::HostRecovery),
             other => Err(format!("invalid RunStartHoldReason value `{other}`")),
         }
     }
@@ -14260,6 +14318,10 @@ pub struct State {
     pub turn_tool_overlay_deny_names: std::collections::BTreeSet<ToolName>,
     pub tool_grant_gated_names: std::collections::BTreeSet<ToolName>,
     pub tool_grant_open_names: std::collections::BTreeSet<ToolName>,
+    pub tool_grant_gated_servers: std::collections::BTreeSet<String>,
+    pub tool_grant_gates_unconfigured_servers: bool,
+    pub tool_grant_ungated_servers: std::collections::BTreeSet<String>,
+    pub tool_grant_not_mounted_names: std::collections::BTreeSet<ToolName>,
     pub input_authority_bindings: std::collections::BTreeMap<String, String>,
     pub input_authority_batch_keys: std::collections::BTreeMap<String, String>,
     pub scoped_context_binding: Option<String>,
@@ -14310,6 +14372,7 @@ pub struct State {
     pub run_stop_requested: Option<RunId>,
     pub run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     pub input_controller_holds: std::collections::BTreeSet<String>,
+    pub resumed_run_admission_hold: Option<RunId>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub registration_live_input_seen: bool,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -15053,6 +15116,19 @@ impl std::fmt::Debug for State {
             )
             .field("tool_grant_gated_names", &self.tool_grant_gated_names)
             .field("tool_grant_open_names", &self.tool_grant_open_names)
+            .field("tool_grant_gated_servers", &self.tool_grant_gated_servers)
+            .field(
+                "tool_grant_gates_unconfigured_servers",
+                &self.tool_grant_gates_unconfigured_servers,
+            )
+            .field(
+                "tool_grant_ungated_servers",
+                &self.tool_grant_ungated_servers,
+            )
+            .field(
+                "tool_grant_not_mounted_names",
+                &self.tool_grant_not_mounted_names,
+            )
             .field(
                 "input_authority_bindings",
                 &format_args!(
@@ -15170,6 +15246,10 @@ impl std::fmt::Debug for State {
             .field("run_stop_requested", &self.run_stop_requested)
             .field("run_start_holds", &self.run_start_holds)
             .field("input_controller_holds", &self.input_controller_holds)
+            .field(
+                "resumed_run_admission_hold",
+                &self.resumed_run_admission_hold,
+            )
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field(
                 "registration_live_input_seen",
@@ -19086,10 +19166,40 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceToolGrantGate {
         pub gated: std::collections::BTreeSet<ToolName>,
+        pub gated_servers: std::collections::BTreeSet<String>,
+        pub gates_unconfigured_servers: bool,
+        pub ungated_servers: std::collections::BTreeSet<String>,
+        pub not_mounted_names: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyToolGrantOpenSet {
         pub open: std::collections::BTreeSet<ToolName>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AbortUntilChangedSwitchTurnReconfigure {
+        pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleRetainedRun {
+        pub run_id: Option<RunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldResumedRunForAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseResumedRunAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExtendToolGrantGate {
+        pub server: String,
+        pub gated: std::collections::BTreeSet<ToolName>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceStageGatedAdd {
+        pub surface_id: String,
+        pub now_ms: u64,
     }
 }
 
@@ -19524,6 +19634,12 @@ pub enum Input {
     ReleaseInputController(inputs::ReleaseInputController),
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
+    AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
+    SettleRetainedRun(inputs::SettleRetainedRun),
+    HoldResumedRunForAdmission(inputs::HoldResumedRunForAdmission),
+    ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
+    ExtendToolGrantGate(inputs::ExtendToolGrantGate),
+    SurfaceStageGatedAdd(inputs::SurfaceStageGatedAdd),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20121,6 +20237,14 @@ impl Input {
             Self::ReleaseInputController(_) => InputKind::ReleaseInputController,
             Self::ReplaceToolGrantGate(_) => InputKind::ReplaceToolGrantGate,
             Self::ApplyToolGrantOpenSet(_) => InputKind::ApplyToolGrantOpenSet,
+            Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
+                InputKind::AbortUntilChangedSwitchTurnReconfigure
+            }
+            Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
+            Self::HoldResumedRunForAdmission(_) => InputKind::HoldResumedRunForAdmission,
+            Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
+            Self::ExtendToolGrantGate(_) => InputKind::ExtendToolGrantGate,
+            Self::SurfaceStageGatedAdd(_) => InputKind::SurfaceStageGatedAdd,
         }
     }
 }
@@ -20543,6 +20667,12 @@ pub enum InputKind {
     ReleaseInputController,
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
+    AbortUntilChangedSwitchTurnReconfigure,
+    SettleRetainedRun,
+    HoldResumedRunForAdmission,
+    ReleaseResumedRunAdmission,
+    ExtendToolGrantGate,
+    SurfaceStageGatedAdd,
 }
 
 pub mod signals {
@@ -22324,6 +22454,16 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InputControllerReleased {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetainedRunSettleResolved {
+        pub verdict: RetainedRunSettleVerdict,
+        pub run_id: Option<RunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExactRunBoundaryCancel {
+        pub run_id: RunId,
+        pub reason: String,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22602,6 +22742,8 @@ pub enum Effect {
     RuntimeRegistrationReleased(effects::RuntimeRegistrationReleased),
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
     InputControllerReleased(effects::InputControllerReleased),
+    RetainedRunSettleResolved(effects::RetainedRunSettleResolved),
+    ExactRunBoundaryCancel(effects::ExactRunBoundaryCancel),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22867,6 +23009,8 @@ pub enum EffectKind {
     RuntimeRegistrationReleased,
     EmptyResumeRetirementResolved,
     InputControllerReleased,
+    RetainedRunSettleResolved,
+    ExactRunBoundaryCancel,
 }
 
 pub mod command_capabilities {
@@ -26076,6 +26220,62 @@ pub enum TransitionId {
     SuspendRunForStopFenceGapRunningToAttached,
     StopCurrentRunForRunResumableIdle,
     StopCurrentRunForRunResumableAttached,
+    AbortUntilChangedSwitchTurnReconfigureIdle,
+    AbortUntilChangedSwitchTurnReconfigureAttached,
+    AbortUntilChangedSwitchTurnReconfigureRunning,
+    AbortUntilChangedSwitchTurnReconfigureRetired,
+    AbortUntilChangedSwitchTurnReconfigureStopped,
+    RequestUntilChangedSwitchTurnPendingConflictIdle,
+    RequestUntilChangedSwitchTurnPendingConflictAttached,
+    RequestUntilChangedSwitchTurnPendingConflictRunning,
+    CompleteUntilChangedSwitchTurnReconfigureRetired,
+    CompleteUntilChangedSwitchTurnReconfigureStopped,
+    SettleRetainedRunAcceptedIdle,
+    SettleRetainedRunAcceptedAttached,
+    SettleRetainedRunBusyRunCurrentInitializing,
+    SettleRetainedRunBusyRunCurrentIdle,
+    SettleRetainedRunBusyRunCurrentAttached,
+    SettleRetainedRunBusyRunCurrentRunning,
+    SettleRetainedRunBusyRunCurrentRetired,
+    SettleRetainedRunBusyRunCurrentStopped,
+    SettleRetainedRunBusyDrainingIdle,
+    SettleRetainedRunBusyDrainingAttached,
+    SettleRetainedRunBusyStaleRunIdle,
+    SettleRetainedRunBusyStaleRunAttached,
+    SettleRetainedRunBusyNotServingInitializing,
+    SettleRetainedRunBusyNotServingRunning,
+    SettleRetainedRunBusyNotServingRetired,
+    SettleRetainedRunBusyNotServingStopped,
+    SettleRetainedRunNotRetainedInitializing,
+    SettleRetainedRunNotRetainedIdle,
+    SettleRetainedRunNotRetainedAttached,
+    SettleRetainedRunNotRetainedRunning,
+    SettleRetainedRunNotRetainedRetired,
+    SettleRetainedRunNotRetainedStopped,
+    SettleRetainedRunInertDestroyed,
+    HoldResumedRunForAdmissionIdle,
+    HoldResumedRunForAdmissionAttached,
+    HoldResumedRunForAdmissionRunning,
+    HoldResumedRunForAdmissionRetired,
+    HoldResumedRunForAdmissionStopped,
+    ReleaseResumedRunAdmissionIdle,
+    ReleaseResumedRunAdmissionAttached,
+    ReleaseResumedRunAdmissionRunning,
+    ReleaseResumedRunAdmissionRetired,
+    ReleaseResumedRunAdmissionStopped,
+    ExtendToolGrantGateChangedIdle,
+    ExtendToolGrantGateChangedAttached,
+    ExtendToolGrantGateChangedRunning,
+    ExtendToolGrantGateChangedRetired,
+    ExtendToolGrantGateChangedStopped,
+    ExtendToolGrantGateUnchangedIdle,
+    ExtendToolGrantGateUnchangedAttached,
+    ExtendToolGrantGateUnchangedRunning,
+    ExtendToolGrantGateUnchangedRetired,
+    ExtendToolGrantGateUnchangedStopped,
+    SurfaceStageGatedAddIdle,
+    SurfaceStageGatedAddAttached,
+    SurfaceStageGatedAddRunning,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26279,6 +26479,10 @@ pub fn initial_state() -> State {
         turn_tool_overlay_deny_names: Default::default(),
         tool_grant_gated_names: Default::default(),
         tool_grant_open_names: Default::default(),
+        tool_grant_gated_servers: Default::default(),
+        tool_grant_gates_unconfigured_servers: false,
+        tool_grant_ungated_servers: Default::default(),
+        tool_grant_not_mounted_names: Default::default(),
         input_authority_bindings: Default::default(),
         input_authority_batch_keys: Default::default(),
         scoped_context_binding: None,
@@ -26324,6 +26528,7 @@ pub fn initial_state() -> State {
         run_stop_requested: None,
         run_start_holds: Default::default(),
         input_controller_holds: Default::default(),
+        resumed_run_admission_hold: None,
         recovered_admitted_lanes: Default::default(),
         registration_live_input_seen: false,
         op_statuses: Default::default(),

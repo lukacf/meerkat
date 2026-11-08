@@ -73,6 +73,8 @@ fn stored(
         permit_issued: false,
         executed_request_digest: None,
         notice,
+        cleanup: meerkat_core::approval::decision::DecisionCleanup::NotOwed,
+        reply_digest: None,
     };
     StoredDecision::held(descriptor, state)
 }
@@ -459,6 +461,7 @@ fn an_approved_decision_with_no_permit_past_its_deadline_is_due() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn the_executor_claim_is_an_os_lock_beside_the_database() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store_path = dir.path().join("host");
@@ -502,4 +505,112 @@ fn the_executor_claim_is_an_os_lock_beside_the_database() {
     let _claim = other_open
         .claim_executor()
         .expect("free once every holder is gone");
+}
+
+#[test]
+fn a_kind_claim_locks_its_own_file_and_shares_the_store_lock() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store_path = dir.path().join("host");
+    let store = SqliteDecisionStore::in_store_path(&store_path);
+    let release = DecisionKind::new("release").expect("kind");
+    let deploy = DecisionKind::new("deploy").expect("kind");
+    let kind_lock = store.executor_kind_lock_path(&release);
+    assert_eq!(
+        kind_lock,
+        store_path.join("approval_decisions.executor.release.lock")
+    );
+    let store_lock = store.executor_lock_path();
+
+    let claim = store
+        .claim_executor_kind(&release)
+        .expect("the first claim creates the store path and both lock files");
+    assert!(kind_lock.is_file());
+    assert!(store_lock.is_file());
+    assert!(!store.path().exists(), "the claim creates no database");
+    let other_open = SqliteDecisionStore::in_store_path(&store_path);
+    for (holder, what) in [(&store, "the same open"), (&other_open, "another open")] {
+        assert_eq!(
+            holder.claim_executor_kind(&release).map(|_| ()),
+            Err(ApprovalStoreError::Contended),
+            "{what}"
+        );
+    }
+    let other_kind = other_open
+        .claim_executor_kind(&deploy)
+        .expect("a claim of another kind is independent, across opens too");
+    assert!(
+        store
+            .executor_kind_lock_path(&deploy)
+            .ends_with("approval_decisions.executor.deploy.lock")
+    );
+
+    // Any other holder of the files, as another process is, finds the
+    // kind's file locked, and may share the store's file but not hold it
+    // alone.
+    let foreign_kind = std::fs::File::open(&kind_lock).expect("open the kind's lock file");
+    assert!(matches!(
+        foreign_kind.try_lock_shared(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    let foreign_store = std::fs::File::open(&store_lock).expect("open the store's lock file");
+    assert!(matches!(
+        foreign_store.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    foreign_store
+        .try_lock_shared()
+        .expect("the store's lock is shared");
+    drop(foreign_store);
+
+    drop(claim);
+    foreign_kind
+        .try_lock()
+        .expect("the kind's lock ends when the claim drops");
+    assert_eq!(
+        other_open.claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "the OS lock is the claim"
+    );
+    drop(foreign_kind);
+    let _claim = other_open
+        .claim_executor_kind(&release)
+        .expect("free once every holder is gone");
+    drop(other_kind);
+}
+
+#[test]
+#[allow(deprecated)]
+fn the_whole_store_claim_and_kind_claims_exclude_each_other_across_opens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let release = DecisionKind::new("release").expect("kind");
+    let open = || SqliteDecisionStore::in_store_path(dir.path());
+
+    let kind_claim = open()
+        .claim_executor_kind(&release)
+        .expect("a claim of a kind");
+    assert_eq!(
+        open().claim_executor().map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "no whole-store claim beside a claim of a kind"
+    );
+    drop(kind_claim);
+
+    let whole_store = open()
+        .claim_executor()
+        .expect("free once no kind is claimed");
+    assert_eq!(
+        open().claim_executor_kind(&release).map(|_| ()),
+        Err(ApprovalStoreError::Contended),
+        "no claim of a kind beside the whole-store claim"
+    );
+    let kind_file = std::fs::File::open(open().executor_kind_lock_path(&release))
+        .expect("the kind's lock file, from the first claim");
+    kind_file
+        .try_lock()
+        .expect("a refused claim of a kind holds nothing");
+    drop(kind_file);
+    drop(whole_store);
+    let _kind_claim = open()
+        .claim_executor_kind(&release)
+        .expect("free once the whole-store claim drops");
 }

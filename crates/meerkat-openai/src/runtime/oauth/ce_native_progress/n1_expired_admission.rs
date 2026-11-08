@@ -397,6 +397,7 @@ async fn exercise_expiry(case: CredentialCase) {
         unconfigured
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

@@ -136,6 +136,7 @@ from .generated.types import (
     MobSpawnPolicyInput as MobSpawnPolicyInput,
     MobSpawnReceiptWire as MobSpawnReceiptWire,
     MobSpawnSpecParams as MobSpawnSpecParams,
+    MobStreamCursor as MobStreamCursor,
     MobSupervisorSpecInput as MobSupervisorSpecInput,
     MobToolConfigInput as MobToolConfigInput,
     MobTopologySpecInput as MobTopologySpecInput,

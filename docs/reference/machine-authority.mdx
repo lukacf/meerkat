@@ -40,7 +40,7 @@ The canonical registry is `canonical_machine_schemas()` in
 | `ScheduleLifecycleMachine` | `meerkat-schedule::machines::schedule_lifecycle` | Schedule definition lifecycle, trigger state, and revision handling. |
 | `OccurrenceLifecycleMachine` | `meerkat-schedule::machines::occurrence_lifecycle` | Claimed occurrence delivery and terminal outcomes. |
 | `AuthMachine` | `meerkat-runtime::auth_machine::dsl` | Per-binding auth lease and OAuth flow lifecycle. |
-| `GrantAuthorityMachine` | `meerkat-authorization::grants::dsl` | Process-local grant issuance, attenuation, revocation and current full-lineage resolution. Embeddings supply authenticated callers and controller mutation custody; this owner alone does not enable native operation enforcement or durable grant recovery. |
+| `GrantAuthorityMachine` | `meerkat-authorization::grants::dsl` | Process-local grant issuance, attenuation, revocation and current full-lineage resolution, and approval-carried children: a grant under a child rule has children only through a person's decision for the rule's approver id, and each such child serves its one requester, work and operation for at most its uses, each use spent before it enters. Embeddings supply authenticated callers and controller mutation custody; this owner alone does not enable native operation enforcement or durable grant recovery. |
 | `ApprovalLifecycleMachine` | `meerkat-core::generated::approval_lifecycle` | Approval request and decision lifecycle legality. `ApprovalService` and its configured store own records and optional persistence; this machine does not imply an automatic in-loop tool gate. |
 | `DurableDecisionMachine` | `meerkat-runtime::decision::dsl` | One durable decision: the hold and its sealed binding, the presentation of the held subject, the attested human or reviewer decision, the execution permit and the executed fact, expiry, withdrawal, and the one notice an ended decision owes its requester. Record-scoped (one machine state per decision) and clock-free (time arrives as the host's observation). Its owner service and decision store own the records and their persistence. |
 | `DetachedJobMachine` | `meerkat-jobs::machines::detached_job` | Durable job lifecycle, fenced attempts, leases, retry/loss classification, cancellation, terminality, and delivery acknowledgement. |
@@ -55,12 +55,13 @@ The canonical registry is `canonical_machine_schemas()` in
 | `TemporaryCouncilLifecycleMachine` | `meerkat-mob::machines::temporary_council_lifecycle` | One temporary-council record: request-identity binding, discussion/merge advance, immutable result sealing (executed versus coordinator-interrupted), cleanup settlement versus retained debt, and the recovery-sweep verdict. Record-scoped (one machine state per council) and clock-free. |
 | `ToolGrantLifecycleMachine` | `meerkat-runtime::tool_grant::dsl` | One scoped tool grant: issuance, expiry at a supplied clock, revocation, use admission. Record-scoped (one machine state per grant) and clock-free (every input carries the host's time observation); expired and revoked grants are terminal. |
 | `MobStoreRestoreLifecycleMachine` | `meerkat-mob::machines::mob_store_restore_lifecycle` | One quarantined persisted mob store: its class (store unavailable, store unreadable, resume refused), which re-attempts of its restore it admits (an explicit one for any class, an on-demand one only for a store that could not serve now), the single re-attempt in flight, and whether a re-attempt released the store (managed, held or settled) or left it quarantined under the class it met. Record-scoped (one machine state per quarantined store), volatile (held in memory by the mob-set state; every restore pass derives it again) and clock-free (it never re-attempts on its own). |
+| `HostStoreWriterFenceMachine` | `meerkat-runtime::store::spi::writer_fence` | The writer fence of one host store realm: the writer's phase (live, stopped, re-acquiring, proving a grant with a fresh listing, resuming, waiting out a holder that may be its own late grant, or lost), the token it commits with, the grant it got and has not installed, the acquires it gave up on since its last grant, the holder it waits out, why it stopped or lost the realm, and whether the open's listing failed. It also owns which of the realm's scopes are quarantined (the store reports a conflict for them: each conflicted incarnation recorded under its scope's key, with its version and commit ids) and which are poisoned (with the first cause), each a scope's one classification until a reopen. Realm-scoped (one machine state per open realm), volatile (a reopen starts a fresh one at the open's grant) and clock-free (the realm reports the self-fence window and the end of a waited-out lease as inputs). |
 
 `MeerkatMachine` and `MobMachine` are the two runtime kernels. The other
 canonical machines protect narrower domain facts: auth, approval and durable
 decisions, schedules and occurrences, detached jobs and runtime delivery,
 session document and turn admission, WorkGraph lifecycle, attention, and
-execution, and scoped tool grants. WorkGraph is an
+execution, scoped tool grants, and the writer fence of a host store realm. WorkGraph is an
 optional subsystem authority for durable agent commitments, dependency-aware
 claim state, and goal attention bindings. `WorkExecutionLifecycleMachine` owns
 the cross-system obligation for one execution attempt without absorbing either
@@ -376,6 +377,75 @@ unlists one `Declared` entry, decided on that identity's own facts
 marks one, an entry no member holds ended at once, one whose member step
 is in flight deferred, and nothing else read. Each answers one arm per
 verdict through a pure helper, with a `MobNotRunning` arm per other phase.
+
+`MobMachine` keeps the mob's owned edges too (since 0.9.11): one custody map,
+`identity_edge_owners`, from each edge an identity change declared to its
+owner, the identity whose change declared it. `DeclareOwnedIdentityEdge`
+declares an edge a store-owned identity's change lists, to an identity of
+either custody (`OwnedEdgeDeclareVerdict`: a second declaration of an owned
+edge gives no custody, and a peer that is no identity is `PeerUnknown`);
+`EndOwnedIdentityEdge` ends one by its owner's change or by the host's policy
+reload that denies it (`OwnedEdgeEndCause`), naming its owner
+(`OwnedEdgeEndVerdict`: another identity's end is `NotOwner`); a removal ends
+its identity's edges, whichever end owns them, in its own step
+(`RemoveIdentityEntry`), and the reset and the destroy end them all;
+`AdmitMemberUnwire` refuses a plain unwire of an owned edge in force
+(`MemberUnwireAdmission`); and the boot recovers each edge from its owner's
+row (`RecoverOwnedIdentityEdge`). The map is the edge's desired record. An
+edge is in force while both its ends are identity entries (the helper
+`owned_edge_in_force`, and its complement `owned_edge_out_of_force`): only
+then does the shell realize it
+(`wiring_edges`) once both its ends are seated, each realization (a seat's,
+a spawn's or a pass's) reading MobMachine's verdict before its wire
+(`AdmitOwnedEdgeRealization`, `OwnedEdgeRealization`), and only then is it
+refused a plain unwire. An archive of an end leaves the edge owned and
+unrealized; an unlisting of an end leaves it owned and out of force, so a
+worker that takes the end's free name is no end of it, and the end's
+re-listing brings it back in force. The invariants
+`owned_edge_owner_is_a_store_owned_end` and
+`owned_edge_joins_no_tombstone` hold these facts. An import restores the
+edges of the rows it restores as the boot recovers them, after the boot
+plan's seal too (`RestoreOwnedIdentityEdge`, `OwnedEdgeRestoreVerdict`), and
+writes each restored row with only the edges it restored (an edge another
+identity owns meanwhile is not the row's): the custody map an import leaves
+is the one the next start reads.
+
+`MobMachine` decides an adoption into store custody too (since 0.9.11):
+`AdoptIdentityIntoStore` takes a roster-owned identity (`Roster`: a Declared
+entry seated on a local member bound to a session, or owed its seat) or a
+worker member (`Worker`: seated, with no entry, local and bound to a session,
+spawned with no profile or model override (`spawn_overridden`), at the
+generation its host observed) into store custody as a Created entry,
+its member's runtime, generation and session untouched. A pure helper,
+`identity_adoption_verdict`, decides over the name's facts, one arm per
+verdict (`IdentityAdoptionVerdict`): a member step in flight is
+`AdmissionUnsettled`, an open declared apply `DeclaredApplyOpen`, a stale
+generation `PredecessorMismatch`, and any other shape no adoption takes
+`NotAdoptable`, with its reason (`IdentityNotAdoptableReason`, a worker's
+override among them: `ProfileOverride`); the shell
+then declares the member's current edges to identities owned edges of the
+adopted identity in the same step.
+
+`MobMachine` decides the downgrade cycle too (since 0.9.11).
+`PurgeIdentityRows` admits the host operator's purge of the mob's rows of
+schema version 2 and later only under held identity changes, and only when
+the mob's scan read any such row (`rows_present`; none is
+`NothingToPurge`); the step's
+store transaction removes the rows when their digest is the export's, and
+the machine records only `identity_rows_purged`, which refuses every later
+identity change (`IdentityChangeAdmissionKind::RowsPurged`) until the mob
+restarts. A start that reads no row of a Created entry's name
+(`RecoverRowlessCreatedEntry`) reserves it, unreadable and rowless
+(`identity_entry_rowless`), so nothing acts on it and no seat binds it; the
+invariant `created_origin_without_row_is_unreadable` holds this.
+`ImportIdentityRecord` decides each exported record, one arm per verdict
+(`IdentityImportVerdict`): the record comes back for a member seated under
+its name in place (a plain member only on the session the record names),
+for an unseated name owed its seat on its archived
+session, as recorded for a pending, an archived or a removed name, or by the
+adoption's step for a roster's adopted identity whose roster declared it
+again; a name another holder keeps is reported and left, and a rowless
+entry's name a member holds now is released to that member.
 
 The host's preparation before an identity's first seat is `MobMachine`'s for
 either custody. `BeginPreparationConstruction` holds an attempt of a

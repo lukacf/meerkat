@@ -98,6 +98,49 @@ impl DecisionNotice {
     }
 }
 
+/// What an owner's execution of a decision left outside the decision store
+/// to undo once the decision's work is over: the decision machine's cleanup
+/// fact. The owner opens it while it holds its execution permit, before it
+/// creates anything to undo, and settles it only after the decision ended
+/// and it undid that work. A kind whose executions leave nothing outside
+/// the store never opens it, and its rows never carry it.
+///
+/// A cleanup can stay owed after a crash between the owner's last undo step
+/// and the settlement: the work is undone, so the owed fact carries no
+/// authority and blocks nothing, and nothing lists it. Any future retention
+/// of decisions must settle it or ignore it.
+///
+/// Matched exhaustively: the cleanup states are the decision machine's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionCleanup {
+    /// The owner's execution left nothing to undo.
+    #[default]
+    NotOwed,
+    /// Opened by the owner; owed until it settles it.
+    Owed,
+    /// The owner undid what its execution created.
+    Settled,
+}
+
+impl DecisionCleanup {
+    /// The cleanup state's stable token (`not_owed`, `owed`, `settled`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotOwed => "not_owed",
+            Self::Owed => "owed",
+            Self::Settled => "settled",
+        }
+    }
+
+    /// Whether nothing is owed: the state a row omits.
+    #[must_use]
+    pub fn is_not_owed(&self) -> bool {
+        *self == Self::NotOwed
+    }
+}
+
 /// The state of a decision's generated `DurableDecisionMachine`, as its row
 /// stores it: the machine's fields by name. The owner service rebuilds the
 /// machine from it, and the machine's invariants refuse a torn one.
@@ -137,6 +180,15 @@ pub struct DecisionMachineState {
     #[serde(default)]
     pub executed_request_digest: Option<String>,
     pub notice: DecisionNotice,
+    /// The cleanup the owner's execution owes ([`DecisionCleanup`]).
+    /// Omitted while nothing is owed, so a row that never opens it is the
+    /// row a 0.9.10 reader decodes.
+    #[serde(default, skip_serializing_if = "DecisionCleanup::is_not_owed")]
+    pub cleanup: DecisionCleanup,
+    /// The digest of the one reply the executed decision's work settled.
+    /// Omitted until one is settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_digest: Option<String>,
 }
 
 /// What a caller asks to hold: one operation, sealed by the operation id and
@@ -249,11 +301,17 @@ impl DecisionDescriptor {
     ///
     /// # Errors
     /// [`DecisionContractError::SubjectDigestMismatch`] when the request
-    /// carries a subject digest other than the rendering's.
+    /// carries a subject digest other than the rendering's;
+    /// [`DecisionContractError::ReviewStageNotAllowed`] when it names a
+    /// reviewer for a kind decided by people only
+    /// ([`super::decided_by_people_only`]).
     pub fn seal(
         request: DecisionHoldRequest,
         created_at_ms: u64,
     ) -> Result<Self, DecisionContractError> {
+        if request.reviewer.is_some() && super::decided_by_people_only(&request.kind) {
+            return Err(DecisionContractError::ReviewStageNotAllowed { kind: request.kind });
+        }
         let subject_digest = request.rendering.subject_digest();
         if request
             .expected_subject_digest

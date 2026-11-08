@@ -333,10 +333,11 @@ write_cargo_metadata() {
 # and cargo metadata). Cargo unifies features across the packages of one
 # invocation, so `--workspace` alone would build Core's tests with the
 # products' feature requests; the products' tests run in their own CI lanes.
+# --tests adds every member's test features, which no dev-dependency turns on.
 core_workspace=()
 load_core_workspace() {
   local selection
-  selection="$(CARGO="$CARGO" node "$ROOT/scripts/core-workspace-args.mjs")" || {
+  selection="$(CARGO="$CARGO" node "$ROOT/scripts/core-workspace-args.mjs" --tests)" || {
     echo "cannot derive Core's package selection (scripts/core-workspace-args.mjs)" >&2
     return 1
   }

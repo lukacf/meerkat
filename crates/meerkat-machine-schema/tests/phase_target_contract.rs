@@ -31,6 +31,13 @@ enum Reason {
 }
 
 const ALLOWED: &[(&str, &str, Reason)] = &[
+    // A commit fenced out, or an adapter rule broken, loses the realm from
+    // every opened phase: Lost is terminal.
+    (
+        "HostStoreWriterFenceMachine",
+        "Poison",
+        Reason::LifecycleExit,
+    ),
     // MobMachine, reviewed with the #1500 Stopped-phase fix.
     ("MobMachine", "DestroyFromAny", Reason::LifecycleExit),
     ("MobMachine", "DestroyMob", Reason::LifecycleExit),

@@ -1722,6 +1722,7 @@ fn trusted_oidc() -> TrustedOidcRuntimeConfig {
             .to_string(),
         audience: "meerkat-console".to_string(),
         require_verified_email: false,
+        shared_account_tokens: false,
     }
 }
 
@@ -2309,6 +2310,70 @@ async fn console_break_glass_reassign_requires_authenticated_principal() {
     assert_eq!(response["error"]["code"], json!(-32030), "{response:#?}");
     assert_eq!(response["error"]["data"]["kind"], json!("access_denied"));
     runtime.mob_handle().stop().await.expect("stop");
+}
+
+/// The break-glass move records its caller's principal, so the console's
+/// `meta/capabilities` lists it only to a caller with one: an open console's
+/// caller without a token neither sees it nor can call it, and a signed-in
+/// operator sees it.
+#[tokio::test(flavor = "multi_thread")]
+async fn console_break_glass_reassign_is_offered_only_to_a_caller_with_a_principal() {
+    let runtime = build_runtime().await;
+    let response = rpc(
+        &runtime,
+        "meta/workgraph/goal/create",
+        json!({
+            "title": "offered only to a caller with a principal",
+            "target": { "kind": "identity", "identity": "helper" },
+        }),
+    )
+    .await;
+    let goal = result(&response).clone();
+    let offers = |caps: &Value, wanted: &str| {
+        caps["result"]["methods"]
+            .as_array()
+            .is_some_and(|methods| methods.iter().any(|method| method == wanted))
+    };
+
+    // An open console (app auth disabled): its caller has no token.
+    let open = runtime.build_reference_app_router(decision_state(false, false));
+    let open_caps = console_rpc(&open, "meta/capabilities", json!({})).await;
+    let refused = console_rpc(
+        &open,
+        "meta/workgraph/attention/break_glass_reassign",
+        json!({
+            "binding_id": goal["attention"]["binding_id"],
+            "expected_revision": goal["attention"]["machine_state"]["revision"],
+            "target": { "kind": "identity", "identity": "backup" },
+            "reason": "no principal available",
+        }),
+    )
+    .await;
+
+    // A console with sign-in: the operator's token names a principal.
+    let signed_in = runtime.build_reference_app_router(decision_state(true, false));
+    let bearer = alice_bearer();
+    let signed_in_caps =
+        console_rpc_with_bearer(&signed_in, "meta/capabilities", json!({}), Some(&bearer)).await;
+    runtime.mob_handle().stop().await.expect("stop");
+
+    assert!(
+        offers(&open_caps, "meta/workgraph/create"),
+        "the open console offers WorkGraph changes: {open_caps:#?}"
+    );
+    assert!(
+        !offers(&open_caps, "meta/workgraph/attention/break_glass_reassign"),
+        "a caller without a token is offered the break-glass move: {open_caps:#?}"
+    );
+    assert_eq!(refused["error"]["code"], json!(-32030), "{refused:#?}");
+    assert_eq!(refused["error"]["data"]["kind"], json!("access_denied"));
+    assert!(
+        offers(
+            &signed_in_caps,
+            "meta/workgraph/attention/break_glass_reassign"
+        ),
+        "{signed_in_caps:#?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

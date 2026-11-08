@@ -49,7 +49,7 @@ pub fn wire_tool_grant_subject(subject: &ToolGrantSubject) -> WireToolGrantSubje
 }
 
 /// A grant's target. A family target carries the names its grant took, in
-/// name order.
+/// name order; a server target its `tools` subset, in name order.
 #[must_use]
 pub fn wire_tool_grant_target(target: &ToolGrantTarget) -> WireToolGrantTarget {
     match target {
@@ -60,6 +60,12 @@ pub fn wire_tool_grant_target(target: &ToolGrantTarget) -> WireToolGrantTarget {
             family: family.clone(),
             names: names.iter().map(ToString::to_string).collect(),
         },
+        ToolGrantTarget::McpServer { server, tools } => WireToolGrantTarget::McpServer {
+            server: server.clone(),
+            tools: tools
+                .as_ref()
+                .map(|tools| tools.iter().map(ToString::to_string).collect()),
+        },
     }
 }
 
@@ -67,8 +73,12 @@ pub fn wire_tool_grant_target(target: &ToolGrantTarget) -> WireToolGrantTarget {
 #[must_use]
 pub fn wire_tool_grant_issuer(issuer: &ToolGrantIssuer) -> WireToolGrantIssuer {
     match issuer {
-        ToolGrantIssuer::Operator { caller } => WireToolGrantIssuer::Operator {
+        ToolGrantIssuer::Operator {
+            caller,
+            decision_ref,
+        } => WireToolGrantIssuer::Operator {
             caller: caller.clone(),
+            decision_ref: decision_ref.as_ref().map(ToString::to_string),
         },
         ToolGrantIssuer::Approval { approval_id } => WireToolGrantIssuer::Approval {
             approval_id: approval_id.clone(),
@@ -176,6 +186,7 @@ fn wire_tool_grant_expiry_driver(driver: ToolGrantExpiryDriver) -> WireToolGrant
         ToolGrantExpiryDriver::Dispatch => WireToolGrantExpiryDriver::Dispatch,
         ToolGrantExpiryDriver::Read => WireToolGrantExpiryDriver::Read,
         ToolGrantExpiryDriver::Revoke => WireToolGrantExpiryDriver::Revoke,
+        ToolGrantExpiryDriver::Build => WireToolGrantExpiryDriver::Build,
     }
 }
 
@@ -212,6 +223,7 @@ mod tests {
                 },
                 issuer: ToolGrantIssuer::Operator {
                     caller: Some("ops".to_string()),
+                    decision_ref: None,
                 },
                 reason: Some("incident".to_string()),
             },
@@ -219,6 +231,7 @@ mod tests {
             issued_at_ms: 1_000,
             expires_at_ms: 61_000,
             ended_at_ms: Some(2_000),
+            subject_ended: false,
         };
         assert_eq!(
             serde_json::to_value(wire_tool_grant(&grant)).unwrap(),

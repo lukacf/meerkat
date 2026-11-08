@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from Meerkat Meta main at [a3e206295c7d](https://github.com/lukacf/meerkat/commit/a3e206295c7d98c5cbda60028080511b9f1dc221) on 2026-11-04; Meta version 0.9.9 at that commit.*
+*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -356,9 +356,11 @@ count. Reading it wakes no agent.
 The browser keeps these preferences in local storage, per signed-in user and
 console: the manual order, the Group and Sort choices and the pins follow the
 user and are kept when the `[agent_list]` configuration changes. The order of
-categories and subgroups and which of them are collapsed belong to that
-configuration and start over when it changes. Pins an earlier console kept
-carry over once.
+categories and subgroups and which of them are collapsed are kept per user too,
+for that configuration, and start over when it changes. Pins set in two tabs
+are both kept, and every tab shows them. Pins, and the category order and
+collapse an earlier console kept for every user of the runtime, carry over
+once.
 
 Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
 
@@ -388,7 +390,7 @@ counts.
 
 | Tab | What it shows |
 | --- | --- |
-| Pending | Current requests with Approve, Reject, and Escalate controls when decisions are available. |
+| Pending | Current requests, each marked **For you** or **Waiting for** its approver, with Approve, Reject, and Escalate controls when the caller can decide them; requests decided elsewhere stay, saying by whom. |
 | Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
 | Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
 | Policies | A placeholder; policy details and editing are not available in this console. |
@@ -403,9 +405,34 @@ confirm execution: the caller remains responsible for enforcing the returned
 outcome and carrying out any permitted action. See [Gating](/meta/concepts/gating) for
 current tier, timeout, and decision behavior.
 
-The stock console submits decisions with `approver_id: "console-ops-lead"`. There
-is no approver selector in this inbox. A request pinned to a different approver
-needs a host-provided approval surface that authenticates and maps the approver.
+The stock console decides as the signed-in person: its decisions name no
+approver, and the console takes the approver from the connection (see
+[Gating](/meta/concepts/gating)). When `meta/console/whoami` reports a caller that is
+not a person (no token on an open console, a service token, a token that names
+no human, or a shared-account token), the inbox shows requests read-only and
+says to sign in as yourself to decide: such a caller can read them but not
+decide them. A request pinned to an approver id is decided by a person who
+holds that id through the access configuration's `approvers` bindings.
+
+Approval cards are personal. A request pinned to an approver id the caller does
+not hold reads **Waiting for** that approver and offers no decision; for a
+signed-in person, a request pinned to an id they hold, or pinned to no one,
+reads **For you**. **Needs you** counts only the requests that are not waiting
+for someone else (with any host items), and the sidebar's **Approvals** count
+counts the same requests. A request for the caller that someone
+else decides keeps its card, which says how and by whom (for example
+"Approved by" the deciding person, read from the gating audit), or "Decided
+elsewhere" when the audit cannot say.
+
+The same holds for memory quarantine reviews and WorkGraph goal confirmations:
+the console offers them only to a signed-in person. A WorkGraph claim is owned
+by the caller who makes it, so the WorkGraph panel offers Claim only to a
+caller with a token, and Release on the caller's own claims and, to an access
+admin, on anyone's: the work graph records an admin's release with the admin
+and the claim released. Claims the stock console makes carry no lease, so
+someone else's claim ends when an access admin releases it, when the host
+releases it on its stdio RPC gateway (`rpc_gateway`; `meta_gateway` serves
+none), or when its item is closed.
 
 Configure action tiers through the host's gating configuration. For SDK-launched
 stdio gateways, see [`gating_config_path`](/meta/reference/configuration#sdk-and-gateway-runtime-options).
@@ -512,16 +539,27 @@ which asks you to confirm. An edit keeps the timing unless you change it.
   policy at that time, a writable console, and an agent that takes console
   messages. A refused send fails that time only; the schedule keeps its
   later times.
-- Creating, editing or resuming a schedule makes you its sender. On a
-  console without sign-in the sender is the console's shared account, as it
-  is for a message you send there; once the console requires sign-in, such
-  schedules stop sending until someone signed in edits them.
-- A change that races another change of the same schedule is refused and
-  the list is read again: check the schedule and repeat the change.
+- Creating a schedule makes you its sender, and so does editing or resuming
+  one you send. Editing or resuming a schedule someone else sends takes it
+  over: the Console first says who it sends as and asks you to confirm, and
+  only then makes you its sender; keeping its sender changes nothing. The
+  schedule keeps the senders it was taken over from, and its details name
+  them. On a console without sign-in the sender is the console's shared
+  account, as it is for a message you send there; once the console requires
+  sign-in, such schedules stop sending until someone signed in edits them.
+- An edit or a resume names the version of the schedule the pane showed: one
+  made after someone else changed the same schedule is refused and the list
+  is read again: check the schedule and repeat the change. A pause and a
+  delete name no version: they act on the schedule as it is.
+- A deployment can let people message an agent without changing its
+  schedules: schedule changes also need `schedule.manage`, which an access
+  configuration that names no schedule action grants wherever it grants
+  `agent.send`.
 - A schedule repeats at most once a minute.
-- Viewers who may see the agent but not message it see its schedules
-  read-only, and so does everyone on a read-only console or on a gateway
-  that does not offer schedule changes; the pane says why.
+- Viewers who may see the agent but not message it, or message it but not
+  manage its schedules, see its schedules read-only, and so does everyone on
+  a read-only console or on a gateway that does not offer schedule changes;
+  the pane says why.
 - An agent whose input is governed takes no schedule (a governed send needs
   its human present, and a scheduled send has none), and an agent that
   takes no console messages cannot be scheduled.
@@ -946,6 +984,7 @@ interface ConsoleAgent {
   addressable?: boolean;
   affordances?: {
     can_send_message?: boolean;
+    can_manage_schedules?: boolean; // under enforced access: agent.send and schedule.manage
     can_retire?: boolean;
     can_respawn?: boolean;
     runtime_mode?: string;
@@ -1106,8 +1145,8 @@ Primary RPC methods on `/console/rpc`:
 - `meta/schedule/list`, `meta/schedule/create`, `meta/schedule/update`,
   `meta/schedule/pause`, `meta/schedule/resume` and `meta/schedule/delete` -
   an agent's console schedules (see [Schedules](#schedules)); the list is
-  gated by `agent.view` and the writes by `agent.send` for the agent, and
-  each send is a Console send by the schedule's sender
+  gated by `agent.view` and the writes by `agent.send` and `schedule.manage`
+  for the agent, and each send is a Console send by the schedule's sender
 - `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
   `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
   revisioned connection management and separately permissioned durable audit
@@ -1217,11 +1256,82 @@ a frontend-only affordance for per-user UX; direct RPC calls are still governed
 by the server-side `ConsolePolicy.read_only` setting.
 
 Console mutation endpoints assume non-ambient credentials: pass bearer tokens
-explicitly in the `Authorization` header or `auth_token` query parameter for
-SSE/browser bootstrap cases. If a host proxy converts console auth into cookies
+explicitly in the `Authorization` header (a `GET` may carry the token as the
+`auth_token` query parameter, since an `EventSource` stream or an image load
+cannot set headers; a write whose only token is in the query string is refused
+401). An open console
+(no sign-in) answers only requests addressed to a host it serves: a loopback
+name, its listen address, or the host of the gateway's public base URL
+(`http_public_base_url`). Any other `Host` gets 403 `host_not_served`, so a
+page that rebinds its own name to the console's address cannot drive it. If a
+host proxy converts console auth into cookies
 or another browser-ambient credential, that host must add origin and CSRF
 protection before exposing mutation routes such as `/console/rpc`,
 `/console/rpc/multipart`, or `/console/send`.
+
+### Who the console acts as
+
+The top bar names the caller the console acts as, from
+`meta/console/whoami`: the signed-in person, a shared account (a token that
+names no person), a service, or **Not signed in** on an open console. Its menu
+offers **Sign out** when the console configuration names `[sign_out]` (see
+[sign-out](/meta/reference/configuration#sign-out)).
+
+The stock console reads `whoami` once for each console it loads and names that
+caller on every console request (`expected_caller_scope`, and
+`expectedCallerScope` on an MCP Apps tool call): the `caller_scope` that read
+reported. A later answer for someone else never changes whom it names. Its
+first change waits for that read. While no read has answered, no console
+request that names a caller leaves: a message sent then reads **Not sent**, a
+queued message stays queued, the console commands that read (approvals and the
+other panels that read through them) are refused too, and the top bar shows no
+identity chip, so **Sign out** is not offered. The console reads its caller
+again with its next read of the console experience, and loads again at once
+when another tab of the console learns it. The gateway refuses a change made
+for another caller (`caller_changed`), so a message queued by one person is
+never sent as another.
+
+When someone else signs in to the same browser, every tab of the console
+notices at once: a tab that learns its caller tells this browser's other tabs
+of the console, and a tab whose caller differs, or whose request was refused
+with `caller_changed` (a voice call, an MCP Apps tool call or a blob upload
+included), drops what it shows (transcripts, approvals, host items, the
+previous caller's queued messages and drafts), stops its streams and loads
+again as the new caller. A queued message the console sends on its own (an
+agent became idle) waits for a fresh read of the console experience first, so
+it is never sent under a login that changed meanwhile.
+
+A login that ends puts the console in one sign-in state: a 401,
+`caller_not_current`, or a front that redirects a console request to its
+sign-in page. No view of the ended login stays on screen. **Sign in** reloads
+the console page so the front can sign the browser in again, and signing in
+again in another tab, or coming back to the tab, brings the console back, with
+the message being written and the images attached to it. Console requests do
+not follow redirects, so a front's redirect to its sign-in page reads as "sign
+in", never as an unknown outcome: a send it stopped reads **Not sent**.
+Messages already queued stay saved in this browser.
+
+### What this browser keeps
+
+The browser keeps each signed-in user's console data apart. Queued messages
+(in local storage) and unsent drafts (in each tab's session storage) are kept
+under the user's storage scope, the `storage_scope` of `/console/experience`;
+a host that passes `storageNamespace` gets it combined with that scope. The
+display settings, the sidebar's and the activity rail's collapse and the agent
+list's arrangement are kept per user too, and each tab saves the panel layout
+only when it changes it, so a tab left open does not undo what another tab
+arranged.
+
+**Sign out** removes the user's queued messages and drafts from this browser,
+in every tab of the console; preferences stay. On an origin without Web Locks
+(plain HTTP), the queue's storage lock keeps a copy of each queue in IndexedDB;
+signing out removes those copies too, and the browser leaves for the sign-out
+once they are gone, or after at most 1.5 seconds. A queue an earlier console kept
+for everyone using the browser (one that named no user, or a host namespace
+alone) is offered once as **Older queued messages**: importing it moves it to
+the user who imported it and removes the earlier copy, so no other user of
+the browser is offered it. A preference an earlier console kept for everyone
+is read once in the same way, by the first user who loads the console.
 
 ## Build system
 

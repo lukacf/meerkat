@@ -6086,6 +6086,7 @@ async fn create_session_inner(
         initial_turn_metadata: None,
         initial_work_authorization: None,
         grant_gated_tools: None,
+        grant_gated_tools_where_mounted: None,
     };
     build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::from_override(
         req.enable_mob,
@@ -7391,6 +7392,7 @@ async fn continue_session_inner(
             initial_turn_metadata: None,
             initial_work_authorization: None,
             grant_gated_tools: None,
+            grant_gated_tools_where_mounted: None,
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let model = match req.model.clone() {
@@ -11009,6 +11011,28 @@ mod tests {
             }
         };
         Ok(created.session_id)
+    }
+
+    /// The executor contract for the REST session executor: a boundary
+    /// cancel the runtime loop applies while no run is active is a no-op, so
+    /// the session keeps serving input.
+    #[tokio::test]
+    async fn rest_session_executor_idle_boundary_cancel_conformance() {
+        let temp = TempDir::new().unwrap();
+        let mut state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        state.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = create_deferred_rest_runtime_session(&state).await;
+        ensure_rest_session_runtime_executor(&state, &session_id)
+            .await
+            .expect("attach the REST runtime executor");
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &state.runtime_adapter,
+            &session_id,
+        )
+        .await;
+        unregister_rest_runtime_until_terminal(&state.runtime_adapter, &session_id).await;
     }
 
     async fn create_deferred_rest_runtime_session(state: &AppState) -> SessionId {

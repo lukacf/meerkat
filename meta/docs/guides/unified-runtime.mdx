@@ -330,7 +330,16 @@ found restored members without their comms identity on this host
 poisoned scope alone leaves `is_ready()` true: `scope_poisoned` says one
 exists and `poisoned_scopes` names each with its cause (a session's runtime
 scope is `rt:<runtime id>`). Alert on it, and restart at a planned point,
-after a drain, to recover those members and documents.
+after a drain, to recover those members and documents. A scope your store
+reports conflicted (two batches at one of its versions) is quarantined:
+the realm opens without it, it refuses the same way, `is_ready()` stays
+true and `quarantined_scopes` names it with its cause. A restart alone
+quarantines it again: repair it in your store first (keep one of the two
+batches, as your store's rule for one version picks it), then restart. A
+conflict on a scope of the root mob storage (the one storage that holds
+every mob Meta hosts) is the exception: the build fails typed, since the
+boot cannot open its mobs, so Meta does not start and readiness never runs.
+Repair that scope the same way, then restart.
 
 **Restart wait.** The SPI has no fence release: after a stop, the next open
 waits at most the lease the host declared in its `FenceTiming` (30 seconds by
@@ -633,20 +642,33 @@ is refused (`IdentityHostAdopted`). A member embodied outside the add after
 its freshness read refuses the add (`NotHeld`). In each case the host is
 never asked. In lazy mode, too, the add embodies its member at once.
 
-Before the member exists, the add marks its identity as owing the host a
-held completion (in `<state>/held-completion-owed/`, as a held roster pass
-does), and it clears the mark when it publishes the member. A member whose
-add aborted never got a Core binding, so it can be added again. Until a held
-pass (that re-add, or a held roster pass) publishes it, every other wake or
-reset refuses it (`HeldCompletionOwed`), across a restart too; a delete finds
-nothing to delete, since Core never spawned it, and the mark stays. On the
-wire this refusal keeps the internal-error code `-32603` with structured data
-`{kind: "held_completion_owed", identity}`, in an RPC error and in a refused
-`meta/reconcile_identity` outcome alike. After an eager roster pass the
-identity's bootstrap status entry is `broken`, with `restore`
-`{stage: "refused", code: -32603, kind: "held_completion_owed"}`. Read it as
-an admission still owed to the host, not as a failed member: only a held
-pass that publishes the member clears it.
+The add holds its identity for the host in this process: every declaration
+of it asks Core to create it only under a held pass, and Core, which never
+created it, awaits that held creation. A member whose add aborted never got a
+Core binding, so it can be added again. Until a held pass (that re-add, or a
+held roster pass) publishes it, every other wake or reset refuses it
+(`HeldCompletionOwed`). The hold lasts for the process: after a restart the
+host holds the identity again through its held bootstrap or a re-add, and an
+identity it no longer holds is created as any other. A delete finds nothing
+to delete, since Core never spawned it, and the identity leaves the host's
+hold. The add also marks the identity in `<state>/held-completion-owed/` (or
+the host store), as 0.9.10 does, and clears the mark when it publishes the
+member: the marks are written for a rollback to 0.9.10 only, and nothing
+online reads them. On the wire this refusal keeps the internal-error code
+`-32603` with structured data `{kind: "held_completion_owed", identity}`, in
+an RPC error and in a refused `meta/reconcile_identity` outcome alike. After
+an eager roster pass the identity's bootstrap status entry is `broken`, with
+`restore` `{stage: "refused", code: -32603, kind: "held_completion_owed"}`.
+Read it as an admission still owed to the host, not as a failed member: only
+a held pass that publishes the member clears it.
+
+A held name is reserved from its declaration on: while Core awaits the
+identity's held creation, a raw spawn under its member id (a spawn without
+the identity entry's custody) is refused (`IdentityMember`). Never raw-spawn
+under a name you declare held. Core does not journal the reservation: after
+a restart it stands again from the held bootstrap's declaration, and a raw
+member that takes the name before that declaration makes Core seat the
+identity outside the held protocol.
 
 List the member from inside the completion, as above, never before the add.
 Until the add ends it holds the bootstrap controller, so no pass of the
@@ -888,7 +910,7 @@ let runtime = UnifiedRuntime::builder()
 | `actor_loop_terminated` | `detail`, `stall_id?` | the probe observed the actor's command or reply channel closing; the actor is gone |
 | `host_loop_crash` | `member_id`, `error` | a member run failed (`run_failed` during event drain); a run that ended cancelled, by an interrupt, a stop or a shutdown, does not fire it |
 | `rediscover_failure` | `error` | `rediscover` failed |
-| `event_log_flush_failure` | `error` | the operational event log could not flush: the batch is kept and retried, and past 4,096 kept events the oldest are dropped and counted in `error`. Also fired once when the log's flush task has ended (its store or filter panicked): the events it had buffered, the batch it was writing and every later event are lost |
+| `event_log_flush_failure` | `error` | the operational event log could not flush: the batch is kept and retried after a wait (the flush interval, doubled for each further refusal in a row up to 30 seconds, or the flush interval when that is longer; one flush interval while events are being dropped), and past 4,096 kept events the oldest are dropped and counted in `error`. Events dropped during a wait are counted in the next report, which can be the one for a flush that succeeded (`event log dropped N oldest events ...`). On a quiet log the retry runs at the first flush tick after its wait, so it can come up to one interval later. Also fired once when the log's flush task has ended (its store or filter panicked): the events it had buffered, the batch it was writing and every later event are lost |
 | `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | a materialization an operator or a background warm asked for failed (`operation` `materialize_all` or the background warm's); nothing is throttled, and the next request asks Core again. `initiator` is no longer set: Meta no longer materializes a member's peers |
 | `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | not produced since 0.8.46 (meerkat 0.8.51's Stop no longer refuses on runtime-attach readiness); kept for wire compatibility |
 | `retired_member_release_failed` | `identity`, `agent_runtime_id`, `session_id?`, `cause`, `error` | a gateway host's retirement hook (`GatewayHostComposition::identity_member_retired`) answered an error for a retired incarnation, or, for an incarnation Core ended, did not answer within its 30-second deadline on any of its three attempts (`error` then says it timed out). The retirement stands and the hook is not called for it again; `cause` is `unlisted`, `retire`, `scoped`, `reset`, `delete`, `role_move` or `rotated` |

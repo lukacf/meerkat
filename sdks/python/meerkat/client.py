@@ -35,6 +35,8 @@ import urllib.parse
 import urllib.request
 import warnings
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import IO, Any, Callable, Literal, cast, get_args, get_origin
@@ -167,6 +169,7 @@ from .generated.types import (
     MobSpawnManyResultEntry,
     MobSpawnManySpawnedResult,
     MobSpawnSpecParams,
+    MobStreamCursor,
     MobTurnStartParams,
     MobUnwireParams,
     MobWireParams,
@@ -241,6 +244,7 @@ from .mob import (
     MobLifecycleAction,
     MobMember,
     MobMemberCustodyDeferral,
+    MobMemberPreviewUnavailableUnknown,
     MobMemberRef,
     MobMemberSnapshot,
     MobPeerConnectivity,
@@ -499,6 +503,27 @@ _TURN_SESSION_EVENTS_OPT_OUT_MIN_CONTRACT = (0, 9, 5)
 # An older server, released 0.9.8 included, ignores the field and builds the
 # session with the gated tools ungated, so the SDK refuses to send a gate to it.
 _GRANT_GATED_TOOLS_MIN_CONTRACT = (0, 9, 9)
+
+
+@contextmanager
+def _decision_method_served(method: str) -> Iterator[None]:
+    """Raise an older server's method not found as an error naming ``method``.
+
+    The ``decision/*`` methods need a 0.9.11 or newer server. The SDK sets no
+    contract floor for them: an older server answers method not found
+    (``-32601``), which already fails closed, in words that need not name the
+    method.
+    """
+    try:
+        yield
+    except MeerkatError as error:
+        if error.code != "-32601":
+            raise
+        raise MeerkatError(
+            error.code,
+            f"{method} needs a Meerkat 0.9.11 or newer server: {error.message}",
+            error.details,
+        ) from error
 
 
 def _contract_parts(version: str) -> tuple[int, ...] | None:
@@ -2615,38 +2640,73 @@ class MeerkatClient:
     async def decide_approval(self, params: ApprovalDecideParams) -> dict[str, Any]:
         return await self._request("approval/decide", _wire_params(params))
 
+    @staticmethod
+    def _tool_grant_subject(
+        session_id: str | None, mob_id: str | None, identity: str | None
+    ) -> dict[str, Any]:
+        """The ``tool_grants/*`` subject: a session, or a mob member identity."""
+        if session_id is not None:
+            if mob_id is not None or identity is not None:
+                raise ValueError(
+                    "name either session_id or mob_id with identity, not both"
+                )
+            return {"kind": "session", "session_id": session_id}
+        if mob_id is None or identity is None:
+            raise ValueError("name either session_id or mob_id with identity")
+        return {"kind": "identity", "mob_id": mob_id, "identity": identity}
+
     async def grant_tool(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         tool: str | None = None,
         family: str | None = None,
         duration_ms: int | None = None,
         expires_at_ms: int | None = None,
         reason: str | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
+        decision_ref: str | None = None,
+        mcp_server: str | None = None,
+        server_tools: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Grant one of a session's grant-gated tool names or tool families.
+        """Grant one of a subject's grant-gated tool names, tool families or
+        MCP servers.
 
-        Name exactly one of ``tool`` and ``family``: the session's build must
-        gate it (``create_session(grant_gated_tools=...)``). Bound the grant
-        by exactly one of ``duration_ms`` and ``expires_at_ms`` (UNIX ms), at
-        most the server's maximum lifetime. Returns the ``tool_grants/grant``
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``): an identity's grant applies to the
+        member's builds in the mob's running incarnation, across respawns.
+        Name exactly one of ``tool``, ``family`` and ``mcp_server``: the
+        session's build, or the member's gate (its profile's joined with its
+        role's), must gate it. A server grant covers every tool the server
+        provides, or with ``server_tools`` (a non-empty list) only those of
+        them. Bound the grant by exactly one of ``duration_ms`` and
+        ``expires_at_ms`` (UNIX ms), at most the server's maximum lifetime.
+        ``decision_ref`` records the host's reference to the decision it made
+        before issuing, as attribution. Returns the ``tool_grants/grant``
         result, ``{"grant": {...}}``: a family grant's ``target.names`` are
-        the names the server took for it.
+        the names the server took for it, and an identity grant's ``applies``
+        says whether the member's running build gates the target.
         """
-        if (tool is None) == (family is None):
-            raise ValueError("exactly one of tool or family must be provided")
+        if sum(target is not None for target in (tool, family, mcp_server)) != 1:
+            raise ValueError("exactly one of tool, family or mcp_server must be provided")
+        if server_tools is not None and mcp_server is None:
+            raise ValueError("server_tools narrows an mcp_server grant only")
         if (duration_ms is None) == (expires_at_ms is None):
             raise ValueError(
                 "exactly one of duration_ms or expires_at_ms must be provided"
             )
-        target: dict[str, Any] = (
-            {"kind": "tool", "name": tool}
-            if tool is not None
-            else {"kind": "family", "family": family}
-        )
+        target: dict[str, Any]
+        if tool is not None:
+            target = {"kind": "tool", "name": tool}
+        elif family is not None:
+            target = {"kind": "family", "family": family}
+        else:
+            target = {"kind": "mcp_server", "server": mcp_server}
+            if server_tools is not None:
+                target["tools"] = list(server_tools)
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "target": target,
         }
         if duration_ms is not None:
@@ -2655,6 +2715,8 @@ class MeerkatClient:
             params["expires_at_ms"] = expires_at_ms
         if reason is not None:
             params["reason"] = reason
+        if decision_ref is not None:
+            params["decision_ref"] = decision_ref
         return await self._request("tool_grants/grant", params)
 
     async def revoke_tool_grant(
@@ -2672,42 +2734,172 @@ class MeerkatClient:
         return await self._request("tool_grants/revoke", params)
 
     async def list_tool_grants(
-        self, session_id: str, *, include_ended: bool = False
+        self,
+        session_id: str | None = None,
+        *,
+        include_ended: bool = False,
+        mob_id: str | None = None,
+        identity: str | None = None,
     ) -> dict[str, Any]:
-        """List a session's scoped tool grants, each due one read as expired.
+        """List a subject's scoped tool grants, each due one read as expired.
 
-        Ended (expired or revoked) grants are listed only with
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``); a retired identity's history stays
+        readable. Ended (expired or revoked) grants are listed only with
         ``include_ended``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the server cannot read.
+        For a member identity in the mob's roster the result also carries
+        ``"gate"``: ``"running"``, what the member's live build gates and the
+        names it ignored as not mounted (``None`` when no build of it is live
+        on the server), and ``"next_build"``, the gate its next build
+        resolves. The gate is advisory.
         """
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "include_ended": include_ended,
         }
         return await self._request("tool_grants/list", params)
 
     async def tool_grant_audit(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         after_sequence: int | None = None,
         limit: int | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
     ) -> dict[str, Any]:
-        """Read a page of the audit log of a session's scoped tool grants.
+        """Read a page of the audit log of a subject's scoped tool grants.
 
-        Rows come in sequence order, after ``after_sequence`` when given.
-        Returns ``{"rows": [...]}``, with ``"next_sequence"`` while more rows
-        may follow: pass it as the next page's ``after_sequence``. A row the
-        server cannot read is named in ``"unreadable"``.
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``). Rows come in sequence order, after
+        ``after_sequence`` when given. Returns ``{"rows": [...]}``, with
+        ``"next_sequence"`` while more rows may follow: pass it as the next
+        page's ``after_sequence``. A row the server cannot read is named in
+        ``"unreadable"``.
         """
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
         }
         if after_sequence is not None:
             params["after_sequence"] = after_sequence
         if limit is not None:
             params["limit"] = limit
         return await self._request("tool_grants/audit", params)
+
+    async def list_decisions(
+        self,
+        *,
+        kind: str | None = None,
+        phase: str | None = None,
+        approver_id: str | None = None,
+        requester: str | None = None,
+        after: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """List a page of the server's durable decisions, in decision id order.
+
+        Every given filter must match; ``requester`` is a principal key. A
+        page holds 100 decisions unless ``limit`` asks for another size, at
+        most 500. Returns ``{"decisions": [...], "unreadable": [...]}``, with
+        ``"next_after"`` while more decisions may follow: pass it as the next
+        page's ``after``. A server whose persistence keeps no durable
+        decisions answers capability unavailable. Needs a Meerkat 0.9.11 or
+        newer server: an older one answers method not found (``-32601``),
+        raised as a :class:`MeerkatError` that names the method.
+
+        A list on the stdio connection this client opens is more than a read
+        when the server is a Unix build with local authorization: before it
+        answers, the server shows the connection's operator each decision of
+        the page that is open, waits for a human and is held for an approver
+        id the operator acts for (once per connection), and records each
+        presentation. It writes a ``decision/notice`` for each decision it
+        shows; this client drops those notices.
+        """
+        params: dict[str, Any] = {}
+        if kind is not None:
+            params["kind"] = kind
+        if phase is not None:
+            params["phase"] = phase
+        if approver_id is not None:
+            params["approver_id"] = approver_id
+        if requester is not None:
+            params["requester"] = requester
+        if after is not None:
+            params["after"] = after
+        if limit is not None:
+            params["limit"] = limit
+        with _decision_method_served("decision/list"):
+            return await self._request("decision/list", params)
+
+    async def get_decision(
+        self, decision_id: str, *, include_request: bool = False
+    ) -> dict[str, Any]:
+        """Read one durable decision, its expiry recorded once its deadline passed.
+
+        The held request is in the answer only with ``include_request``.
+        Returns ``{"decision": {...}}``. Needs a Meerkat 0.9.11 or newer
+        server: an older one answers method not found (``-32601``), raised
+        as a :class:`MeerkatError` that names the method.
+        """
+        params: dict[str, Any] = {"decision_id": decision_id}
+        if include_request:
+            params["include_request"] = True
+        with _decision_method_served("decision/get"):
+            return await self._request("decision/get", params)
+
+    async def decision_rendering(
+        self, decision_id: str, *, max_part_bytes: int | None = None
+    ) -> dict[str, Any]:
+        """Read a durable decision's rendering and its canonical parts.
+
+        Without ``max_part_bytes`` the rendering is one part. Returns the
+        rendering, its renderer and subject digest, and ``"parts"``, each
+        with its index, count and digest. Needs a Meerkat 0.9.11 or newer
+        server: an older one answers method not found (``-32601``), raised
+        as a :class:`MeerkatError` that names the method.
+        """
+        params: dict[str, Any] = {"decision_id": decision_id}
+        if max_part_bytes is not None:
+            params["max_part_bytes"] = max_part_bytes
+        with _decision_method_served("decision/rendering"):
+            return await self._request("decision/rendering", params)
+
+    async def present_decision(
+        self, decision_id: str, presentation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record what a host presenter showed of a durable decision.
+
+        ``presentation`` names the ``audience`` (``{"kind": "approver",
+        "approver_id": ...}`` or ``{"kind": "reviewer", "reviewer": ...}``),
+        the ``subject_digest`` shown, the ``parts_shown``, the
+        ``channel_ref`` and ``message_ref`` and the host clock reading
+        ``at_ms``; a summary a surface with a size limit showed adds the
+        ``link`` it carried (``{"reference": ..., "served_digest": ...}``).
+        It counts only when it shows every canonical part, or its link
+        served the held rendering, to the party that decides now. Returns
+        ``{"decision": {...}}``. Needs a Meerkat 0.9.11 or newer server: an
+        older one answers method not found (``-32601``), raised as a
+        :class:`MeerkatError` that names the method.
+        """
+        params: dict[str, Any] = {
+            "decision_id": decision_id,
+            "presentation": presentation,
+        }
+        with _decision_method_served("decision/present"):
+            return await self._request("decision/present", params)
+
+    async def withdraw_decision(self, decision_id: str) -> dict[str, Any]:
+        """Withdraw an open durable decision as the host.
+
+        Returns ``{"decision": {...}}``; a decision no longer open is refused
+        with the ``not_open`` decision refusal. Needs a Meerkat 0.9.11 or
+        newer server: an older one answers method not found (``-32601``),
+        raised as a :class:`MeerkatError` that names the method.
+        """
+        params: dict[str, Any] = {"decision_id": decision_id}
+        with _decision_method_served("decision/withdraw"):
+            return await self._request("decision/withdraw", params)
 
     async def list_artifacts(
         self, params: dict[str, Any] | None = None
@@ -4928,11 +5120,27 @@ class MeerkatClient:
         )
 
     async def subscribe_mob_member_events(
-        self, mob_id: str, agent_identity: str
+        self,
+        mob_id: str,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
     ) -> EventSubscription:
+        """Subscribe to one mob member's events.
+
+        Without ``cursor`` the stream is live. With the ``epoch`` and ``seq``
+        of the last event received (``subscription.last_event_epoch`` and
+        ``subscription.last_event_seq``), it first replays the events the
+        member still retains after that position; a cursor of another
+        sequence space replays the current space from its earliest retained
+        event.
+        """
+        params: dict[str, Any] = {"mob_id": mob_id, "agent_identity": agent_identity}
+        if cursor is not None:
+            params["cursor"] = _wire_params(cursor)
         return await self._open_event_subscription(
             "mob/stream_open",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
+            params,
             "mob/stream_close",
             self._parse_agent_event_envelope,
         )
@@ -8475,25 +8683,31 @@ class MeerkatClient:
     @staticmethod
     def _parse_member_preview_unavailable(
         raw: dict[str, Any], context: str
-    ) -> WireMemberPreviewUnavailable | None:
+    ) -> WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown | None:
         """Return the typed reason a status read carries no observed preview.
 
         Absent or ``null`` means ``output_preview``/``tokens_used`` are
-        observations; a value outside the closed vocabulary fails closed.
+        observations. The field is advisory and its vocabulary may grow: a
+        reason this SDK does not know is read as ``{"unknown": <the value>}``,
+        so a newer server never fails the read. A value that is not a string
+        is malformed and fails closed.
         """
         value = raw.get("preview_unavailable")
         if value is None:
             return None
-        if not isinstance(value, str) or value not in {
+        if not isinstance(value, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
+            )
+        if value in {
             "observation_deadline",
             "read_failed",
             "session_absent",
             "not_observed_while_retiring",
+            "store_refused",
         }:
-            raise MeerkatError(
-                "INVALID_RESPONSE", f"{context}: invalid preview_unavailable"
-            )
-        return cast(WireMemberPreviewUnavailable, value)
+            return cast(WireMemberPreviewUnavailable, value)
+        return {"unknown": value}
 
     @staticmethod
     def _parse_member_registration_refusal(

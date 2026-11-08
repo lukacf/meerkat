@@ -2282,7 +2282,11 @@ impl ToolDispatchContext {
 
     /// Spend this dispatch's retained review once for the decision staging
     /// returned (`entering`, or this context's own when staging refreshed
-    /// nothing). R1 and ungoverned entries spend nothing.
+    /// nothing). R1 and ungoverned entries spend nothing. Then the entering
+    /// decision's own entry spend, once: a use of a grant that serves a
+    /// counted number of uses, acknowledged by its owner before the effect
+    /// ([`crate::authorization::PreparedOperationAuthorization::spend_at_entry`]).
+    /// Its refusal refuses the entry.
     fn spend_review_entry(
         &self,
         entering: Option<Self>,
@@ -2293,6 +2297,9 @@ impl ToolDispatchContext {
             (Some(entry), Some(check)) => entry.consume_held(check)?,
             _ => crate::approval::review::ReviewedEntryCustody::none(),
         };
+        if let Some(check) = current.prepared_authorization() {
+            check.spend_at_entry()?;
+        }
         Ok((entering, custody))
     }
 
@@ -4933,6 +4940,25 @@ pub trait CommsRuntime: Send + Sync {
         ))
     }
 
+    /// Dispatch a canonical comms command with the origin of the governed
+    /// work that sends it, if any ([`crate::GovernedSendOrigin`]): an
+    /// in-process delivery carries it to its receiver unchanged, and a
+    /// delivery over a network carries none. A comms tool passes the origin
+    /// of its dispatch context's work, never one from its arguments. With no
+    /// origin this is [`Self::send`].
+    ///
+    /// The default sends `cmd` without the origin, so a receiver sees a
+    /// delivery from an ungoverned sender, which a binder that keeps the
+    /// original requester refuses (`origin_unverifiable`).
+    async fn send_with_governed_origin(
+        &self,
+        cmd: CommsCommand,
+        origin: Option<crate::GovernedSendOrigin>,
+    ) -> Result<SendReceipt, SendError> {
+        let _ = origin;
+        self.send(cmd).await
+    }
+
     #[doc(hidden)]
     fn stream(&self, scope: StreamScope) -> Result<EventStream, StreamError> {
         let scope_desc = match scope {
@@ -7214,6 +7240,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// The dispatch's own operation is reachable only with its actual
@@ -7317,6 +7347,10 @@ mod governed_operation_tests {
             _binding: &PreparedAuthorizationBinding,
             _event: OperationObservation,
         ) -> Result<(), OperationObservationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -7815,6 +7849,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn churn_context(work: &Arc<ChurnWork>) -> ToolDispatchContext {
@@ -8145,6 +8183,10 @@ mod governed_operation_tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// What one fenced call through the execution policy gate did under an
@@ -8410,6 +8452,10 @@ mod governed_operation_tests {
                 self.facts.complete_change(false);
                 self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

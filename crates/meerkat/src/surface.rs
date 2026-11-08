@@ -3088,6 +3088,7 @@ mod native_admission_projection_tests {
             AuthErrorKind::CredentialInteractionRequired,
             AuthErrorKind::CredentialAccessPending,
             AuthErrorKind::CredentialStoreUnavailable,
+            AuthErrorKind::SourceUnavailable,
         ] {
             let error = RuntimeDriverError::ControllerReadinessUnavailable {
                 reason: Ready::CredentialPreparationFailed { kind },

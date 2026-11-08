@@ -48,7 +48,7 @@ import type {
   WireReachability,
   MobStopMemberRunResult,
 } from "./generated/types.js";
-import type { MeerkatClient, MobMemberLiveOpenOptions } from "./client.js";
+import type { MeerkatClient, MobMemberEventsOptions, MobMemberLiveOpenOptions } from "./client.js";
 import type { Usage } from "./events.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -174,9 +174,10 @@ export interface MobMemberSnapshot {
   /**
    * Set when this read did not observe the member's session: `outputPreview`
    * and `tokensUsed` are then missing, not an empty preview and a zero count.
-   * Absent when they are observations.
+   * Absent when they are observations. A reason this SDK does not know reads
+   * as `{ unknown: <value> }`.
    */
-  previewUnavailable?: WireMemberPreviewUnavailable;
+  previewUnavailable?: WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown;
   /**
    * Set when the member's host refused its restored registration: the hook
    * call that refused it. The member stays broken until an explicit repair.
@@ -196,6 +197,15 @@ export interface MobMemberSnapshot {
  * refused.
  */
 export interface MobMemberCustodyUnknown {
+  unknown: string;
+}
+
+/**
+ * A preview-unavailable reason this SDK does not know, as the server sent
+ * it: the vocabulary may grow, and an unknown reason is surfaced, not
+ * refused.
+ */
+export interface MobMemberPreviewUnavailableUnknown {
   unknown: string;
 }
 
@@ -224,7 +234,7 @@ export interface MobKickoffMemberSnapshot {
   isFinal: boolean;
   peerConnectivity?: MobPeerConnectivity;
   /** As on {@link MobMemberSnapshot.previewUnavailable}. */
-  previewUnavailable?: WireMemberPreviewUnavailable;
+  previewUnavailable?: WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown;
   /** As on {@link MobMemberSnapshot.registrationRefusal}. */
   registrationRefusal?: WireMemberRegistrationHookCall;
   /** As on {@link MobMemberSnapshot.custodyDeferred}. */
@@ -311,8 +321,8 @@ export class Member {
     return this.client.sendMobMemberContent(this.mobId, this.agentIdentity, content, options);
   }
 
-  async events(): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity);
+  async events(options?: MobMemberEventsOptions): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, this.agentIdentity, options);
   }
 }
 
@@ -579,8 +589,11 @@ export class Mob {
     await this.client.cancelMobFlow(this.mobId, runId);
   }
 
-  async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
-    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity);
+  async subscribeMemberEvents(
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    return this.client.subscribeMobMemberEvents(this.mobId, agentIdentity, options);
   }
 
   async subscribeEvents(): Promise<EventSubscription<AttributedMobEvent>> {

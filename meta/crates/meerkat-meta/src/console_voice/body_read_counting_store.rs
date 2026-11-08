@@ -42,6 +42,18 @@ impl RuntimeStore for BodyReadCountingRuntimeStore {
         self.inner.self_fence()
     }
 
+    fn refuses_runtime_until_reopen(&self, runtime_id: &LogicalRuntimeId) -> bool {
+        self.inner.refuses_runtime_until_reopen(runtime_id)
+    }
+
+    fn unnamed_refused_runtimes(&self) -> Vec<meerkat_runtime::store::RefusedScope> {
+        self.inner.unnamed_refused_runtimes()
+    }
+
+    fn quarantined_tool_grants(&self) -> Vec<meerkat_runtime::store::QuarantinedToolGrant> {
+        self.inner.quarantined_tool_grants()
+    }
+
     fn session_persistence_profile(&self) -> RuntimeSessionPersistenceProfile {
         self.inner.session_persistence_profile()
     }
@@ -377,6 +389,13 @@ impl RuntimeStore for BodyReadCountingRuntimeStore {
         &self,
     ) -> Result<Vec<LogicalRuntimeId>, RuntimeStoreError> {
         self.inner.list_runtimes_with_recovery_work().await
+    }
+
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        self.inner.runtime_holds_recovery_work(runtime_id).await
     }
 
     async fn list_runtime_delivery_authorities_or_unavailable(

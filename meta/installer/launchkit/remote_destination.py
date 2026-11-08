@@ -665,7 +665,7 @@ def _fields(files, definition, *, with_validator=False):
             _fail('configuration-invalid')
         console = _console_configuration_helper()
         try:
-            console['console_authentication'](json.loads(metadata), result)
+            authentication = console['console_authentication'](json.loads(metadata), result)
         except (ValueError, UnicodeError):
             _fail('configuration-invalid')
         scalar_validator = validator
@@ -675,7 +675,7 @@ def _fields(files, definition, *, with_validator=False):
                  'message': 'Enter a required value that is not only whitespace.'}
                 for field in fields if field['required'] and not values.get(field['key'], '').strip()]
             invalid_keys = {issue['key'] for issue in issues}
-            return issues + [issue for issue in console['console_credentials_issues'](fields, values)
+            return issues + [issue for issue in console['console_credentials_issues'](fields, values, authentication)
                              if issue['key'] not in invalid_keys]
     return (result, validator) if with_validator else result
 

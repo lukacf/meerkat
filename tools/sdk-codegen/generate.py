@@ -128,6 +128,9 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobMemberListEntryWire",
     "WireMemberProgressSnapshot",
     "WireMemberCustodyDeferral",
+    # A profile's member tool grant gate, listed before the tool config that
+    # carries it.
+    "WireGrantGatedTools",
     "WireMobToolConfig",
     "WireMobProfile",
     "WireMobRun",
@@ -469,6 +472,9 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireUnreadableToolGrant",
     "WireToolGrantAuditRow",
     "WireUnreadableToolGrantAuditRow",
+    "WireToolGrantGateEntries",
+    "WireToolGrantGateView",
+    "WireMemberToolGrantGate",
     "GrantToolParams",
     "GrantToolResult",
     "RevokeToolGrantParams",
@@ -477,6 +483,28 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "ListToolGrantsResult",
     "ToolGrantAuditParams",
     "ToolGrantAuditResult",
+    # Durable decisions (`decision/*`). The records precede the params and
+    # results that carry them.
+    "WireCanonicalPart",
+    "WirePresentationLink",
+    "WirePresentationRecord",
+    "WireDecisionOutcome",
+    "WireDecisionEffect",
+    "WireDecision",
+    "WireUnreadableDecision",
+    "DecisionPresentationRequest",
+    "DecisionListParams",
+    "DecisionListResult",
+    "DecisionGetParams",
+    "DecisionResult",
+    "DecisionRenderingParams",
+    "DecisionRenderingResult",
+    "DecisionPresentParams",
+    "DecisionWithdrawParams",
+    # The `decision/notice` a stdio connection writes its operator; its
+    # presentation precedes it.
+    "WireDecisionNoticePresentation",
+    "WireDecisionNotice",
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
@@ -514,6 +542,21 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireToolGrantExpiryDriver",
     "WireToolGrantRefusalKind",
     "WireToolGrantAuditEvent",
+    "WireToolGrantApplies",
+    # Durable decision vocabulary. The request audience is closed; the result
+    # vocabularies are tolerant; the refusal and the error data are closed.
+    "DecisionAudienceRequest",
+    "WireDecisionPhase",
+    "WireDecisionStage",
+    "WireDecisionNoticeState",
+    "WireDecisionNoticeEvent",
+    "WireDecisionTier",
+    "WireDecisionAssurance",
+    "WireDecisionReviewVerdict",
+    "WirePresentationAudience",
+    "WireDecisionEvidence",
+    "WireDecisionRefusal",
+    "WireDecisionErrorData",
 ]
 
 # Request unions whose schemas live in the params roster rather than the wire
@@ -526,6 +569,7 @@ PARAMS_UNION_ALIAS_TYPES = {
     "LoginStartParams",
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
+    "DecisionAudienceRequest",
 }
 
 MCP_LIVE_CONTRACT_TYPES = [
@@ -748,6 +792,8 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "WireGeminiThinkingConfig",
     "WireOpenAiPromptCacheOptions",
     "WireProviderParamsOverride",
+    # `MobStreamOpenParams.cursor`: the member stream resume position.
+    "MobStreamCursor",
 ]
 
 # Item 6 / K20 pattern: the `skills/list` RPC result is catalog-typed
@@ -855,6 +901,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "WireContentInput",
         "WireAuthBindingRef",
         "WireMobProfile",
+        "WireGrantGatedTools",
         "WireMobToolConfig",
         "WireResolvedModelCapabilities",
         "PublicTurnToolOverlay",
@@ -7066,6 +7113,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "      'credential_interaction_required',",
             "      'credential_access_pending',",
             "      'credential_store_unavailable',",
+            "      'source_unavailable',",
             "    ],",
             "    `${path}.kind`,",
             "    'wire auth error kind',",

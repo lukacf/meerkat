@@ -399,6 +399,66 @@ with `state` `ABSENT`, `IN_FLIGHT` (`durable_witness`), `COMPLETED`
 `UNRESOLVED` (`cause`); a state this SDK does not know reads as `UNRESOLVED`,
 never `ABSENT`. See [Scope-bound dispatch](/api/rpc#scope-bound-dispatch).
 
+### Scoped tool grants
+
+A profile's `tools.grant_gated` mounts tools closed on every build of its
+members; a grant to an identity opens one for a fixed window, across the
+member's respawns and the gateway's restarts. The grant wakes nothing and
+applies at the member's next model request.
+
+```python
+from meerkat_meta import ToolGrantRequestRefusedError
+
+granted = await runtime.grant_tool(
+    "agent-a", tool="datetime", duration_ms=600_000,
+    decision_ref="approval-7",           # your own record of the decision
+)
+grant_id = granted["grant"]["grant_id"]
+await runtime.list_tool_grants("agent-a", include_ended=True)
+await runtime.tool_grant_audit("agent-a", limit=50)
+await runtime.revoke_tool_grant(grant_id, reason="done")
+
+try:
+    await runtime.grant_tool("agent-a", family="shell", duration_ms=600_000)
+except ToolGrantRequestRefusedError as error:
+    error.refusal_kind                   # "target_not_gated", ...
+```
+
+Name exactly one of `tool` and `family`, and exactly one of `duration_ms`
+and `expires_at_ms`. Every refusal raises `ToolGrantRequestRefusedError`; its
+kinds are `TOOL_GRANT_REQUEST_REFUSAL_KINDS`. See
+[Scoped tool grants](/api/rpc#scoped-tool-grants).
+
+### Realm MCP administration
+
+The stdio gateway lets its host administer the installation realm's own MCP
+servers and the secret values of their stdio servers' `secret_env` slots,
+kept in the launch's provider credential store:
+
+```python
+from meerkat_meta import RealmMcpRefusedError
+
+listed = await runtime.realm_mcp_servers()          # {"servers": [...], "generation": 3}
+server = {
+    "name": "search",
+    "command": "search-mcp",
+    "secret_env": ["SEARCH_API_KEY"],
+}
+await runtime.realm_mcp_install(server, expected_generation=listed["generation"])
+await runtime.realm_mcp_set_secret(server, "SEARCH_API_KEY", api_key)
+try:
+    await runtime.realm_mcp_install(server, expected_generation=listed["generation"])
+except RealmMcpRefusedError as error:
+    error.refusal_kind                               # "generation_conflict"
+await runtime.realm_mcp_remove_secret(server, "SEARCH_API_KEY")
+```
+
+The value is sent once, in the `set_secret` request, and never appears in an
+answer, an exception or a log record. A launch whose credential store did not
+open answers the secret methods `RealmMcpUnavailableError`; a write whose
+result is unknown raises `RealmMcpOutcomeUnknownError`. See
+[Realm MCP administration](/api/rpc#realm-mcp-administration-stdio-gateway).
+
 ## Mob-Level API
 
 For direct mob-member operations (discovery-based), the mob handle API is still available.
@@ -1090,10 +1150,11 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   life, and when a declared role migration moves it to its new role, with
   the runtime's real context (every registered identity as `active_peers`,
   the roster's managed edges). That call publishes the tools and records
-  the customized spawn spec. It builds nothing, except where the seat
-  builds the member from it: a seat that revives the session of a member
-  that was retired after it was built (a respawn, for example), and a
-  declared role migration's move of the member onto its session.
+  the customized spawn spec. It builds nothing, except a declared role
+  migration's move of the member onto its session, which builds the member
+  from it: a seat that revives the session of a member that was retired
+  after it was built (a respawn, for example) is a Dormant seat and builds
+  nothing.
   `resolved_tools`, which reports the tools a build actually resolved,
   answers `no_build_recorded` until the member's first build. Your
   `after_create(identity,
@@ -1108,18 +1169,16 @@ adopted instead of respawned, a respawn. `customize_build` runs:
   and at start for the members that must be live then. No `after_create`
   follows a build.
 
-A respawn of a built member calls `customize_build` once and `after_create`
-once, with the session the respawn keeps, and the member is built once, with
-that call's tools: the mob keeps the retired member's session archived, so
-the respawn's seat revives the member on it, and that revival is the build.
-The same holds for a materialization, a warm or a delivery whose seat builds
-the member: the member stays live for it. The roster pass asks the mob to
-release a member its seat built, so that identity is then like a lazily
-seated one. A lazily
-seated identity (one seated with nothing built yet) gets two
+A respawn of a built member seats it again on the session the mob kept
+archived when it retired it, Dormant and building nothing, and the wake that
+follows builds it once, as for a lazily seated identity: `after_create` is
+called once, with the session the respawn keeps. A materialization, a warm
+or a delivery of an identity the mob seats again on its archived session
+builds the member once, at its wake, and the roster pass builds nothing. A
+lazily seated identity (one seated with nothing built yet) gets two
 `customize_build` calls before its first run: its seat's, then its first
-build's. A respawn of a member that was never built does the same: its seat
-calls `customize_build`, and its build calls it again.
+build's. A respawn does the same: its seat calls `customize_build`, and its
+build calls it again.
 
 A member is never built without its tools, so its first run sees them. A
 restart over idle members the mob already holds calls `customize_build` for
@@ -1129,13 +1188,15 @@ builds the mob) is built, then starts no run until the roster pass has
 published its tools. A member whose identity the roster no longer lists
 starts no run either, until the roster retires it (a host-adopted identity's
 member, which the roster never retires, is not held). A `customize_build`
-that fails refuses the member's build: the member stays as it was, the
-delivery that needed it answers a typed retryable error (the artifact
-refusal itself, typed, when the host's installed artifacts refused the
-tools), and the next delivery tries again. While a member's tools are not
-published, its identity status reports `customizer_tools_pending` with the
-reason. A tool from an earlier build that the latest build no longer
-declares is refused, never routed to stale handlers.
+that fails refuses the member's build: the member stays as it was, and the
+delivery that needed it asks for the build once more. When that fails too,
+the delivery answers a typed retryable error (the artifact refusal itself,
+typed, when the host's installed artifacts refused the tools), and a later
+delivery, or the mob's own retry of work the member owes, tries again.
+While a member's tools are not published, its identity status reports
+`customizer_tools_pending` with the reason. A tool from an earlier build
+that the latest build no longer declares is refused, never routed to stale
+handlers.
 
 `meta/identity/resolved_tools` lists a member's tools without building it:
 a live member's live tools, or, for a member that is not materialized, the
@@ -1343,6 +1404,10 @@ from meerkat_meta.errors import (
     IdentityHistoryUnavailableError,   # Core's history of the identity cannot be read now (-32052, retryable)
     IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
     IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
+    ToolGrantRequestRefusedError,      # A refused meta/tool_grants/* request (-32602): .refusal_kind, .refusal
+    RealmMcpRefusedError,              # A refused meta/realm_mcp/* request (-32602): .refusal_kind, .refusal
+    RealmMcpUnavailableError,          # A realm MCP write could not be made now, or no credential store (-32004)
+    RealmMcpOutcomeUnknownError,       # A realm MCP write began and its result is unknown (-32603)
     MobAnnouncementsUnavailableError,  # Mob announcements are not enabled (-32044)
     AnnouncementConflictError,         # Conflict or stale request (-32045): .kind
     SourceStaleRevisionError,          # A source's revision moved (-32045): .current_revision, .current_version, .generation, .cursor

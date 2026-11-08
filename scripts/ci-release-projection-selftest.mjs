@@ -794,15 +794,22 @@ process.stdout.write(JSON.stringify(fixture[path]));
   const job = (name, created, started, completed) => ({
     name, created_at: at(created), started_at: at(started), completed_at: at(completed), conclusion: "success",
   });
-  const runBudget = (attemptStarts, jobs, extraEnv = {}) =>
-    runBudgetAt(attemptStarts.map(at), jobs, extraEnv);
+  const runBudget = (attemptStarts, jobs, extraEnv = {}, listings = {}) =>
+    runBudgetAt(attemptStarts.map(at), jobs, extraEnv, listings);
   // The plan's GUARD_LANE_REASONS is "{}" unless a row sets it: no
-  // exact-profile lane ran.
-  const runBudgetAt = (attemptStarts, jobs, extraEnv = {}) => {
+  // exact-profile lane ran. `jobs` is the last attempt's job listing; an
+  // earlier attempt's listing (`listings[n]`) defaults to the jobs of
+  // `jobs` that started in that attempt, as given.
+  const runBudgetAt = (attemptStarts, jobs, extraEnv = {}, listings = {}) => {
     const run = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`;
-    const pages = { [`${run}/attempts/${attemptStarts.length}/jobs?per_page=100`]: [{ jobs }] };
+    const pages = { [`${run}/attempts/${attemptStarts.length}/jobs?per_page=30`]: [{ jobs }] };
     attemptStarts.forEach((start, index) => {
       pages[`${run}/attempts/${index + 1}`] = [{ run_started_at: start }];
+      if (index + 1 === attemptStarts.length) return;
+      const next = attemptStarts[index + 1];
+      const own = listings[index + 1] ??
+        jobs.filter((entry) => entry.started_at && entry.started_at >= start && entry.started_at < next);
+      pages[`${run}/attempts/${index + 1}/jobs?per_page=30`] = [{ jobs: own }];
     });
     writeFileSync(budgetFixture, JSON.stringify(pages));
     const outputFile = join(scratch, "budget-output");
@@ -852,6 +859,39 @@ process.stdout.write(JSON.stringify(fixture[path]));
   budget = runBudget([0, 2000], [...busy.slice(0, 4), job("Clippy (core+12)", 2000, 2003, 2473)]);
   assert.equal(budget.status, 0, `a re-run rest-wave row: ${budget.stdout}${budget.stderr}`);
   assert.match(budget.stdout, /^\| Clippy \(core\+12\) \| 2 \| 3 \| 470 \| 500 \| 473 \| 470 \| success \|$/m, "a re-run row is not behind the stagger job");
+  // A re-run attempt lists the jobs it carried over with its own creation
+  // time. Read from that listing alone, a carried-over row's runner queue in
+  // its own attempt counted toward the runaway ceiling (run 42362604651
+  // attempt 2: 5386 s against attempt 1's 1160 s for the same Clippy row),
+  // and the row looked created after the stagger job. The step reads a
+  // carried-over job's creation time from the attempt it ran in.
+  {
+    const rerunAt = 5000;
+    const firstAttempt = [
+      job(budgetEnv.CLASSIFICATION_JOB_NAME, 0, 5, 35),
+      job("Format + governance", 0, 5, 400),
+      job(budgetEnv.STAGGER_JOB_NAME, 36, 40, 44),
+      // 3000 s waiting for a hosted runner, then 900 s of Clippy.
+      job("Clippy (mob)", 36, 3036, 3936),
+    ];
+    const relisted = firstAttempt.map((entry) => ({ ...entry, created_at: at(rerunAt) }));
+    const rerun = [...relisted, job("Unit tests (xtask)", rerunAt, rerunAt + 3, rerunAt + 300)];
+    budget = runBudget([0, rerunAt], rerun, {}, { 1: firstAttempt });
+    assert.equal(budget.status, 0, `a carried-over row's own runner queue never counts: ${budget.stdout}${budget.stderr}`);
+    assert.match(
+      budget.stdout,
+      /^\| Clippy \(mob\) \| 1 \| 3000 \| 900 \| 930 \| 3936 \| 931 \| success \|$/m,
+      "the carried-over row keeps its attempt's queue and waited for no stagger job",
+    );
+    assert.equal(budget.outputs.terminal_excluding_queue_seconds, "931");
+    assert.equal(budget.outputs.budget_verdict, "queue_delayed");
+    // A carried-over job its attempt's listing lacks keeps the re-run's
+    // creation time: no queue is read for it, so the runaway ceiling fails
+    // closed.
+    budget = runBudget([0, rerunAt], rerun, {}, { 1: firstAttempt.filter((entry) => entry.name !== "Clippy (mob)") });
+    assert.equal(budget.status, 1, `an unmatched carried-over row reads no queue: ${budget.stdout}`);
+    assert.equal(budget.outputs.budget_verdict, "runaway");
+  }
   // The execution overrun still fails: the stagger job's run time counts.
   const overBudget = [...busy.slice(0, 2), { ...stagger, completed_at: at(741) }, job("Clippy (core+12)", 741, 745, 1791)];
   budget = runBudget([0], overBudget);
@@ -1068,7 +1108,7 @@ process.stdout.write(JSON.stringify(fixture[path]));
   // delay. It fails an enforced measurement only after the last retry, and
   // any other error fails it at once, as before.
   assert.equal(budgetEnv.API_RETRY_DELAYS, "5 10 20", "the budget retries a server error three times");
-  const jobsPath = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/1/jobs?per_page=100`;
+  const jobsPath = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}/attempts/1/jobs?per_page=30`;
   const failuresFile = join(scratch, "budget-failures.json");
   const callsFile = join(scratch, "budget-calls");
   const flaky = (count, message, extraEnv = {}) => {

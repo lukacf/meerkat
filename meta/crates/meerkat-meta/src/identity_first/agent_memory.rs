@@ -701,11 +701,12 @@ impl AgentMemoryRuntimeInjector {
         }
     }
 
-    /// §8.5 exit interviews, for a retirement whose step was asked at
-    /// `retired_at_ms`: the pending harvest is keyed by it, so a repeat of
-    /// the same retirement (its side effects run again after a restart)
-    /// queues nothing more. Answers the store's error, for a caller that
-    /// owes the harvest at least once. No-op without a wired Steward.
+    /// §8.5 exit interviews, for a retirement whose step was asked (or, when
+    /// no step asked for it, that Core journaled) at `retired_at_ms`: the
+    /// pending harvest is keyed by it, so a repeat of the same retirement
+    /// (its side effects run again after a restart) queues nothing more.
+    /// Answers the store's error, for a caller that owes the harvest at
+    /// least once. No-op without a wired Steward.
     pub async fn record_identity_retired_at(
         &self,
         identity: &AgentIdentity,
@@ -3776,6 +3777,10 @@ memory = false
             &self,
             _: &meerkat_core::PreparedAuthorizationBinding,
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
     }

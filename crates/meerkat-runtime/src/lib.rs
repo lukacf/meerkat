@@ -31,6 +31,42 @@
     )
 )]
 
+// Test-feature canary. This crate's tests build with its test features,
+// which no dev-dependency turns on: in this repository every test command
+// passes them (`node scripts/core-workspace-args.mjs --tests -p meerkat-runtime`
+// prints them). A test build without them would compile the tests they
+// gate out and pass over fewer tests, so it fails to compile here instead.
+// Only code generation instantiates the generic function below (a test
+// binary does), so `cargo check`, clippy and an editor's check run, which
+// generate no code, are not stopped by it.
+// `.cargo/config.toml` [env] sets MEERKAT_WORKSPACE_TEST_FEATURES for this
+// repository's builds only; the published package builds without it.
+#[cfg(all(
+    test,
+    not(all(
+        feature = "test-support",
+        feature = "sqlite-store",
+        feature = "live",
+        feature = "local-authorization"
+    ))
+))]
+mod test_features_canary {
+    fn require<T>() {
+        const {
+            let _ = size_of::<T>();
+            assert!(
+                option_env!("MEERKAT_WORKSPACE_TEST_FEATURES").is_none(),
+                "meerkat-runtime: this repository's test builds need the crate's test features: \
+                 `cargo test -p meerkat-runtime --features test-support,sqlite-store,live,local-authorization` \
+                 (core-workspace-args.mjs --tests prints the flags for any selection)"
+            );
+        }
+    }
+
+    #[used]
+    static REQUIRE: fn() = require::<()>;
+}
+
 #[cfg(target_arch = "wasm32")]
 pub mod tokio {
     pub use meerkat_core::time_compat::wasm as time;
@@ -43,6 +79,8 @@ pub mod tokio {
 pub use ::tokio;
 
 pub mod accept;
+#[cfg(all(feature = "local-authorization", not(target_arch = "wasm32")))]
+pub mod approval_grants;
 pub mod auth_machine;
 pub mod bounded_submit;
 pub mod coalescing;
@@ -104,6 +142,7 @@ pub mod protocol_supervisor_trust_publish;
 pub mod protocol_supervisor_trust_revoke;
 pub mod recovery;
 pub mod resumed_run_admission;
+pub mod retained_run;
 pub mod retained_work;
 pub(crate) mod run_progress;
 pub mod run_stop;
@@ -644,9 +683,9 @@ pub use meerkat_machine::{
     RuntimeSessionRegistrationOutcome, RuntimeSessionRegistrationUse,
     RuntimeSessionRegistrationWitness, RuntimeSessionUnregisterAdmission,
     RuntimeSessionUnregisterObserver, RuntimeSessionUnregisterUseAdmission,
-    SessionDurabilityReloadRequired, StagedCustodyRelease, StagedMeerkatMachine,
-    StandaloneSessionRuntimeAuthorities, StoppedRegistrationTakeover, UnregisterQueuedInputs,
-    UnregisterQueuedInputsError, classify_runtime_lifecycle_state,
+    SessionDurabilityReloadRequired, SessionDurableWork, SessionWorkState, StagedCustodyRelease,
+    StagedMeerkatMachine, StandaloneSessionRuntimeAuthorities, StoppedRegistrationTakeover,
+    UnregisterQueuedInputs, UnregisterQueuedInputsError, classify_runtime_lifecycle_state,
     classify_runtime_loop_queue_admission, standalone_session_runtime_authorities,
     standalone_tool_visibility_owner,
 };
@@ -692,6 +731,7 @@ pub use resumed_run_admission::{
     RESUMED_RUN_ADMISSION_RETRY_DELAY, ResumedRunAdmission, ResumedRunAdmissionDecision,
     ResumedRunAdmissionRequest,
 };
+pub use retained_run::{RetainedRunSettledInput, RetainedRunSettlement};
 pub use run_stop::{RunStopContributor, RunStopReceipt};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_hosting::spawn_blocking_holding_claim;
@@ -748,6 +788,59 @@ where
     })
     .join()
     .expect("test peer-comms authority thread should finish")
+}
+
+/// Executor contract check for
+/// [`CoreExecutor::cancel_after_boundary`](meerkat_core::lifecycle::CoreExecutor::cancel_after_boundary):
+/// a boundary cancel the runtime loop applies while no run is active is a
+/// no-op that returns `Ok`, so the loop keeps serving the session.
+///
+/// `session_id` must be registered on `machine` with the executor under test,
+/// attached with no run in flight, and the executor must be able to run a
+/// prompt to completion. The check issues a boundary cancel, then admits a
+/// prompt and requires that it completes. The loop realizes the cancel
+/// before it takes the prompt, so a refused cancel shows as a session that no
+/// longer admits or completes input. Every shipped executor's crate runs it
+/// once against its own executor.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+#[doc(hidden)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub async fn assert_idle_boundary_cancel_keeps_the_session_serving(
+    machine: &MeerkatMachine,
+    session_id: &meerkat_core::SessionId,
+) {
+    machine
+        .cancel_after_boundary(session_id)
+        .await
+        .expect("an idle session accepts a boundary cancel");
+    let (outcome, completion) = machine
+        .accept_input_with_completion(
+            session_id,
+            Input::Prompt(PromptInput::new("boundary cancel conformance", None)),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the session still admits input after an idle boundary cancel: {error:?}")
+        });
+    assert!(
+        outcome.is_accepted(),
+        "the session still admits input after an idle boundary cancel: {outcome:?}"
+    );
+    let completion = completion.expect("the admitted prompt has a completion");
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), completion.wait())
+        .await
+        .expect("the prompt's completion arrives after an idle boundary cancel")
+        .unwrap_or_else(|error| {
+            panic!("the prompt completes after an idle boundary cancel: {error:?}")
+        });
+    assert!(
+        matches!(
+            outcome,
+            completion::CompletionOutcome::Completed(_)
+                | completion::CompletionOutcome::CompletedWithoutResult
+        ),
+        "the prompt completes after an idle boundary cancel: {outcome:?}"
+    );
 }
 
 /// Real MeerkatMachine authority for transport tests that must prove durable
@@ -1155,6 +1248,12 @@ pub mod machine_schema_exports {
         meerkat_machine_schema::catalog::dsl::durable_decision_schema_metadata()
             .attach_to(crate::decision::dsl::DurableDecisionMachineState::schema())
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn host_store_writer_fence_schema() -> meerkat_machine_schema::MachineSchema {
+        meerkat_machine_schema::catalog::dsl::host_store_writer_fence_schema_metadata()
+            .attach_to(crate::store::spi::writer_fence::HostStoreWriterFenceMachineState::schema())
+    }
 }
 pub use instruction_activation_admission::{
     InstructionActivationRuntimeRefusal, instruction_activation_admission_for_session_error,
@@ -1192,7 +1291,7 @@ pub use store::{
     PreparedRuntimeSessionCommitOutcome, PreparedRuntimeSessionCommitResult,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteBoundary,
     PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobRunRebase,
-    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RefusedScope,
+    PreparedWholeBlobRunRebaseStoreParts, QuarantinedToolGrant, RecoveryCommitStatus, RefusedScope,
     RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityListing,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,

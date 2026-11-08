@@ -13,6 +13,7 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_grant_authority_machine()
 }
 
+pub type DecisionId = meerkat_core::approval::decision::DecisionId;
 pub type DerivedChildRestrictions =
     meerkat_authorization_contracts::derived_child::DerivedChildRestrictions;
 pub type EvidenceId = meerkat_authorization_contracts::evidence::EvidenceId;
@@ -20,9 +21,13 @@ pub type ExecutionRestrictions =
     meerkat_authorization_contracts::constraints::ExecutionRestrictions;
 pub type GrantAuthorityIncarnation =
     meerkat_authorization_contracts::grant::GrantAuthorityIncarnation;
+pub type GrantOperationBinding =
+    meerkat_machine_schema::catalog::dsl::grant_authority::types::GrantOperationBinding;
 pub type GrantPrincipal =
     meerkat_machine_schema::catalog::dsl::grant_authority::types::GrantPrincipal;
 pub type GrantRecord = meerkat_machine_schema::catalog::dsl::grant_authority::types::GrantRecord;
+pub type OriginalWorkRef = meerkat_authorization_contracts::work_association::OriginalWorkRef;
+pub type Sha256Digest = meerkat_core::approval::decision::Sha256Digest;
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -45,6 +50,9 @@ pub struct State {
     pub revision: u64,
     pub records: std::collections::BTreeMap<EvidenceId, GrantRecord>,
     pub revoked: std::collections::BTreeSet<EvidenceId>,
+    pub spent: std::collections::BTreeMap<EvidenceId, u64>,
+    pub consumed: u64,
+    pub carried_decisions: std::collections::BTreeSet<DecisionId>,
 }
 impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,6 +73,15 @@ impl std::fmt::Debug for State {
             .field(
                 "revoked",
                 &format_args!("<redacted; {} entries>", self.revoked.len()),
+            )
+            .field(
+                "spent",
+                &format_args!("<redacted; {} entries>", self.spent.len()),
+            )
+            .field("consumed", &self.consumed)
+            .field(
+                "carried_decisions",
+                &format_args!("<redacted; {} entries>", self.carried_decisions.len()),
             )
             .finish()
     }
@@ -115,6 +132,7 @@ pub mod inputs {
         pub derived: DerivedChildRestrictions,
         pub chain: Vec<GrantRecord>,
         pub now_ms: u64,
+        pub terms_digest: Sha256Digest,
     }
     impl std::fmt::Debug for IssueChild {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -127,6 +145,7 @@ pub mod inputs {
                     &format_args!("<redacted; {} entries>", self.chain.len()),
                 )
                 .field("now_ms", &self.now_ms)
+                .field("terms_digest", &"<redacted>")
                 .finish()
         }
     }
@@ -150,6 +169,9 @@ pub mod inputs {
         pub incarnation: GrantAuthorityIncarnation,
         pub executor: GrantPrincipal,
         pub represented_subject: Option<GrantPrincipal>,
+        pub requester: Option<GrantPrincipal>,
+        pub work: Option<OriginalWorkRef>,
+        pub operation: Option<GrantOperationBinding>,
         pub leaf: GrantRecord,
         pub chain: Vec<GrantRecord>,
         pub now_ms: u64,
@@ -165,12 +187,54 @@ pub mod inputs {
                     "represented_subject",
                     &self.represented_subject.as_ref().map(|_| "<redacted>"),
                 )
+                .field("requester", &self.requester.as_ref().map(|_| "<redacted>"))
+                .field("work", &self.work.as_ref().map(|_| "<redacted>"))
+                .field("operation", &self.operation.as_ref().map(|_| "<redacted>"))
                 .field("leaf", &"<redacted>")
                 .field(
                     "chain",
                     &format_args!("<redacted; {} entries>", self.chain.len()),
                 )
                 .field("now_ms", &self.now_ms)
+                .finish()
+        }
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeUse {
+        pub namespace: EvidenceId,
+        pub generation: u64,
+        pub incarnation: GrantAuthorityIncarnation,
+        pub executor: GrantPrincipal,
+        pub represented_subject: Option<GrantPrincipal>,
+        pub requester: Option<GrantPrincipal>,
+        pub work: Option<OriginalWorkRef>,
+        pub operation: Option<GrantOperationBinding>,
+        pub leaf: GrantRecord,
+        pub chain: Vec<GrantRecord>,
+        pub now_ms: u64,
+        pub approver_current: bool,
+    }
+    impl std::fmt::Debug for ConsumeUse {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ConsumeUse")
+                .field("namespace", &"<redacted>")
+                .field("generation", &self.generation)
+                .field("incarnation", &"<redacted>")
+                .field("executor", &"<redacted>")
+                .field(
+                    "represented_subject",
+                    &self.represented_subject.as_ref().map(|_| "<redacted>"),
+                )
+                .field("requester", &self.requester.as_ref().map(|_| "<redacted>"))
+                .field("work", &self.work.as_ref().map(|_| "<redacted>"))
+                .field("operation", &self.operation.as_ref().map(|_| "<redacted>"))
+                .field("leaf", &"<redacted>")
+                .field(
+                    "chain",
+                    &format_args!("<redacted; {} entries>", self.chain.len()),
+                )
+                .field("now_ms", &self.now_ms)
+                .field("approver_current", &self.approver_current)
                 .finish()
         }
     }
@@ -183,6 +247,7 @@ pub enum Input {
     IssueChild(inputs::IssueChild),
     Revoke(inputs::Revoke),
     ResolveUse(inputs::ResolveUse),
+    ConsumeUse(inputs::ConsumeUse),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -192,6 +257,7 @@ impl Input {
             Self::IssueChild(_) => InputKind::IssueChild,
             Self::Revoke(_) => InputKind::Revoke,
             Self::ResolveUse(_) => InputKind::ResolveUse,
+            Self::ConsumeUse(_) => InputKind::ConsumeUse,
         }
     }
 }
@@ -202,6 +268,7 @@ pub enum InputKind {
     IssueChild,
     Revoke,
     ResolveUse,
+    ConsumeUse,
 }
 
 pub mod effects {
@@ -242,6 +309,17 @@ pub mod effects {
                 .finish()
         }
     }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct UseConsumed {
+        pub leaf: GrantRecord,
+    }
+    impl std::fmt::Debug for UseConsumed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("UseConsumed")
+                .field("leaf", &"<redacted>")
+                .finish()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -250,6 +328,7 @@ pub enum Effect {
     Issued(effects::Issued),
     Revoked(effects::Revoked),
     UseResolved(effects::UseResolved),
+    UseConsumed(effects::UseConsumed),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -257,6 +336,7 @@ pub enum EffectKind {
     Issued,
     Revoked,
     UseResolved,
+    UseConsumed,
 }
 
 #[allow(non_camel_case_types)]
@@ -268,6 +348,8 @@ pub enum TransitionId {
     RevokeNew,
     RevokeAlready,
     ResolveUse,
+    ConsumeUse,
+    ConsumeUseRefusedApproverRevoked,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -347,5 +429,8 @@ pub fn initial_state() -> State {
         revision: 0,
         records: Default::default(),
         revoked: Default::default(),
+        spent: Default::default(),
+        consumed: 0,
+        carried_decisions: Default::default(),
     }
 }

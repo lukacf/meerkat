@@ -41,7 +41,10 @@ use crate::auth_store::{
     CredentialMutationError, CredentialMutationFn, CredentialMutationOutcome, PersistedAuthMode,
     PersistedTokens, TokenKey, TokenStore, TokenStoreAccess,
 };
-use meerkat_core::{AdministrationEntry, AdministrationEntryRefusal, EnteredAdministration};
+use meerkat_core::{
+    AdministeredChange, AdministrationEntry, AdministrationEntryRefusal, AdministrationOutcome,
+    EnteredAdministration,
+};
 
 /// The metadata member of a profile's custody row that holds its
 /// non-secret facts; the secret is the row's primary secret.
@@ -643,7 +646,11 @@ impl McpOAuthAuthority {
     /// slot's current profile was read and immediately before anything is
     /// written; a refusal writes nothing
     /// ([`McpOAuthClientProfileRefusal::NotAdmitted`]). The admission is
-    /// held until the write's durable result is known. A write that fails
+    /// held until the write's durable result is known. An admission that
+    /// states its administrator ([`EnteredAdministration::administered_by`])
+    /// hands the host's recorder one record then, also when the caller
+    /// stopped waiting: the slot's install, replace or removal, committed
+    /// or unknown. A write that fails
     /// may have left the slot's profile in any state: read it back with
     /// [`Self::client_profile`]. The caller is the host's authenticated
     /// administrator: this method is not an authentication.
@@ -813,26 +820,72 @@ async fn write_profile_update(
         }
         (ProfileUpdate::Install(..), None) | (ProfileUpdate::Remove, _) => {}
     }
-    let admission = entry.enter().map_err(|refusal| {
-        profile_refusal(target, McpOAuthClientProfileRefusal::NotAdmitted(refusal))
-    })?;
+    let change = administered_change(target, &update);
+    let admission = entry
+        .enter()
+        .map_err(|refusal| {
+            profile_refusal(target, McpOAuthClientProfileRefusal::NotAdmitted(refusal))
+        })?
+        .for_change(change);
     *entered.lock() = Some(admission);
+    let written = async {
+        match update {
+            ProfileUpdate::Install(record, secret) | ProfileUpdate::Replace(record, secret) => {
+                let row = client_profile_row(&record, &secret)?;
+                store
+                    .save_for(fence, key, &row, TokenStoreAccess::Interactive)
+                    .await
+                    .map_err(mcp_store_error)?;
+                Ok(CredentialMutationOutcome::Persisted(row))
+            }
+            ProfileUpdate::Remove => {
+                store
+                    .clear_for(fence, key, TokenStoreAccess::Interactive)
+                    .await
+                    .map_err(mcp_store_error)?;
+                Ok(CredentialMutationOutcome::Cleared)
+            }
+        }
+    }
+    .await;
+    // The write's durable result is known: the admission's record says how
+    // it ended, whoever releases the admission last.
+    if let Some(admission) = entered.lock().as_mut() {
+        admission.settle(if written.is_ok() {
+            AdministrationOutcome::Committed
+        } else {
+            AdministrationOutcome::Unknown
+        });
+    }
+    written
+}
+
+/// What `update` of `target`'s slot changes, as its admission's record
+/// names it: the slot, by its server, realm and credential binding. Never
+/// the client's secret, and never the server's URL, which can carry
+/// credentials in its userinfo or its query.
+fn administered_change(target: &McpServerIdentity, update: &ProfileUpdate) -> AdministeredChange {
+    let (realm, server, slot) = (
+        target.realm().cloned(),
+        target.server_name().to_owned(),
+        target.binding_slug(),
+    );
     match update {
-        ProfileUpdate::Install(record, secret) | ProfileUpdate::Replace(record, secret) => {
-            let row = client_profile_row(&record, &secret)?;
-            store
-                .save_for(fence, key, &row, TokenStoreAccess::Interactive)
-                .await
-                .map_err(mcp_store_error)?;
-            Ok(CredentialMutationOutcome::Persisted(row))
-        }
-        ProfileUpdate::Remove => {
-            store
-                .clear_for(fence, key, TokenStoreAccess::Interactive)
-                .await
-                .map_err(mcp_store_error)?;
-            Ok(CredentialMutationOutcome::Cleared)
-        }
+        ProfileUpdate::Install(..) => AdministeredChange::McpOauthClientProfileInstall {
+            realm,
+            server,
+            slot,
+        },
+        ProfileUpdate::Replace(..) => AdministeredChange::McpOauthClientProfileReplace {
+            realm,
+            server,
+            slot,
+        },
+        ProfileUpdate::Remove => AdministeredChange::McpOauthClientProfileRemove {
+            realm,
+            server,
+            slot,
+        },
     }
 }
 

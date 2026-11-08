@@ -2,22 +2,19 @@ import { CONSOLE_COMMAND_NAMES } from "./headless";
 
 // ── WorkGraph operator action helpers ───────────────────────────────────────
 //
-// Console operator mutations are CAS-guarded: every request must echo the
-// latest revision of the item (claim/close, goal confirm/request-close CAS
+// Console operator mutations are CAS-guarded: every request echoes the
+// revision of the item (claim/close/release, goal confirm/request-close CAS
 // against the goal WORK ITEM) or the binding's machine state (attention
-// pause/resume/reassign). When the UI never observed a revision, these
-// helpers fetch the live one instead of guessing — sending 0 is a guaranteed
-// conflict. Resolution failures throw so callers surface the error banner
-// and never dispatch the mutation.
+// pause/resume/reassign) that the card or panel row showed. An action is
+// never sent with a revision read at the click: that would apply it to a
+// state the viewer never saw, so another person's change would go
+// unnoticed. A card that showed no revision sends nothing; the console says
+// so and reads the entity again, so the next action names a revision the
+// viewer saw.
 
-/// Console-issued workgraph command executor, already bound to the workgraph
-/// workbench target. Injected so the resolution paths are testable.
-export type WorkGraphCommandRunner = (
-  command:
-    | typeof CONSOLE_COMMAND_NAMES.workgraphGet
-    | typeof CONSOLE_COMMAND_NAMES.workgraphGoalStatus,
-  params: Record<string, unknown>,
-) => Promise<unknown>;
+/// What the console says when a card or row showed no revision to act on.
+export const WORKGRAPH_UNOBSERVED_REVISION_MESSAGE =
+  "The console did not show the version this would change, so nothing was changed. It has been read again: check it, then try again.";
 
 /// JSON-RPC code of the retryable CAS-conflict class every workgraph
 /// mutation can return (`WORKGRAPH_CONFLICT_CODE` in rpc.rs, with
@@ -55,69 +52,31 @@ export function workGraphConflictRefreshRequest(
   return null;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
+/// The part of a work item `workGraphClaimOwnedBy` reads.
+export interface WorkGraphClaimedItem {
+  claim?: { owner?: { key?: { kind?: string | null; id?: string | null } | null } | null } | null;
 }
 
-function revisionOfItem(result: unknown): number | undefined {
-  const item = asRecord(asRecord(result)?.item);
-  return typeof item?.revision === "number" ? item.revision : undefined;
+/// Whether `principal` owns the claim on `item`. The gateway owns a console
+/// claim by its caller's principal; no principal owns nothing.
+export function workGraphClaimOwnedBy(
+  item: WorkGraphClaimedItem,
+  principal: string | undefined,
+): boolean {
+  const key = item.claim?.owner?.key;
+  return Boolean(principal) && key?.kind === "principal" && key.id === principal;
 }
 
-/// Live revision of one work item via `meta/workgraph/get`.
-export async function resolveWorkGraphItemRevision(
-  run: WorkGraphCommandRunner,
-  itemId: string,
-): Promise<number> {
-  const result = await run(CONSOLE_COMMAND_NAMES.workgraphGet, { id: itemId });
-  const revision = revisionOfItem(result);
-  if (revision === undefined) {
-    throw new Error(`could not resolve the current revision of work item ${itemId}`);
-  }
-  return revision;
-}
-
-/// Live revision of the goal WORK ITEM behind an attention binding via
-/// `meta/workgraph/goal/status` — the CAS token goal confirm/request-close
-/// must echo.
-export async function resolveWorkGraphGoalItemRevision(
-  run: WorkGraphCommandRunner,
-  bindingId: string,
-): Promise<number> {
-  const result = await run(CONSOLE_COMMAND_NAMES.workgraphGoalStatus, { binding_id: bindingId });
-  const revision = revisionOfItem(result);
-  if (revision === undefined) {
-    throw new Error(`could not resolve the goal item revision for binding ${bindingId}`);
-  }
-  return revision;
-}
-
-/// Live machine revision of an attention binding via
-/// `meta/workgraph/goal/status` — the CAS token attention
-/// pause/resume/reassign must echo.
-export async function resolveWorkGraphBindingRevision(
-  run: WorkGraphCommandRunner,
-  bindingId: string,
-): Promise<number> {
-  const result = await run(CONSOLE_COMMAND_NAMES.workgraphGoalStatus, { binding_id: bindingId });
-  const machineState = asRecord(asRecord(asRecord(result)?.attention)?.machine_state);
-  const revision = typeof machineState?.revision === "number" ? machineState.revision : undefined;
-  if (revision === undefined) {
-    throw new Error(`could not resolve the machine revision of attention binding ${bindingId}`);
-  }
-  return revision;
-}
-
-/// Owner id stamped on console-issued claims. The authenticated operator
-/// (the experience `access.subject`, same identity the console ABAC layer
-/// authorizes against) wins; the static ops-lead id is only a fallback for
-/// runtimes without console auth.
-export function workGraphClaimOwnerId(
-  subject: string | null | undefined,
-  fallback: string,
-): string {
-  const trimmed = typeof subject === "string" ? subject.trim() : "";
-  return trimmed || fallback;
+/// Whether the caller may release the claim on `item` from the console: the
+/// claim's owner may, and so may an access admin (a caller with a principal
+/// whom `whoami` reports as able to administer access), whose release the
+/// gateway records with the claim it released. Nobody releases an item
+/// without a claim.
+export function workGraphMayRelease(
+  item: WorkGraphClaimedItem,
+  caller: { principal?: string; canAdminister?: boolean },
+): boolean {
+  if (!item.claim) return false;
+  return workGraphClaimOwnedBy(item, caller.principal)
+    || (Boolean(caller.principal) && caller.canAdminister === true);
 }

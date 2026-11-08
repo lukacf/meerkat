@@ -883,7 +883,13 @@ export interface ToolGrantTargetFamily {
   kind: "family";
 }
 
-export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily;
+export interface ToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
+export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily | ToolGrantTargetMcpServer;
 
 export interface WireToolGrantSubjectSession {
   kind: "session";
@@ -913,14 +919,21 @@ export interface WireToolGrantTargetFamily {
   names?: string[];
 }
 
+export interface WireToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
 export interface WireToolGrantTargetUnknown {
   kind: "unknown";
 }
 
-export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown;
+export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetMcpServer | WireToolGrantTargetUnknown;
 
 export interface WireToolGrantIssuerOperator {
   caller?: string | null;
+  decision_ref?: string | null;
   kind: "operator";
 }
 
@@ -937,7 +950,7 @@ export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIss
 
 export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "unknown";
 
-export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "unknown";
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "build" | "unknown";
 
 export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
 
@@ -980,6 +993,189 @@ export interface WireToolGrantAuditEventUnknown {
 }
 
 export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
+
+export type WireToolGrantApplies = "now" | "not_mounted" | "at_next_build" | "unknown";
+
+export interface DecisionAudienceApprover {
+  approver_id: string;
+  kind: "approver";
+}
+
+export interface DecisionAudienceReviewer {
+  kind: "reviewer";
+  reviewer: string;
+}
+
+export type DecisionAudienceRequest = DecisionAudienceApprover | DecisionAudienceReviewer;
+
+export type WireDecisionPhase = "open" | "approved" | "rejected" | "expired" | "withdrawn" | "executed" | "execution_refused" | "unknown";
+
+export type WireDecisionStage = "human" | "review" | "unknown";
+
+export type WireDecisionNoticeState = "not_required" | "not_due" | "owed" | "delivered" | "failed" | "unknown";
+
+export type WireDecisionNoticeEvent = "presented" | "unknown";
+
+export type WireDecisionTier = "human" | "review" | "unknown";
+
+export type WireDecisionAssurance = "person_authenticated" | "service_credential" | "device_trusted" | "unknown";
+
+export type WireDecisionReviewVerdict = "allow" | "deny" | "escalate" | "unknown";
+
+export interface WirePresentationAudienceApprover {
+  approver_id: string;
+  kind: "approver";
+}
+
+export interface WirePresentationAudienceReviewer {
+  kind: "reviewer";
+  reviewer: string;
+}
+
+export interface WirePresentationAudienceUnknown {
+  kind: "unknown";
+}
+
+export type WirePresentationAudience = WirePresentationAudienceApprover | WirePresentationAudienceReviewer | WirePresentationAudienceUnknown;
+
+export interface WireDecisionEvidenceHuman {
+  approve: boolean;
+  approver_id: string;
+  assurance: WireDecisionAssurance;
+  decider: string;
+  event_ref: string;
+  ingress: string;
+  kind: "human";
+  observed_at_ms?: number | null;
+  presentation?: Record<string, unknown> | null;
+  presented_digest: string;
+  reason?: string | null;
+}
+
+export interface WireDecisionEvidenceReview {
+  feedback?: string | null;
+  kind: "review";
+  origin_session: string;
+  presented_digest: string;
+  reviewer: string;
+  verdict: WireDecisionReviewVerdict;
+  verdict_call_ref: string;
+}
+
+export interface WireDecisionEvidenceUnknown {
+  kind: "unknown";
+}
+
+export type WireDecisionEvidence = WireDecisionEvidenceHuman | WireDecisionEvidenceReview | WireDecisionEvidenceUnknown;
+
+export interface WireDecisionRefusalInvalidWindow {
+  kind: "invalid_window";
+}
+
+export interface WireDecisionRefusalSelfReview {
+  kind: "self_review";
+}
+
+export interface WireDecisionRefusalHoldConflict {
+  kind: "hold_conflict";
+}
+
+export interface WireDecisionRefusalNotOpen {
+  kind: "not_open";
+}
+
+export interface WireDecisionRefusalExpired {
+  kind: "expired";
+}
+
+export interface WireDecisionRefusalSubjectChanged {
+  kind: "subject_changed";
+}
+
+export interface WireDecisionRefusalPresentationIncomplete {
+  kind: "presentation_incomplete";
+}
+
+export interface WireDecisionRefusalWrongAudience {
+  kind: "wrong_audience";
+}
+
+export interface WireDecisionRefusalReviewStage {
+  kind: "review_stage";
+}
+
+export interface WireDecisionRefusalHumanStage {
+  kind: "human_stage";
+}
+
+export interface WireDecisionRefusalEvidenceRequired {
+  kind: "evidence_required";
+}
+
+export interface WireDecisionRefusalNotEligible {
+  kind: "not_eligible";
+}
+
+export interface WireDecisionRefusalSelfApproval {
+  kind: "self_approval";
+}
+
+export interface WireDecisionRefusalWrongReviewer {
+  kind: "wrong_reviewer";
+}
+
+export interface WireDecisionRefusalNotRequester {
+  kind: "not_requester";
+}
+
+export interface WireDecisionRefusalNotApproved {
+  kind: "not_approved";
+}
+
+export interface WireDecisionRefusalBindingMismatch {
+  kind: "binding_mismatch";
+}
+
+export interface WireDecisionRefusalNotAuthorized {
+  kind: "not_authorized";
+}
+
+export interface WireDecisionRefusalSettlementOwed {
+  kind: "settlement_owed";
+}
+
+export interface WireDecisionRefusalNotOwed {
+  kind: "not_owed";
+}
+
+export interface WireDecisionRefusalDecidedBeforePresentation {
+  kind: "decided_before_presentation";
+}
+
+export type WireDecisionRefusal = WireDecisionRefusalInvalidWindow | WireDecisionRefusalSelfReview | WireDecisionRefusalHoldConflict | WireDecisionRefusalNotOpen | WireDecisionRefusalExpired | WireDecisionRefusalSubjectChanged | WireDecisionRefusalPresentationIncomplete | WireDecisionRefusalWrongAudience | WireDecisionRefusalReviewStage | WireDecisionRefusalHumanStage | WireDecisionRefusalEvidenceRequired | WireDecisionRefusalNotEligible | WireDecisionRefusalSelfApproval | WireDecisionRefusalWrongReviewer | WireDecisionRefusalNotRequester | WireDecisionRefusalNotApproved | WireDecisionRefusalBindingMismatch | WireDecisionRefusalNotAuthorized | WireDecisionRefusalSettlementOwed | WireDecisionRefusalNotOwed | WireDecisionRefusalDecidedBeforePresentation;
+
+export interface WireDecisionErrorDataDecisionRefused {
+  decision_refusal: WireDecisionRefusal;
+  kind: "decision_refused";
+}
+
+export interface WireDecisionErrorDataDecisionNotFound {
+  kind: "decision_not_found";
+}
+
+export interface WireDecisionErrorDataDecisionUnreadable {
+  kind: "decision_unreadable";
+}
+
+export interface WireDecisionErrorDataCandidateLaunch {
+  kind: "candidate_launch";
+}
+
+export interface WireDecisionErrorDataNoDecisionStore {
+  kind: "no_decision_store";
+}
+
+export type WireDecisionErrorData = WireDecisionErrorDataDecisionRefused | WireDecisionErrorDataDecisionNotFound | WireDecisionErrorDataDecisionUnreadable | WireDecisionErrorDataCandidateLaunch | WireDecisionErrorDataNoDecisionStore;
 
 export interface ActivateInstructionParams {
   activation: Record<string, unknown>;
@@ -1573,7 +1769,25 @@ export interface WireUnreadableToolGrantAuditRow {
   sequence: number;
 }
 
+export interface WireToolGrantGateEntries {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
+export interface WireToolGrantGateView {
+  gated?: WireToolGrantGateEntries;
+  not_mounted?: WireToolGrantGateEntries;
+}
+
+export interface WireMemberToolGrantGate {
+  next_build: WireToolGrantGateView;
+  running?: WireToolGrantGateView | null;
+}
+
 export interface GrantToolParams {
+  decision_ref?: string | null;
   duration_ms?: number | null;
   expires_at_ms?: number | null;
   reason?: string | null;
@@ -1582,6 +1796,7 @@ export interface GrantToolParams {
 }
 
 export interface GrantToolResult {
+  applies?: WireToolGrantApplies | null;
   grant: WireToolGrant;
 }
 
@@ -1601,6 +1816,7 @@ export interface ListToolGrantsParams {
 }
 
 export interface ListToolGrantsResult {
+  gate?: WireMemberToolGrantGate | null;
   grants: WireToolGrant[];
   unreadable?: WireUnreadableToolGrant[];
 }
@@ -1615,6 +1831,146 @@ export interface ToolGrantAuditResult {
   next_sequence?: number | null;
   rows: WireToolGrantAuditRow[];
   unreadable?: WireUnreadableToolGrantAuditRow[];
+}
+
+export interface WireCanonicalPart {
+  count: number;
+  index: number;
+  part_digest: string;
+}
+
+export interface WirePresentationLink {
+  reference: string;
+  served_digest: string;
+}
+
+export interface WirePresentationRecord {
+  at_ms: number;
+  audience: WirePresentationAudience;
+  channel_ref: string;
+  link?: WirePresentationLink | null;
+  max_part_bytes?: number | null;
+  message_ref: string;
+  parts_shown: WireCanonicalPart[];
+  subject_digest: string;
+}
+
+export interface WireDecisionOutcome {
+  evidence: WireDecisionEvidence;
+  tier: WireDecisionTier;
+}
+
+export interface WireDecisionEffect {
+  grant_id?: string | null;
+}
+
+export interface WireDecision {
+  approver_id: string;
+  created_at_ms: number;
+  deadline_at_ms: number;
+  decided_at_ms?: number | null;
+  decision_id: string;
+  effect?: WireDecisionEffect | null;
+  ended_at_ms?: number | null;
+  execution_refusal?: string | null;
+  first_presented_to_approver_at_ms?: number | null;
+  kind: string;
+  notice: WireDecisionNoticeState;
+  operation_id: string;
+  outcome?: WireDecisionOutcome | null;
+  permit_issued: boolean;
+  phase: WireDecisionPhase;
+  presentations?: WirePresentationRecord[];
+  renderer: string;
+  request?: unknown;
+  request_digest: string;
+  requester: string;
+  reviewer?: string | null;
+  revision: number;
+  stage: WireDecisionStage;
+  subject_digest: string;
+  subject_key: string;
+}
+
+export interface WireUnreadableDecision {
+  decision_id: string;
+  detail: string;
+}
+
+export interface DecisionPresentationRequest {
+  at_ms: number;
+  audience: DecisionAudienceRequest;
+  channel_ref: string;
+  link?: WirePresentationLink | null;
+  max_part_bytes?: number | null;
+  message_ref: string;
+  parts_shown: WireCanonicalPart[];
+  subject_digest: string;
+}
+
+export interface DecisionListParams {
+  after?: string | null;
+  approver_id?: string | null;
+  kind?: string | null;
+  limit?: number | null;
+  phase?: WireDecisionPhase | null;
+  requester?: string | null;
+}
+
+export interface DecisionListResult {
+  decisions: WireDecision[];
+  next_after?: string | null;
+  unreadable?: WireUnreadableDecision[];
+}
+
+export interface DecisionGetParams {
+  decision_id: string;
+  include_request?: boolean;
+}
+
+export interface DecisionResult {
+  decision: WireDecision;
+}
+
+export interface DecisionRenderingParams {
+  decision_id: string;
+  max_part_bytes?: number | null;
+}
+
+export interface DecisionRenderingResult {
+  decision_id: string;
+  max_part_bytes?: number | null;
+  parts: WireCanonicalPart[];
+  renderer: string;
+  rendering: string;
+  subject_digest: string;
+}
+
+export interface DecisionPresentParams {
+  decision_id: string;
+  presentation: DecisionPresentationRequest;
+}
+
+export interface DecisionWithdrawParams {
+  decision_id: string;
+}
+
+export interface WireDecisionNoticePresentation {
+  parts: WireCanonicalPart[];
+  renderer: string;
+  rendering: string;
+  subject_digest: string;
+}
+
+export interface WireDecisionNotice {
+  approver_id: string;
+  decision_id: string;
+  event: WireDecisionNoticeEvent;
+  kind: string;
+  notice_id: string;
+  phase: WireDecisionPhase;
+  presentation?: WireDecisionNoticePresentation | null;
+  requester: string;
 }
 
 export interface CallbackToolExecutionFast {
@@ -2082,10 +2438,18 @@ export interface WireMemberCustodyDeferral {
   restore: WireMemberCustodyRestore;
 }
 
+export interface WireGrantGatedTools {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
 export interface WireMobToolConfig {
   builtins?: boolean;
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -2668,6 +3032,7 @@ export interface MobProfileDeleteResult {
 
 export interface MobStreamOpenParams {
   agent_identity?: string | null;
+  cursor?: MobStreamCursor | null;
   mob_id: string;
 }
 
@@ -3002,6 +3367,7 @@ export interface MobToolConfigInput {
   bundles?: string[];
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -3234,6 +3600,11 @@ export interface WireProviderParamsOverride {
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;
+}
+
+export interface MobStreamCursor {
+  epoch: string;
+  seq: number;
 }
 
 export interface AttentionBindingRequest {
@@ -3747,7 +4118,7 @@ export interface WireFlowTurnOutcomeInteractionFailed {
 
 export type WireFlowTurnOutcome = "run_completed" | "extraction_succeeded" | "interaction_complete" | "interaction_callback_pending" | "channel_closed" | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed;
 
-export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable";
+export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable" | "source_unavailable";
 
 export type ConnectionTargetErrorKind = "missing_realm" | "unknown_realm" | "missing_default_binding" | "invalid_realm_id" | "invalid_binding_id" | "realm_config_invalid" | "binding_invalid" | "provider_mismatch" | "realm_chain";
 
@@ -4184,7 +4555,7 @@ export type WireReachability = "reachable" | "stale" | "unreachable" | "unknown"
 
 export type WireNonPortableResourceKind = "rust_bundles" | "per_spawn_external_tools" | "mob_default_external_tools" | "default_llm_client_override" | "host_surface_mcp_allowlist" | "workgraph_tools";
 
-export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring";
+export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring" | "store_refused";
 
 export type WireMemberRegistrationHookCall = "select_destination" | "select_agent_mandate" | "prepare_member_surface" | "verify_member_surface";
 
@@ -7182,7 +7553,12 @@ export interface WireAuthErrorCredentialStoreUnavailable {
   kind: "credential_store_unavailable";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable;
+export interface WireAuthErrorSourceUnavailable {
+  detail: string;
+  kind: "source_unavailable";
+}
+
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable;
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 

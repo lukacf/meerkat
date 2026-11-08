@@ -726,6 +726,7 @@ async fn an_unused_peer_send_ticket_refuses_after_its_run_is_consumed() {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

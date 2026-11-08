@@ -277,7 +277,7 @@ impl MetaDocuments {
     pub(crate) async fn read(&self, key: &str) -> Result<Option<Arc<Vec<u8>>>, MetaDocumentError> {
         let id = ScopeId::new(META_DOCUMENT_FAMILY, key);
         let mut guards = self.realm.lock_scopes(std::slice::from_ref(&id)).await;
-        let Some(state) = guards.pop() else {
+        let Some(mut state) = guards.pop() else {
             return Err(MetaDocumentError::Store {
                 key: key.to_string(),
                 error: SpiError::Misuse("a locked document scope is missing".to_string()),
@@ -291,7 +291,7 @@ impl MetaDocuments {
         }
         let mut pinned = self
             .realm
-            .pinned_values(&state)
+            .pinned_values(&mut state)
             .await
             .map_err(Self::store_error(key))?;
         Ok(pinned.remove(DOCUMENT_ENTRY))
@@ -329,7 +329,7 @@ impl MetaDocuments {
         let guards = self.realm.lock_scopes(std::slice::from_ref(&id)).await;
         let mut scopes = ArmedScopes::new(Arc::clone(&self.realm), guards);
         let current = {
-            let Some(state) = scopes.guards().first() else {
+            let Some(state) = scopes.guards_mut().first_mut() else {
                 return Err(MetaDocumentError::Store {
                     key: key.to_string(),
                     error: SpiError::Misuse("a locked document scope is missing".to_string()),

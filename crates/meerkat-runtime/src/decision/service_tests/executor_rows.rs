@@ -1,13 +1,13 @@
-//! Rows of the decision executor loop: one executor per store, in this
-//! process and across opens of a SQLite store; settle first after a
-//! restart; the approver's currentness at execution; retries, refusals and
-//! notices; the deadline; and a candidate launch that starts none.
+//! Rows of the decision executor loop: one executor per store and kind, in
+//! this process and across opens of a SQLite store, and never beside an
+//! executor of 0.9.10; settle first after a restart; the approver's
+//! currentness at execution; retries, refusals and notices; the deadline;
+//! and a candidate launch that starts none.
 
 use std::collections::{BTreeMap, VecDeque};
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use meerkat_store::approval_decision_store::APPROVAL_DECISIONS_FILE;
 
 use super::*;
 use crate::decision::{
@@ -37,6 +37,10 @@ struct ScriptedOwner {
     record_readable: AtomicBool,
     delivers: AtomicBool,
     calls: Mutex<Vec<(&'static str, DecisionId)>>,
+    /// How many times the loop asked this owner to sweep.
+    sweeps: AtomicUsize,
+    /// What the next sweep answers.
+    swept: Mutex<Vec<(DecisionId, DecisionPassOutcome)>>,
 }
 
 impl ScriptedOwner {
@@ -49,7 +53,18 @@ impl ScriptedOwner {
             record_readable: AtomicBool::new(true),
             delivers: AtomicBool::new(true),
             calls: Mutex::default(),
+            sweeps: AtomicUsize::new(0),
+            swept: Mutex::default(),
         })
+    }
+
+    /// The next sweep answers `outcomes`.
+    fn sweep_answers(&self, outcomes: impl IntoIterator<Item = (DecisionId, DecisionPassOutcome)>) {
+        self.swept.lock().expect("swept").extend(outcomes);
+    }
+
+    fn sweeps(&self) -> usize {
+        self.sweeps.load(Ordering::SeqCst)
     }
 
     /// The owner of the rows' `release` decisions.
@@ -187,6 +202,11 @@ impl DecisionExecutor for ScriptedOwner {
                 session_id: SessionId::new(),
                 input_id: format!("notice-{}", decision.decision_id),
             })
+    }
+
+    async fn sweep(&self) -> Vec<(DecisionId, DecisionPassOutcome)> {
+        self.sweeps.fetch_add(1, Ordering::SeqCst);
+        std::mem::take(&mut *self.swept.lock().expect("swept"))
     }
 }
 
@@ -331,55 +351,197 @@ fn a_pass_can_run_on_a_spawned_task() {
     assert_send(&pass);
 }
 
-#[test]
-fn a_second_executor_of_a_store_is_refused_until_the_first_ends() {
-    let (store, clock, service) = fixture();
-    let other_owner = service_over(&store, &clock);
-    let owner = ScriptedOwner::release();
-    let approvers = Approvers::current();
-
-    let first = start(&service, &[&owner], &approvers).expect("the first executor");
-    assert_eq!(
-        start(&other_owner, &[&owner], &approvers).expect_err("a second executor"),
-        DecisionExecutorLoopError::Decision(DecisionError::ExecutorHeld)
-    );
-    assert_eq!(
-        start(&service, &[&owner], &approvers).expect_err("a second loop of the same owner"),
-        DecisionExecutorLoopError::Decision(DecisionError::ExecutorHeld)
-    );
-    drop(first);
-    let _second = start(&other_owner, &[&owner], &approvers).expect("once the first ends");
+fn release_kind() -> DecisionKind {
+    DecisionKind::new("release").expect("kind")
 }
 
-#[test]
-fn a_second_executor_of_a_sqlite_store_is_refused_across_opens() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let open = || {
-        let store: Arc<dyn DecisionStore> =
-            Arc::new(SqliteDecisionStore::in_store_path(dir.path()));
-        let clock: Arc<dyn DecisionClock> = ManualClock::at(HELD_AT);
-        DurableDecisionService::with_clock(store, clock)
-    };
-    let owner = ScriptedOwner::release();
+/// A service over the SQLite decision store under `store_path`, opened as
+/// another process opens it.
+fn sqlite_service(store_path: &std::path::Path) -> DurableDecisionService {
+    let store: Arc<dyn DecisionStore> = Arc::new(SqliteDecisionStore::in_store_path(store_path));
+    let clock: Arc<dyn DecisionClock> = ManualClock::at(HELD_AT);
+    DurableDecisionService::with_clock(store, clock)
+}
+
+#[tokio::test]
+async fn a_kind_held_elsewhere_is_reported_and_retried() {
+    let (store, clock, service) = fixture();
+    let other_owner = service_over(&store, &clock);
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let first_owner = ScriptedOwner::release();
+    let second_owner = ScriptedOwner::release();
     let approvers = Approvers::current();
 
-    let first = start(&open(), &[&owner], &approvers).expect("the first executor");
+    let first = start(&service, &[&first_owner], &approvers).expect("the first executor");
+    let mut second = start(&other_owner, &[&second_owner], &approvers)
+        .expect("a second executor of the kind starts without it");
+    let mut same_owner = start(&service, &[&second_owner], &approvers)
+        .expect("and so does a second loop of the same owner");
+    for executor in [&mut second, &mut same_owner] {
+        let held = executor.pass().await;
+        assert_eq!(
+            held.unclaimed,
+            vec![(release_kind(), DecisionError::ExecutorHeld)]
+        );
+        assert_eq!(
+            held.outcomes,
+            vec![(decision_id.clone(), DecisionPassOutcome::KindNotClaimed)]
+        );
+    }
     assert!(
-        dir.path()
-            .join("approval_decisions.executor.lock")
-            .is_file(),
-        "the claim holds a lock file beside the database"
+        second_owner.calls().is_empty(),
+        "a kind held elsewhere is not executed here"
     );
+    let waiting = store.stored(&decision_id);
+    assert_eq!(waiting.state.phase, DecisionPhase::Approved);
+    assert!(!waiting.state.permit_issued);
+
+    drop(first);
+    let claimed = second.pass().await;
+    assert!(claimed.unclaimed.is_empty(), "{:?}", claimed.unclaimed);
+    assert_eq!(
+        claimed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::Executed)],
+        "the next pass claims the kind once the first executor ends"
+    );
+    assert_eq!(second_owner.executions(), vec![decision_id]);
+    assert_eq!(
+        same_owner.pass().await.unclaimed,
+        vec![(release_kind(), DecisionError::ExecutorHeld)],
+        "and holds it from then on"
+    );
+    assert!(first_owner.calls().is_empty());
+}
+
+#[tokio::test]
+async fn two_runtimes_execute_their_own_kinds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rendering = rendering();
+    let holder = sqlite_service(dir.path());
+    let release_id = approved(&holder, &rendering);
+    let deploy_id = approved_of_kind(&holder, &rendering, "deploy", "artifact:build-7");
+    let release_owner = ScriptedOwner::release();
+    let deploy_owner = ScriptedOwner::of_kind("deploy");
+    let approvers = Approvers::current();
+
+    // Two runtimes over one store, each with its own open of it, as two
+    // processes are.
+    let mut releases = start(&sqlite_service(dir.path()), &[&release_owner], &approvers)
+        .expect("the executor of releases");
+    let mut deploys = start(&sqlite_service(dir.path()), &[&deploy_owner], &approvers)
+        .expect("the executor of deploys starts beside it");
+    for kind in ["release", "deploy"] {
+        assert!(
+            dir.path()
+                .join(format!("approval_decisions.executor.{kind}.lock"))
+                .is_file(),
+            "each kind's claim holds a lock file of its own"
+        );
+    }
+
+    let first = releases.pass().await;
+    assert!(first.unclaimed.is_empty(), "{:?}", first.unclaimed);
+    assert_eq!(
+        outcomes_of(&first),
+        BTreeMap::from([
+            (release_id.clone(), vec![DecisionPassOutcome::Executed]),
+            (deploy_id.clone(), vec![DecisionPassOutcome::NoExecutor]),
+        ])
+    );
+    let second = deploys.pass().await;
+    assert!(second.unclaimed.is_empty(), "{:?}", second.unclaimed);
+    assert_eq!(
+        outcomes_of(&second).get(&deploy_id),
+        Some(&vec![DecisionPassOutcome::Executed])
+    );
+    for decision_id in [&release_id, &deploy_id] {
+        assert_eq!(
+            holder.get(decision_id).expect("read").state.phase,
+            DecisionPhase::Executed
+        );
+    }
+    assert_eq!(release_owner.executions(), vec![release_id]);
+    assert_eq!(deploy_owner.executions(), vec![deploy_id]);
+
+    let mut late = start(&sqlite_service(dir.path()), &[&deploy_owner], &approvers)
+        .expect("a second executor of deploys starts without it");
+    assert_eq!(
+        late.pass().await.unclaimed,
+        vec![(
+            DecisionKind::new("deploy").expect("kind"),
+            DecisionError::ExecutorHeld
+        )],
+        "another open's executor holds the kind"
+    );
+    drop(deploys);
     assert!(
-        !dir.path().join(APPROVAL_DECISIONS_FILE).exists(),
-        "the claim creates no database"
+        late.pass().await.unclaimed.is_empty(),
+        "it claims the kind at its next pass once that executor ends"
+    );
+}
+
+#[tokio::test]
+async fn a_0910_loop_and_a_0911_loop_never_share_a_store() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let rendering = rendering();
+    let decision_id = approved(&sqlite_service(dir.path()), &rendering);
+    let owner = ScriptedOwner::release();
+    let approvers = Approvers::current();
+    let store_lock = dir.path().join("approval_decisions.executor.lock");
+    // The claim of a 0.9.10 executor: an exclusive OS lock on the store's
+    // lock file.
+    let lock_as_0910 = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&store_lock)
+            .expect("open the store's lock file")
+    };
+
+    let old_executor = lock_as_0910();
+    old_executor
+        .try_lock()
+        .expect("the 0.9.10 executor's claim");
+    let mut executor = start(&sqlite_service(dir.path()), &[&owner], &approvers)
+        .expect("a 0.9.11 loop starts beside a 0.9.10 executor");
+    let held = executor.pass().await;
+    assert_eq!(
+        held.unclaimed,
+        vec![(release_kind(), DecisionError::ExecutorHeld)]
     );
     assert_eq!(
-        start(&open(), &[&owner], &approvers).expect_err("another open's executor"),
-        DecisionExecutorLoopError::Decision(DecisionError::ExecutorHeld)
+        held.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::KindNotClaimed)]
     );
-    drop(first);
-    let _second = start(&open(), &[&owner], &approvers).expect("once the first ends");
+    assert!(
+        owner.calls().is_empty(),
+        "nothing executes beside a 0.9.10 executor"
+    );
+    drop(old_executor);
+
+    let claimed = executor.pass().await;
+    assert!(claimed.unclaimed.is_empty(), "{:?}", claimed.unclaimed);
+    assert_eq!(
+        claimed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::Executed)]
+    );
+
+    // While the 0.9.11 loop runs, a 0.9.10 executor is refused at its start.
+    let late_old_executor = lock_as_0910();
+    assert!(matches!(
+        late_old_executor.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    #[allow(deprecated)]
+    let whole_store = sqlite_service(dir.path()).claim_executor().map(|_| ());
+    assert_eq!(whole_store, Err(DecisionError::ExecutorHeld));
+    drop(executor);
+    late_old_executor
+        .try_lock()
+        .expect("free once the 0.9.11 loop ends");
 }
 
 #[tokio::test]
@@ -750,6 +912,38 @@ async fn a_decision_of_a_kind_with_no_executor_is_left_as_stored() {
     assert!(owner.calls().is_empty());
 }
 
+/// A pass tells a decision of a kind the loop registered, whose claim
+/// another executor holds, from a decision of a kind the loop does not
+/// register: the first is `KindNotClaimed`, the second `NoExecutor`, and
+/// neither runs here.
+#[tokio::test]
+async fn a_pass_tells_a_kind_held_elsewhere_from_an_unregistered_kind() {
+    let (store, clock, service) = fixture();
+    let other_owner = service_over(&store, &clock);
+    let rendering = rendering();
+    let release_id = approved(&service, &rendering);
+    let deploy_id = approved_of_kind(&service, &rendering, "deploy", "artifact:build-7");
+    let holder = ScriptedOwner::release();
+    let owner = ScriptedOwner::release();
+    let approvers = Approvers::current();
+    let _holder = start(&other_owner, &[&holder], &approvers).expect("the executor of releases");
+    let mut executor = start(&service, &[&owner], &approvers).expect("a loop beside it");
+
+    let pass = executor.pass().await;
+    assert_eq!(
+        pass.unclaimed,
+        vec![(release_kind(), DecisionError::ExecutorHeld)]
+    );
+    assert_eq!(
+        outcomes_of(&pass),
+        BTreeMap::from([
+            (release_id, vec![DecisionPassOutcome::KindNotClaimed]),
+            (deploy_id, vec![DecisionPassOutcome::NoExecutor]),
+        ])
+    );
+    assert!(owner.calls().is_empty());
+}
+
 #[test]
 fn a_candidate_launch_or_a_duplicate_kind_starts_no_executor_and_claims_nothing() {
     let (store, _clock, service) = fixture();
@@ -770,21 +964,26 @@ fn a_candidate_launch_or_a_duplicate_kind_starts_no_executor_and_claims_nothing(
     assert!(store.calls().is_empty(), "{:?}", store.calls());
 
     let _executor = start(&service, &[&owner], &approvers).expect("nothing was claimed");
-    assert_eq!(store.calls(), vec!["claim_executor"]);
+    assert_eq!(store.calls(), vec!["claim_executor_kind"]);
 }
 
-/// A store that keeps no executor claim; every other call is the in-memory
-/// store's.
+/// A store wrapper written before claims of a kind: it forwards no claim of
+/// a kind, and the whole-store claim only when `forwards_whole_store` is
+/// set, as a wrapper written for 0.9.10 does. Every other call is the
+/// in-memory store's.
 #[derive(Default)]
-struct NoClaimStore(InMemoryDecisionStore);
+struct WrapperWithoutKindClaims {
+    inner: Arc<InMemoryDecisionStore>,
+    forwards_whole_store: bool,
+}
 
-impl DecisionStore for NoClaimStore {
+impl DecisionStore for WrapperWithoutKindClaims {
     fn get(&self, decision_id: &DecisionId) -> Result<Option<DecisionRow>, ApprovalStoreError> {
-        self.0.get(decision_id)
+        self.inner.get(decision_id)
     }
 
     fn insert_if_absent(&self, row: &StoredDecision) -> Result<(), ApprovalStoreError> {
-        self.0.insert_if_absent(row)
+        self.inner.insert_if_absent(row)
     }
 
     fn replace_if_revision(
@@ -792,7 +991,7 @@ impl DecisionStore for NoClaimStore {
         expected_revision: u64,
         row: &StoredDecision,
     ) -> Result<(), ApprovalStoreError> {
-        self.0.replace_if_revision(expected_revision, row)
+        self.inner.replace_if_revision(expected_revision, row)
     }
 
     fn list(
@@ -801,11 +1000,11 @@ impl DecisionStore for NoClaimStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<DecisionPage, ApprovalStoreError> {
-        self.0.list(filter, after, limit)
+        self.inner.list(filter, after, limit)
     }
 
     fn owed(&self, after: Option<&str>, limit: usize) -> Result<DecisionPage, ApprovalStoreError> {
-        self.0.owed(after, limit)
+        self.inner.owed(after, limit)
     }
 
     fn due(
@@ -814,21 +1013,32 @@ impl DecisionStore for NoClaimStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<DecisionPage, ApprovalStoreError> {
-        self.0.due(now_ms, after, limit)
+        self.inner.due(now_ms, after, limit)
     }
 
     fn count(&self, filter: &DecisionListFilter) -> Result<u64, ApprovalStoreError> {
-        self.0.count(filter)
+        self.inner.count(filter)
     }
 
     fn is_persistent(&self) -> bool {
         false
     }
+
+    #[allow(deprecated)]
+    fn claim_executor(&self) -> Result<DecisionExecutorClaim, ApprovalStoreError> {
+        if self.forwards_whole_store {
+            self.inner.claim_executor()
+        } else {
+            Err(ApprovalStoreError::NotCommitted(
+                "this decision store keeps no executor claim".to_owned(),
+            ))
+        }
+    }
 }
 
 #[test]
 fn a_store_that_keeps_no_executor_claim_starts_no_executor() {
-    let store: Arc<dyn DecisionStore> = Arc::new(NoClaimStore::default());
+    let store: Arc<dyn DecisionStore> = Arc::new(WrapperWithoutKindClaims::default());
     let clock: Arc<dyn DecisionClock> = ManualClock::at(HELD_AT);
     let service = DurableDecisionService::with_clock(store, clock);
     let refused = start(
@@ -843,5 +1053,177 @@ fn a_store_that_keeps_no_executor_claim_starts_no_executor() {
             DecisionExecutorLoopError::Decision(DecisionError::Unavailable(_))
         ),
         "{refused:?}"
+    );
+}
+
+#[test]
+fn a_store_wrapper_forwards_claim_executor_kind() {
+    // A wrapper that forwards the claim of a kind: the loop claims each kind
+    // it registers through it, and nothing else.
+    let (store, _clock, service) = fixture();
+    store.clear();
+    let release_owner = ScriptedOwner::release();
+    let deploy_owner = ScriptedOwner::of_kind("deploy");
+    let _executor = start(
+        &service,
+        &[&release_owner, &deploy_owner],
+        &Approvers::current(),
+    )
+    .expect("start");
+    assert_eq!(
+        store.calls(),
+        vec!["claim_executor_kind", "claim_executor_kind"]
+    );
+
+    // A wrapper written for 0.9.10 forwards only the whole-store claim. The
+    // default claim of a kind refuses, so no executor starts over it, and
+    // nothing is claimed through it.
+    let inner = Arc::new(InMemoryDecisionStore::new());
+    let wrapper: Arc<dyn DecisionStore> = Arc::new(WrapperWithoutKindClaims {
+        inner: Arc::clone(&inner),
+        forwards_whole_store: true,
+    });
+    let clock: Arc<dyn DecisionClock> = ManualClock::at(HELD_AT);
+    let refused = start(
+        &DurableDecisionService::with_clock(wrapper, clock),
+        &[&ScriptedOwner::release()],
+        &Approvers::current(),
+    )
+    .expect_err("no claim of a kind, no executor");
+    assert!(
+        matches!(
+            refused,
+            DecisionExecutorLoopError::Decision(DecisionError::Unavailable(_))
+        ),
+        "{refused:?}"
+    );
+    let _claim = inner
+        .claim_executor_kind(&release_kind())
+        .expect("nothing was claimed");
+}
+
+/// Core runs the sweep: every pass asks each kind it claims to sweep once,
+/// after the owed decisions, and records what the sweep settled; a kind
+/// whose claim another executor holds is swept there, never here.
+#[tokio::test]
+async fn a_pass_sweeps_each_kind_it_claims_after_its_owed_decisions() {
+    let (store, clock, service) = fixture();
+    let other_owner = service_over(&store, &clock);
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let release = ScriptedOwner::release();
+    let deploy = ScriptedOwner::of_kind("deploy");
+    let holder = ScriptedOwner::of_kind("deploy");
+    let approvers = Approvers::current();
+    let _holder = start(&other_owner, &[&holder], &approvers).expect("the executor of deploys");
+    let mut executor = start(&service, &[&release, &deploy], &approvers).expect("start");
+    let left = DecisionId::derive(
+        &release_kind(),
+        &DecisionSubjectKey::new("artifact:left-by-a-stop").expect("subject key"),
+    );
+    release.sweep_answers([(left.clone(), DecisionPassOutcome::CleanupSettled)]);
+
+    let pass = executor.pass().await;
+    assert_eq!(
+        pass.outcomes,
+        vec![
+            (decision_id.clone(), DecisionPassOutcome::Executed),
+            (left, DecisionPassOutcome::CleanupSettled),
+        ],
+        "the sweep runs after the owed decisions, and its outcomes are the pass's"
+    );
+    assert_eq!(release.sweeps(), 1);
+    assert_eq!(
+        deploy.sweeps(),
+        0,
+        "a kind held elsewhere is not swept here"
+    );
+    assert_eq!(holder.sweeps(), 0, "a loop sweeps only at its own pass");
+
+    let next = executor.pass().await;
+    assert_eq!(
+        next.outcomes,
+        vec![(decision_id, DecisionPassOutcome::NoticeSettled)],
+        "the sweep answers nothing more"
+    );
+    assert_eq!(release.sweeps(), 2, "once per pass");
+}
+
+/// An executed decision settles its work's one reply, by the digest of its
+/// text, before the reply is delivered: not before the execution, the same
+/// reply again is a replay, and another is refused `not_owed`, whatever the
+/// host's route would do with it.
+#[tokio::test]
+async fn an_executed_decision_settles_one_reply() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let answer = Sha256Digest::of(b"the answer");
+    let not_owed = |error: DecisionError| {
+        assert!(
+            matches!(
+                error,
+                DecisionError::Refused {
+                    refusal: DecisionRefusal::NotOwed,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("not_owed"), "{error}");
+    };
+    not_owed(
+        service
+            .settle_reply(&decision_id, &answer)
+            .expect_err("an approved decision's work has not run"),
+    );
+    let owner = ScriptedOwner::release();
+    let mut executor = start(&service, &[&owner], &Approvers::current()).expect("start");
+    let executed = executor.pass().await;
+    assert_eq!(
+        executed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::Executed)]
+    );
+    service
+        .settle_reply(&decision_id, &answer)
+        .expect("the first reply settles");
+    service
+        .settle_reply(&decision_id, &answer)
+        .expect("the same reply again is a replay");
+    not_owed(
+        service
+            .settle_reply(&decision_id, &Sha256Digest::of(b"another answer"))
+            .expect_err("another reply"),
+    );
+    assert_eq!(
+        store.stored(&decision_id).state.reply_digest.as_deref(),
+        Some(answer.as_str())
+    );
+}
+
+/// A kind that opens neither fact of an executed decision (a cleanup owed,
+/// a reply settled) runs as it did, and its rows never carry them.
+#[tokio::test]
+async fn a_kind_that_never_opens_the_executed_facts_keeps_its_rows() {
+    let (store, _clock, service) = fixture();
+    let rendering = rendering();
+    let decision_id = approved(&service, &rendering);
+    let owner = ScriptedOwner::release();
+    let mut executor = start(&service, &[&owner], &Approvers::current()).expect("start");
+    let executed = executor.pass().await;
+    assert_eq!(
+        executed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::Executed)]
+    );
+    let noticed = executor.pass().await;
+    assert_eq!(
+        noticed.outcomes,
+        vec![(decision_id.clone(), DecisionPassOutcome::NoticeSettled)]
+    );
+    let row = serde_json::to_value(store.stored(&decision_id)).expect("the row encodes");
+    let state = row["state"].as_object().expect("the machine state");
+    assert!(
+        !state.contains_key("cleanup") && !state.contains_key("reply_digest"),
+        "{state:?}"
     );
 }

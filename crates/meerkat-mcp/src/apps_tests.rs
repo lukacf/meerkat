@@ -288,6 +288,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for ResourceDec
         self.audit.lock().unwrap().push(observation);
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 struct ResourceLease {
@@ -479,6 +483,67 @@ async fn app_resource_timeout_returns_through_native_outcome_and_releases_lease(
         // The local timeout does not claim the remote finished. Let its actual
         // server handler settle only after checking local failure and cleanup.
         fixture.server.read_release.add_permits(1);
+    })
+    .catch_unwind()
+    .await;
+    fixture.server.read_release.add_permits(1);
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+/// A response that arrives after the read timed out is dropped: the lease
+/// the timeout released is not released again, nothing is observed twice,
+/// and nothing stays in flight.
+#[tokio::test]
+async fn app_resource_response_after_timeout_is_dropped_and_leases_once() {
+    use meerkat_core::authorization::{OperationObservation, OperationObservedOutcome};
+    let fixture = Fixture::start().await;
+    let router = fixture.router(true).await;
+    let original = dispatch(&router, "workspace_display", json!({})).await;
+    let invocation: McpAppInvocation =
+        serde_json::from_value(original.host_metadata[MCP_APPS_EXTENSION].clone()).unwrap();
+    let audit = Arc::new(ResourceAudit::default());
+    let router = router.with_call_context_provider(audit.clone());
+    let result = AssertUnwindSafe(async {
+        fixture.server.block_reads.store(true, Ordering::SeqCst);
+        let context = resource_context(&audit);
+        let mut read = Box::pin(router.read_app_resource(
+            "workspace_display",
+            &invocation.registration,
+            &invocation.tool,
+            OTHER_URI,
+            &context,
+        ));
+        tokio::select! {
+            _ = &mut read => panic!("read completed before server admission"),
+            permit = fixture.server.read_entered.acquire() => permit.unwrap().forget(),
+            () = tokio::time::sleep(LIMIT) => panic!("read never reached server"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(16)).await;
+        tokio::time::resume();
+        let failure = tokio::time::timeout(LIMIT, read)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(failure, McpError::ToolCallFailed { .. }));
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 1);
+
+        // The server answers late; the answer goes nowhere.
+        fixture.server.read_release.add_permits(1);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(audit.lease_drops.load(Ordering::SeqCst), 1, "released once");
+        assert!(matches!(
+            audit.observations.lock().unwrap().as_slice(),
+            [
+                OperationObservation::Entry(meerkat_core::OperationEntryBoundary::McpResourceRead),
+                OperationObservation::Outcome(OperationObservedOutcome::SourceReadUnavailable),
+            ]
+        ));
+        assert_eq!(
+            router.external_tool_surface_snapshot().entries[0].inflight_call_count,
+            0
+        );
     })
     .catch_unwind()
     .await;

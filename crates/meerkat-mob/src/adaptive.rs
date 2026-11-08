@@ -338,6 +338,10 @@ pub struct FinishResult {
 /// other MCP server definition, and a placed member refuses it (a portable
 /// profile cannot carry a working directory).
 ///
+/// So is a profile's member tool grant gate (`tools.grant_gated`), with the
+/// definitions only it brings in, for the same reason: a decision that
+/// carries it anyway is parsed and judged by the member's build.
+///
 /// So is the `12h` OpenAI prompt-cache TTL (`prompt_cache_options.ttl`), for
 /// the same reason: a decision that carries it anyway is parsed and judged by
 /// the member's build like any other request, which accepts it on the models
@@ -362,12 +366,33 @@ pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
                 )
         });
     }
-    // Nor the tool bundle opt-in, which the released schema does not carry.
+    // Nor the tool bundle opt-in, which the released schema does not carry,
+    // nor the member tool grant gate and its definition.
     if let Some(properties) = schema
         .pointer_mut("/$defs/ToolConfig/properties")
         .and_then(serde_json::Value::as_object_mut)
     {
         properties.remove("bundles");
+        properties.remove("grant_gated");
+    }
+    if let Some(definitions) = schema
+        .pointer_mut("/$defs")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        definitions.remove("GrantGatedTools");
+    }
+    // The gate's tool names were the only reference to the tool name
+    // definitions the released schema does not carry (the set first, since
+    // it references the name).
+    for name in ["ToolNameSet", "ToolName"] {
+        let reference = format!("\"#/$defs/{name}\"");
+        if !schema.to_string().contains(&reference)
+            && let Some(definitions) = schema
+                .pointer_mut("/$defs")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            definitions.remove(name);
+        }
     }
     // Nor a stdio MCP server's working directory, which the released schema
     // does not carry.

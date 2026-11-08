@@ -250,12 +250,26 @@ impl AdmissionFence {
         &self.kind
     }
 
+    /// Create this fence's directory as the writes into it do: a credentials
+    /// fence's owner-only when this creates it, since its listing names the
+    /// realm's secret slots; any other's with the mode the process umask
+    /// gives it. A directory that already exists keeps its mode.
+    fn create_directory(&self) -> Result<(), FenceUnavailableCause> {
+        match self.kind {
+            AdmissionFenceKind::Credentials { .. } => {
+                os::create_owner_only_directory(&self.directory)
+            }
+            _ => os::create_directory(&self.directory),
+        }
+    }
+
     /// Create the fence file if it is missing, as a writer does, without
     /// locking it, and return its identity. Its directory is created first.
     /// This is what the native verifier does for every fence of a set it
     /// binds, so that holders, which never create, can open them.
     pub fn ensure_exists(&self) -> Result<FenceIdentity, FenceUnavailable> {
-        os::create_directory(&self.directory).map_err(|cause| self.unavailable(cause))?;
+        self.create_directory()
+            .map_err(|cause| self.unavailable(cause))?;
         if !hosts_fences(&self.directory).map_err(|cause| self.unavailable(cause))? {
             return Err(self.unavailable(FenceUnavailableCause::ExcludedFilesystem));
         }
@@ -928,11 +942,11 @@ struct PreparedFence {
     composed: bool,
 }
 
-/// Prepare an acquisition's set once: create each fence's directory, as the
-/// writes into it already do, decide whether its filesystem hosts fences,
-/// and read the composed-install flag of each fence root once (a root
-/// shared by several fences is read once). A waiting acquisition's polls
-/// then only attempt the locks.
+/// Prepare an acquisition's set once: create each fence's directory as the
+/// writes into it do (a credentials fence's owner-only), decide whether its
+/// filesystem hosts fences, and read the composed-install flag of each fence
+/// root once (a root shared by several fences is read once). A waiting
+/// acquisition's polls then only attempt the locks.
 fn prepare(fences: Vec<AdmissionFence>) -> Result<Vec<PreparedFence>, AdmissionRefusal> {
     let mut roots: std::collections::BTreeMap<PathBuf, bool> = std::collections::BTreeMap::new();
     let mut prepared = Vec::with_capacity(fences.len());
@@ -940,7 +954,7 @@ fn prepare(fences: Vec<AdmissionFence>) -> Result<Vec<PreparedFence>, AdmissionR
         let refused = |cause| AdmissionRefusal::Unavailable(fence.unavailable(cause));
         #[cfg(test)]
         hooks::created_directory(&fence.directory);
-        os::create_directory(&fence.directory).map_err(refused)?;
+        fence.create_directory().map_err(refused)?;
         let hosted = hosts_fences(&fence.directory).map_err(refused)?;
         let mut composed = false;
         for root in fence.composition_roots() {
@@ -1394,9 +1408,39 @@ mod os {
         }
     }
 
-    /// Create a fence's directory, as the writes into it already do.
+    /// Create a config or realm fence's directory, and the directories above
+    /// it that are missing, with the mode the process umask gives them, as
+    /// the writes into such a directory do. A credentials fence's directory
+    /// is created owner-only instead ([`create_owner_only_directory`]).
     pub(super) fn create_directory(directory: &Path) -> Result<(), Cause> {
         std::fs::create_dir_all(directory).map_err(|error| Cause::Open(error.to_string()))
+    }
+
+    /// Create a credentials fence's directory, a realm's credential
+    /// directory, whose listing names the realm's secret slots, as the
+    /// credential writes create it: its missing parents with the mode the
+    /// process umask gives them, and the directory itself owner-only (0o700,
+    /// set explicitly after the creation, so the umask does not decide it)
+    /// when this call creates it. A directory that already exists keeps its
+    /// mode; anything else at the path is an error.
+    pub(super) fn create_owner_only_directory(directory: &Path) -> Result<(), Cause> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        let failed = |error: std::io::Error| Cause::Open(error.to_string());
+        if let Some(parent) = directory.parent() {
+            std::fs::create_dir_all(parent).map_err(failed)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .map_err(failed),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                match std::fs::metadata(directory) {
+                    Ok(metadata) if metadata.is_dir() => Ok(()),
+                    _ => Err(failed(error)),
+                }
+            }
+            Err(error) => Err(failed(error)),
+        }
     }
 
     /// Open the fence at `path`: a writer creates a missing one; a holder
@@ -1587,6 +1631,11 @@ mod os {
 
     /// No fence is ever created here, so neither is its directory.
     pub(super) fn create_directory(_directory: &Path) -> Result<(), Cause> {
+        Ok(())
+    }
+
+    /// No fence is ever created here, so neither is its directory.
+    pub(super) fn create_owner_only_directory(_directory: &Path) -> Result<(), Cause> {
         Ok(())
     }
 

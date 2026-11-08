@@ -593,3 +593,84 @@ async fn a_late_bind_onto_a_registration_surface_makes_the_router_borrow_it() {
         Some(ExternalToolSurfaceBaseState::Removed)
     );
 }
+
+/// A stage on the grant path is held by the construction that staged it:
+/// once that construction's router, borrowing a session registration's
+/// surface, shuts down, it releases what it staged, applied or not, so the
+/// registration's surface keeps no staged, pending or active slot for the
+/// server and the next construction's gated stage succeeds. A server the
+/// registration's grant gate does not gate is never staged on that path.
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn a_gated_stage_is_released_with_the_construction_that_staged_it() {
+    use meerkat_core::{
+        ExternalToolSurfaceBaseState, ExternalToolSurfacePendingOp, ExternalToolSurfaceStagedOp,
+    };
+    use meerkat_mcp::McpSurfaceOwnership;
+    let server_path = mcp_test_server::fixture_binary();
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+    let bindings = machine
+        .prepare_bindings(meerkat_core::SessionId::new())
+        .await
+        .expect("runtime bindings");
+    bindings
+        .tool_visibility_owner()
+        .replace_tool_grant_gate(meerkat_core::tool_grant::InstalledToolGrantGate {
+            gated_servers: ["gated".to_string()].into_iter().collect(),
+            ..Default::default()
+        })
+        .expect("the registration installs its gate");
+    let surface = Arc::clone(bindings.external_tool_surface());
+    let construction = || {
+        McpRouterAdapter::new(
+            McpRouter::new_with_surface_handle_and_stdio_profile(
+                Arc::clone(&surface),
+                meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+            )
+            .with_surface_ownership(McpSurfaceOwnership::Borrowed),
+        )
+    };
+
+    for apply in [false, true] {
+        let adapter = construction();
+        adapter
+            .stage_add_gated(test_server_config("gated", &server_path))
+            .await
+            .expect("the gate gates the server");
+        if apply {
+            adapter.apply_staged().await.expect("apply the gated add");
+            wait_for_adapter_action(
+                &adapter,
+                "gated",
+                ToolConfigChangeOperation::Add,
+                McpLifecyclePhase::Applied,
+                Duration::from_secs(35),
+            )
+            .await;
+        }
+        adapter.shutdown().await;
+        let slot = surface.surface_snapshot("gated");
+        assert!(
+            slot.as_ref().is_none_or(|slot| {
+                slot.staged_op == ExternalToolSurfaceStagedOp::None
+                    && slot.pending_op == ExternalToolSurfacePendingOp::None
+                    && slot
+                        .base_state
+                        .is_none_or(|base| base == ExternalToolSurfaceBaseState::Removed)
+            }),
+            "applied: {apply}: the ended construction left a slot: {slot:?}"
+        );
+    }
+
+    let next = construction();
+    next.stage_add_gated(test_server_config("gated", &server_path))
+        .await
+        .expect("the next construction stages the released server");
+    assert!(
+        next.stage_add_gated(test_server_config("open", &server_path))
+            .await
+            .is_err(),
+        "a server the gate does not gate is never staged on the grant path"
+    );
+    next.shutdown().await;
+}

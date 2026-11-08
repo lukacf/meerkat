@@ -1,7 +1,7 @@
 //! MCPB 0.3 manifest import into inert setup evidence. Bundle extraction,
 //! executable verification, credential binding and process launch belong to the
 //! artifact/auth/deployment owners and are not implied by successful parsing.
-//! Source: https://github.com/modelcontextprotocol/mcpb/blob/main/MANIFEST.md
+//! Source: <https://github.com/modelcontextprotocol/mcpb/blob/main/MANIFEST.md>
 
 use crate::{ContentDigest, Id, RuntimeKind, ValidationError};
 use serde::{Deserialize, Serialize};

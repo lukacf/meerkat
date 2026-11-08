@@ -340,3 +340,75 @@ mod tests {
         assert_eq!(override_key.keyring_account(), "dev:default_openai:work");
     }
 }
+
+/// Test support for the rows on the modes of the credential directories the
+/// stores create: a scenario run under several process umasks.
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used)]
+pub(crate) mod umask_test_support {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// The umasks a scenario runs under: the common default, a shared-group
+    /// default, and the private one.
+    const UMASKS: [&str; 3] = ["022", "002", "077"];
+    /// Set to its umask in the child process a scenario runs in.
+    const UMASK_CHILD: &str = "MEERKAT_AUTH_STORE_TEST_UMASK_CHILD";
+    /// Printed by that child, with its umask, once the scenario passed.
+    const UMASK_CHILD_DONE: &str = "credential directory scenario passed under umask";
+
+    /// Run `scenario`, the body of the test `test` in the module `module` (the
+    /// caller's `module_path!()`), under each of `UMASKS`. The umask is
+    /// process-wide, so the shared test process never changes it: each run is
+    /// a child process of this test binary, started by a shell that sets the
+    /// umask before exec, that runs `test` alone.
+    pub(crate) fn under_each_umask(module: &str, test: &str, scenario: impl FnOnce()) {
+        if let Some(umask) = std::env::var_os(UMASK_CHILD) {
+            scenario();
+            println!("\n{UMASK_CHILD_DONE} {}", umask.to_string_lossy());
+            return;
+        }
+        let binary = std::env::current_exe().expect("the test binary");
+        let (_, module) = module
+            .split_once("::")
+            .expect("a module path within the crate");
+        let test_path = format!("{module}::{test}");
+        for umask in UMASKS {
+            #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+            let output = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "umask \"$1\" && shift && exec \"$@\"",
+                    "credential-directory-umask",
+                    umask,
+                ])
+                .arg(binary.as_os_str())
+                .args([
+                    "--exact",
+                    test_path.as_str(),
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(UMASK_CHILD, umask)
+                .output()
+                .expect("start the test under a umask");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let done = format!("{UMASK_CHILD_DONE} {umask}");
+            assert!(
+                output.status.success() && stdout.contains(done.as_str()),
+                "{test} failed under umask {umask} ({}):\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// The permission bits of `path`.
+    pub(crate) fn mode_bits(path: &Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+}

@@ -61,6 +61,7 @@ pub(in crate::private_originals::service_approved_input) async fn console_task(
         meerkat_mobkit::console_auth_config::parse_console_auth_config(&serde_json::json!({
             "provider": "jwt", "shared_secret": std::str::from_utf8(KEY).unwrap(),
             "issuer": ISSUER, "audience": AUDIENCE, "email_allowlist": [EMAIL],
+            "accounts": "personal",
         }))
         .unwrap();
     fixture

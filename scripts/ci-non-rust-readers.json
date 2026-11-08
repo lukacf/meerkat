@@ -2837,6 +2837,16 @@
       "source": "crates/xtask/src/protocol_codegen.rs",
       "literal": "write_protocol_files(emitted)",
       "why": "Writes the generated protocol files; the drift check that reads them is listed under their paths."
+    },
+    {
+      "source": "crates/xtask/tests/ci_gate_requires_rmat.rs",
+      "literal": "./.github/workflows/buildbuddy.yml",
+      "why": "Compared with the `uses:` value of a nightly.yml job; the test reads nightly.yml, not the called workflow."
+    },
+    {
+      "source": "crates/xtask/tests/ci_gate_requires_rmat.rs",
+      "literal": "./.github/workflows/mob-dense-topology.yml",
+      "why": "Compared with the `uses:` value of a nightly.yml job; the test reads nightly.yml, not the called workflow."
     }
   ]
 }

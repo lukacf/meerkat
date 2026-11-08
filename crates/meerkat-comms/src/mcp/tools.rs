@@ -261,8 +261,22 @@ impl RuntimeCommsCommandHandle {
     }
 
     pub async fn send(&self, command: CommsCommand) -> Result<SendReceipt, SendError> {
+        self.send_with_governed_origin(command, None).await
+    }
+
+    /// [`Self::send`] with the origin of the governed work that sends it, if
+    /// any: an in-process delivery the command makes carries `origin`, the
+    /// work's process-local origin, to its receiver unchanged.
+    pub async fn send_with_governed_origin(
+        &self,
+        command: CommsCommand,
+        origin: Option<meerkat_core::GovernedSendOrigin>,
+    ) -> Result<SendReceipt, SendError> {
         let observation_command = command.clone();
-        let receipt = self.runtime.send(command).await?;
+        let receipt = self
+            .runtime
+            .send_with_governed_origin(command, origin)
+            .await?;
         if let Some(dispatcher) = &self.post_commit_hooks
             && let Some(observation) = meerkat_core::HookObservation::from_committed_peer_send(
                 &observation_command,
@@ -426,7 +440,7 @@ pub async fn handle_tools_call_typed(
                 in_reply_to: Some(capability.in_reply_to),
             }
             .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
-            dispatch(ctx, command).await
+            dispatch(ctx, command, governed_send_origin(dispatch_context)).await
         }
         "send_message" => {
             let input: SendMessageInput = serde_json::from_value(args.clone())
@@ -454,7 +468,7 @@ pub async fn handle_tools_call_typed(
                 in_reply_to: None,
             }
             .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
-            dispatch(ctx, command).await
+            dispatch(ctx, command, governed_send_origin(dispatch_context)).await
         }
         "send_request" => {
             let input: SendRequestInput = serde_json::from_value(args.clone())
@@ -474,7 +488,7 @@ pub async fn handle_tools_call_typed(
             };
             let command = project_peer_request_command(typed_request, to)?
                 .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
-            dispatch(ctx, command).await
+            dispatch(ctx, command, governed_send_origin(dispatch_context)).await
         }
         "send_response" => {
             let input: SendResponseInput = serde_json::from_value(args.clone())
@@ -496,7 +510,7 @@ pub async fn handle_tools_call_typed(
             };
             let command = project_peer_response_command(typed_request, to)?
                 .with_objective_id(objective_id_from_dispatch_context(dispatch_context)?);
-            dispatch(ctx, command).await
+            dispatch(ctx, command, governed_send_origin(dispatch_context)).await
         }
         "peers" => {
             let _input: PeersInput = serde_json::from_value(args.clone())
@@ -937,7 +951,24 @@ fn peer_route(
     }
 }
 
-async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, CommsToolCallError> {
+/// The governed origin of the work a comms tool call is dispatched under:
+/// the one its dispatch context's work authorization carries, which the
+/// native runtime attached when it staged the run. Never read from the
+/// call's arguments.
+fn governed_send_origin(
+    dispatch_context: &ToolDispatchContext,
+) -> Option<meerkat_core::GovernedSendOrigin> {
+    dispatch_context
+        .work_authorization()
+        .and_then(meerkat_core::WorkAuthorizationContext::governed_send_origin)
+        .cloned()
+}
+
+async fn dispatch(
+    ctx: &ToolContext,
+    command: CommsCommand,
+    governed_origin: Option<meerkat_core::GovernedSendOrigin>,
+) -> Result<Value, CommsToolCallError> {
     // Capture peer display label for error normalization before consuming the command.
     let peer_for_errors = match &command {
         CommsCommand::PeerMessage { to, .. }
@@ -950,7 +981,10 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Com
     let cmd_kind = command.command_kind().to_string();
 
     if let Some(runtime) = &ctx.runtime {
-        let receipt = runtime.send(command).await.map_err(|error| match error {
+        let sent = runtime
+            .send_with_governed_origin(command, governed_origin)
+            .await;
+        let receipt = sent.map_err(|error| match error {
             // The runtime refused a response addressed to a peer that did not
             // send the request: the call's `peer_id` is the invalid argument.
             error @ SendError::ResponseAddresseeNotRequester { .. } => {
@@ -996,7 +1030,7 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Com
         return Ok(sent_result(&cmd_kind, receipt));
     }
 
-    Ok(dispatch_without_runtime(ctx, command, peer_for_errors, cmd_kind).await?)
+    Ok(dispatch_without_runtime(ctx, command, peer_for_errors, cmd_kind, governed_origin).await?)
 }
 
 /// Transport-only dispatch for a tool context without runtime command
@@ -1006,6 +1040,7 @@ async fn dispatch_without_runtime(
     command: CommsCommand,
     peer_for_errors: Option<String>,
     cmd_kind: String,
+    governed_origin: Option<meerkat_core::GovernedSendOrigin>,
 ) -> Result<Value, String> {
     if matches!(
         command,
@@ -1049,7 +1084,7 @@ async fn dispatch_without_runtime(
             // choke point even on the runtime-less fallback path.
             let outcome = ctx
                 .router
-                .send_with_id(
+                .send_with_id_and_origin(
                     dest_peer_id,
                     uuid::Uuid::new_v4(),
                     crate::types::MessageKind::Message {
@@ -1061,6 +1096,7 @@ async fn dispatch_without_runtime(
                         in_reply_to: in_reply_to.map(|delivery| delivery.0),
                     },
                     content_taint,
+                    governed_origin,
                 )
                 .await
                 .map_err(|e| format_router_send_error(&dest_display, e))?;
@@ -1084,7 +1120,7 @@ async fn dispatch_without_runtime(
             reject_runtime_less_blob_blocks(blocks.as_deref())?;
             let outcome = ctx
                 .router
-                .send_with_id(
+                .send_with_id_and_origin(
                     dest_peer_id,
                     uuid::Uuid::new_v4(),
                     crate::types::MessageKind::IncarnationFencedMessage {
@@ -1096,6 +1132,7 @@ async fn dispatch_without_runtime(
                         expected_recipient,
                     },
                     content_taint,
+                    governed_origin,
                 )
                 .await
                 .map_err(|e| format_router_send_error(&dest_display, e))?;
@@ -1375,6 +1412,8 @@ mod tests {
 
     struct RecordingRuntime {
         sent: Mutex<Vec<CommsCommand>>,
+        /// The governed origin each sent command carried, in send order.
+        origins: Mutex<Vec<Option<meerkat_core::GovernedSendOrigin>>>,
         peers: Vec<PeerDirectoryEntry>,
         notify: Arc<Notify>,
     }
@@ -1406,6 +1445,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 sent: Mutex::new(Vec::new()),
+                origins: Mutex::new(Vec::new()),
                 peers: Vec::new(),
                 notify: Arc::new(Notify::new()),
             }
@@ -1414,6 +1454,7 @@ mod tests {
         fn with_peers(peers: Vec<PeerDirectoryEntry>) -> Self {
             Self {
                 sent: Mutex::new(Vec::new()),
+                origins: Mutex::new(Vec::new()),
                 peers,
                 notify: Arc::new(Notify::new()),
             }
@@ -1460,6 +1501,19 @@ mod tests {
                 }
             };
             self.sent.lock().push(cmd);
+            self.origins.lock().push(None);
+            Ok(receipt)
+        }
+
+        async fn send_with_governed_origin(
+            &self,
+            cmd: CommsCommand,
+            origin: Option<meerkat_core::GovernedSendOrigin>,
+        ) -> Result<meerkat_core::comms::SendReceipt, meerkat_core::comms::SendError> {
+            let receipt = self.send(cmd).await?;
+            if let Some(last) = self.origins.lock().last_mut() {
+                *last = origin;
+            }
             Ok(receipt)
         }
 
@@ -1469,6 +1523,151 @@ mod tests {
 
         async fn peers(&self) -> Vec<PeerDirectoryEntry> {
             self.peers.clone()
+        }
+    }
+
+    /// Prepares nothing: the rows below read only the work's governed origin.
+    struct UnusedWorkAuthorization;
+
+    impl meerkat_core::WorkAuthorization for UnusedWorkAuthorization {
+        fn prepare(
+            &self,
+            _binding: &meerkat_core::authorization::PreparedAuthorizationBinding,
+        ) -> Result<
+            Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+            meerkat_core::OperationAuthorizationError,
+        > {
+            Err(meerkat_core::OperationAuthorizationError::Unavailable)
+        }
+    }
+
+    /// The facts a native runtime would mint, opaque to this crate.
+    fn runtime_minted_origin() -> meerkat_core::GovernedSendOrigin {
+        meerkat_core::GovernedSendOrigin::__from_runtime_facts(Arc::new("staged run facts"))
+    }
+
+    fn same_origin(
+        left: &meerkat_core::GovernedSendOrigin,
+        right: &meerkat_core::GovernedSendOrigin,
+    ) -> bool {
+        Arc::ptr_eq(left.__runtime_facts(), right.__runtime_facts())
+    }
+
+    /// Arguments a model may write beside the addressee and body, naming a
+    /// requester and an origin of its own choosing.
+    fn send_with_forged_origin_arguments(peer_id: meerkat_core::comms::PeerId) -> Value {
+        json!({
+            "peer_id": peer_id.to_string(),
+            "body": "answer for my requester",
+            "handling_mode": "queue",
+            "requester": {"kind": "human", "id": "someone-else"},
+            "origin": {"requester": "someone-else", "sender_work": ["forged-work"]},
+            "governed_origin": "forged",
+        })
+    }
+
+    /// A comms tool takes the governed origin of the work it is dispatched
+    /// under from its dispatch context, never from its arguments: a call
+    /// whose arguments name a requester and an origin sends with exactly its
+    /// work's origin, and a call dispatched under no governed work sends with
+    /// none at all, whatever its arguments say.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn the_origin_is_never_taken_from_tool_arguments() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair).await;
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let arguments = send_with_forged_origin_arguments(peer_id);
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &arguments,
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect("an ungoverned send");
+        let origin = runtime_minted_origin();
+        let governed = ToolDispatchContext::default().with_work_authorization(Some(
+            meerkat_core::WorkAuthorizationContext::new(
+                Arc::new(UnusedWorkAuthorization),
+                meerkat_core::OperationExecutionScope::Domain,
+            )
+            .with_governed_send_origin(Some(origin.clone())),
+        ));
+        handle_tools_call_with_context(&ctx, "send_message", &arguments, &governed)
+            .await
+            .expect("a governed send");
+
+        let origins = runtime.origins.lock();
+        let [ungoverned, governed] = origins.as_slice() else {
+            panic!("two sends: {origins:?}");
+        };
+        assert!(
+            ungoverned.is_none(),
+            "no governed work, no origin, whatever the arguments name"
+        );
+        assert!(
+            governed
+                .as_ref()
+                .is_some_and(|sent| same_origin(sent, &origin)),
+            "exactly the dispatch context's origin: {governed:?}"
+        );
+    }
+
+    /// An in-process send carries the governed origin it was given to the
+    /// receiver's queue claim unchanged, beside the in-process sender
+    /// authentication; a send without one leaves the claim without one.
+    #[cfg(feature = "workspace-tests")]
+    #[tokio::test]
+    async fn an_in_process_send_carries_its_governed_origin_to_the_receivers_claim() {
+        for carried in [Some(runtime_minted_origin()), None] {
+            let (_ctx, peer_id, sender, receiver, finalizer) =
+                make_runtime_less_inproc_delivery_pair().await;
+            let observed = tokio::spawn(async move {
+                let claim = loop {
+                    if let Some(claim) =
+                        CoreCommsRuntime::claim_classified_inbox_interaction(receiver.as_ref())
+                            .await
+                            .expect("claim surface")
+                    {
+                        break claim;
+                    }
+                    tokio::task::yield_now().await;
+                };
+                let seen = (
+                    claim.sender_authentication(),
+                    claim.governed_send_origin().cloned(),
+                );
+                finalizer
+                    .finalize(claim)
+                    .await
+                    .expect("the exact claim is durably finalized");
+                seen
+            });
+            let command = CommsCommand::PeerMessage {
+                to: meerkat_core::comms::PeerRoute::new(peer_id),
+                body: "governed delivery".to_string(),
+                blocks: None,
+                content_taint: None,
+                handling_mode: HandlingMode::Queue,
+                objective_id: None,
+                in_reply_to: None,
+            };
+            CoreCommsRuntime::send_with_governed_origin(sender.as_ref(), command, carried.clone())
+                .await
+                .expect("delivered in process");
+            let (authentication, origin) = observed.await.expect("claim task");
+            assert_eq!(
+                authentication,
+                meerkat_core::PeerIngressSenderAuthentication::InProcess
+            );
+            match (&carried, &origin) {
+                (Some(sent), Some(received)) => assert!(same_origin(sent, received)),
+                (None, None) => {}
+                _ => panic!("carried {carried:?}, received {origin:?}"),
+            }
         }
     }
 
@@ -2358,6 +2557,10 @@ mod tests {
             &self,
             _: &meerkat_core::PreparedAuthorizationBinding,
         ) -> Result<(), meerkat_core::OperationAuthorizationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -3628,6 +3831,7 @@ mod tests {
                     fence_token: 5,
                 },
             },
+            None,
         )
         .await
         .expect_err("runtime-less fenced send should surface durable rejection");

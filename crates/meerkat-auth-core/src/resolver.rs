@@ -17,8 +17,9 @@ use futures::future::BoxFuture;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::auth::{
     CredentialMutationError, CredentialMutationOutcome, PersistedAuthMode, PersistedTokens,
-    ProviderAuthPersistence, RefreshCoordinator, RefreshError, RefreshFailureObservation, TokenKey,
-    TokenStore, TokenStoreAccess, TokenStoreError, TokenStoreObservation, TokenStoreRefusal,
+    ProviderAuthPersistence, RefreshCoordinator, RefreshError, RefreshFailureDisposition,
+    RefreshFailureObservation, TokenKey, TokenStore, TokenStoreAccess, TokenStoreError,
+    TokenStoreObservation, TokenStoreRefusal,
 };
 #[cfg(all(not(target_arch = "wasm32"), test))]
 use meerkat_core::auth::{CredentialMutationFn, RefreshFn};
@@ -834,15 +835,59 @@ impl PreparedManagedStoreOAuthRefresh {
         {
             return RefreshError::StalePreparation;
         }
+        let observation = error.observation();
+        // AuthMachine's verdict on this failure, read from the refreshing
+        // lease before the failure closes it (`refresh_failed` commits the
+        // same verdict). The failure carries it, so its caller tells one
+        // that clears on its own from one that needs a new sign-in without
+        // reading the provider's answer itself. A classifier that refuses
+        // here refuses the closure below too, which reports it.
+        let verdict = if self.refresh_started
+            && auth.snapshot(&lease_key).phase == Some(AuthLeasePhase::Refreshing)
+        {
+            auth.resolve_refresh_failure_disposition(&lease_key, observation.clone())
+                .ok()
+        } else {
+            None
+        };
         match mark_managed_store_oauth_refresh_failed(
             &self.env,
             &self.binding,
             self.refresh_started,
-            error.observation(),
+            observation,
         ) {
-            Ok(()) => error,
+            Ok(()) => with_refresh_failure_verdict(error, verdict),
             Err(lifecycle_error) => RefreshError::Refresh(format!("{error}; {lifecycle_error}")),
         }
+    }
+}
+
+/// A provider's refresh failure with the verdict AuthMachine issued on it
+/// (`Classified`), when it issued one. Only a failure the provider observed
+/// takes the verdict; every other error keeps its type.
+#[cfg(not(target_arch = "wasm32"))]
+fn with_refresh_failure_verdict(
+    error: RefreshError,
+    verdict: Option<RefreshFailureDisposition>,
+) -> RefreshError {
+    let Some(disposition) = verdict else {
+        return error;
+    };
+    match error {
+        RefreshError::Observed {
+            message,
+            observation,
+        } => RefreshError::Classified {
+            message,
+            observation,
+            disposition,
+        },
+        RefreshError::Refresh(message) => RefreshError::Classified {
+            message,
+            observation: RefreshFailureObservation::transient(),
+            disposition,
+        },
+        other => other,
     }
 }
 

@@ -112,6 +112,8 @@ class _SubscriptionEvent:
 
     event: dict[str, Any]
     rpc_sequence: int | None
+    # The sequence space of a member stream event's envelope ``seq``.
+    epoch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -370,6 +372,7 @@ class _StdoutDispatcher:
                     else:
                         event = raw_event
                     sequence = params.get("sequence")
+                    epoch = params.get("epoch")
                     delivery = _SubscriptionEvent(
                         event=event,
                         rpc_sequence=(
@@ -379,6 +382,7 @@ class _StdoutDispatcher:
                             and 0 <= sequence <= (1 << 64) - 1
                             else None
                         ),
+                        epoch=epoch if isinstance(epoch, str) and epoch else None,
                     )
                     queue = self._stream_queues.get(stream_id)
                     if queue is not None:
@@ -635,6 +639,7 @@ class EventSubscription:
         self._closed = False
         self._last_rpc_sequence: int | None = None
         self._last_event_seq: int | None = None
+        self._last_event_epoch: str | None = None
         self._terminal_outcome: dict[str, Any] | None = None
 
     @property
@@ -652,11 +657,22 @@ class EventSubscription:
 
     @property
     def last_event_seq(self) -> int | None:
-        """Last delivered canonical event seq, not a replay cursor.
+        """Last delivered canonical event seq.
 
-        Gap markers do not replace it.
+        Gap markers do not replace it. On a mob member stream it is, with
+        :attr:`last_event_epoch`, the position to resume the stream from
+        (``MobStreamCursor(epoch=..., seq=...)``); elsewhere it is not a
+        replay cursor.
         """
         return self._last_event_seq
+
+    @property
+    def last_event_epoch(self) -> str | None:
+        """Sequence space of the last delivered canonical event's seq.
+
+        Only a mob member stream names one; gap markers do not replace it.
+        """
+        return self._last_event_epoch
 
     async def __aenter__(self) -> EventSubscription:
         return self
@@ -713,4 +729,5 @@ class EventSubscription:
             self._last_rpc_sequence = delivery.rpc_sequence
             if not isinstance(getattr(envelope, "payload", None), StreamTruncated):
                 self._last_event_seq = getattr(envelope, "seq", None)
+                self._last_event_epoch = delivery.epoch
             yield event

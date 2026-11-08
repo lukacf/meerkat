@@ -17,6 +17,11 @@
 //!   resource (`resources/list`, `resources/read`), so a test can read a
 //!   resource over a launched connection. Without the flag the server
 //!   advertises tools only, as before.
+//!
+//! With `--tool-prefix PREFIX` every tool is listed and called as
+//! `PREFIX<name>`, so two servers of one test serve distinct names. With
+//! `--started-file FILE` the server appends one line to `FILE` when it
+//! starts, so a test can count the processes a launch started.
 
 use schemars::JsonSchema;
 use serde_json::{Map, Value, json};
@@ -105,6 +110,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd_report = std::env::args()
         .skip_while(|arg| arg != "--cwd-report")
         .nth(1);
+    let tool_prefix = std::env::args()
+        .skip_while(|arg| arg != "--tool-prefix")
+        .nth(1)
+        .unwrap_or_default();
+    if let Some(started_file) = std::env::args()
+        .skip_while(|arg| arg != "--started-file")
+        .nth(1)
+    {
+        let mut started = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(started_file)?;
+        writeln!(started, "started {}", std::process::id())?;
+    }
     let ui_view = std::env::args().any(|arg| arg == "--ui-view");
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -154,17 +173,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // This is a request, send a response
-        let response = handle_request(
-            &request,
-            env_digest.as_deref(),
-            cwd_report.as_deref(),
-            ui_view,
-        );
+        let response = with_tool_prefix(&request, &tool_prefix, |request| {
+            handle_request(
+                request,
+                env_digest.as_deref(),
+                cwd_report.as_deref(),
+                ui_view,
+            )
+        });
         writeln!(stdout, "{response}")?;
         stdout.flush()?;
     }
 
     Ok(())
+}
+
+/// Serve `request` with every tool named `prefix<name>`: a call's name loses
+/// the prefix before `handle` reads it, and a listing's names gain it.
+fn with_tool_prefix(request: &Value, prefix: &str, handle: impl Fn(&Value) -> Value) -> Value {
+    if prefix.is_empty() {
+        return handle(request);
+    }
+    let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let mut request = request.clone();
+    if method == "tools/call"
+        && let Some(name) = request
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .and_then(|name| name.strip_prefix(prefix))
+            .map(str::to_owned)
+        && let Some(params) = request.get_mut("params").and_then(Value::as_object_mut)
+    {
+        params.insert("name".to_string(), Value::String(name));
+    }
+    let mut response = handle(&request);
+    if method == "tools/list"
+        && let Some(tools) = response
+            .pointer_mut("/result/tools")
+            .and_then(Value::as_array_mut)
+    {
+        for tool in tools {
+            if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                let prefixed = format!("{prefix}{name}");
+                tool["name"] = Value::String(prefixed);
+            }
+        }
+    }
+    response
 }
 
 /// FNV-1a (64-bit) of `value`, as 16 lowercase hex digits.

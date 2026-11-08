@@ -20,6 +20,21 @@ impl MeerkatMachine {
         self.store.as_ref().and_then(|store| store.self_fence())
     }
 
+    /// Whether this machine's store refuses every later call that needs
+    /// `session_id`'s runtime until its realm is reopened
+    /// ([`crate::store::RuntimeStore::refuses_runtime_until_reopen`]): the
+    /// store keeps that runtime's inputs as it last committed them.
+    pub(crate) fn store_refuses_session_until_reopen(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> bool {
+        self.store.as_ref().is_some_and(|store| {
+            store.refuses_runtime_until_reopen(&crate::identifiers::LogicalRuntimeId::for_session(
+                session_id,
+            ))
+        })
+    }
+
     /// Whether `session_id`'s store holds a provisional tail of `run_id`:
     /// the run made a round commit, so it resumes from the cursor the tail
     /// carries. A run with none (a store fence gap suspended it before its
@@ -190,6 +205,292 @@ impl MeerkatMachine {
             Arc::clone(&sessions.get(session_id)?.driver)
         };
         driver.lock().await.resumable_run_id()
+    }
+
+    /// The run `session_id`'s current registration keeps resumable while its
+    /// resumed-run admission could not decide, if any: the run stays marked,
+    /// with its inputs bound and none ended, until a later lap of the
+    /// runtime loop or a later registration asks the admission again and it
+    /// answers.
+    pub async fn resumed_run_admission_held(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Option<meerkat_core::lifecycle::RunId> {
+        let driver = {
+            let sessions = self.sessions.read().await;
+            Arc::clone(&sessions.get(session_id)?.driver)
+        };
+        driver.lock().await.resumed_run_admission_held()
+    }
+
+    /// Settle the run `session_id`'s registration retained, without resuming
+    /// it and without a model request: the run a restart left open (a crash,
+    /// a power cut, or a graceful stop that kept the run), which the
+    /// registration marked resumable and which has not begun again.
+    ///
+    /// The machine decides (`SettleRetainedRun`), under the session's
+    /// mutation gate. With no run current and a run marked, it records that
+    /// run's stop, as [`Self::stop_run`] records the stop of a run marked
+    /// resumable: the run never resumes, and the runtime loop settles it at
+    /// its next lap, before it asks any run-start hold or resumed-run
+    /// admission. Every input bound to the run ends `Abandoned { Cancelled }`,
+    /// the run's provisional tail is closed as an interrupted run (every
+    /// committed round kept, open calls answered as outcome-unknown, the
+    /// interrupted notice appended), and the run's terminal is published on
+    /// the session's stream. A host that holds the session's run starts
+    /// ([`super::RunStartHoldReason::HostRecovery`]) is settled all the same:
+    /// its hold only keeps the run from resuming before the settle. Queued
+    /// inputs and the holds are untouched.
+    ///
+    /// The call answers
+    /// [`RetainedRunSettlement::Settled`](crate::RetainedRunSettlement::Settled)
+    /// only from committed facts, read under the session's mutation gate once
+    /// the settlement ended (the runtime loop holds the gate through the
+    /// settlement's commit and its tail repair, and requires the reload of a
+    /// tail the repair left standing before it releases the gate): the
+    /// registration is ready, neither drains for its unregister nor owes one,
+    /// no longer marks the run, and every input bound to the run holds its
+    /// committed terminal, `Abandoned { Cancelled }` when this settle or a
+    /// stop ended the run, `Abandoned { Reset }` or `Abandoned { Retired }`
+    /// when a reset or a retire ended it first. The call never answers
+    /// `Settled` when:
+    ///
+    /// - the settlement's write failed, so the registration needs a
+    ///   durability reload, which loses the stop: the reload refusal
+    ///   ([`RuntimeDriverError::RecoveryRepairBlocked`]), and the reloaded
+    ///   registration keeps the run again;
+    /// - the settlement committed but its tail repair left the run's
+    ///   provisional tail standing, so the registration needs a durability
+    ///   reload: the reload refusal too. The run's inputs keep their
+    ///   committed terminals, so the reloaded registration keeps no run, and
+    ///   the tail is left to the session's durable-tail recovery;
+    /// - another writer took the session store's fence, or an unregister
+    ///   ended the run first: the refusal of a session that leaves this
+    ///   process ([`RuntimeDriverError::UnregisterInProgress`] while it
+    ///   drains, the unregister's own refusal while one is owed,
+    ///   [`RuntimeDriverError::NotReady`] once it is gone). An unregister
+    ///   that keeps queued work (a mob Shutdown's default) ends the run's
+    ///   inputs `Abandoned { Stopped }`, whatever each input's state; one
+    ///   that stops ends them `Abandoned { Cancelled }`.
+    ///
+    /// A registration that replaced the one that accepted the settle (a
+    /// reload) and keeps the run again is settled again within the call.
+    ///
+    /// A run that is current (the marked run resumed, or another run
+    /// started) is never stopped here: the answer is
+    /// [`RetainedRunSettlement::Busy`](crate::RetainedRunSettlement::Busy)
+    /// with that run. A registration that cannot settle the run it marked now
+    /// (draining for its unregister, whose next registration finds the run
+    /// open again, or initializing, retired or stopped) answers `Busy` with no
+    /// run. With no run current and none marked, the answer is
+    /// [`RetainedRunSettlement::NotRetained`](crate::RetainedRunSettlement::NotRetained).
+    /// Neither changes anything.
+    ///
+    /// Idempotent per run: a settle that arrives while the run's settlement
+    /// is pending joins it and gets the same answer, and a settle after it
+    /// (a retry after a lost reply) finds nothing retained, `NotRetained`;
+    /// the run's inputs then read `Abandoned { Cancelled }` through
+    /// [`Self::input_terminal_receipt`]. The call has no deadline of its own:
+    /// the settlement waits for an executor (a registration with none
+    /// settles the run when one is attached) and for the session's store to
+    /// take writes (a store fence gap). Dropping the call never undoes the
+    /// settle: the stop the machine recorded stands.
+    ///
+    /// # Errors
+    /// [`RuntimeDriverError::NotReady`] for a session with no registration
+    /// in this process, the refusal of a registration that needs a
+    /// durability reload, the refusal of one whose unregister is owed or
+    /// running, and those refusals for a settlement that did not commit.
+    /// [`RuntimeDriverError::InputTerminalNotYetReadable`] when the
+    /// registration no longer keeps the run but an input bound to it reads
+    /// no committed terminal.
+    pub async fn settle_retained_run(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<crate::retained_run::RetainedRunSettlement, RuntimeDriverError> {
+        use crate::retained_run::{RetainedRunSettledInput, RetainedRunSettlement};
+
+        let mut gate = self
+            .lock_current_durability_ready_session_mutation_gate(session_id)
+            .await?;
+        loop {
+            if let Some(refusal) = self
+                .lifecycle_mutation_refused_by_unregister(session_id)
+                .await
+            {
+                return Err(refusal);
+            }
+            // The run the registration marked, observed under the gate the
+            // machine decides under.
+            let observed_run_id = self.marked_resumable_run_id(session_id).await?;
+            let (_, effects) = self
+                .apply_session_dsl_input(
+                    session_id,
+                    super::dsl::MeerkatMachineInput::SettleRetainedRun {
+                        run_id: observed_run_id.as_ref().map(super::dsl::RunId::from_domain),
+                    },
+                    "SettleRetainedRun",
+                )
+                .await
+                .map_err(RuntimeDriverError::Internal)?;
+            let (verdict, run_id) = effects
+                .as_slice()
+                .iter()
+                .find_map(|effect| match effect {
+                    super::dsl::MeerkatMachineEffect::RetainedRunSettleResolved {
+                        verdict,
+                        run_id,
+                    } => Some((*verdict, run_id.clone())),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    RuntimeDriverError::Internal(
+                        "SettleRetainedRun committed without RetainedRunSettleResolved".to_string(),
+                    )
+                })?;
+            let run_id = run_id
+                .map(|run_id| {
+                    uuid::Uuid::parse_str(&run_id.0)
+                        .map(meerkat_core::lifecycle::RunId::from_uuid)
+                        .map_err(|error| {
+                            RuntimeDriverError::Internal(format!(
+                                "RetainedRunSettleResolved carried a malformed run id {run_id:?}: {error}"
+                            ))
+                        })
+                })
+                .transpose()?;
+            let run_id = match verdict {
+                super::dsl::RetainedRunSettleVerdict::NotRetained => {
+                    return Ok(RetainedRunSettlement::NotRetained);
+                }
+                super::dsl::RetainedRunSettleVerdict::Busy => {
+                    return Ok(RetainedRunSettlement::Busy {
+                        current_run_id: run_id,
+                    });
+                }
+                super::dsl::RetainedRunSettleVerdict::Accepted => run_id.ok_or_else(|| {
+                    RuntimeDriverError::Internal(
+                        "an accepted SettleRetainedRun named no run".to_string(),
+                    )
+                })?,
+            };
+            // Under the gate, which the loop's settlement takes too: the run
+            // is still marked, so the waiters registered here are answered by
+            // its settlement, or by the end of this registration.
+            let (driver, completions, wake_tx) = {
+                let sessions = self.sessions.read().await;
+                let entry = sessions
+                    .get(session_id)
+                    .ok_or(RuntimeDriverError::NotReady {
+                        state: crate::runtime_state::RuntimeState::Destroyed,
+                    })?;
+                (
+                    Arc::clone(&entry.driver),
+                    Arc::clone(&entry.completions),
+                    entry.wake_sender(),
+                )
+            };
+            let bound_input_ids = driver.lock().await.resumed_run_bound_input_ids(&run_id);
+            let waiters = {
+                let mut completions = completions.lock().await;
+                bound_input_ids
+                    .iter()
+                    .map(|input_id| completions.register(input_id.clone()))
+                    .collect::<Vec<_>>()
+            };
+            drop(gate);
+            // The loop may be parked on a run-start hold: wake it, so it
+            // settles the stopped run at its next lap.
+            if let Some(wake_tx) = wake_tx {
+                let _ = wake_tx.try_send(());
+            }
+            for waiter in waiters {
+                // Ended by the settlement, or by the end of the registration
+                // (a reload, a teardown): what committed is read below.
+                let _ = waiter.try_wait_with_terminal_outcome().await;
+            }
+            // The facts, under the gate the loop holds through the
+            // settlement's commit and its tail repair. A registration that
+            // needs a reload, or is gone, refuses here.
+            gate = self
+                .lock_current_durability_ready_session_mutation_gate(session_id)
+                .await?;
+            if let Some(refusal) = self
+                .lifecycle_mutation_refused_by_unregister(session_id)
+                .await
+            {
+                return Err(refusal);
+            }
+            if self.registration_drains(session_id).await? {
+                // The session leaves this process through its unregister,
+                // which ends the run's inputs or keeps them for the next
+                // registration: nothing was settled here.
+                return Err(RuntimeDriverError::UnregisterInProgress {
+                    runtime_id: crate::identifiers::LogicalRuntimeId::for_session(session_id),
+                });
+            }
+            if self.marked_resumable_run_id(session_id).await?.as_ref() == Some(&run_id) {
+                // A registration that replaced the one that accepted the
+                // settle (a reload) keeps the run again: settle it again.
+                continue;
+            }
+            let mut inputs = Vec::with_capacity(bound_input_ids.len());
+            for input_id in bound_input_ids {
+                let Some(terminal) = self.committed_input_terminal(session_id, &input_id).await
+                else {
+                    return Err(RuntimeDriverError::InputTerminalNotYetReadable {
+                        reason: format!(
+                            "the settlement of run {run_id} left input {input_id} with no committed \
+                             terminal"
+                        ),
+                        input_id,
+                    });
+                };
+                inputs.push(RetainedRunSettledInput { input_id, terminal });
+            }
+            return Ok(RetainedRunSettlement::Settled { run_id, inputs });
+        }
+    }
+
+    /// The run `session_id`'s registration marks resumable, read from its
+    /// machine authority. Read under the session's mutation gate.
+    async fn marked_resumable_run_id(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<Option<meerkat_core::lifecycle::RunId>, RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: crate::runtime_state::RuntimeState::Destroyed,
+            })?;
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(super::dsl_authority::resumable_run_id_from_authority(
+            &authority,
+        ))
+    }
+
+    /// Whether `session_id`'s registration drains for its unregister, read
+    /// from its machine authority. Read under the session's mutation gate.
+    async fn registration_drains(
+        &self,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<bool, RuntimeDriverError> {
+        let sessions = self.sessions.read().await;
+        let entry = sessions
+            .get(session_id)
+            .ok_or(RuntimeDriverError::NotReady {
+                state: crate::runtime_state::RuntimeState::Destroyed,
+            })?;
+        let authority = entry
+            .dsl_authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(authority.state().registration_phase
+            == crate::meerkat_machine::dsl::RegistrationPhase::Draining)
     }
 
     /// Release the run `session_id`'s registration marked resumable to
@@ -431,6 +732,32 @@ impl super::driver::DriverEntry {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = authority.state();
         state.resumable_run_id.is_some() && state.run_stop_requested == state.resumable_run_id
+    }
+
+    /// The run marked resumable that the machine holds because its
+    /// resumed-run admission could not decide, if any.
+    pub(crate) fn resumed_run_admission_held(&self) -> Option<meerkat_core::lifecycle::RunId> {
+        self.shell_driver().resumed_run_admission_held()
+    }
+
+    /// Hold the run `run_id` marked resumable for its admission (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::hold_resumed_run_for_admission`]).
+    pub(crate) fn hold_resumed_run_for_admission(
+        &mut self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        self.shell_driver_mut()
+            .hold_resumed_run_for_admission(run_id)
+    }
+
+    /// Release the admission hold of the run `run_id` (see
+    /// [`crate::driver::ephemeral::EphemeralRuntimeDriver::release_resumed_run_admission`]).
+    pub(crate) fn release_resumed_run_admission(
+        &mut self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<(), crate::RuntimeDriverError> {
+        self.shell_driver_mut()
+            .release_resumed_run_admission(run_id)
     }
 
     /// The session's unfinished inputs its store keeps: every active input

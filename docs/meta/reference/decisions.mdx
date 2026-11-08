@@ -4,7 +4,7 @@ description: "Policy enforcement: auth rules, console access, runtime ops constr
 icon: "scale-balanced"
 ---
 
-*Mirrored from Meerkat Meta main at [a3e206295c7d](https://github.com/lukacf/meerkat/commit/a3e206295c7d98c5cbda60028080511b9f1dc221) on 2026-11-04; Meta version 0.9.9 at that commit.*
+*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 Meta's decision layer enforces operational policies through typed validation functions. Each function takes a policy or configuration input and returns a typed error on violation.
 
@@ -148,6 +148,7 @@ let decisions = build_runtime_decision_state(RuntimeDecisionInputs {
         jwks_json: jwks_json,                    // at least one key
         audience: "my-console".into(),
         require_verified_email: false,
+        shared_account_tokens: false,
     },
     console: ConsolePolicy::default(),           // require_app_auth: true
     ops: RuntimeOpsPolicy::default(),

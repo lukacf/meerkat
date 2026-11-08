@@ -155,6 +155,40 @@ RevokeSettledRevoked(now_ms) ==
     /\ UnchangedFrame_99683cc0d992b69c
 
 
+EndWithSubjectActive(now_ms) ==
+    /\ phase = "Active"
+    /\ (now_ms < expires_at_ms)
+    /\ phase' = "Revoked"
+    /\ model_step_count' = model_step_count + 1
+    /\ ended_at_ms' = Some(now_ms)
+    /\ end_reason' = Some("SubjectEnded")
+    /\ UnchangedFrame_879ce4ccada6bac3
+
+
+EndWithSubjectAfterDeadline(now_ms) ==
+    /\ phase = "Active"
+    /\ (expires_at_ms <= now_ms)
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ ended_at_ms' = Some(now_ms)
+    /\ end_reason' = Some("Deadline")
+    /\ UnchangedFrame_879ce4ccada6bac3
+
+
+EndWithSubjectSettledExpired(now_ms) ==
+    /\ phase = "Expired"
+    /\ phase' = "Expired"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_99683cc0d992b69c
+
+
+EndWithSubjectSettledRevoked(now_ms) ==
+    /\ phase = "Revoked"
+    /\ phase' = "Revoked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_99683cc0d992b69c
+
+
 AdmitLive(now_ms) ==
     /\ phase = "Active"
     /\ (now_ms < expires_at_ms)
@@ -182,6 +216,15 @@ AdmitEndedExpired(now_ms) ==
 
 AdmitEndedRevoked(now_ms) ==
     /\ phase = "Revoked"
+    /\ (end_reason = Some("Revoked"))
+    /\ phase' = "Revoked"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_99683cc0d992b69c
+
+
+AdmitEndedWithSubject(now_ms) ==
+    /\ phase = "Revoked"
+    /\ (end_reason = Some("SubjectEnded"))
     /\ phase' = "Revoked"
     /\ model_step_count' = model_step_count + 1
     /\ UnchangedFrame_99683cc0d992b69c
@@ -201,10 +244,15 @@ Next ==
     \/ (phase = "Active") /\ \E now_ms \in 0..2 : RevokeAfterDeadline(now_ms)
     \/ (phase = "Expired") /\ \E now_ms \in 0..2 : RevokeSettledExpired(now_ms)
     \/ (phase = "Revoked") /\ \E now_ms \in 0..2 : RevokeSettledRevoked(now_ms)
+    \/ (phase = "Active") /\ \E now_ms \in 0..2 : EndWithSubjectActive(now_ms)
+    \/ (phase = "Active") /\ \E now_ms \in 0..2 : EndWithSubjectAfterDeadline(now_ms)
+    \/ (phase = "Expired") /\ \E now_ms \in 0..2 : EndWithSubjectSettledExpired(now_ms)
+    \/ (phase = "Revoked") /\ \E now_ms \in 0..2 : EndWithSubjectSettledRevoked(now_ms)
     \/ (phase = "Active") /\ \E now_ms \in 0..2 : AdmitLive(now_ms)
     \/ (phase = "Active") /\ \E now_ms \in 0..2 : AdmitDue(now_ms)
     \/ (phase = "Expired") /\ \E now_ms \in 0..2 : AdmitEndedExpired(now_ms)
     \/ (phase = "Revoked") /\ \E now_ms \in 0..2 : AdmitEndedRevoked(now_ms)
+    \/ (phase = "Revoked") /\ \E now_ms \in 0..2 : AdmitEndedWithSubject(now_ms)
     \/ TerminalStutter
 
 unissued_is_empty == (IF (phase # "Unissued") THEN TRUE ELSE ((grant_id = "") /\ (issued_at_ms = 0) /\ (expires_at_ms = 0) /\ (ended_at_ms = None) /\ (end_reason = None)))
@@ -212,7 +260,7 @@ issued_window_is_nonempty == (IF (phase = "Unissued") THEN TRUE ELSE ((grant_id 
 active_has_no_end == (IF (phase # "Active") THEN TRUE ELSE ((ended_at_ms = None) /\ (end_reason = None)))
 ended_grants_record_their_end == (IF ((phase # "Expired") /\ (phase # "Revoked")) THEN TRUE ELSE ((ended_at_ms # None) /\ (end_reason # None)))
 expiry_never_precedes_its_deadline == (IF (phase # "Expired") THEN TRUE ELSE ((end_reason = Some("Deadline")) /\ (ended_at_ms # None) /\ ((IF "value" \in DOMAIN ended_at_ms THEN ended_at_ms["value"] ELSE None) >= expires_at_ms)))
-revocation_precedes_the_deadline == (IF (phase # "Revoked") THEN TRUE ELSE ((end_reason = Some("Revoked")) /\ (ended_at_ms # None) /\ ((IF "value" \in DOMAIN ended_at_ms THEN ended_at_ms["value"] ELSE None) < expires_at_ms)))
+revocation_precedes_the_deadline == (IF (phase # "Revoked") THEN TRUE ELSE ((IF (end_reason = Some("Revoked")) THEN TRUE ELSE (end_reason = Some("SubjectEnded"))) /\ (ended_at_ms # None) /\ ((IF "value" \in DOMAIN ended_at_ms THEN ended_at_ms["value"] ELSE None) < expires_at_ms)))
 
 CiStateConstraint == /\ model_step_count <= 4
 DeepStateConstraint == /\ model_step_count <= 8

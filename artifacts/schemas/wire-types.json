@@ -8435,13 +8435,21 @@
         ]
       },
       "ApprovalConsentApprover": {
-        "description": "The authenticated approver recorded on a consent decision.",
+        "description": "The authenticated approver recorded on a consent decision: the one record\nof who decided. The decision's `actor` is only its principal's id.",
         "properties": {
           "assurance": {
             "$ref": "#/$defs/ApprovalAssurance"
           },
+          "authentication_scope_digest": {
+            "description": "The digest of the host authentication scope (the login or session)\nthe decision event was authenticated in, when the host named one\n([`consent::HostAuthenticationScope::digest`]): `sha256:` and 64\nlowercase hex digits. Never the scope itself. Absent on a row decided\nbefore the digest was recorded; a Core that predates it ignores the\nfield and drops it when it rewrites the row.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "principal": {
-            "$ref": "#/$defs/PrincipalRef"
+            "$ref": "#/$defs/PrincipalRef",
+            "description": "The decider's qualified principal: its kind, trust domain and id."
           }
         },
         "required": [
@@ -9259,13 +9267,21 @@
         ]
       },
       "ApprovalConsentApprover": {
-        "description": "The authenticated approver recorded on a consent decision.",
+        "description": "The authenticated approver recorded on a consent decision: the one record\nof who decided. The decision's `actor` is only its principal's id.",
         "properties": {
           "assurance": {
             "$ref": "#/$defs/ApprovalAssurance"
           },
+          "authentication_scope_digest": {
+            "description": "The digest of the host authentication scope (the login or session)\nthe decision event was authenticated in, when the host named one\n([`consent::HostAuthenticationScope::digest`]): `sha256:` and 64\nlowercase hex digits. Never the scope itself. Absent on a row decided\nbefore the digest was recorded; a Core that predates it ignores the\nfield and drops it when it rewrites the row.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "principal": {
-            "$ref": "#/$defs/PrincipalRef"
+            "$ref": "#/$defs/PrincipalRef",
+            "description": "The decider's qualified principal: its kind, trust domain and id."
           }
         },
         "required": [
@@ -39988,7 +40004,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -43418,7 +43435,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -59865,7 +59883,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -84346,7 +84365,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -96125,7 +96145,7 @@
             "type": "object"
           },
           {
-            "description": "The member's durable resume gate was unavailable at the wake.",
+            "description": "The member's durable resume gate was unavailable at the wake, or its\nsession could not be built now for a cause that clears with no change\nto the member (for example a provider credential whose source or\nstore cannot answer now or whose lookup is in flight).",
             "properties": {
               "kind": {
                 "const": "resume_gate_unavailable",
@@ -97017,6 +97037,23 @@
         },
         "type": "object"
       },
+      "DecisionGovernanceConfig": {
+        "additionalProperties": false,
+        "description": "The durable decisions the operator of an `rkat-rpc` stdio connection\ndecides: those addressed to one of `operator_approver_ids`. The operator\nis the process's operating-system user (on a governed pipe, the\ncomposition's operator); the connection presents it the open decisions\nof these approver ids when its client lists them, and it decides only a\ndecision the connection presented, while the decision's approver id is\nstill listed here.\n\nChanging the list is approver-authority administration, so it lives in\nthe host-administered governance section: an ordinary config write can\nneither add, change nor remove it.",
+        "properties": {
+          "operator_approver_ids": {
+            "default": [
+              "operator"
+            ],
+            "description": "The approver ids the operator acts for. Absent, it is `[\"operator\"]`;\nan explicitly empty list presents nothing and decides nothing.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "ExecutionConfinement": {
         "additionalProperties": false,
         "description": "Validated immutable requirements. Final host-path and backend validation\nbelongs to the adapter at preparation, not this platform-neutral contract.",
@@ -97154,8 +97191,12 @@
       },
       "GovernanceConfig": {
         "additionalProperties": false,
-        "description": "Governance of a realm's native composition. Empty by default: a stock\ngoverned realm keeps every operation at its local R1 tier and calls no\nreviewer. A present section ([`crate::Config::governance`]), even an\nempty one, replaces an inherited one as a whole.",
+        "description": "Governance of a realm's native composition. By default a stock governed\nrealm keeps every operation at its local R1 tier and calls no reviewer,\nand the stdio operator decides for the approver id `operator`.\nA present section ([`crate::Config::governance`]), even an empty one,\nreplaces an inherited one as a whole.",
         "properties": {
+          "decisions": {
+            "$ref": "#/$defs/DecisionGovernanceConfig",
+            "description": "The approver ids the stdio operator decides durable decisions for."
+          },
           "review": {
             "$ref": "#/$defs/StockReviewConfig",
             "description": "The review the stock governed host requires."
@@ -99080,6 +99121,1441 @@
       "patch"
     ],
     "title": "ContractVersion",
+    "type": "object"
+  },
+  "DecisionListResult": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecision": {
+        "description": "One durable decision, as its row stands at the read.",
+        "properties": {
+          "approver_id": {
+            "description": "Who may approve the decision: the host maps it to the humans who may\nact for it.",
+            "type": "string"
+          },
+          "created_at_ms": {
+            "description": "The host clock reading of the hold, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deadline_at_ms": {
+            "description": "The sealed deadline, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "decided_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "decision_id": {
+            "description": "`decision:` and 64 lowercase hex digits.",
+            "type": "string"
+          },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "execution_refusal": {
+            "description": "The owner's typed refusal of an execution-refused decision.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_presented_to_approver_at_ms": {
+            "description": "When a complete presentation first reached the approver, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "The host's token naming what kind of operation the decision holds.",
+            "type": "string"
+          },
+          "notice": {
+            "$ref": "#/$defs/WireDecisionNoticeState",
+            "description": "Where the requester notice stands."
+          },
+          "operation_id": {
+            "description": "The held operation's id, as its owner names it.",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set exactly when the decision was decided."
+          },
+          "permit_issued": {
+            "description": "Whether an execution permit is outstanding.",
+            "type": "boolean"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireDecisionPhase"
+          },
+          "presentations": {
+            "description": "The latest complete presentation per audience.",
+            "items": {
+              "$ref": "#/$defs/WirePresentationRecord"
+            },
+            "type": "array"
+          },
+          "renderer": {
+            "description": "The token of the renderer that produced the rendering.",
+            "type": "string"
+          },
+          "request": {
+            "description": "The held request, when the read asked for it (`include_request`)."
+          },
+          "request_digest": {
+            "description": "The held request's digest, as the operation's owner computes it.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "The requester's principal key.",
+            "type": "string"
+          },
+          "reviewer": {
+            "description": "The reviewer of a review-stage decision (a principal key).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "description": "The row's revision: 1 at the hold, one more at each write.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stage": {
+            "$ref": "#/$defs/WireDecisionStage"
+          },
+          "subject_digest": {
+            "description": "The digest of the decision's rendering, computed by the server.",
+            "type": "string"
+          },
+          "subject_key": {
+            "description": "The host's key of the subject the decision is held for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "kind",
+          "subject_key",
+          "operation_id",
+          "request_digest",
+          "requester",
+          "approver_id",
+          "phase",
+          "stage",
+          "notice",
+          "deadline_at_ms",
+          "created_at_ms",
+          "subject_digest",
+          "renderer",
+          "permit_issued",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionNoticeState": {
+        "description": "Where the requester notice of a decision stands.",
+        "oneOf": [
+          {
+            "const": "not_required",
+            "description": "The requester is not routable: no notice is ever owed.",
+            "type": "string"
+          },
+          {
+            "const": "not_due",
+            "description": "The decision has not ended.",
+            "type": "string"
+          },
+          {
+            "const": "owed",
+            "description": "The decision ended and its notice is owed.",
+            "type": "string"
+          },
+          {
+            "const": "delivered",
+            "description": "The notice was delivered.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The notice failed terminally.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionOutcome": {
+        "description": "A decided decision's outcome: who decided, and the evidence.",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/WireDecisionEvidence"
+          },
+          "tier": {
+            "$ref": "#/$defs/WireDecisionTier"
+          }
+        },
+        "required": [
+          "tier",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionStage": {
+        "description": "Who decides an open decision now.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      },
+      "WireUnreadableDecision": {
+        "description": "A stored decision row the server cannot read (written by a newer\nversion, or torn). Nothing executes it.",
+        "properties": {
+          "decision_id": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "detail"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`decision/list` result. Each decision is read at the server's clock: one\npast its deadline reads as expired.",
+    "properties": {
+      "decisions": {
+        "items": {
+          "$ref": "#/$defs/WireDecision"
+        },
+        "type": "array"
+      },
+      "next_after": {
+        "description": "The id to read the next page after, when there may be more rows.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "unreadable": {
+        "default": [],
+        "description": "The rows of the page the server cannot read.",
+        "items": {
+          "$ref": "#/$defs/WireUnreadableDecision"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "decisions"
+    ],
+    "title": "DecisionListResult",
+    "type": "object"
+  },
+  "DecisionRenderingResult": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`decision/rendering` result: the one canonical rendering of the held\nrequest and its canonical parts for the asked part size.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "max_part_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "parts": {
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "renderer": {
+        "type": "string"
+      },
+      "rendering": {
+        "type": "string"
+      },
+      "subject_digest": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id",
+      "rendering",
+      "renderer",
+      "subject_digest",
+      "parts"
+    ],
+    "title": "DecisionRenderingResult",
+    "type": "object"
+  },
+  "DecisionResult": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecision": {
+        "description": "One durable decision, as its row stands at the read.",
+        "properties": {
+          "approver_id": {
+            "description": "Who may approve the decision: the host maps it to the humans who may\nact for it.",
+            "type": "string"
+          },
+          "created_at_ms": {
+            "description": "The host clock reading of the hold, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "deadline_at_ms": {
+            "description": "The sealed deadline, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "decided_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "decision_id": {
+            "description": "`decision:` and 64 lowercase hex digits.",
+            "type": "string"
+          },
+          "effect": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionEffect"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "execution_refusal": {
+            "description": "The owner's typed refusal of an execution-refused decision.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_presented_to_approver_at_ms": {
+            "description": "When a complete presentation first reached the approver, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "The host's token naming what kind of operation the decision holds.",
+            "type": "string"
+          },
+          "notice": {
+            "$ref": "#/$defs/WireDecisionNoticeState",
+            "description": "Where the requester notice stands."
+          },
+          "operation_id": {
+            "description": "The held operation's id, as its owner names it.",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireDecisionOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set exactly when the decision was decided."
+          },
+          "permit_issued": {
+            "description": "Whether an execution permit is outstanding.",
+            "type": "boolean"
+          },
+          "phase": {
+            "$ref": "#/$defs/WireDecisionPhase"
+          },
+          "presentations": {
+            "description": "The latest complete presentation per audience.",
+            "items": {
+              "$ref": "#/$defs/WirePresentationRecord"
+            },
+            "type": "array"
+          },
+          "renderer": {
+            "description": "The token of the renderer that produced the rendering.",
+            "type": "string"
+          },
+          "request": {
+            "description": "The held request, when the read asked for it (`include_request`)."
+          },
+          "request_digest": {
+            "description": "The held request's digest, as the operation's owner computes it.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "The requester's principal key.",
+            "type": "string"
+          },
+          "reviewer": {
+            "description": "The reviewer of a review-stage decision (a principal key).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "description": "The row's revision: 1 at the hold, one more at each write.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stage": {
+            "$ref": "#/$defs/WireDecisionStage"
+          },
+          "subject_digest": {
+            "description": "The digest of the decision's rendering, computed by the server.",
+            "type": "string"
+          },
+          "subject_key": {
+            "description": "The host's key of the subject the decision is held for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "kind",
+          "subject_key",
+          "operation_id",
+          "request_digest",
+          "requester",
+          "approver_id",
+          "phase",
+          "stage",
+          "notice",
+          "deadline_at_ms",
+          "created_at_ms",
+          "subject_digest",
+          "renderer",
+          "permit_issued",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionNoticeState": {
+        "description": "Where the requester notice of a decision stands.",
+        "oneOf": [
+          {
+            "const": "not_required",
+            "description": "The requester is not routable: no notice is ever owed.",
+            "type": "string"
+          },
+          {
+            "const": "not_due",
+            "description": "The decision has not ended.",
+            "type": "string"
+          },
+          {
+            "const": "owed",
+            "description": "The decision ended and its notice is owed.",
+            "type": "string"
+          },
+          {
+            "const": "delivered",
+            "description": "The notice was delivered.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The notice failed terminally.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionOutcome": {
+        "description": "A decided decision's outcome: who decided, and the evidence.",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/WireDecisionEvidence"
+          },
+          "tier": {
+            "$ref": "#/$defs/WireDecisionTier"
+          }
+        },
+        "required": [
+          "tier",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionStage": {
+        "description": "Who decides an open decision now.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The result of `decision/get`, `decision/present`, `decision/withdraw`\nand `decision/decide`: the decision as it stands after the call.",
+    "properties": {
+      "decision": {
+        "$ref": "#/$defs/WireDecision"
+      }
+    },
+    "required": [
+      "decision"
+    ],
+    "title": "DecisionResult",
     "type": "object"
   },
   "DeferredCreateResult": {
@@ -112079,13 +113555,44 @@
         ],
         "type": "object"
       },
+      "WireToolGrantApplies": {
+        "description": "Whether an identity grant applies to the member's running build.",
+        "oneOf": [
+          {
+            "const": "now",
+            "description": "The identity's live member build runs a gate that covers the target\n(for a gated MCP server the member's profile configures, the build\nholds the server too).",
+            "type": "string"
+          },
+          {
+            "const": "not_mounted",
+            "description": "The target is not mounted: the live build ignored it, or, with no\nlive build, the next build cannot mount it.",
+            "type": "string"
+          },
+          {
+            "const": "at_next_build",
+            "description": "The member's next build applies it: the member is not live here, its\nlive build predates the gate that covers the target, or the target is\na gated MCP server the member's profile configures that the live\nbuild left unattached.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a value this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
       "WireToolGrantIssuer": {
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -112225,7 +113732,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -112269,6 +113776,32 @@
             "type": "object"
           },
           {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
             "properties": {
               "kind": {
@@ -112287,6 +113820,17 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`tool_grants/grant` result.",
     "properties": {
+      "applies": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireToolGrantApplies"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For an identity grant: whether it applies to the member's running\nbuild now. Advisory: the grant is issued either way."
+      },
       "grant": {
         "$ref": "#/$defs/WireToolGrant"
       }
@@ -115631,6 +117175,30 @@
   },
   "ListToolGrantsResult": {
     "$defs": {
+      "WireMemberToolGrantGate": {
+        "description": "A mob member identity's tool grant gate, as `tool_grants/list` answers\nit: what its live build runs, and what its next build resolves.",
+        "properties": {
+          "next_build": {
+            "$ref": "#/$defs/WireToolGrantGateView",
+            "description": "The gate the member's next build resolves: its own gate joined with\nits role's current gate."
+          },
+          "running": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireToolGrantGateView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the identity's live member build gates now (its gated names\nunder `tools`, with its gated servers and the unconfigured-servers\nmode) and the names it ignored as not mounted; `null` when no build\nof the member is live on this server."
+          }
+        },
+        "required": [
+          "next_build"
+        ],
+        "type": "object"
+      },
       "WireToolGrant": {
         "description": "One scoped tool grant.",
         "properties": {
@@ -115688,13 +117256,64 @@
         ],
         "type": "object"
       },
+      "WireToolGrantGateEntries": {
+        "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Whether every MCP server the build does not configure itself is\ngated.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "WireToolGrantGateView": {
+        "description": "A build's tool grant gate: what it gates, and the role entries it\nignores as not mounted (never gated, never open).",
+        "properties": {
+          "gated": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          },
+          "not_mounted": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          }
+        },
+        "type": "object"
+      },
       "WireToolGrantIssuer": {
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -115834,7 +117453,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -115878,6 +117497,32 @@
             "type": "object"
           },
           {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward compatibility: a target kind this version does not know.\nThe server never sends it.",
             "properties": {
               "kind": {
@@ -115912,6 +117557,17 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "`tool_grants/list` result. Due grants are settled as expired first.",
     "properties": {
+      "gate": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireMemberToolGrantGate"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For an identity subject: the member's gate, running and next build.\nAdvisory."
+      },
       "grants": {
         "items": {
           "$ref": "#/$defs/WireToolGrant"
@@ -118154,7 +119810,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -119179,7 +120836,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -120174,7 +121832,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -126380,6 +128039,10 @@
             },
             "type": "array"
           },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. A member's gate is its own profile's\njoined with its role's current gate. Leave a gated family's switch\noff: the gate mounts it, and an older server keeps it off."
+          },
           "image_generation": {
             "default": false,
             "type": "boolean"
@@ -127051,6 +128714,38 @@
           "high"
         ],
         "type": "string"
+      },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
       },
       "WireMobBackendKind": {
         "enum": [
@@ -134179,6 +135874,11 @@
             "const": "not_observed_while_retiring",
             "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
             "type": "string"
+          },
+          {
+            "const": "store_refused",
+            "description": "The store refuses to read the member's session until its realm is\nreopened (a host store whose scope of the session, or whose realm, is\npoisoned). Later reads of the member answer the same until then.",
+            "type": "string"
           }
         ]
       },
@@ -135785,6 +137485,38 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -135959,6 +137691,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -136980,6 +138716,38 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -137154,6 +138922,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -147314,9 +149086,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -147456,7 +149234,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -147496,6 +149274,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -158032,6 +159836,11 @@
             "type": "string"
           },
           {
+            "const": "build",
+            "description": "A build reading which gated MCP servers a live grant covers.",
+            "type": "string"
+          },
+          {
             "const": "unknown",
             "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
             "type": "string"
@@ -158042,9 +159851,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -158112,7 +159927,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -158152,6 +159967,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -162544,6 +164385,23 @@
           "detail"
         ],
         "type": "object"
+      },
+      {
+        "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "source_unavailable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "detail"
+        ],
+        "type": "object"
       }
     ],
     "title": "WireAuthError"
@@ -163802,6 +165660,23 @@
               "detail"
             ],
             "type": "object"
+          },
+          {
+            "description": "The credential's source (a token exchange, an identity or token\nendpoint) cannot answer now; a later attempt can succeed.",
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "source_unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
           }
         ]
       }
@@ -164767,6 +166642,36 @@
     "title": "WireCallbackPendingStatus",
     "type": "string"
   },
+  "WireCanonicalPart": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+    "properties": {
+      "count": {
+        "description": "How many parts the split has.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "index": {
+        "description": "The part's position, from 0.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "part_digest": {
+        "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "index",
+      "count",
+      "part_digest"
+    ],
+    "title": "WireCanonicalPart",
+    "type": "object"
+  },
   "WireConnectorAccountSelection": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Which provider account a connector login must prove.\n\n`known` refuses any other verified account. `discover` admits the login\nwith no account and binds the provider-verified account at completion;\nit publishes only into an empty slot.",
@@ -165629,7 +167534,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -165845,6 +167751,2457 @@
     ],
     "title": "WireCredentialUseDisposition",
     "type": "string"
+  },
+  "WireDecision": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEffect": {
+        "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+        "properties": {
+          "grant_id": {
+            "description": "The id of the grant the execution issued.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionNoticeState": {
+        "description": "Where the requester notice of a decision stands.",
+        "oneOf": [
+          {
+            "const": "not_required",
+            "description": "The requester is not routable: no notice is ever owed.",
+            "type": "string"
+          },
+          {
+            "const": "not_due",
+            "description": "The decision has not ended.",
+            "type": "string"
+          },
+          {
+            "const": "owed",
+            "description": "The decision ended and its notice is owed.",
+            "type": "string"
+          },
+          {
+            "const": "delivered",
+            "description": "The notice was delivered.",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The notice failed terminally.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionOutcome": {
+        "description": "A decided decision's outcome: who decided, and the evidence.",
+        "properties": {
+          "evidence": {
+            "$ref": "#/$defs/WireDecisionEvidence"
+          },
+          "tier": {
+            "$ref": "#/$defs/WireDecisionTier"
+          }
+        },
+        "required": [
+          "tier",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionStage": {
+        "description": "Who decides an open decision now.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One durable decision, as its row stands at the read.",
+    "properties": {
+      "approver_id": {
+        "description": "Who may approve the decision: the host maps it to the humans who may\nact for it.",
+        "type": "string"
+      },
+      "created_at_ms": {
+        "description": "The host clock reading of the hold, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "deadline_at_ms": {
+        "description": "The sealed deadline, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "decided_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "decision_id": {
+        "description": "`decision:` and 64 lowercase hex digits.",
+        "type": "string"
+      },
+      "effect": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionEffect"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What the executed decision did, as its kind names it; absent for a\ndecision that is not executed and for a kind that names none."
+      },
+      "ended_at_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "execution_refusal": {
+        "description": "The owner's typed refusal of an execution-refused decision.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "first_presented_to_approver_at_ms": {
+        "description": "When a complete presentation first reached the approver, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "kind": {
+        "description": "The host's token naming what kind of operation the decision holds.",
+        "type": "string"
+      },
+      "notice": {
+        "$ref": "#/$defs/WireDecisionNoticeState",
+        "description": "Where the requester notice stands."
+      },
+      "operation_id": {
+        "description": "The held operation's id, as its owner names it.",
+        "type": "string"
+      },
+      "outcome": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionOutcome"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Set exactly when the decision was decided."
+      },
+      "permit_issued": {
+        "description": "Whether an execution permit is outstanding.",
+        "type": "boolean"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireDecisionPhase"
+      },
+      "presentations": {
+        "description": "The latest complete presentation per audience.",
+        "items": {
+          "$ref": "#/$defs/WirePresentationRecord"
+        },
+        "type": "array"
+      },
+      "renderer": {
+        "description": "The token of the renderer that produced the rendering.",
+        "type": "string"
+      },
+      "request": {
+        "description": "The held request, when the read asked for it (`include_request`)."
+      },
+      "request_digest": {
+        "description": "The held request's digest, as the operation's owner computes it.",
+        "type": "string"
+      },
+      "requester": {
+        "description": "The requester's principal key.",
+        "type": "string"
+      },
+      "reviewer": {
+        "description": "The reviewer of a review-stage decision (a principal key).",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "revision": {
+        "description": "The row's revision: 1 at the hold, one more at each write.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "stage": {
+        "$ref": "#/$defs/WireDecisionStage"
+      },
+      "subject_digest": {
+        "description": "The digest of the decision's rendering, computed by the server.",
+        "type": "string"
+      },
+      "subject_key": {
+        "description": "The host's key of the subject the decision is held for.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id",
+      "kind",
+      "subject_key",
+      "operation_id",
+      "request_digest",
+      "requester",
+      "approver_id",
+      "phase",
+      "stage",
+      "notice",
+      "deadline_at_ms",
+      "created_at_ms",
+      "subject_digest",
+      "renderer",
+      "permit_issued",
+      "revision"
+    ],
+    "title": "WireDecision",
+    "type": "object"
+  },
+  "WireDecisionAssurance": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "How the human who decided was authenticated on the decision event.",
+    "oneOf": [
+      {
+        "const": "person_authenticated",
+        "description": "The person was authenticated on the actual event.",
+        "type": "string"
+      },
+      {
+        "const": "service_credential",
+        "description": "A delegated service credential authenticated the event.",
+        "type": "string"
+      },
+      {
+        "const": "device_trusted",
+        "description": "Only device or network trust was established.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionAssurance"
+  },
+  "WireDecisionEffect": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What an executed decision did, as its kind names it: each field names\none thing its execution committed. An executed `grant.child` decision\nnames the grant it issued. Read tolerantly: a field this version does\nnot know is ignored.",
+    "properties": {
+      "grant_id": {
+        "description": "The id of the grant the execution issued.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WireDecisionEffect",
+    "type": "object"
+  },
+  "WireDecisionErrorData": {
+    "$defs": {
+      "WireDecisionRefusal": {
+        "description": "Why a decision refused a call. Closed: a refusal bears authority, so a\nclient never reads one it does not know as another.",
+        "oneOf": [
+          {
+            "description": "The hold's deadline is not after the hold's clock reading.",
+            "properties": {
+              "kind": {
+                "const": "invalid_window",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The hold names the requester as its own reviewer.",
+            "properties": {
+              "kind": {
+                "const": "self_review",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision is held with another binding.",
+            "properties": {
+              "kind": {
+                "const": "hold_conflict",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision is no longer open: the first valid decision won.",
+            "properties": {
+              "kind": {
+                "const": "not_open",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The deadline passed; the call recorded the expiry.",
+            "properties": {
+              "kind": {
+                "const": "expired",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The presented digest is not the held subject digest.",
+            "properties": {
+              "kind": {
+                "const": "subject_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The presentation did not cover the whole held subject, none reached\nthe deciding party, or it was shown at 0 (no reading of when).",
+            "properties": {
+              "kind": {
+                "const": "presentation_incomplete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The presentation was shown to a party that does not decide now.",
+            "properties": {
+              "kind": {
+                "const": "wrong_audience",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A human decision while the review stage is open.",
+            "properties": {
+              "kind": {
+                "const": "review_stage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A review verdict while the human stage is open.",
+            "properties": {
+              "kind": {
+                "const": "human_stage",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision carries no attested evidence.",
+            "properties": {
+              "kind": {
+                "const": "evidence_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decider does not act for the approver id, or is not currently\neligible.",
+            "properties": {
+              "kind": {
+                "const": "not_eligible",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The requester tried to decide its own request.",
+            "properties": {
+              "kind": {
+                "const": "self_approval",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The verdict is not the named reviewer's.",
+            "properties": {
+              "kind": {
+                "const": "wrong_reviewer",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Only the requester or the host may withdraw.",
+            "properties": {
+              "kind": {
+                "const": "not_requester",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision is not approved.",
+            "properties": {
+              "kind": {
+                "const": "not_approved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The execution names another operation or request.",
+            "properties": {
+              "kind": {
+                "const": "binding_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No execution permit is outstanding.",
+            "properties": {
+              "kind": {
+                "const": "not_authorized",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The deadline passed while a permit is outstanding: the permit is\nsettled first.",
+            "properties": {
+              "kind": {
+                "const": "settlement_owed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "No notice is owed, or the receipt contradicts the settled one.",
+            "properties": {
+              "kind": {
+                "const": "not_owed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The human decision was observed before the decision's first\npresentation to the approver.",
+            "properties": {
+              "kind": {
+                "const": "decided_before_presentation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The typed `data` of a `decision/*` error. Closed, like the refusals it\ncarries.",
+    "oneOf": [
+      {
+        "description": "The decision refused the call (code -32602); nothing changed, except\nan expiry the call recorded.",
+        "properties": {
+          "decision_refusal": {
+            "$ref": "#/$defs/WireDecisionRefusal"
+          },
+          "kind": {
+            "const": "decision_refused",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "decision_refusal"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "No decision has the id (code -32602).",
+        "properties": {
+          "kind": {
+            "const": "decision_not_found",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision's row cannot be read (code -32603). Nothing executes it.",
+        "properties": {
+          "kind": {
+            "const": "decision_unreadable",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The runtime serves a candidate launch, which writes no decision\n(code -32020).",
+        "properties": {
+          "kind": {
+            "const": "candidate_launch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The runtime keeps no durable decisions: an ephemeral persistence\n(code -32020).",
+        "properties": {
+          "kind": {
+            "const": "no_decision_store",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireDecisionErrorData"
+  },
+  "WireDecisionEvidence": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+    "oneOf": [
+      {
+        "description": "An authenticated human's decision.",
+        "properties": {
+          "approve": {
+            "type": "boolean"
+          },
+          "approver_id": {
+            "type": "string"
+          },
+          "assurance": {
+            "$ref": "#/$defs/WireDecisionAssurance"
+          },
+          "decider": {
+            "description": "The decider's principal key.",
+            "type": "string"
+          },
+          "event_ref": {
+            "type": "string"
+          },
+          "ingress": {
+            "description": "How the decision event reached the host.",
+            "type": "string"
+          },
+          "kind": {
+            "const": "human",
+            "type": "string"
+          },
+          "observed_at_ms": {
+            "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "presentation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The presentation the decision event carried, if any."
+          },
+          "presented_digest": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "decider",
+          "assurance",
+          "ingress",
+          "event_ref",
+          "approver_id",
+          "presented_digest",
+          "approve"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A reviewer's attributed verdict.",
+        "properties": {
+          "feedback": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "const": "review",
+            "type": "string"
+          },
+          "origin_session": {
+            "type": "string"
+          },
+          "presented_digest": {
+            "type": "string"
+          },
+          "reviewer": {
+            "description": "The reviewer's principal key.",
+            "type": "string"
+          },
+          "verdict": {
+            "$ref": "#/$defs/WireDecisionReviewVerdict"
+          },
+          "verdict_call_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reviewer",
+          "origin_session",
+          "verdict_call_ref",
+          "verdict",
+          "presented_digest"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireDecisionEvidence"
+  },
+  "WireDecisionNotice": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionNoticeEvent": {
+        "description": "What a decision notice reports.",
+        "oneOf": [
+          {
+            "const": "presented",
+            "description": "The connection presented the decision to its operator.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an event this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionNoticePresentation": {
+        "description": "The rendering a `presented` notice showed: the decision's whole\nrendering, its renderer and digest, and its canonical parts (one part:\nthe whole rendering).",
+        "properties": {
+          "parts": {
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "renderer": {
+            "type": "string"
+          },
+          "rendering": {
+            "type": "string"
+          },
+          "subject_digest": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "rendering",
+          "renderer",
+          "subject_digest",
+          "parts"
+        ],
+        "type": "object"
+      },
+      "WireDecisionPhase": {
+        "description": "Where a decision stands.",
+        "oneOf": [
+          {
+            "const": "open",
+            "description": "Held, and not yet decided, withdrawn or expired.",
+            "type": "string"
+          },
+          {
+            "const": "approved",
+            "description": "Approved; the held request not yet executed.",
+            "type": "string"
+          },
+          {
+            "const": "rejected",
+            "description": "Rejected. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "expired",
+            "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "withdrawn",
+            "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "executed",
+            "description": "The held request was executed. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "execution_refused",
+            "description": "The operation's owner refused the held request. Terminal.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "`decision/notice` parameters: what an `rkat-rpc` stdio connection showed\nits operator about one durable decision. When its client lists\n(`decision/list`), the connection presents each open decision of the\nreturned page that is addressed to an approver id its operator acts for\nand that it has not presented yet: it writes a `presented` notice\ncarrying the whole rendering, then records that presentation (to the\napprover, with this notice's id as its message reference) before it\nanswers the list. A notice grants nothing: the operator decides with\n`decision/decide` on the same connection.",
+    "properties": {
+      "approver_id": {
+        "description": "The approver id the decision is held for.",
+        "type": "string"
+      },
+      "decision_id": {
+        "type": "string"
+      },
+      "event": {
+        "$ref": "#/$defs/WireDecisionNoticeEvent"
+      },
+      "kind": {
+        "description": "The decision's kind token.",
+        "type": "string"
+      },
+      "notice_id": {
+        "description": "The notice's id: the message reference of the presentation it\nrecords.",
+        "type": "string"
+      },
+      "phase": {
+        "$ref": "#/$defs/WireDecisionPhase",
+        "description": "The decision's phase when the notice was written."
+      },
+      "presentation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireDecisionNoticePresentation"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What the operator was shown; set on a `presented` notice."
+      },
+      "requester": {
+        "description": "The requester's principal key.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "notice_id",
+      "decision_id",
+      "kind",
+      "event",
+      "phase",
+      "approver_id",
+      "requester"
+    ],
+    "title": "WireDecisionNotice",
+    "type": "object"
+  },
+  "WireDecisionNoticeEvent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "What a decision notice reports.",
+    "oneOf": [
+      {
+        "const": "presented",
+        "description": "The connection presented the decision to its operator.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: an event this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionNoticeEvent"
+  },
+  "WireDecisionNoticePresentation": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The rendering a `presented` notice showed: the decision's whole\nrendering, its renderer and digest, and its canonical parts (one part:\nthe whole rendering).",
+    "properties": {
+      "parts": {
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "renderer": {
+        "type": "string"
+      },
+      "rendering": {
+        "type": "string"
+      },
+      "subject_digest": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "rendering",
+      "renderer",
+      "subject_digest",
+      "parts"
+    ],
+    "title": "WireDecisionNoticePresentation",
+    "type": "object"
+  },
+  "WireDecisionNoticeState": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Where the requester notice of a decision stands.",
+    "oneOf": [
+      {
+        "const": "not_required",
+        "description": "The requester is not routable: no notice is ever owed.",
+        "type": "string"
+      },
+      {
+        "const": "not_due",
+        "description": "The decision has not ended.",
+        "type": "string"
+      },
+      {
+        "const": "owed",
+        "description": "The decision ended and its notice is owed.",
+        "type": "string"
+      },
+      {
+        "const": "delivered",
+        "description": "The notice was delivered.",
+        "type": "string"
+      },
+      {
+        "const": "failed",
+        "description": "The notice failed terminally.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a notice state this version does not know.\nThe server never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionNoticeState"
+  },
+  "WireDecisionOutcome": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WireDecisionAssurance": {
+        "description": "How the human who decided was authenticated on the decision event.",
+        "oneOf": [
+          {
+            "const": "person_authenticated",
+            "description": "The person was authenticated on the actual event.",
+            "type": "string"
+          },
+          {
+            "const": "service_credential",
+            "description": "A delegated service credential authenticated the event.",
+            "type": "string"
+          },
+          {
+            "const": "device_trusted",
+            "description": "Only device or network trust was established.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: an assurance this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionEvidence": {
+        "description": "The durable evidence a decision was decided with. An authentication\nscope is never projected.",
+        "oneOf": [
+          {
+            "description": "An authenticated human's decision.",
+            "properties": {
+              "approve": {
+                "type": "boolean"
+              },
+              "approver_id": {
+                "type": "string"
+              },
+              "assurance": {
+                "$ref": "#/$defs/WireDecisionAssurance"
+              },
+              "decider": {
+                "description": "The decider's principal key.",
+                "type": "string"
+              },
+              "event_ref": {
+                "type": "string"
+              },
+              "ingress": {
+                "description": "How the decision event reached the host.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "human",
+                "type": "string"
+              },
+              "observed_at_ms": {
+                "description": "When the ingress observed the event, in UNIX ms; absent in\nevidence recorded before decisions carried it.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "presentation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WirePresentationRecord"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The presentation the decision event carried, if any."
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "decider",
+              "assurance",
+              "ingress",
+              "event_ref",
+              "approver_id",
+              "presented_digest",
+              "approve"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A reviewer's attributed verdict.",
+            "properties": {
+              "feedback": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "review",
+                "type": "string"
+              },
+              "origin_session": {
+                "type": "string"
+              },
+              "presented_digest": {
+                "type": "string"
+              },
+              "reviewer": {
+                "description": "The reviewer's principal key.",
+                "type": "string"
+              },
+              "verdict": {
+                "$ref": "#/$defs/WireDecisionReviewVerdict"
+              },
+              "verdict_call_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer",
+              "origin_session",
+              "verdict_call_ref",
+              "verdict",
+              "presented_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: evidence of a kind this version does not know.\nThe server never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireDecisionReviewVerdict": {
+        "description": "A reviewer's verdict.",
+        "oneOf": [
+          {
+            "const": "allow",
+            "description": "Approve the held operation.",
+            "type": "string"
+          },
+          {
+            "const": "deny",
+            "description": "Reject it.",
+            "type": "string"
+          },
+          {
+            "const": "escalate",
+            "description": "Hand the decision to the human approver.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WireDecisionTier": {
+        "description": "Who decided a decision.",
+        "oneOf": [
+          {
+            "const": "human",
+            "description": "An authenticated human acting for the approver id.",
+            "type": "string"
+          },
+          {
+            "const": "review",
+            "description": "The named reviewer, through its verdict.",
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+            "type": "string"
+          }
+        ]
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      },
+      "WirePresentationRecord": {
+        "description": "One recorded presentation of a decision's rendering.",
+        "properties": {
+          "at_ms": {
+            "description": "The host's clock reading of the presentation, in UNIX ms.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "audience": {
+            "$ref": "#/$defs/WirePresentationAudience"
+          },
+          "channel_ref": {
+            "description": "Where the presentation was shown.",
+            "type": "string"
+          },
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WirePresentationLink"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
+          },
+          "max_part_bytes": {
+            "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "message_ref": {
+            "type": "string"
+          },
+          "parts_shown": {
+            "description": "The parts the audience was shown.",
+            "items": {
+              "$ref": "#/$defs/WireCanonicalPart"
+            },
+            "type": "array"
+          },
+          "subject_digest": {
+            "description": "The digest of the rendering that was presented.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "audience",
+          "subject_digest",
+          "parts_shown",
+          "channel_ref",
+          "message_ref",
+          "at_ms"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A decided decision's outcome: who decided, and the evidence.",
+    "properties": {
+      "evidence": {
+        "$ref": "#/$defs/WireDecisionEvidence"
+      },
+      "tier": {
+        "$ref": "#/$defs/WireDecisionTier"
+      }
+    },
+    "required": [
+      "tier",
+      "evidence"
+    ],
+    "title": "WireDecisionOutcome",
+    "type": "object"
+  },
+  "WireDecisionPhase": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Where a decision stands.",
+    "oneOf": [
+      {
+        "const": "open",
+        "description": "Held, and not yet decided, withdrawn or expired.",
+        "type": "string"
+      },
+      {
+        "const": "approved",
+        "description": "Approved; the held request not yet executed.",
+        "type": "string"
+      },
+      {
+        "const": "rejected",
+        "description": "Rejected. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "expired",
+        "description": "Observed at or after its deadline undecided, or approved and never\nexecuted. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "withdrawn",
+        "description": "Withdrawn by its requester or the host before a decision. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "executed",
+        "description": "The held request was executed. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "execution_refused",
+        "description": "The operation's owner refused the held request. Terminal.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a phase this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionPhase"
+  },
+  "WireDecisionRefusal": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Why a decision refused a call. Closed: a refusal bears authority, so a\nclient never reads one it does not know as another.",
+    "oneOf": [
+      {
+        "description": "The hold's deadline is not after the hold's clock reading.",
+        "properties": {
+          "kind": {
+            "const": "invalid_window",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The hold names the requester as its own reviewer.",
+        "properties": {
+          "kind": {
+            "const": "self_review",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision is held with another binding.",
+        "properties": {
+          "kind": {
+            "const": "hold_conflict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision is no longer open: the first valid decision won.",
+        "properties": {
+          "kind": {
+            "const": "not_open",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The deadline passed; the call recorded the expiry.",
+        "properties": {
+          "kind": {
+            "const": "expired",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The presented digest is not the held subject digest.",
+        "properties": {
+          "kind": {
+            "const": "subject_changed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The presentation did not cover the whole held subject, none reached\nthe deciding party, or it was shown at 0 (no reading of when).",
+        "properties": {
+          "kind": {
+            "const": "presentation_incomplete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The presentation was shown to a party that does not decide now.",
+        "properties": {
+          "kind": {
+            "const": "wrong_audience",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A human decision while the review stage is open.",
+        "properties": {
+          "kind": {
+            "const": "review_stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "A review verdict while the human stage is open.",
+        "properties": {
+          "kind": {
+            "const": "human_stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision carries no attested evidence.",
+        "properties": {
+          "kind": {
+            "const": "evidence_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decider does not act for the approver id, or is not currently\neligible.",
+        "properties": {
+          "kind": {
+            "const": "not_eligible",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The requester tried to decide its own request.",
+        "properties": {
+          "kind": {
+            "const": "self_approval",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The verdict is not the named reviewer's.",
+        "properties": {
+          "kind": {
+            "const": "wrong_reviewer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Only the requester or the host may withdraw.",
+        "properties": {
+          "kind": {
+            "const": "not_requester",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision is not approved.",
+        "properties": {
+          "kind": {
+            "const": "not_approved",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The execution names another operation or request.",
+        "properties": {
+          "kind": {
+            "const": "binding_mismatch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "No execution permit is outstanding.",
+        "properties": {
+          "kind": {
+            "const": "not_authorized",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The deadline passed while a permit is outstanding: the permit is\nsettled first.",
+        "properties": {
+          "kind": {
+            "const": "settlement_owed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "No notice is owed, or the receipt contradicts the settled one.",
+        "properties": {
+          "kind": {
+            "const": "not_owed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The human decision was observed before the decision's first\npresentation to the approver.",
+        "properties": {
+          "kind": {
+            "const": "decided_before_presentation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireDecisionRefusal"
+  },
+  "WireDecisionReviewVerdict": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A reviewer's verdict.",
+    "oneOf": [
+      {
+        "const": "allow",
+        "description": "Approve the held operation.",
+        "type": "string"
+      },
+      {
+        "const": "deny",
+        "description": "Reject it.",
+        "type": "string"
+      },
+      {
+        "const": "escalate",
+        "description": "Hand the decision to the human approver.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a verdict this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionReviewVerdict"
+  },
+  "WireDecisionStage": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who decides an open decision now.",
+    "oneOf": [
+      {
+        "const": "human",
+        "description": "An authenticated human acting for the approver id.",
+        "type": "string"
+      },
+      {
+        "const": "review",
+        "description": "The named reviewer.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a stage this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionStage"
+  },
+  "WireDecisionTier": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who decided a decision.",
+    "oneOf": [
+      {
+        "const": "human",
+        "description": "An authenticated human acting for the approver id.",
+        "type": "string"
+      },
+      {
+        "const": "review",
+        "description": "The named reviewer, through its verdict.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a tier this version does not know. The server\nnever sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireDecisionTier"
   },
   "WireDeviceCompleteResult": {
     "$defs": {
@@ -175060,10 +179417,17 @@
   "WireGrantGatedTools": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "A session build's scoped tool grant gate (`session/create`\n`grant_gated_tools`): the built-in tool families and the tool names the\nbuild mounts hidden and refuses at dispatch until a live grant opens them.\nA field this version does not know is refused, never ignored.",
+    "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
     "properties": {
       "families": {
         "description": "Built-in tool families, such as `shell`.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "mcp_servers": {
+        "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
         "items": {
           "type": "string"
         },
@@ -175075,6 +179439,10 @@
           "type": "string"
         },
         "type": "array"
+      },
+      "unconfigured_mcp_servers": {
+        "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+        "type": "boolean"
       }
     },
     "title": "WireGrantGatedTools",
@@ -180331,7 +184699,8 @@
           "credential_access_denied",
           "credential_interaction_required",
           "credential_access_pending",
-          "credential_store_unavailable"
+          "credential_store_unavailable",
+          "source_unavailable"
         ],
         "type": "string"
       },
@@ -188601,6 +192970,11 @@
         "const": "not_observed_while_retiring",
         "description": "The member is retiring; a status read of a retiring member is answered\nwithout reading its session.",
         "type": "string"
+      },
+      {
+        "const": "store_refused",
+        "description": "The store refuses to read the member's session until its realm is\nreopened (a host store whose scope of the session, or whose realm, is\npoisoned). Later reads of the member answer the same until then.",
+        "type": "string"
       }
     ],
     "title": "WireMemberPreviewUnavailable"
@@ -189057,6 +193431,79 @@
       "application_policy"
     ],
     "title": "WireMemberToolDeclaration",
+    "type": "object"
+  },
+  "WireMemberToolGrantGate": {
+    "$defs": {
+      "WireToolGrantGateEntries": {
+        "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Whether every MCP server the build does not configure itself is\ngated.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "WireToolGrantGateView": {
+        "description": "A build's tool grant gate: what it gates, and the role entries it\nignores as not mounted (never gated, never open).",
+        "properties": {
+          "gated": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          },
+          "not_mounted": {
+            "$ref": "#/$defs/WireToolGrantGateEntries",
+            "default": {}
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A mob member identity's tool grant gate, as `tool_grants/list` answers\nit: what its live build runs, and what its next build resolves.",
+    "properties": {
+      "next_build": {
+        "$ref": "#/$defs/WireToolGrantGateView",
+        "description": "The gate the member's next build resolves: its own gate joined with\nits role's current gate."
+      },
+      "running": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireToolGrantGateView"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "What the identity's live member build gates now (its gated names\nunder `tools`, with its gated servers and the unconfigured-servers\nmode) and the names it ignored as not mounted; `null` when no build\nof the member is live on this server."
+      }
+    },
+    "required": [
+      "next_build"
+    ],
+    "title": "WireMemberToolGrantGate",
     "type": "object"
   },
   "WireMobBackendKind": {
@@ -190094,6 +194541,38 @@
         ],
         "type": "string"
       },
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "WireMobBackendKind": {
         "enum": [
           "session",
@@ -190135,6 +194614,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grant_gated": {
+            "$ref": "#/$defs/WireGrantGatedTools",
+            "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
           },
           "image_generation": {
             "default": false,
@@ -191603,6 +196086,40 @@
     "type": "object"
   },
   "WireMobToolConfig": {
+    "$defs": {
+      "WireGrantGatedTools": {
+        "additionalProperties": false,
+        "description": "A scoped tool grant gate: the built-in tool families, the tool names and\nthe MCP servers a build mounts hidden and refuses at dispatch until a live\ngrant opens them. A session's build takes it on `session/create`\n(`grant_gated_tools`); a mob profile declares its members'\n(`tools.grant_gated`). A field this version does not know is refused,\nnever ignored.",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names: every tool such a server provides is gated, from\nthe moment it appears. A gated server need not be configured: it may\nbe attached later.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Gate every MCP server the build does not configure itself: one an\ninstallation provides, at the build or later, and one attached later\nby any path.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "description": "Tool configuration embedded in a wire mob profile override.",
@@ -191621,6 +196138,10 @@
           "type": "string"
         },
         "type": "array"
+      },
+      "grant_gated": {
+        "$ref": "#/$defs/WireGrantGatedTools",
+        "description": "The member tool grant gate: the built-in tool families and tool\nnames members of the profile mount hidden and refused until a live\nscoped tool grant opens them. Omitted when empty, for the same\ncompatibility reason as `read_only`: a gated profile sent to an older\nserver is refused there, never read ungated."
       },
       "image_generation": {
         "default": false,
@@ -192038,6 +196559,245 @@
       "args"
     ],
     "title": "WirePendingToolCall",
+    "type": "object"
+  },
+  "WirePresentationAudience": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Who a recorded presentation was shown to.",
+    "oneOf": [
+      {
+        "description": "Whoever acts for the decision's approver id.",
+        "properties": {
+          "approver_id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "approver",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "approver_id"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The decision's named reviewer (a principal key).",
+        "properties": {
+          "kind": {
+            "const": "reviewer",
+            "type": "string"
+          },
+          "reviewer": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reviewer"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+        "properties": {
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WirePresentationAudience"
+  },
+  "WirePresentationLink": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+    "properties": {
+      "reference": {
+        "description": "Where the link points: the page or document that serves the full\npresentation.",
+        "type": "string"
+      },
+      "served_digest": {
+        "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "reference",
+      "served_digest"
+    ],
+    "title": "WirePresentationLink",
+    "type": "object"
+  },
+  "WirePresentationRecord": {
+    "$defs": {
+      "WireCanonicalPart": {
+        "additionalProperties": false,
+        "description": "One canonical part of a rendering: consecutive byte ranges on character\nboundaries of at most the presenter's part size, each with its own\ndigest.",
+        "properties": {
+          "count": {
+            "description": "How many parts the split has.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index": {
+            "description": "The part's position, from 0.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "part_digest": {
+            "description": "The digest of the part's bytes (`sha256:` and 64 lowercase hex\ndigits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "count",
+          "part_digest"
+        ],
+        "type": "object"
+      },
+      "WirePresentationAudience": {
+        "description": "Who a recorded presentation was shown to.",
+        "oneOf": [
+          {
+            "description": "Whoever acts for the decision's approver id.",
+            "properties": {
+              "approver_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "approver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "approver_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The decision's named reviewer (a principal key).",
+            "properties": {
+              "kind": {
+                "const": "reviewer",
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "reviewer"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Forward compatibility: an audience this version does not know. The\nserver never sends it.",
+            "properties": {
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WirePresentationLink": {
+        "additionalProperties": false,
+        "description": "The link a summary presentation carried to the full presentation of a\ndecision's rendering, and the digest of the rendering that link served\nwhen it was followed. A surface with a size limit shows a summary that\nsays it is shortened, with such a link; the summary counts as a complete\npresentation only when the link served the held rendering.",
+        "properties": {
+          "reference": {
+            "description": "Where the link points: the page or document that serves the full\npresentation.",
+            "type": "string"
+          },
+          "served_digest": {
+            "description": "The digest of the rendering the link served (`sha256:` and 64\nlowercase hex digits).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "served_digest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "One recorded presentation of a decision's rendering.",
+    "properties": {
+      "at_ms": {
+        "description": "The host's clock reading of the presentation, in UNIX ms.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "audience": {
+        "$ref": "#/$defs/WirePresentationAudience"
+      },
+      "channel_ref": {
+        "description": "Where the presentation was shown.",
+        "type": "string"
+      },
+      "link": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WirePresentationLink"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "For a summary presentation, the link it carried to the full\npresentation and the digest of the rendering that link served;\nabsent for a presentation of the parts themselves."
+      },
+      "max_part_bytes": {
+        "description": "The presenter's part size; absent when the rendering was presented\nas one part.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "message_ref": {
+        "type": "string"
+      },
+      "parts_shown": {
+        "description": "The parts the audience was shown.",
+        "items": {
+          "$ref": "#/$defs/WireCanonicalPart"
+        },
+        "type": "array"
+      },
+      "subject_digest": {
+        "description": "The digest of the rendering that was presented.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "audience",
+      "subject_digest",
+      "parts_shown",
+      "channel_ref",
+      "message_ref",
+      "at_ms"
+    ],
+    "title": "WirePresentationRecord",
     "type": "object"
   },
   "WireProjectionProvenance": {
@@ -206430,9 +211190,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -206572,7 +211338,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -206612,6 +211378,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -206689,6 +211481,33 @@
     "title": "WireToolGrant",
     "type": "object"
   },
+  "WireToolGrantApplies": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Whether an identity grant applies to the member's running build.",
+    "oneOf": [
+      {
+        "const": "now",
+        "description": "The identity's live member build runs a gate that covers the target\n(for a gated MCP server the member's profile configures, the build\nholds the server too).",
+        "type": "string"
+      },
+      {
+        "const": "not_mounted",
+        "description": "The target is not mounted: the live build ignored it, or, with no\nlive build, the next build cannot mount it.",
+        "type": "string"
+      },
+      {
+        "const": "at_next_build",
+        "description": "The member's next build applies it: the member is not live here, its\nlive build predates the gate that covers the target, or the target is\na gated MCP server the member's profile configures that the live\nbuild left unattached.",
+        "type": "string"
+      },
+      {
+        "const": "unknown",
+        "description": "Forward compatibility: a value this version does not know. The\nserver never sends it.",
+        "type": "string"
+      }
+    ],
+    "title": "WireToolGrantApplies"
+  },
   "WireToolGrantAuditEvent": {
     "$defs": {
       "WireToolGrantExpiryDriver": {
@@ -206705,6 +211524,11 @@
             "type": "string"
           },
           {
+            "const": "build",
+            "description": "A build reading which gated MCP servers a live grant covers.",
+            "type": "string"
+          },
+          {
             "const": "unknown",
             "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
             "type": "string"
@@ -206715,9 +211539,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -206785,7 +211615,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -206825,6 +211655,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -207173,6 +212029,11 @@
             "type": "string"
           },
           {
+            "const": "build",
+            "description": "A build reading which gated MCP servers a live grant covers.",
+            "type": "string"
+          },
+          {
             "const": "unknown",
             "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
             "type": "string"
@@ -207183,9 +212044,15 @@
         "description": "Who issued a grant.",
         "oneOf": [
           {
-            "description": "An operator, through a host surface.",
+            "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
             "properties": {
               "caller": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "decision_ref": {
                 "type": [
                   "string",
                   "null"
@@ -207253,7 +212120,7 @@
         ]
       },
       "WireToolGrantTarget": {
-        "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+        "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
         "oneOf": [
           {
             "description": "One tool name.",
@@ -207293,6 +212160,32 @@
             "required": [
               "kind",
               "family"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+            "properties": {
+              "kind": {
+                "const": "mcp_server",
+                "type": "string"
+              },
+              "server": {
+                "type": "string"
+              },
+              "tools": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "server"
             ],
             "type": "object"
           },
@@ -207353,6 +212246,11 @@
         "type": "string"
       },
       {
+        "const": "build",
+        "description": "A build reading which gated MCP servers a live grant covers.",
+        "type": "string"
+      },
+      {
         "const": "unknown",
         "description": "Forward compatibility: a driver this version does not know. The\nserver never sends it.",
         "type": "string"
@@ -207360,14 +212258,102 @@
     ],
     "title": "WireToolGrantExpiryDriver"
   },
+  "WireToolGrantGateEntries": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+    "properties": {
+      "families": {
+        "description": "Built-in tool families, such as `shell`.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "mcp_servers": {
+        "description": "MCP server names.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "tools": {
+        "description": "Tool names.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "unconfigured_mcp_servers": {
+        "description": "Whether every MCP server the build does not configure itself is\ngated.",
+        "type": "boolean"
+      }
+    },
+    "title": "WireToolGrantGateEntries",
+    "type": "object"
+  },
+  "WireToolGrantGateView": {
+    "$defs": {
+      "WireToolGrantGateEntries": {
+        "description": "The entries of a build's tool grant gate as `tool_grants/list` shows\nthem: built-in tool families, tool names, MCP servers and the\nunconfigured-servers mode. Advisory, so tolerant: a field this version\ndoes not know is ignored, never refused, and a newer server's gate never\nfails the result it rides on. (A gate a request names is the closed\n[`WireGrantGatedTools`].)",
+        "properties": {
+          "families": {
+            "description": "Built-in tool families, such as `shell`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "mcp_servers": {
+            "description": "MCP server names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tools": {
+            "description": "Tool names.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unconfigured_mcp_servers": {
+            "description": "Whether every MCP server the build does not configure itself is\ngated.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A build's tool grant gate: what it gates, and the role entries it\nignores as not mounted (never gated, never open).",
+    "properties": {
+      "gated": {
+        "$ref": "#/$defs/WireToolGrantGateEntries",
+        "default": {}
+      },
+      "not_mounted": {
+        "$ref": "#/$defs/WireToolGrantGateEntries",
+        "default": {}
+      }
+    },
+    "title": "WireToolGrantGateView",
+    "type": "object"
+  },
   "WireToolGrantIssuer": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Who issued a grant.",
     "oneOf": [
       {
-        "description": "An operator, through a host surface.",
+        "description": "An operator, through a host surface. `decision_ref` is the host's\nreference to the decision it made before issuing, when it gave one:\nattribution only.",
         "properties": {
           "caller": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decision_ref": {
             "type": [
               "string",
               "null"
@@ -207534,7 +212520,7 @@
   },
   "WireToolGrantTarget": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "What a grant record opens: one tool name, or a built-in tool family with\nthe names the server took for it at grant time.",
+    "description": "What a grant record opens: one tool name, a built-in tool family with\nthe names the server took for it at grant time, or an MCP server's tools.",
     "oneOf": [
       {
         "description": "One tool name.",
@@ -207574,6 +212560,32 @@
         "required": [
           "kind",
           "family"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "An MCP server: every tool it provides, or only those of its tools\nnamed in `tools`.",
+        "properties": {
+          "kind": {
+            "const": "mcp_server",
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "server"
         ],
         "type": "object"
       },
@@ -208187,6 +213199,24 @@
       "peer"
     ],
     "title": "WireUnreachablePeer",
+    "type": "object"
+  },
+  "WireUnreadableDecision": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "A stored decision row the server cannot read (written by a newer\nversion, or torn). Nothing executes it.",
+    "properties": {
+      "decision_id": {
+        "type": "string"
+      },
+      "detail": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "decision_id",
+      "detail"
+    ],
+    "title": "WireUnreadableDecision",
     "type": "object"
   },
   "WireUnreadableToolGrant": {

@@ -271,6 +271,38 @@ struct ControllerHoldClock {
     last_asked: Option<meerkat_core::time_compat::Instant>,
 }
 
+/// The kind of a kept input, admitted before a stop or a restart, whose
+/// controller client did not survive the store
+/// (`EphemeralRuntimeDriver::kept_inputs_without_client`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeptInputKind {
+    /// A resume of retained work: its row carries the retained-resume
+    /// record. Its host is asked with the record's evidence
+    /// (`NativeWorkAuthorizationHost::authenticate_retained_resume`); held,
+    /// it is asked again once per pause and refused once its budget ran out.
+    RetainedResume,
+    /// A governed input admitted under an authority association of its own
+    /// (a governed prompt). Its host is asked with its stored association
+    /// (`NativeWorkAuthorizationHost::authenticate_kept_original`); held, it
+    /// is asked again at each wake of the runtime loop and at the session's
+    /// next registration, never on a timer, and never refused for its time.
+    KeptOriginal,
+}
+
+impl KeptInputKind {
+    /// The kind of `row`, when it is governed work whose client can be asked
+    /// for again.
+    fn of(row: &InputState) -> Option<Self> {
+        if row.retained_resume.is_some() {
+            Some(Self::RetainedResume)
+        } else if !row.authority_contributors.is_empty() {
+            Some(Self::KeptOriginal)
+        } else {
+            None
+        }
+    }
+}
+
 /// Session-local order of durable-class live-boundary Steer deliveries.
 ///
 /// Each boundary of a running run accepts one durable delivery, so durable
@@ -685,6 +717,62 @@ impl EphemeralRuntimeDriver {
         ))
     }
 
+    /// [`Self::reacquire_retained_resume_client`] for a kept governed input
+    /// admitted under its own association (a governed prompt, not a resume
+    /// of retained work): ask the installed host for its controller client
+    /// again with the row's stored input and its canonical stored
+    /// association (`NativeWorkAuthorizationHost::authenticate_kept_original`).
+    /// `None` when `state` is not such an input, already holds its client,
+    /// or carries no payload to ask with. A destination its session has
+    /// since superseded is refused before the host is asked, and a host that
+    /// is not installed any more supplies nothing. A client for another
+    /// selection than the stored association's is a refusal. Asking decides
+    /// nothing: the caller pins the client, holds the input, or ends it.
+    pub(crate) fn reacquire_kept_original_client(
+        &self,
+        state: &InputState,
+    ) -> Option<crate::retained_work::RetainedClientReacquisition> {
+        use crate::retained_work::RetainedClientReacquisition;
+        if state.retained_resume.is_some() || state.controller_client.is_some() {
+            return None;
+        }
+        let original = state.authority_contributors.first()?;
+        let input = state.persisted_input.as_ref()?;
+        let Some(host) = self.work_authorization_host.get() else {
+            return Some(RetainedClientReacquisition::Refused);
+        };
+        let association = original.association();
+        match self.scoped_destination_superseded(&association.candidate().target) {
+            Ok(true) => return Some(RetainedClientReacquisition::Refused),
+            Ok(false) => {}
+            Err(_) => {
+                return Some(RetainedClientReacquisition::NotReady(
+                    crate::traits::ControllerReadinessFailure::PolicyUnavailable,
+                ));
+            }
+        }
+        Some(crate::retained_work::classify_reacquired_selection(
+            association.candidate().controller_model.as_ref(),
+            host.host()
+                .authenticate_kept_original(&self.runtime_id, input, association),
+        ))
+    }
+
+    /// Ask the installed host again for the controller client of `state`,
+    /// a kept input of either kind ([`KeptInputKind`]):
+    /// [`Self::reacquire_retained_resume_client`] or
+    /// [`Self::reacquire_kept_original_client`].
+    pub(crate) fn reacquire_kept_input_client(
+        &self,
+        state: &InputState,
+    ) -> Option<crate::retained_work::RetainedClientReacquisition> {
+        if state.retained_resume.is_some() {
+            self.reacquire_retained_resume_client(state)
+        } else {
+            self.reacquire_kept_original_client(state)
+        }
+    }
+
     /// Whether `input_id`'s row is a kept resume of retained work: a resume
     /// (its row carries the retained-resume record) that this registration
     /// recovered from the store (the machine's `recovered_admitted_inputs`).
@@ -731,74 +819,127 @@ impl EphemeralRuntimeDriver {
         self.scoped_destination_superseded(&canonical.association().candidate().target)
     }
 
-    /// The kept retained-resume rows that hold no controller client and wait
-    /// unstaged for one (queued in a lane, or bound to the run marked
-    /// resumable, as the machine's `HoldInputController` guard requires), in
-    /// admission order, each with whether the machine holds it for its
-    /// controller. A held row never holds a client: the hold is released when
-    /// its client is pinned.
-    fn kept_retained_resumes_without_client(&self) -> Vec<(InputId, bool)> {
-        let mut rows: Vec<(u64, String, InputId, bool)> = self.with_dsl_state(|state| {
-            if state.recovered_admitted_inputs.is_empty() {
-                return Vec::new();
-            }
-            self.ledger
-                .iter()
-                .filter_map(|(input_id, row)| {
-                    if row.retained_resume.is_none() || row.controller_client.is_some() {
-                        return None;
-                    }
-                    let key = Self::dsl_key(input_id);
-                    if !state.recovered_admitted_inputs.contains(&key) {
-                        return None;
-                    }
-                    let waits_unstaged = match state.input_phases.get(&key) {
-                        Some(mm_dsl::InputPhase::Queued) => state.input_lane.contains_key(&key),
-                        Some(
-                            mm_dsl::InputPhase::Staged
-                            | mm_dsl::InputPhase::Applied
-                            | mm_dsl::InputPhase::AppliedPendingConsumption,
-                        ) => {
-                            state.resumable_run_id.is_some()
-                                && state.input_run_associations.get(&key)
-                                    == state.resumable_run_id.as_ref()
+    /// The kept rows of either kind ([`KeptInputKind`]) that hold no
+    /// controller client and wait unstaged for one (queued in a lane, or
+    /// bound to the run marked resumable, as the machine's
+    /// `HoldInputController` guard requires), in admission order, each with
+    /// whether the machine holds it for its controller and its kind. A held
+    /// row never holds a client: the hold is released when its client is
+    /// pinned.
+    fn kept_inputs_without_client(&self) -> Vec<(InputId, bool, KeptInputKind)> {
+        let mut rows: Vec<(u64, String, InputId, bool, KeptInputKind)> =
+            self.with_dsl_state(|state| {
+                if state.recovered_admitted_inputs.is_empty() {
+                    return Vec::new();
+                }
+                self.ledger
+                    .iter()
+                    .filter_map(|(input_id, row)| {
+                        if row.controller_client.is_some() {
+                            return None;
                         }
-                        _ => false,
-                    };
-                    waits_unstaged.then(|| {
-                        let held = state.input_controller_holds.contains(&key);
-                        let sequence = state
-                            .input_admission_seq
-                            .get(&key)
-                            .copied()
-                            .unwrap_or(u64::MAX);
-                        (sequence, key, input_id.clone(), held)
+                        let kind = KeptInputKind::of(row)?;
+                        let key = Self::dsl_key(input_id);
+                        if !state.recovered_admitted_inputs.contains(&key) {
+                            return None;
+                        }
+                        let waits_unstaged = match state.input_phases.get(&key) {
+                            Some(mm_dsl::InputPhase::Queued) => state.input_lane.contains_key(&key),
+                            Some(
+                                mm_dsl::InputPhase::Staged
+                                | mm_dsl::InputPhase::Applied
+                                | mm_dsl::InputPhase::AppliedPendingConsumption,
+                            ) => {
+                                state.resumable_run_id.is_some()
+                                    && state.input_run_associations.get(&key)
+                                        == state.resumable_run_id.as_ref()
+                            }
+                            _ => false,
+                        };
+                        waits_unstaged.then(|| {
+                            let held = state.input_controller_holds.contains(&key);
+                            let sequence = state
+                                .input_admission_seq
+                                .get(&key)
+                                .copied()
+                                .unwrap_or(u64::MAX);
+                            (sequence, key, input_id.clone(), held, kind)
+                        })
                     })
-                })
-                .collect()
-        });
+                    .collect()
+            });
         rows.sort_by(|(left_seq, left_key, ..), (right_seq, right_key, ..)| {
             left_seq
                 .cmp(right_seq)
                 .then_with(|| left_key.cmp(right_key))
         });
         rows.into_iter()
-            .map(|(_, _, input_id, held)| (input_id, held))
+            .map(|(_, _, input_id, held, kind)| (input_id, held, kind))
             .collect()
     }
 
-    /// Whether `input_id` is a kept retained-resume row without its
+    /// Whether `input_id` is a kept row of either kind without its
     /// controller client that waits unstaged for one, so the machine may hold
-    /// it (see [`Self::kept_retained_resumes_without_client`]).
-    pub(crate) fn kept_retained_resume_waits_unstaged(&self, input_id: &InputId) -> bool {
-        self.kept_retained_resumes_without_client()
+    /// it (see [`Self::kept_inputs_without_client`]).
+    pub(crate) fn kept_input_waits_unstaged(&self, input_id: &InputId) -> bool {
+        self.kept_inputs_without_client()
             .iter()
-            .any(|(kept, _)| kept == input_id)
+            .any(|(kept, ..)| kept == input_id)
+    }
+
+    /// Whether `input_id` is a kept row of either kind that holds no
+    /// controller client (yet): a kept resume of retained work, or a kept
+    /// governed input admitted under its own association.
+    pub(crate) fn kept_input_without_client(&self, input_id: &InputId) -> bool {
+        self.kept_retained_resume_without_client(input_id)
+            || self.kept_governed_input_without_controller(input_id)
     }
 
     /// Whether the machine holds any input for its controller.
     pub(crate) fn has_input_controller_holds(&self) -> bool {
         self.with_dsl_state(|state| !state.input_controller_holds.is_empty())
+    }
+
+    /// Whether the machine holds `input_id` for its controller
+    /// (`input_controller_holds`).
+    pub(crate) fn input_controller_held(&self, input_id: &InputId) -> bool {
+        self.with_dsl_state(|state| {
+            state
+                .input_controller_holds
+                .contains(&Self::dsl_key(input_id))
+        })
+    }
+
+    /// Whether the machine holds a kept resume of retained work for its
+    /// controller: the holds the re-ask pause and the budget apply to. A
+    /// held kept governed input (admitted under its own association) is
+    /// asked at the runtime loop's wakes and the session's registrations
+    /// only.
+    fn has_retained_controller_holds(&self) -> bool {
+        self.with_dsl_state(|state| {
+            !state.input_controller_holds.is_empty()
+                && self.ledger.iter().any(|(input_id, row)| {
+                    row.retained_resume.is_some()
+                        && state
+                            .input_controller_holds
+                            .contains(&Self::dsl_key(input_id))
+                })
+        })
+    }
+
+    /// Whether `row` is a kept governed input admitted under its own
+    /// association that the machine holds for its controller and that holds
+    /// no client: the machine-wide refusals of work without its client (the
+    /// controller veto, `NativeControllerGrantMutation::with_preserved_controllers`,
+    /// and the credential observer's reference check) skip it, as it has no
+    /// client to preserve, and its pin decides again under the grants and
+    /// credentials current then. A held resume of retained work keeps both
+    /// refusals, which its budget bounds.
+    pub(crate) fn held_kept_original_without_client(&self, row: &InputState) -> bool {
+        row.retained_resume.is_none()
+            && row.controller_client.is_none()
+            && !row.authority_contributors.is_empty()
+            && self.input_controller_held(&row.input_id)
     }
 
     /// Whether the machine holds an input bound to `run_id` for its
@@ -827,6 +968,54 @@ impl EphemeralRuntimeDriver {
         })
     }
 
+    /// The run marked resumable that the machine holds because its
+    /// resumed-run admission could not decide, if any
+    /// (`resumed_run_admission_hold`).
+    pub(crate) fn resumed_run_admission_held(&self) -> Option<RunId> {
+        self.with_dsl_state(|state| {
+            state
+                .resumed_run_admission_hold
+                .as_ref()
+                .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl)
+        })
+    }
+
+    /// Hold the run `run_id` marked resumable through the machine
+    /// (`HoldResumedRunForAdmission`): its resumed-run admission could not
+    /// decide, so the run stays marked, with its inputs bound and none
+    /// ended, and neither `ResumeRun` nor the resumed-run plan admits it
+    /// until a later answer releases it.
+    pub(crate) fn hold_resumed_run_for_admission(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::HoldResumedRunForAdmission {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "HoldResumedRunForAdmission",
+        )
+    }
+
+    /// Release the admission hold of the run `run_id`
+    /// (`ReleaseResumedRunAdmission`): a later answer let it continue, and
+    /// the caller resumes it. A run the machine does not hold is left as it
+    /// is.
+    pub(crate) fn release_resumed_run_admission(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        if self.resumed_run_admission_held().as_ref() != Some(run_id) {
+            return Ok(());
+        }
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::ReleaseResumedRunAdmission {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "ReleaseResumedRunAdmission",
+        )
+    }
+
     /// Whether the pause since the held rows were last asked is over.
     fn controller_hold_ask_due(&self, now: meerkat_core::time_compat::Instant) -> bool {
         self.controller_hold_clock.last_asked.is_none_or(|last| {
@@ -837,10 +1026,13 @@ impl EphemeralRuntimeDriver {
     /// When the runtime loop asks again for the clients of the rows the
     /// machine holds for their controller: one
     /// [`crate::retained_work::CONTROLLER_HOLD_RETRY_DELAY`] after the last
-    /// ask, while the machine holds any row. `None` while it holds none: the
-    /// re-ask timer is armed exactly while the machine reports holds.
+    /// ask, while the machine holds any kept resume of retained work. `None`
+    /// while it holds none: the re-ask timer is armed exactly while the
+    /// machine reports such holds. A held kept governed input arms no timer:
+    /// it is asked again at the loop's wakes and the session's
+    /// registrations.
     pub(crate) fn controller_reask_due_at(&self) -> Option<meerkat_core::time_compat::Instant> {
-        if !self.has_input_controller_holds() {
+        if !self.has_retained_controller_holds() {
             return None;
         }
         Some(match self.controller_hold_clock.last_asked {
@@ -849,23 +1041,32 @@ impl EphemeralRuntimeDriver {
         })
     }
 
-    /// Whether the runtime loop has an ask to make for kept retained-resume
-    /// rows without a controller client at `now`: a row the machine does not
-    /// hold yet (asked at once), or held rows whose pause is over.
+    /// Whether the runtime loop has an ask to make for kept rows without a
+    /// controller client at `now`: a row the machine does not hold yet
+    /// (asked at once), held resumes of retained work whose pause is over,
+    /// or a held kept governed input (asked at each pass of the loop, which
+    /// a wake starts).
     pub(crate) fn kept_resume_controller_ask_due(
         &self,
         now: meerkat_core::time_compat::Instant,
     ) -> bool {
-        let rows = self.kept_retained_resumes_without_client();
-        rows.iter().any(|(_, held)| !held)
-            || (rows.iter().any(|(_, held)| *held) && self.controller_hold_ask_due(now))
+        let rows = self.kept_inputs_without_client();
+        rows.iter().any(|(_, held, _)| !held)
+            || rows
+                .iter()
+                .any(|(_, held, kind)| *held && *kind == KeptInputKind::KeptOriginal)
+            || (rows
+                .iter()
+                .any(|(_, held, kind)| *held && *kind == KeptInputKind::RetainedResume)
+                && self.controller_hold_ask_due(now))
     }
 
-    /// Hold `input_id`, a kept retained-resume row whose host cannot say yet
-    /// whether it supplies its controller client, through the machine
+    /// Hold `input_id`, a kept row whose host cannot say yet whether it
+    /// supplies its controller client, through the machine
     /// (`HoldInputController`), and start its budget at `now` unless it
-    /// started earlier in this registration. The first hold while the
-    /// machine held nothing restarts the re-ask pause from `now`.
+    /// started earlier in this registration (only a resume of retained work
+    /// is ever refused by it). The first hold while the machine held nothing
+    /// restarts the re-ask pause from `now`.
     pub(crate) fn hold_input_controller(
         &mut self,
         input_id: &InputId,
@@ -888,26 +1089,26 @@ impl EphemeralRuntimeDriver {
         Ok(())
     }
 
-    /// Whether a kept retained-resume row without its controller client
+    /// Whether a kept row of either kind without its controller client
     /// waits unstaged and is not held by the machine yet.
     pub(crate) fn has_unheld_kept_resume_without_client(&self) -> bool {
-        self.kept_retained_resumes_without_client()
+        self.kept_inputs_without_client()
             .iter()
-            .any(|(_, held)| !held)
+            .any(|(_, held, _)| !held)
     }
 
-    /// Hold, through the machine and without asking its host, every kept
-    /// retained-resume row without its controller client that the machine
-    /// does not hold yet, for a registration that drains for its unregister:
-    /// it asks nothing (what it keeps, the next registration asks about
-    /// again), and a held row is never selected or staged. Each budget starts
-    /// at `now`. Returns whether any row was held.
+    /// Hold, through the machine and without asking its host, every kept row
+    /// of either kind without its controller client that the machine does
+    /// not hold yet, for a registration that drains for its unregister: it
+    /// asks nothing (what it keeps, the next registration asks about again),
+    /// and a held row is never selected or staged. Each budget starts at
+    /// `now`. Returns whether any row was held.
     pub(crate) fn hold_kept_resumes_without_client(
         &mut self,
         now: meerkat_core::time_compat::Instant,
     ) -> Result<bool, RuntimeDriverError> {
         let mut held_any = false;
-        for (input_id, held) in self.kept_retained_resumes_without_client() {
+        for (input_id, held, _) in self.kept_inputs_without_client() {
             if !held {
                 self.hold_input_controller(&input_id, now)?;
                 held_any = true;
@@ -936,19 +1137,23 @@ impl EphemeralRuntimeDriver {
     }
 
     /// Ask the installed host again, once, for the controller client of every
-    /// kept retained-resume row that holds none (see
-    /// [`Self::reacquire_retained_resume_client`]): a row the machine does
-    /// not hold yet at once, and the held rows once per
-    /// [`crate::retained_work::CONTROLLER_HOLD_RETRY_DELAY`]. One ask per row
-    /// each time, never a burst.
+    /// kept row that holds none (see [`Self::reacquire_kept_input_client`]):
+    /// a row the machine does not hold yet at once; a held resume of retained
+    /// work once per [`crate::retained_work::CONTROLLER_HOLD_RETRY_DELAY`]; a
+    /// held kept governed input at every ask, which the runtime loop makes
+    /// at each pass a wake starts and the registration makes at recovery.
+    /// One ask per row each time, never a burst.
     ///
     /// A client is pinned on its row, and a held row is released. A definite
     /// refusal ends the row: a queued row is returned for the caller to end
     /// as a refused resume, and for a row bound to the run marked resumable
-    /// that run is returned, to settle as refused. A row the host cannot
-    /// answer for now is held (it keeps its attempts) and its budget
-    /// ([`crate::retained_work::CONTROLLER_HOLD_BUDGET`]) starts; a held row
-    /// still unanswered once its budget ran out ends as refused too.
+    /// that run is returned, to settle as refused (a kept governed input's in
+    /// lists of their own, which end with the kept-governed termination
+    /// reason). A row the host cannot answer for now is held (it keeps its
+    /// attempts). A held resume of retained work still unanswered once its
+    /// budget ([`crate::retained_work::CONTROLLER_HOLD_BUDGET`]) ran out ends
+    /// as refused too; a held kept governed input waits for an answer, and
+    /// the run it is bound to stays marked.
     pub(crate) fn ask_kept_resume_controllers(
         &mut self,
         now: meerkat_core::time_compat::Instant,
@@ -957,17 +1162,18 @@ impl EphemeralRuntimeDriver {
         let mut asks = crate::retained_work::KeptResumeControllerAsks::default();
         let held_due = self.controller_hold_ask_due(now);
         let mut asked_held = false;
-        for (input_id, held) in self.kept_retained_resumes_without_client() {
-            if held && !held_due {
+        for (input_id, held, kind) in self.kept_inputs_without_client() {
+            let retained = kind == KeptInputKind::RetainedResume;
+            if retained && held && !held_due {
                 continue;
             }
-            asked_held |= held;
+            asked_held |= retained && held;
             // A listed row carries no client; without its stored payload no
             // host can be asked, so that is as final as a refusal.
             let answer = self
                 .ledger
                 .get(&input_id)
-                .and_then(|row| self.reacquire_retained_resume_client(row))
+                .and_then(|row| self.reacquire_kept_input_client(row))
                 .unwrap_or(RetainedClientReacquisition::Refused);
             match answer {
                 RetainedClientReacquisition::Pinned(client) => {
@@ -981,14 +1187,21 @@ impl EphemeralRuntimeDriver {
                         asks.released |= self.release_input_controller(&input_id)?;
                     }
                 }
-                RetainedClientReacquisition::Refused => {
+                RetainedClientReacquisition::Refused if retained => {
                     tracing::warn!(
                         %input_id,
                         "the installed host supplies no controller for a kept retained-work resume; it ends as a refused resume"
                     );
                     self.refuse_kept_resume(&input_id, &mut asks);
                 }
-                RetainedClientReacquisition::NotReady(reason) if held => {
+                RetainedClientReacquisition::Refused => {
+                    tracing::warn!(
+                        %input_id,
+                        "the installed host supplies no controller again for kept governed work; it ends as a refused resume"
+                    );
+                    self.refuse_kept_original(&input_id, &mut asks);
+                }
+                RetainedClientReacquisition::NotReady(reason) if held && retained => {
                     let first = *self
                         .controller_hold_clock
                         .first_unanswered
@@ -1011,11 +1224,19 @@ impl EphemeralRuntimeDriver {
                         );
                     }
                 }
+                RetainedClientReacquisition::NotReady(reason) if held => {
+                    tracing::debug!(
+                        %input_id,
+                        ?reason,
+                        "the installed host still cannot answer for a held kept governed input's controller; it stays held, and is asked again at the next wake or registration"
+                    );
+                }
                 RetainedClientReacquisition::NotReady(reason) => {
                     tracing::debug!(
                         %input_id,
                         ?reason,
-                        "the installed host cannot answer for a kept retained-work resume's controller now; the machine holds it with its attempts"
+                        ?kind,
+                        "the installed host cannot answer for a kept input's controller now; the machine holds it with its attempts"
                     );
                     self.hold_input_controller(&input_id, now)?;
                     asks.held = true;
@@ -1031,6 +1252,35 @@ impl EphemeralRuntimeDriver {
             .first_unanswered
             .retain(|input_id, _| holds.contains(&Self::dsl_key(input_id)));
         Ok(asks)
+    }
+
+    /// Record the definite end of kept governed input `input_id` (admitted
+    /// under its own association) in `asks`: a queued input ends as a
+    /// refused kept governed input; one bound to the run marked resumable
+    /// settles that run as refused.
+    fn refuse_kept_original(
+        &self,
+        input_id: &InputId,
+        asks: &mut crate::retained_work::KeptResumeControllerAsks,
+    ) {
+        let key = Self::dsl_key(input_id);
+        let (queued, resumable) = self.with_dsl_state(|state| {
+            (
+                state.input_phases.get(&key) == Some(&mm_dsl::InputPhase::Queued),
+                state
+                    .resumable_run_id
+                    .clone()
+                    .filter(|run| state.input_run_associations.get(&key) == Some(run)),
+            )
+        });
+        if queued {
+            asks.refused_kept.push(input_id.clone());
+        } else if let Some(run) = resumable
+            .as_ref()
+            .and_then(crate::meerkat_machine::dsl_authority::current_run_id_from_dsl)
+        {
+            asks.refused_kept_run = Some(run);
+        }
     }
 
     /// Record the definite end of kept retained-resume row `input_id` in
@@ -1061,13 +1311,12 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    /// Whether `input_id` is kept governed work with no way back to its
-    /// controller client: an input this registration recovered from the
-    /// store, admitted with an authority association of its own (not a
-    /// resume of retained work, whose host is asked again), whose client did
-    /// not survive the store. The host contract can supply such an input's
-    /// client again only with a fresh authentication of its caller, so it
-    /// can never run.
+    /// Whether `input_id` is kept governed work without its controller
+    /// client: an input this registration recovered from the store, admitted
+    /// with an authority association of its own (not a resume of retained
+    /// work), whose client did not survive the store. Its host is asked for
+    /// the client again with its stored association
+    /// ([`Self::reacquire_kept_original_client`]).
     pub(crate) fn kept_governed_input_without_controller(&self, input_id: &InputId) -> bool {
         self.ledger.get(input_id).is_some_and(|row| {
             row.retained_resume.is_none()
@@ -1080,28 +1329,38 @@ impl EphemeralRuntimeDriver {
         })
     }
 
-    /// The queued kept governed inputs with no way back to their controller
-    /// client ([`Self::kept_governed_input_without_controller`]), in
-    /// admission order.
+    /// Whether `input_id` is kept governed work without its controller
+    /// client ([`Self::kept_governed_input_without_controller`]) that the
+    /// machine does not hold for it: its host was asked and supplies no
+    /// client, definitely, so it can never run. A held one waits for a later
+    /// answer.
+    fn kept_governed_input_refused_its_controller(&self, input_id: &InputId) -> bool {
+        self.kept_governed_input_without_controller(input_id)
+            && !self.input_controller_held(input_id)
+    }
+
+    /// The queued kept governed inputs whose host supplies no controller
+    /// client again ([`Self::kept_governed_input_refused_its_controller`]),
+    /// in admission order.
     pub(crate) fn queued_kept_governed_inputs_without_controller(&self) -> Vec<InputId> {
         self.admission_order()
             .into_iter()
             .filter(|input_id| {
                 self.input_phase(input_id) == Some(InputLifecycleState::Queued)
-                    && self.kept_governed_input_without_controller(input_id)
+                    && self.kept_governed_input_refused_its_controller(input_id)
             })
             .collect()
     }
 
     /// Whether the first input of the run marked resumable `run_id`, whose
     /// controller client a resumed run executes with, is kept governed work
-    /// with no way back to that client
-    /// ([`Self::kept_governed_input_without_controller`]): the run can never
-    /// resume.
+    /// whose host supplies no client again
+    /// ([`Self::kept_governed_input_refused_its_controller`]): the run can
+    /// never resume. A held first input keeps the run marked, waiting.
     pub(crate) fn resumed_run_first_input_lacks_controller(&self, run_id: &RunId) -> bool {
         self.resumed_run_bound_input_ids(run_id)
             .first()
-            .is_some_and(|first| self.kept_governed_input_without_controller(first))
+            .is_some_and(|first| self.kept_governed_input_refused_its_controller(first))
     }
 
     /// A governed resume of retained work: runtime-minted custody bound to
@@ -1328,6 +1587,19 @@ impl EphemeralRuntimeDriver {
         // rejects.
         self.staged_retained_work.set(Some(identity.clone()));
         let context = context.with_retained_work(identity);
+        // The governed origin of the staged run, minted from the admitted
+        // associations of every original it stages: the work its comms
+        // tools' in-process deliveries are sent under. Core sets it, or none,
+        // whatever the host's context held.
+        let context = context.with_governed_send_origin(
+            crate::input_authority::GovernedPeerOrigin::from_associations(
+                batch
+                    .contributors
+                    .iter()
+                    .map(crate::input_authority::RetainedInputAuthority::association),
+            )
+            .map(|origin| origin.to_send_origin()),
+        );
         // The staged inputs that resume retained work, each with the run it
         // resumes: the consent owner moves parked custody into this run only
         // for an input its own committed notice receipt names.
@@ -4032,7 +4304,7 @@ impl EphemeralRuntimeDriver {
 
         if !terminal
             && let Some(crate::retained_work::RetainedClientReacquisition::Pinned(client)) =
-                self.reacquire_retained_resume_client(&bundle.state)
+                self.reacquire_kept_input_client(&bundle.state)
         {
             bundle.state.controller_client = Some(client);
         }
@@ -5291,11 +5563,13 @@ impl EphemeralRuntimeDriver {
     /// queued prompt, or an input of a run marked resumable and not resumed
     /// yet, which stays Staged or Applied and bound to its run) keeps its
     /// phase and payload and is durably marked with the stop's time and max
-    /// age. An input it keeps (the rollback of a materialization that never
-    /// served keeps every input its registration recovered, but the inputs
-    /// bound to a run marked resumable whose stop was asked) stays exactly
-    /// as the store holds it, with no mark. Every other input ends as
-    /// stopped. Returns the retained and kept inputs.
+    /// age, which replace a mark an earlier stop left: its requeue age counts
+    /// from this stop. An input it keeps (the rollback of a materialization
+    /// that never served keeps every input its registration recovered, but
+    /// the inputs bound to a run marked resumable whose stop was asked) stays
+    /// exactly as the store holds it: this stop adds no mark, and a mark an
+    /// earlier stop left stays. Every other input ends as stopped. Returns
+    /// the retained and kept inputs.
     ///
     /// `retained_before_exit` is the set the classifier retained before the
     /// executor's exit, for which no runless carrier was staged. The stop
@@ -6897,21 +7171,22 @@ impl EphemeralRuntimeDriver {
             }
             requeued.push(input_id);
         }
-        // A kept resume of retained work still without its controller client
+        // A kept input (a resume of retained work, or governed work admitted
+        // under its own association) still without its controller client
         // returns to its lane held again (the release dropped its hold with
-        // the run's): the runtime loop asks its host at its next re-ask, and
-        // no batch selects it before. A hold the machine refuses fails the
+        // the run's): the runtime loop asks its host at its next ask, and no
+        // batch selects it before. A hold the machine refuses fails the
         // release, which its caller rolls back (a persistent driver with
         // durability health requires a reload from the store instead), so no
-        // such resume is ever requeued unheld.
+        // such input is ever requeued unheld.
         let held_at = meerkat_core::time_compat::Instant::now();
         for input_id in &requeued {
-            if self.kept_retained_resume_waits_unstaged(input_id) {
+            if self.kept_input_waits_unstaged(input_id) {
                 self.hold_input_controller(input_id, held_at)
                     .map_err(|error| {
                         RuntimeDriverError::Internal(format!(
-                            "released kept retained-work resume '{input_id}' could not be held \
-                             for its controller: {error}"
+                            "released kept input '{input_id}' could not be held for its \
+                             controller: {error}"
                         ))
                     })?;
             }
@@ -9388,9 +9663,9 @@ mod tests {
     }
 
     /// The stop's mark stays on a kept input until it runs or expires, so
-    /// every attachment that still finds it queued checks its age again: a
-    /// check within the bound leaves it queued and marked, and a later one,
-    /// past the bound, selects it for expiry.
+    /// every attachment that still finds it queued checks its age, counted
+    /// from the stop, again: a check within the bound leaves it queued and
+    /// marked, and a later one, past the bound, selects it for expiry.
     #[tokio::test]
     async fn every_attachment_that_finds_a_kept_input_queued_checks_its_age_again() {
         let (mut driver, durable_id, _, _) =
@@ -9406,15 +9681,14 @@ mod tests {
             driver.stop_non_terminal_inputs(&before_exit).unwrap(),
             vec![durable_id.clone()]
         );
-        let admitted_at = driver
+        let stopped_at = driver
             .ledger
             .get(&durable_id)
-            .and_then(|state| state.persisted_input.as_ref())
-            .expect("a kept input keeps its payload")
-            .header()
-            .timestamp;
+            .and_then(|state| state.stop_requeue)
+            .expect("the stop marks the input it keeps")
+            .stopped_at;
 
-        let within = admitted_at + chrono::Duration::milliseconds(900_000);
+        let within = stopped_at + chrono::Duration::milliseconds(900_000);
         assert!(crate::input_state::expired_stop_requeued_inputs(&driver, within).is_empty());
         assert!(
             driver
@@ -9427,10 +9701,83 @@ mod tests {
             driver.input_phase(&durable_id),
             Some(InputLifecycleState::Queued)
         );
-        let past = admitted_at + chrono::Duration::milliseconds(900_001);
+        let past = stopped_at + chrono::Duration::milliseconds(900_001);
         assert_eq!(
             crate::input_state::expired_stop_requeued_inputs(&driver, past),
             vec![durable_id]
+        );
+    }
+
+    /// A second graceful requeue stop over an input an earlier one kept,
+    /// before any start ran it, marks it again: the second stop's time and
+    /// max age replace the earlier mark, which is not kept. So the input's
+    /// age counts from the last stop that kept it, and the max age bounds
+    /// that last outage alone, however long before it the input was admitted
+    /// or first kept. RED before: the age counted from the input's admission,
+    /// so the input, admitted 20 minutes back, was over the second stop's
+    /// 10-minute max age the moment that stop kept it.
+    #[tokio::test]
+    async fn a_second_requeue_stop_marks_a_kept_input_again_from_its_own_time() {
+        let (mut driver, durable_id, _, _) =
+            stop_classification_fixture("stop-requeue-second-stop").await;
+        // Admitted 20 minutes ago and kept by a first stop 10 minutes ago
+        // with a 15-minute max age, as the next registration recovers it.
+        let now = Utc::now();
+        let first_stop = now - chrono::Duration::minutes(10);
+        {
+            let row = driver.ledger.get_mut(&durable_id).expect("the kept row");
+            let admitted_at = now - chrono::Duration::minutes(20);
+            row.persisted_input
+                .as_mut()
+                .expect("a kept input keeps its payload")
+                .header_mut()
+                .timestamp = admitted_at;
+            row.created_at = admitted_at;
+            row.stop_requeue = Some(crate::input_state::StopRequeueMark {
+                stopped_at: first_stop,
+                max_age_ms: 900_000,
+            });
+        }
+
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            600_000,
+        );
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        assert_eq!(
+            driver.stop_non_terminal_inputs(&before_exit).unwrap(),
+            vec![durable_id.clone()],
+            "the second stop keeps the input again"
+        );
+        let mark = driver
+            .ledger
+            .get(&durable_id)
+            .and_then(|state| state.stop_requeue)
+            .expect("the second stop marks the input");
+        assert!(
+            mark.stopped_at >= now && mark.max_age_ms == 600_000,
+            "the second stop's time and max age replace the first stop's mark: {mark:?}"
+        );
+
+        // Fifteen minutes after the first stop is five minutes into the
+        // second outage: the first stop's mark no longer counts.
+        let first_bound = first_stop + chrono::Duration::milliseconds(900_001);
+        assert!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, first_bound).is_empty(),
+            "past the first stop's max age, the input is inside the second's"
+        );
+        let within = mark.stopped_at + chrono::Duration::milliseconds(600_000);
+        assert!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, within).is_empty(),
+            "at the second stop's max age, counted from that stop, the input still runs"
+        );
+        let past = mark.stopped_at + chrono::Duration::milliseconds(600_001);
+        assert_eq!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, past),
+            vec![durable_id],
+            "past it, the input expires"
         );
     }
 

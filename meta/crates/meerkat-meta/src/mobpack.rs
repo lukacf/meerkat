@@ -185,6 +185,75 @@ struct DraftStoreLock {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
+/// The admission each change a mobpack operation makes passes right before
+/// it is made ([`with_change_admission`]), and whether it refused one.
+struct ChangeAdmission {
+    admits: Box<dyn Fn() -> bool>,
+    refused: std::cell::Cell<bool>,
+}
+
+std::thread_local! {
+    /// The change admission of the mobpack operation on this thread. Unset
+    /// (the host's own channels, the standalone Flow Editor) admits every
+    /// change.
+    static CHANGE_ADMISSION: std::cell::RefCell<Option<ChangeAdmission>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f`, admitting each change it makes only while `admits` says so,
+/// asked right before the change is made: a draft store write after the
+/// store's reads, under its lock, and a deploy with `execute` or a
+/// validation with `rkat_validate` before it writes its archive and runs
+/// `rkat`. Returns `f`'s answer and whether a change was refused, in which
+/// case nothing of that change was written or run. The Flow Editor on the
+/// Console's listener checks its caller here; no other entry point admits.
+pub(crate) fn with_change_admission<R>(
+    admits: impl Fn() -> bool + 'static,
+    f: impl FnOnce() -> R,
+) -> (R, bool) {
+    struct Restore(Option<ChangeAdmission>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            CHANGE_ADMISSION.with(|admission| *admission.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(CHANGE_ADMISSION.with(|admission| {
+        admission.borrow_mut().replace(ChangeAdmission {
+            admits: Box::new(admits),
+            refused: std::cell::Cell::new(false),
+        })
+    }));
+    let answer = f();
+    let refused = CHANGE_ADMISSION.with(|admission| {
+        admission
+            .borrow()
+            .as_ref()
+            .is_some_and(|admission| admission.refused.get())
+    });
+    (answer, refused)
+}
+
+/// Admit one change of the mobpack operation on this thread right before
+/// it is made ([`with_change_admission`]): `Err` when the admission refuses
+/// it, and the change is then not made.
+fn admit_change() -> Result<(), String> {
+    CHANGE_ADMISSION.with(|admission| {
+        let admission = admission.borrow();
+        match admission.as_ref() {
+            Some(admission) if !(admission.admits)() => {
+                admission.refused.set(true);
+                Err(
+                    "the change was not admitted right before it was made; nothing was \
+                     written or run"
+                        .to_string(),
+                )
+            }
+            _ => Ok(()),
+        }
+    })
+}
+
 #[cfg(test)]
 impl Drop for DraftStoreLock {
     fn drop(&mut self) {
@@ -4390,6 +4459,7 @@ fn write_mobpack_draft_store(
     path: &Path,
     rows: &BTreeMap<String, Value>,
 ) -> Result<Option<String>, String> {
+    admit_change()?;
     let dir = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -13999,7 +14069,10 @@ pub fn validate_mobpack(params: &Value) -> Result<MobpackValidationResult, Strin
     Ok(validation)
 }
 
-fn validate_with_rkat_requested(params: &Value) -> bool {
+/// Whether a `meta/mobpacks/validate` request asks for the validation
+/// through `rkat` (`rkat_validate`, or `rkatValidate` when that is absent),
+/// which writes an archive and runs `rkat mob validate`.
+pub(crate) fn validate_with_rkat_requested(params: &Value) -> bool {
     params
         .get("rkat_validate")
         .or_else(|| params.get("rkatValidate"))
@@ -14043,6 +14116,7 @@ fn validate_document_with_rkat(
         .decode(export.content_base64.as_bytes())
         .map_err(|err| format!("failed to decode exported mobpack for validation: {err}"))?;
     let pack_path = validate_pack_path(params, &export.filename)?;
+    admit_change()?;
     if let Some(parent) = pack_path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create validation output directory: {err}"))?;
@@ -14274,6 +14348,16 @@ pub fn export_mobpack(params: &Value) -> Result<MobpackExportResult, String> {
     })
 }
 
+/// Whether a `meta/mobpacks/deploy` request asks to run the deploy
+/// (`execute`), which writes a mobpack archive and runs `rkat mob run`,
+/// rather than to plan it.
+pub(crate) fn deploy_execute_requested(params: &Value) -> bool {
+    params
+        .get("execute")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn deploy_mobpack(params: &Value) -> Result<MobpackDeployResult, String> {
     enforce_mobpack_draft_expected_revision(params, "meta/mobpacks/deploy")?;
     let export = export_mobpack(params)?;
@@ -14281,10 +14365,7 @@ pub fn deploy_mobpack(params: &Value) -> Result<MobpackDeployResult, String> {
         .decode(export.content_base64.as_bytes())
         .map_err(|err| format!("failed to decode exported mobpack: {err}"))?;
     let pack_sha256 = source_file_sha256(&bytes);
-    let execute = params
-        .get("execute")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let execute = deploy_execute_requested(params);
     // A plan for a caller without host access names no host path: its pack
     // path is the caller's own or the bare file name, and its command runs
     // `rkat`, never a binary the host configured. A deploy that runs reports
@@ -14321,6 +14402,7 @@ pub fn deploy_mobpack(params: &Value) -> Result<MobpackDeployResult, String> {
         deploy_plan_trace_from_definition(&definition, &export.validation, &command, &pack_path);
 
     let (status_code, stdout, stderr) = if execute {
+        admit_change()?;
         if let Some(parent) = pack_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|err| format!("failed to create deploy output directory: {err}"))?;

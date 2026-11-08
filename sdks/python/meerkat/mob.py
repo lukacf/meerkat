@@ -23,6 +23,7 @@ from .generated.types import (
     MobRevokeHostResult,
     MobRouteInstallsResult,
     MobSpawnManyResult,
+    MobStreamCursor,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
     RealtimeTurningMode,
@@ -203,6 +204,12 @@ MobMemberLifecycleCapabilities = TypedDict(
 # refused.
 MobMemberCustodyUnknown = TypedDict("MobMemberCustodyUnknown", {"unknown": str})
 
+# A preview-unavailable reason this SDK does not know, as the server sent it:
+# the vocabulary may grow, and an unknown reason is surfaced, not refused.
+MobMemberPreviewUnavailableUnknown = TypedDict(
+    "MobMemberPreviewUnavailableUnknown", {"unknown": str}
+)
+
 # A member's custody restore a mob start deferred: the restore and the cause
 # its last attempt met.
 MobMemberCustodyDeferral = TypedDict(
@@ -240,8 +247,11 @@ MobMemberSnapshot = TypedDict(
         "non_portable_disabled": NotRequired[list[WireNonPortableResourceKind]],
         # Set when this read did not observe the member's session:
         # output_preview and tokens_used are then missing, not an empty
-        # preview and a zero count. Absent when they are observations.
-        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
+        # preview and a zero count. Absent when they are observations. A
+        # reason this SDK does not know reads as {"unknown": <the value>}.
+        "preview_unavailable": NotRequired[
+            WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown
+        ],
         # Set when the member's host refused its restored registration: the
         # hook call that refused it. The member stays broken until an
         # explicit repair.
@@ -268,7 +278,9 @@ MobKickoffMemberSnapshot = TypedDict(
         "peer_connectivity": NotRequired[MobPeerConnectivity],
         "kickoff": NotRequired[dict[str, Any]],
         # As on MobMemberSnapshot.
-        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
+        "preview_unavailable": NotRequired[
+            WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown
+        ],
         "registration_refusal": NotRequired[WireMemberRegistrationHookCall],
         "custody_deferred": NotRequired[MobMemberCustodyDeferral],
     },
@@ -792,9 +804,20 @@ class Mob:
     async def cancel_flow(self, run_id: str) -> None:
         await self._client.cancel_mob_flow(self.id, run_id)
 
-    async def subscribe_member_events(self, agent_identity: str) -> EventSubscription:
-        """Subscribe to events for a single mob member."""
-        return await self._client.subscribe_mob_member_events(self.id, agent_identity)
+    async def subscribe_member_events(
+        self,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
+    ) -> EventSubscription:
+        """Subscribe to events for a single mob member.
+
+        ``cursor`` resumes after a position, as
+        :meth:`MeerkatClient.subscribe_mob_member_events` describes.
+        """
+        return await self._client.subscribe_mob_member_events(
+            self.id, agent_identity, cursor=cursor
+        )
 
     async def subscribe_events(self) -> EventSubscription:
         """Subscribe to attributed mob-wide events."""

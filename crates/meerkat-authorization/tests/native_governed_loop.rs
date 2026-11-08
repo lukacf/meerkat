@@ -640,6 +640,7 @@ async fn generated_grant_denial_reaches_controller_and_permitted_tool_finishes_s
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

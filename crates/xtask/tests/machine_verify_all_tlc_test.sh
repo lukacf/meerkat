@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-v
+#        machine_verify_all_tlc_test.sh --part audits-a|...|audits-o|audits-q|...|audits-y
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
@@ -26,9 +26,13 @@ set -euo pipefail
 #   audits-t        hand-written audit shard T
 #   audits-u        hand-written audit shard U
 #   audits-v        hand-written audit shard V
-#   all             every part (the default: `make machine-verify`, the
-#                   nightly bounded TLC job and the release gate)
-# Bazel runs the twenty-two parts as separate targets
+#   audits-w        hand-written audit shard W
+#   audits-x        hand-written audit shard X
+#   audits-y        hand-written audit shard Y
+#   all             every part (the default: `make machine-verify` without
+#                   MACHINE_VERIFY_PART, and the release gate); the nightly
+#                   bounded TLC job runs the machine-verify part only
+# Bazel runs the twenty-five parts as separate targets
 # (machine_verify_all_tlc_test, machine_verify_audits_a_tlc_test,
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,
 # machine_verify_audits_d_tlc_test, machine_verify_audits_e_tlc_test,
@@ -39,14 +43,16 @@ set -euo pipefail
 # machine_verify_audits_n_tlc_test, machine_verify_audits_o_tlc_test,
 # machine_verify_audits_q_tlc_test, machine_verify_audits_r_tlc_test,
 # machine_verify_audits_s_tlc_test, machine_verify_audits_t_tlc_test,
-# machine_verify_audits_u_tlc_test, machine_verify_audits_v_tlc_test) so the
+# machine_verify_audits_u_tlc_test, machine_verify_audits_v_tlc_test,
+# machine_verify_audits_w_tlc_test, machine_verify_audits_x_tlc_test,
+# machine_verify_audits_y_tlc_test) so the
 # BuildBuddy machine-authority lane runs them in parallel; together they are
-# exactly `all`. CI's tlc-audits job runs the twenty-one audit shards, one
+# exactly `all`. CI's tlc-audits job runs the twenty-four audit shards, one
 # job each.
 # The audit shards never execute xtask, so they alone may omit its path.
 audit_shard() {
   case "$1" in
-    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v) return 0 ;;
+    audits-a|audits-b|audits-c|audits-d|audits-e|audits-f|audits-g|audits-h|audits-i|audits-j|audits-k|audits-l|audits-m|audits-n|audits-o|audits-q|audits-r|audits-s|audits-t|audits-u|audits-v|audits-w|audits-x|audits-y) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -55,13 +61,13 @@ if [[ "${1:-}" == "--part" ]] && audit_shard "${2:-}"; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-v may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a..audits-o or audits-q..audits-y may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-v) or all}"
+    lane_part="${3:?--part needs machine-verify, an audit shard (audits-a..audits-o, audits-q..audits-y) or all}"
   fi
 fi
 if [[ "${lane_part}" != "machine-verify" && "${lane_part}" != "all" ]] && ! audit_shard "${lane_part}"; then
-  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-v, all)" >&2
+  echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a..audits-o, audits-q..audits-y, all)" >&2
   exit 2
 fi
 # run_part <part>: whether this invocation runs <part>.
@@ -304,8 +310,9 @@ fi
 # negation (refused while held, released then runs, a run that finishes while
 # held then a refusal, the retired drain refused). It explores the MobStop
 # and ToolsNotPublished reasons, and a second run registers, holds and
-# releases every reason (a mob member's HostPreparation among them) with no
-# input and no run, the reasons being alike in every other arm. 12 steps
+# releases every reason (a mob member's HostPreparation and a host's
+# HostRecovery among them) with no input and no run, the reasons being alike
+# in every other arm. 12 steps
 # reach every witness; deeper bounds run by hand.
 run_start_hold_audit="${workspace_root}/specs/machines/meerkat_machine/run_start_hold_audit.sh"
 if [[ ! -x "${run_start_hold_audit}" ]]; then
@@ -315,6 +322,41 @@ fi
 if run_part audits-q; then
   echo "running bounded run-start hold TLC audit"
   TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
+fi
+
+# A host's settle of the run its session retained (SettleRetainedRun: the run
+# a restart left open and the registration marked resumable, settled without
+# resuming it and without a model request) is model-checked by a hand-written
+# audit over the same generated model: one session restarted with every
+# subset of the host's HostRecovery and a mob Stop's MobStop held, its kept
+# run marked, an input staged and bound to it and an input queued behind it,
+# then every settle arm with the observation of no run, the kept run or
+# another run, the attachment, the start and resume of the kept run or the
+# start of a new one, the runtime's settlement of the kept run as cancelled or
+# as a refused resume, a stop of it, the abandonment of an input, the holds
+# and releases, the start of an unregister, a retire, an executor exit and a
+# destroy (and a run marked before the runtime initializes), under every
+# generated invariant plus six action properties (a settle changes nothing
+# but the stop it records; an accepted settle records the stop of exactly the
+# marked run, only with no run current; no settle is accepted while the
+# registration drains; a refused settle records nothing; a run whose settle
+# was accepted never resumes, and is never settled as a refused resume) and
+# one invariant (Running always has a run current). It requires eleven
+# witnesses reached and refuses eight seeded defects (--mutants): an accept
+# of a run other than the marked one, an accept with no run marked, an accept
+# with a run current, an accept while the registration drains, an accept that
+# records no stop, a busy settle that records the stop, a resume that ignores
+# the stop, and a settlement of a stopped run as a refused resume. 10 steps
+# reach every witness and mutant. It runs in shard audits-r, the lightest;
+# not yet measured on a hosted runner.
+retained_run_settle_audit="${workspace_root}/specs/machines/meerkat_machine/retained_run_settle_audit.sh"
+if [[ ! -x "${retained_run_settle_audit}" ]]; then
+  echo "error: retained-run settle audit runner is missing from workspace runfiles: ${retained_run_settle_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded retained-run settle TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${retained_run_settle_audit}" "${RETAINED_RUN_SETTLE_AUDIT_MAX_STEPS:-10}" --mutants
 fi
 
 # Keeping queued inputs across a graceful stop: an unregister records the
@@ -538,6 +580,28 @@ if run_part audits-a; then
   TLC_WORKERS="${tlc_workers}" "${mob_operator_grant_audit}" "${MOB_OPERATOR_GRANT_AUDIT_MAX_STEPS:-5}" --mutants
 fi
 
+# The scoped tool grant gate's server half (the gated servers, the
+# unconfigured-servers mode, the ungated servers and the ignored names; the
+# boundary's ExtendToolGrantGate and the grant path's SurfaceStageGatedAdd)
+# is unreachable in the ci sweep, whose ToolNameValues and StringValues are
+# {}, so its guards and invariants hold there only vacuously. A hand-written
+# audit over the same generated model gives one registered session two tool
+# names and two servers and explores every gate install, extension, open set
+# and stage in Idle, under every generated invariant plus: only a gate
+# install shrinks the gated names or changes the servers and the mode, an
+# extension never opens a name and is taken only for a gated server, and the
+# gated stage stages only a gated server. It requires ten witnesses reached
+# and refuses nine seeded defects (--mutants). 5 steps reach every witness.
+tool_grant_gate_audit="${workspace_root}/specs/machines/meerkat_machine/tool_grant_gate_audit.sh"
+if [[ ! -x "${tool_grant_gate_audit}" ]]; then
+  echo "error: tool grant gate audit runner is missing from workspace runfiles: ${tool_grant_gate_audit}" >&2
+  exit 1
+fi
+if run_part audits-r; then
+  echo "running bounded tool grant gate TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${tool_grant_gate_audit}" "${TOOL_GRANT_GATE_AUDIT_MAX_STEPS:-5}" --mutants
+fi
+
 # The empty-resume retirement verdict (a recovered registration whose resume
 # found nothing to run retires only when it is Session-owned with nothing
 # queued; a Composition-owned one, a mob member, keeps serving) reads the
@@ -560,6 +624,45 @@ fi
 if run_part audits-e; then
   echo "running bounded empty-resume residency TLC audit"
   TLC_WORKERS="${tlc_workers}" "${empty_resume_residency_audit}" "${EMPTY_RESUME_RESIDENCY_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
+# The settlement of an until-changed switch-turn (the shell releases the
+# session mutation gate while the LLM reconfigure runs; on a failure
+# AbortUntilChangedSwitchTurnReconfigure withdraws the request, and on a
+# success CompleteUntilChangedSwitchTurnReconfigure completes it) is reached by
+# no ci-sweep step that also admits an input or stops the runtime in that gap.
+# A hand-written audit over the same generated model drives one session, one
+# input and two requests through the accepted until-changed request, its
+# refusal while another one is pending, the refusal of a finite request while
+# a switch is pending, the input's admission, the stop and the input's
+# abandonment, and the completion and the abort in every phase each declares
+# (only their Idle and Stopped arms fire, since nothing attaches, runs or
+# retires the session; all phases of an arm share one generated body), under
+# every generated invariant plus one invariant and four action properties:
+# the pending switch's id holds no denial; an abort withdraws exactly the
+# pending switch and its request's approval entries (no terminal; the phase
+# and every input's facts unchanged), and fires only for the request still
+# pending; a pending switch ends only through its own request; a completion
+# clears it, records it as applied and makes its target the baseline. It
+# requires five witnesses reached (an approved request withdrawn while
+# another input is queued, one withdrawn in Stopped after a stop abandoned
+# that input, a request refused while another one is pending, a finite
+# request refused while the other one is pending, one completed in Stopped)
+# and refuses eight seeded defects (--mutants): an abort that records a
+# terminal, one that erases the inputs' phases, one without its
+# pending-request guard, one that keeps its request's approval entry, an
+# accept without its pending-switch guard, a completion that keeps the old
+# baseline, an accept without its denied-request guard, a finite refusal
+# without its pending-request guard.
+# 9 steps reach every witness.
+switch_turn_withdrawal_audit="${workspace_root}/specs/machines/meerkat_machine/switch_turn_withdrawal_audit.sh"
+if [[ ! -x "${switch_turn_withdrawal_audit}" ]]; then
+  echo "error: switch-turn withdrawal audit runner is missing from workspace runfiles: ${switch_turn_withdrawal_audit}" >&2
+  exit 1
+fi
+if run_part audits-t; then
+  echo "running bounded switch-turn withdrawal TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${switch_turn_withdrawal_audit}" "${SWITCH_TURN_WITHDRAWAL_AUDIT_MAX_STEPS:-10}" --mutants
 fi
 
 # The member generation high-water (resume recovers each identity's highest
@@ -631,8 +734,9 @@ fi
 # Scoped tool grant expiry (the ToolGrantLifecycleMachine deadline guards,
 # the deadline timer, the boundary that shows a gated name, the dispatch
 # gate's fresh admission and the expiry write it makes after a refusal or
-# loses, revocation, reads that settle a due grant without loading the
-# session, crash, restart and one bounded clock rollback) spans the shell's
+# loses, revocation and a grant's end with its subject, reads that settle a
+# due grant without loading the session, crash, restart and one bounded
+# clock rollback) spans the shell's
 # use of the machine, which the machine's own ci sweep cannot see. A
 # hand-written audit over the same generated model drives one grant with
 # deadline 2 on a clock in 0..3, under every generated invariant plus five
@@ -640,11 +744,13 @@ fi
 # deadline or after the grant ended; a persisted end is latched across crash,
 # restart and rollback; expiry is never early; revocation precedes the
 # deadline; a visible name was shown before the deadline). It requires its
-# eight witnesses reached and refuses six seeded defects (--mutants): an
-# early expiry guard, an inclusive admission guard, a dispatch that reuses
-# the boundary's verdict, a restart that revives an ended grant, a revoked
-# grant handed on, and a boundary that trusts the stored phase. 6 steps reach
-# every witness.
+# ten witnesses reached (among them a grant ended with its subject refusing
+# a call, and the subject's end at the deadline recording expiry) and
+# refuses seven seeded defects (--mutants): an early expiry guard, an
+# inclusive admission guard, a dispatch that reuses the boundary's verdict,
+# a restart that revives an ended grant, a revoked grant handed on, a grant
+# ended with its subject handed on, and a boundary that trusts the stored
+# phase. 6 steps reach every witness.
 tool_grant_expiry_audit="${workspace_root}/specs/machines/tool_grant_lifecycle/tool_grant_expiry_audit.sh"
 if [[ ! -x "${tool_grant_expiry_audit}" ]]; then
   echo "error: tool grant expiry audit runner is missing from workspace runfiles: ${tool_grant_expiry_audit}" >&2
@@ -653,6 +759,36 @@ fi
 if run_part audits-u; then
   echo "running bounded tool grant expiry TLC audit"
   TLC_WORKERS="${tlc_workers}" "${tool_grant_expiry_audit}" "${TOOL_GRANT_EXPIRY_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
+# A host store realm's writer fence (the HostStoreWriterFenceMachine) is
+# driven by a store and by other writers, which the machine's own ci sweep
+# cannot see. A hand-written audit over the same generated model runs in three
+# parts. Its fence part adds a store that grants tokens in order and records
+# one holder's lease, acquires the writer gave up on that the store still
+# decides later, a second writer that takes the fence over once, renews,
+# commits and stops, and a waited-out end that comes before the store's own
+# (a store that answers the remaining lease rounded down). Its scopes and
+# chunks parts drive the scope classifications instead (the quarantine set,
+# the poison map) and an open whose listing may fail, the scopes part with
+# two conflicted incarnations of one key, the chunks part with a chunk's
+# conflict met under its own name and its owner's. Under every generated
+# invariant it
+# checks six invariants (the realm is lost only to another writer or to the
+# documented residual; a live writer resumed through a clean listing; no
+# grant installed over an unseen foreign batch; no holder that renews is
+# waited out again; the token never above the store's; no re-acquire after a
+# failed open listing) and an action property (the classifications only
+# grow), requires its eleven witnesses reached and refuses twelve seeded
+# defects (--mutants). 15 machine steps reach every witness.
+writer_fence_audit="${workspace_root}/specs/machines/host_store_writer_fence/writer_fence_audit.sh"
+if [[ ! -x "${writer_fence_audit}" ]]; then
+  echo "error: writer fence audit runner is missing from workspace runfiles: ${writer_fence_audit}" >&2
+  exit 1
+fi
+if run_part audits-u; then
+  echo "running bounded host store writer fence TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${writer_fence_audit}" "${WRITER_FENCE_AUDIT_MAX_STEPS:-15}" --mutants
 fi
 
 # The MobMachine member lifecycle (roster recovery and reset, session
@@ -668,24 +804,30 @@ fi
 # plus action properties (a member's recorded observation time never
 # decreases; a new incarnation keeps no predecessor's health or failure
 # record; a member runtime destroyed removes only that runtime; the mob is
-# Destroyed only through a destroy it admitted) and two
-# invariants that check why the remaining member arms cannot fire. It
+# Destroyed only through a destroy it admitted) and three
+# invariants: two check why the remaining member arms cannot fire, and one
+# that a resume's replay of a respawn's abandonment of a generation the
+# identity has moved past (a later incarnation ended) is answered by exactly
+# one arm, the stale arm, which answers no other marker. It
 # explores the whole reachable space, with no step bound: its TLC VIEW
 # leaves out the two counters the model never reads
 # (model_step_count, topology_epoch), which it checks first. It runs with
 # TLC coverage and requires every listed arm to fire and a floor of distinct
-# states, requires its six witnesses reached (one recovers an archived
+# states, requires its seven witnesses reached (one recovers an archived
 # identity's next incarnation, one replays a delayed final of an older
-# generation), and refuses eight seeded defects (--mutants): a progress arm
+# generation, one replays a stale abandonment), and refuses ten seeded
+# defects (--mutants): a progress arm
 # without its observation guard, that guard rendered as a plain `<=` between
 # option records, which TLC cannot evaluate, a peer-only retirement-start
 # replay that drops a releasing retirement's session while its ingress
 # detach is pending, the stale-incarnation Retired replay with its old
 # guard, which prunes the Retiring runtime of an identity held for a
 # respawn, a roster recovery that keeps its predecessor's execution health,
-# and a runtime destroy observation that ends the mob, one that leaves its
+# a runtime destroy observation that ends the mob, one that leaves its
 # runtime live, and one that resets the mob's run count (the audit also starts
-# and finishes one mob-level run, so the count is not always zero).
+# and finishes one mob-level run, so the count is not always zero), the
+# stale abandonment arm dropped, and that arm without its
+# later_generation_recorded guard.
 # A second run of the same audit drops the progress observations, adds the
 # mob's completion and destruction (DestroyMob, and the destroy admission,
 # after which a member runtime destroyed still removes only that runtime),
@@ -759,9 +901,9 @@ fi
 # finish, and a replay that keeps the edges a same-session terminal records
 # again, with the ASSUME over the wake refusal helper. It runs with TLC
 # coverage and requires every listed arm to fire and a floor of distinct
-# states per run, and requires its forty-four witnesses reached. Its
+# states per run, and requires its forty-eight witnesses reached. Its
 # --mutants mode (run by hand, outside the shards' budget) refuses
-# sixty-eight seeded defects, one per residency invariant and property (a
+# seventy-two seeded defects, one per residency invariant and property (a
 # same-session start or replay that records no started role, and a terminal
 # that keeps it, among them). The lane runs it
 # in two parts: its whole-space runs in shard audits-g (--part spaces) and
@@ -783,19 +925,31 @@ fi
 # MobMachine identity entries (an identity the host declared as its own,
 # as opposed to a worker member) are reached only with identities, which the
 # ci profile has none of. A hand-written audit over the same generated model
-# checks nine runs over their whole reachable space, in five parts, each in
-# a shard of its own. Its entry part (--part entry, shard audits-l) has two
-# runs. The entry run drives a replayed member and a member seated by the
-# spawn ladder with or without entry custody, the replay of entry rows,
-# every legacy adoption arm, the admission probe, the agent lane's member
-# admission, the worker reconcile and ensure, Stop and Resume, under every
-# generated invariant (the entry ones among them: every entry is seated or
-# unseated with a typed cause, no worker reconcile spawns or retires an
-# entry, entry custody belongs to an open ladder), three ENABLED-form
-# invariants (exactly one probe, agent-lane and adoption arm answers each
-# input), the probe's refusal of an entry's name and two action properties
-# (an entry only by the declared apply, a custody commit, an observed
-# adoption or a replayed row; no entry from an unobserved adoption). The
+# checks ten runs over their whole reachable space, in eight parts, each in
+# a shard of its own. Its two entry runs drive a replayed member and a member
+# seated by the spawn ladder with or without entry custody, the replay of
+# entry rows, every legacy adoption arm over the shell's sixteen raw
+# observations, the admission probe, the agent lane's member admission, the
+# worker reconcile and ensure, Stop and Resume, under every generated
+# invariant (the entry ones among them: every entry is seated or unseated
+# with a typed cause, no worker reconcile spawns or retires an entry, entry
+# custody belongs to an open ladder), three ENABLED-form invariants (exactly
+# one probe, agent-lane and adoption arm answers each input), the probe's
+# refusal of an entry's name and three action properties (an entry only by
+# the declared apply, a custody commit, an adoption from qualifying legacy
+# marks or a replayed row; an adoption records an entry only from qualifying
+# marks; the retirement without an adoption answers only the member it
+# names). A single run over all sixteen observations reached the 900 s
+# per-run cap on a hosted runner (1,575,121 states generated, 544 s locally
+# with 4 TLC workers), so the two runs split them by the roster's listing:
+# the listed run (--part listed, shard audits-w) drives the eight of a
+# listed identity, the unlisted run (--part unlisted, shard audits-x) the
+# eight of an unlisted one, 953,041 states generated each. Each reaches the
+# single run's whole space (12,960 distinct states) and the two check every
+# state and step it checked: identity_entry_audit.tla says why, and the
+# runner checks the generated model's shape that makes it so. Their
+# witnesses and mutants run in the entry part (--part entry, shard
+# audits-l), with the lifecycle run. The
 # lifecycle run takes the member residency audit's retire run with its
 # member made an entry (the replay of its row, or its reseat's ladder opened
 # with entry custody) through the dormant seat, the live and the
@@ -810,30 +964,38 @@ fi
 # entry custody, a rotation keeps the entry, an entry only by a custody seat
 # or a replayed row; the legacy fresh-life respawn admitted only for a member
 # that is no entry, and its topology-preserving archive never taking an
-# entry). Both run with TLC coverage and require every listed arm to fire, a
-# floor of distinct states and their twenty-five witnesses reached, and
-# --mutants refuses twelve seeded defects: a reconcile that retires an
-# entry, a probe that answers an entry's name as a plain duplicate, an
-# adoption without the observation, the replay of an entry row on an
-# unseated identity, an archive that drops the kept entry's unseated cause,
-# a destroy's member archive that keeps the entry, a DestroyMob that keeps
-# the entries, a DestroyFromAny that keeps an open ladder's entry custody, a
-# rotation that drops the entry, a seat that ignores its ladder's entry
-# custody, a fresh-life respawn admitted for an entry and a
-# topology-preserving archive that takes an entry. Its declared apply runs
+# entry). All three run with TLC coverage and require every listed arm to
+# fire and a floor of distinct states; the entry part reaches their
+# twenty-five witnesses, and --mutants refuses fourteen seeded defects: a
+# reconcile that retires an entry, a probe that answers an entry's name as a
+# plain duplicate, an adoption without the observation, the replay of an
+# entry row on an unseated identity (in the listed run), an unlisted
+# adoption that takes one legacy mark, a retirement without an adoption that
+# ignores the host's intent row (in the unlisted run), an archive that drops
+# the kept entry's unseated cause, a destroy's member archive that keeps the
+# entry, a DestroyMob that keeps the entries, a DestroyFromAny that keeps an
+# open ladder's entry custody, a rotation that drops the entry, a seat that
+# ignores its ladder's entry custody, a fresh-life respawn admitted for an
+# entry and a topology-preserving archive that takes an entry. Its declared
+# apply runs
 # (identity_entry_apply_audit.tla) make the other four parts. --part apply
 # (shard audits-k): a declared member seated by its custody ladder, retired
 # unlisted or not, declared again under the role its archived session was
 # built under or another (with the migration from it declared or not),
 # revived on its archived session or seated fresh once a forget let its
-# record go, under the seal, the unmark on listing, a candidate composition
-# and the forced destroy. --part legacy (shard audits-m): a legacy member
+# record go, under the seal (refused while an unseated entry it does not
+# list remains) and the one-entry unlist, the unmark on listing, a candidate
+# composition and the forced destroy. --part legacy (shard audits-m): a
+# legacy member
 # adopted, unlisted and retired to every copy of the plain end (live, after
 # its runtime retired, stopped, or replayed with its session archived or
 # not and its incarnation local or hosted elsewhere), the replay of its
 # start row (stale or not), Stop, Resume and Complete, and the mob's reset
 # from each phase it leaves (its preflight with a member seated, its commit
-# on an empty roster). --part roles (shard audits-n): a seated entry
+# on an empty roster); the witnesses and mutants of its unlisted end (four
+# witnesses of the end on each copy and the five mutants that keep its mark
+# there) run in --part legacy-end (shard audits-y). --part roles (shard
+# audits-n): a seated entry
 # declared under another role or mode, a first-boot preparation, every
 # WakeMember cause and a same-session rotation under another role that
 # names the member's key under the new role's comms name or no endpoint,
@@ -842,7 +1004,8 @@ fi
 # rotations under another role or its own, and a first-boot Resume request.
 # --part hosted (shard audits-o): held creation, the held spawn and entries
 # hosted on their first use, the seal that leaves a member whose spawn is in
-# flight unmarked, with Stop, Resume, Complete and the forced destroy (which
+# flight unmarked and the one-entry unlist, with Stop, Resume, Complete and
+# the forced destroy (which
 # ends the held spawn's ladder whether its membership committed or not), and
 # the declared apply's open fact; one bound host and the placed spawn ladder,
 # its remote commit, its retirement and the placed end; and an explicit
@@ -852,8 +1015,8 @@ fi
 # exactly one arm answering every declaration, seal, mark replay and apply
 # opening, and the declared apply's action properties
 # (identity_entry_apply_audit.tla names them); they require every listed
-# arm to fire, a floor of distinct states and their fifty-eight witnesses
-# reached, and --mutants refuses sixty seeded defects: one per declared
+# arm to fire, a floor of distinct states and their fifty-nine witnesses
+# reached, and --mutants refuses sixty-one seeded defects: one per declared
 # apply invariant and property, one per guard of the declared apply that a
 # reachable state needs, two forced destroys, one that keeps a spawn ladder
 # whose membership committed and one that keeps the startup binding request
@@ -868,6 +1031,14 @@ if run_part audits-l; then
   echo "running bounded identity entry TLC audit"
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part entry
 fi
+if run_part audits-w; then
+  echo "running bounded identity entry listed adoption TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part listed
+fi
+if run_part audits-x; then
+  echo "running bounded identity entry unlisted adoption TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part unlisted
+fi
 if run_part audits-k; then
   echo "running bounded identity entry declared apply TLC audit"
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part apply
@@ -875,6 +1046,10 @@ fi
 if run_part audits-m; then
   echo "running bounded identity entry declared apply legacy TLC audit"
   TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part legacy
+fi
+if run_part audits-y; then
+  echo "running bounded identity entry declared apply legacy end TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${identity_entry_audit}" --mutants --part legacy-end
 fi
 if run_part audits-n; then
   echo "running bounded identity entry declared apply roles TLC audit"
@@ -959,7 +1134,7 @@ fi
 # either. A hand-written audit over the same generated model
 # (created_identity_audit.tla, shards audits-q, audits-r and audits-t
 # through audits-v) checks
-# fourteen runs over their whole reachable space, in two parts. Its
+# seventeen runs over their whole reachable space, in two parts. Its
 # recovery part's scan run
 # replays a seated member with or without its Declared entry's row (before
 # or after the scan of its rows: no replay turns a Created entry Declared;
@@ -1017,9 +1192,20 @@ fi
 # archived session record holds) and the replay of a removal or an archive
 # in flight carried to its terminal, its one row scanned before or after
 # the journal replay (no replay seats a member under an archived entry, and
-# the boot plan's seal keeps an archived identity's standing). They
-# require every listed arm
-# to fire, a floor of distinct states (the changes part's printed until its
+# the boot plan's seal keeps an archived identity's standing), and (0.9.11)
+# the owned edges an identity change declares (exactly one arm answering
+# each declaration, end, plain unwire's admission and recovery, an owned
+# edge ending only by its owner's end or an end's removal, keeping its
+# owner while owned, and no end naming another identity ending it) and an
+# adoption into store custody (exactly one arm answering each, keeping
+# its member's incarnation, and taking a settled member only) and the
+# downgrade cycle (exactly one arm answering each purge, each start's
+# pass of a name without a row, each import and the admission after a
+# purge; a purge changing nothing of the machine but its own fact; an
+# import restoring a record only over no row of its name and binding a
+# member in place on its incarnation; a Created entry whose row was
+# purged reserved). They require every listed arm to fire, a floor of
+# distinct states (the changes part's printed until its
 # first green run sets them) and their witnesses reached, and --mutants
 # refuses the seeded defects named in the runner: the created entries'
 # invariants and properties and the new guards a reachable state needs (a
@@ -1031,7 +1217,13 @@ fi
 # tombstoned name seated, a Declared row's replay over a Created entry, a
 # record over an entry's name, a new entry's cause out of precedence, an
 # unlist of a Created entry, a created custody kept local, which leaves the
-# placed witness unreachable).
+# placed witness unreachable, an owned edge ended by another identity, by a
+# third identity's removal or not by its end's removal, a second
+# declaration taking custody, a plain unwire of an owned edge admitted, an
+# adoption that rotates its member, runs beside an open declared apply or
+# takes an entry its unlisting retires, a purge that drops the archived
+# session records, a start's pass that leaves a purged row's name
+# readable).
 created_identity_audit="${workspace_root}/specs/machines/mob_machine/created_identity_audit.sh"
 if [[ ! -x "${created_identity_audit}" ]]; then
   echo "error: created identity audit runner is missing from workspace runfiles: ${created_identity_audit}" >&2
@@ -1039,9 +1231,10 @@ if [[ ! -x "${created_identity_audit}" ]]; then
 fi
 # Its runs are split over five shards (sized below): the recovery part's
 # scan and placed runs in audits-q and its reseat and names runs in
-# audits-v; the changes part's admit, commit and update runs in audits-r,
-# its archive, unlist, placement and recovered runs in audits-t, and its
-# removal, preparation and prepverdicts runs in audits-u.
+# audits-v; the changes part's admit, commit, update and adoption runs in
+# audits-r, its archive, unlist, placement, recovered and edges runs in
+# audits-t, and its removal, preparation, prepverdicts and cycle runs in
+# audits-u.
 if run_part audits-q; then
   echo "running bounded created identity scans TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part scan,placed
@@ -1051,20 +1244,24 @@ if run_part audits-v; then
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part reseat,names
 fi
 if run_part audits-r; then
-  echo "running bounded created identity admissions and records TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update
+  echo "running bounded created identity admissions, records and adoptions TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part admit,commit,update,adoption
 fi
 if run_part audits-u; then
   echo "running bounded created identity removals TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part removal
 fi
 if run_part audits-t; then
-  echo "running bounded created identity archives and unlists TLC audit"
-  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part archive,unlist,placement,recovered
+  echo "running bounded created identity archives, unlists and owned edges TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part archive,unlist,placement,recovered,edges
 fi
 if run_part audits-u; then
   echo "running bounded created identity preparations TLC audit"
   TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part preparation,prepverdicts
+fi
+if run_part audits-u; then
+  echo "running bounded created identity downgrade cycle TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${created_identity_audit}" --mutants --part cycle
 fi
 
 # The SessionDocumentMachine activation-body retirement region: a hand-written
@@ -1186,20 +1383,23 @@ fi
 
 # The durable decision record (DurableDecisionMachine: one decision's sealed
 # binding, its attested decision, the execution permit and the executed
-# fact, expiry, withdrawal and the requester notice an ended decision owes)
-# is model-checked by a hand-written audit over the generated model: every
-# input in every phase, through one wrapper per arm, under every generated
-# invariant plus twelve step properties (terminals latch; approvals and
-# rejections attested; execution only from Approved with the held binding;
-# expiry only at the deadline and, for an approved decision, only without
-# an outstanding permit or by its release; withdrawal only while open by the
-# requester or the host; the sealed binding never changes; the notice owed
-# once at the end; no permit at or after the deadline; a release clears the
-# permit; a human decision decided only when observed at or after its first
-# presentation, and refused for the order only before it) and two state
-# invariants (an owner's commit stays settleable; the first presentation
-# time is the earliest). It requires every wrapper to fire, fifteen
-# witnesses reached and refuses twenty-four seeded defects (--mutants). 6
+# fact, expiry, withdrawal, the requester notice an ended decision owes, and
+# an executed decision's cleanup and its one reply) is model-checked by a
+# hand-written audit over the generated model: every input in every phase,
+# through one wrapper per arm, under every generated invariant plus sixteen
+# step properties (terminals latch; approvals and rejections attested;
+# execution only from Approved with the held binding; expiry only at the
+# deadline and, for an approved decision, only without an outstanding permit
+# or by its release; withdrawal only while open by the requester or the
+# host; the sealed binding never changes; the notice owed once at the end;
+# no permit at or after the deadline; a release clears the permit; a human
+# decision decided only when observed at or after its first presentation,
+# and refused for the order only before it; a permit only for an approver
+# still current; a cleanup opened only under a permit and settled only after
+# the end; one reply settled) and two state invariants (an owner's commit
+# stays settleable; the first presentation time is the earliest). It
+# requires every wrapper to fire, twenty witnesses reached and refuses
+# thirty-three seeded defects (--mutants; a thirty-fourth from 7 steps). 6
 # steps reach every witness. It runs alone in shard audits-j.
 durable_decision_audit="${workspace_root}/specs/machines/durable_decision/durable_decision_audit.sh"
 if [[ ! -x "${durable_decision_audit}" ]]; then
@@ -1209,6 +1409,33 @@ fi
 if run_part audits-j; then
   echo "running bounded durable decision TLC audit"
   TLC_WORKERS="${tlc_workers}" "${durable_decision_audit}" "${DURABLE_DECISION_AUDIT_MAX_STEPS:-6}" --mutants
+fi
+
+# Approval-carried child grants (GrantAuthorityMachine: a grant under a child
+# rule has children only through a person's decision for the rule's approver
+# id, and such a child serves its own requester, work and operation, at most
+# its uses) are model-checked by a hand-written audit over the generated
+# model: a parent without a rule or under one of two rules, children with
+# the valid approval or one defect, uses with the valid facts or one defect
+# at a clock in 0..3, revocations, an uncertain journal write, one restart
+# from the journal and two concurrent attempts, under every generated
+# invariant plus eight step properties (a use names its leaf's exact
+# operation, requester and work; a child under a rule meets it, with an
+# assurance it accepts; an approval child only under a rule, with the
+# approved request's terms, depth 0, a window and a use; nothing spent for
+# an approver no longer current; a spend advances the revision) and three
+# state invariants (no use beyond the uses; one grant per decision; every
+# entered use spent in the journal). It requires every wrapper to fire,
+# fourteen witnesses reached and refuses thirteen seeded defects
+# (--mutants). 6 steps reach every witness.
+approval_grant_audit="${workspace_root}/specs/machines/grant_authority/approval_grant_audit.sh"
+if [[ ! -x "${approval_grant_audit}" ]]; then
+  echo "error: approval grant audit runner is missing from workspace runfiles: ${approval_grant_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded approval grant TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${approval_grant_audit}" "${APPROVAL_GRANT_AUDIT_MAX_STEPS:-6}" --mutants
 fi
 
 # Broad composition full-TLC skips are CI-time/memory-budget exceptions, NOT
@@ -1297,31 +1524,70 @@ run_machine_verify() {
 # audits-k, audits-m, audits-n and audits-o = the identity entry audit's
 # declared apply parts with --mutants, each alone: apply 384-460 (the shard
 # 396-484 s), legacy 596-726 (605-751 s), roles 563-740 (604-745 s, and
-# 776 s on a pull request's runner) and hosted 353-623 (366-640 s);
+# 776 s on a pull request's runner) and hosted 353-623 (366-640 s). The
+# legacy part then took 1171 s (the shard 1182 s) on a pull request's run
+# 42057238243: its whole space 260, 13 witnesses 401 and 16 mutants 510.
+# The 4 witnesses and 5 mutants of its unlisted end, 562 s of it, moved to
+# audits-y, so about 620 s for audits-m (256 s locally with 4 TLC
+# workers), from those runs' times there;
+# audits-y = the legacy run's unlisted end (--part legacy-end), alone:
+# about 575 s from those runs' times there (227 s locally; this run
+# class's hosted factor was 1.7-2.7x on that runner);
 # audits-l = the identity entry audit's entry part with --mutants (--part
-# entry), alone: the audit 404-715, the shard 588-741 s;
+# entry), alone: the audit 404-715, the shard 588-741 s while the part also
+# held the single entry run (101 s of main's 0.9.10 release run
+# 41976604006); now the lifecycle run with its witnesses and mutants and
+# the two entry runs' 11 witnesses and 6 mutants: 685 s on a pull
+# request's run 42096156511 and 418 s on run 42271560144 before the
+# identity entry takeover, which grew the lifecycle run from 12024 to
+# 17964 states (54 s to 109 s of TLC locally) and added 4 witnesses and 2
+# mutants to it: about 911 s on the first of those runners and 556 s on
+# the second, past the 720 s target below (to be rebalanced);
+# audits-w = the identity entry audit's listed run (--part listed), alone:
+# 726 s on run 42096156511 (2.61x its 278 s local TLC time, this run
+# class's hosted factor there) and 525 s on run 42271560144 before the
+# takeover: about 816 s and 590 s with it, past the 720 s target (to be
+# rebalanced), and its one run about 10 percent under the 900 s per-run
+# cap on the first runner;
+# audits-x = its unlisted run (--part unlisted), alone: 652 s and 497 s on
+# those runs before the takeover, about 702 s and 535 s with it. The
+# single entry run they split took 544 s locally and reached the 900 s
+# per-run cap on a pull request's run 42057238243 (1.29x on main);
 # audits-q = the created identity audit's scan and placed runs 170-272 (the
 # shard 183-277 s) and the run-start hold audit, from audits-c: about
 # 471-568 s;
 # audits-r = its admit, commit and update runs 135-231 (the shard
 # 146-249 s) and the generation high-water audit, from audits-f: about
-# 248-375 s;
+# 248-375 s (200 s locally with 4 TLC workers), plus the retained-run settle
+# audit with --mutants (0.9.11, not yet measured on a hosted runner), its
+# adoption run (0.9.11; 114 s locally with 4 TLC workers, about 130-190 s at
+# the 1.13-1.66x its archive, unlist, placement and recovered runs took
+# hosted over their 202 s there) and the scoped tool grant gate audit with
+# --mutants (0.9.11; its runs 144 s locally, not yet measured on a hosted
+# runner, about 180-270 s at that shard's 1.24-1.88x): about 560-835 s
+# without the settle audit, past the 720 s target below (to be rebalanced);
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s;
 # audits-t = its archive, unlist, placement and recovered runs: 228-335,
-# the shard 320-364 s;
+# the shard 320-364 s, and the switch-turn withdrawal audit with --mutants
+# (eleven runs, not yet measured hosted; the empty-resume residency audit's
+# seven runs take 52-64 s): about 400-460 s, and its owned edges run
+# (0.9.11; 115 s locally with 4 TLC workers, about 130-190 s at that
+# factor): about 530-650 s;
 # audits-u = its preparation and prepverdicts runs 161-237 and the tool
 # grant expiry audit with --mutants 13-16 (the shard 228-264 s), and the
-# removal run, from audits-s: about 454-497 s;
+# removal run, from audits-s: about 454-497 s, and its downgrade cycle run
+# (0.9.11; 97 s locally with 4 TLC workers, about 110-160 s at that
+# factor): about 565-660 s;
 # audits-v = its reseat and names runs: 500-665, the shard 525-690 s.
 # The "about" figures are those runs' job times with the moved audit's own
 # time added or taken away, not yet measured as one job. Hosted time ran
 # about 1.2-3.8x the local times with 4 TLC workers recorded for these
 # audits, so size a new audit by a hosted run. The job times out at 20
 # minutes; each shard is sized to stay within about 720 s hosted, 60
-# percent of that. audits-l, audits-m and audits-n, one audit part each,
-# reach 741-776 s and get shorter only when their parts split. A new audit
+# percent of that. audits-n, one audit part, reaches 745-776 s and gets
+# shorter only when its part splits. A new audit
 # joins the lightest shard, or a new shard when it would take that shard
 # past about 720 s hosted. Shard of the two audits the
 # `all` lane runs concurrently with machine-verify below:

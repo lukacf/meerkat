@@ -1957,6 +1957,10 @@ mod tests {
             ) -> Result<(), OperationAuthorizationError> {
                 Ok(())
             }
+
+            fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+                Ok(())
+            }
         }
         struct AllowAll;
         impl meerkat_core::authorization::WorkAuthorization for AllowAll {

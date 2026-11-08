@@ -26,12 +26,22 @@ use crate::publication::{
     LocalAuthorizationPublication, LocalPublicationGuard, LocalPublicationStamp, PublicationError,
 };
 
+mod approval;
 pub(crate) mod dsl;
 mod durable;
 mod reconstruction;
+pub use approval::{
+    ApprovalChildRefusal, ApprovalUseAnswer, ApprovalUseCurrentness, ConsumeUseRefusal,
+    GrantChildTerms, GrantUse, MCP_OPERATION_FEATURE, RetainedGrant, grant_child_terms_digest,
+    mcp_operation_binding,
+};
+pub use dsl::{
+    ChildApprovalRule, GrantApproval, GrantDecisionAssurance, GrantDecisionTier, GrantDeviceTrust,
+    GrantOperationBinding, GrantPrincipal,
+};
 use dsl::{
     GrantAuthorityEffect, GrantAuthorityInput, GrantAuthorityMachineAuthority,
-    GrantAuthorityMachineMutator, GrantPrincipal, GrantRecord,
+    GrantAuthorityMachineMutator, GrantRecord,
 };
 #[cfg(test)]
 pub(crate) use durable::with_last_issued_restrictions;
@@ -217,6 +227,10 @@ pub struct LocalGrantAuthority {
     publication: LocalAuthorizationPublication,
     clock: Arc<dyn LocalAuthorizationClock>,
     durable: Option<durable::DurableCustody>,
+    /// The host's currentness owner for the deciders of approval-carried
+    /// grants, asked at each use's spend at entry. Without one, such a
+    /// spend is unavailable.
+    approval_currentness: Option<Arc<dyn ApprovalUseCurrentness>>,
 }
 
 impl std::fmt::Debug for LocalGrantAuthority {
@@ -480,6 +494,7 @@ impl LocalGrantAuthority {
             publication,
             clock,
             durable: None,
+            approval_currentness: None,
         })
     }
 
@@ -499,6 +514,31 @@ impl LocalGrantAuthority {
         grantee: PrincipalRef,
         represented_subject: Option<PrincipalRef>,
         restrictions: ExecutionRestrictions,
+    ) -> Result<GrantLineageRef, GrantRefusal> {
+        self.issue_root_carrying(
+            guard,
+            caller,
+            id,
+            grantee,
+            represented_subject,
+            restrictions,
+            None,
+        )
+    }
+
+    /// [`issue_root`](Self::issue_root) with an optional child rule: every
+    /// child of the root then carries a person's decision for its approver id.
+    /// Its append takes `guard` as [`issue_root`](Self::issue_root)'s does.
+    #[allow(clippy::too_many_arguments)]
+    fn issue_root_carrying(
+        &self,
+        guard: &AdmissionGuard,
+        caller: &PrincipalRef,
+        id: EvidenceId,
+        grantee: PrincipalRef,
+        represented_subject: Option<PrincipalRef>,
+        restrictions: ExecutionRestrictions,
+        child_approval: Option<ChildApprovalRule>,
     ) -> Result<GrantLineageRef, GrantRefusal> {
         let actor = principal(caller.clone())?;
         let grantee = principal(grantee)?;
@@ -526,6 +566,8 @@ impl LocalGrantAuthority {
                 .checked_add(1)
                 .ok_or(GrantRefusal::Unavailable)?,
             restrictions,
+            child_approval,
+            approval: None,
         };
         self.apply_change(
             &mut owner,
@@ -555,6 +597,28 @@ impl LocalGrantAuthority {
         id: EvidenceId,
         grantee: PrincipalRef,
         requested: ExecutionRestrictions,
+    ) -> Result<GrantLineageRef, GrantRefusal> {
+        self.issue_child_carrying(guard, caller, parent, id, grantee, requested, None, None)
+    }
+
+    /// [`issue_child`](Self::issue_child) with an optional child rule of its
+    /// own and an optional approval the child carries. The generated owner
+    /// decides both: a child of a grant under a rule must carry a decision
+    /// that meets it, and an approval-carried child needs such a parent,
+    /// terms equal to the approved request's, depth 0, a window, at least
+    /// one use and a decision no other grant carries. Its append takes
+    /// `guard` as [`issue_child`](Self::issue_child)'s does.
+    #[allow(clippy::too_many_arguments)]
+    fn issue_child_carrying(
+        &self,
+        guard: &AdmissionGuard,
+        caller: &PrincipalRef,
+        parent: &GrantLineageRef,
+        id: EvidenceId,
+        grantee: PrincipalRef,
+        requested: ExecutionRestrictions,
+        child_approval: Option<ChildApprovalRule>,
+        approval: Option<GrantApproval>,
     ) -> Result<GrantLineageRef, GrantRefusal> {
         let actor = principal(caller.clone())?;
         let grantee = principal(grantee)?;
@@ -604,7 +668,10 @@ impl LocalGrantAuthority {
                 .checked_add(1)
                 .ok_or(GrantRefusal::Unavailable)?,
             restrictions: derived.effective().clone(),
+            child_approval,
+            approval,
         };
+        let terms_digest = approval::issued_terms_digest(&record)?;
         let now_ms = self
             .clock
             .now()
@@ -620,6 +687,7 @@ impl LocalGrantAuthority {
                 derived,
                 chain,
                 now_ms,
+                terms_digest,
             },
         )
         .map_err(|refusal| issue_refusal(&owner, refusal, &record.id, may_issue))?;
@@ -814,7 +882,10 @@ impl LocalGrantAuthority {
                 .checked_add(1)
                 .ok_or(ChildGrantRefusal::Unavailable)?,
             restrictions: derived.effective().clone(),
+            child_approval: None,
+            approval: None,
         };
+        let terms_digest = approval::issued_terms_digest(&record).map_err(refused)?;
         // The final time check immediately before the mutation: the
         // reservation freezes owner changes, not time.
         let now_ms = self.require_within(validity)?;
@@ -828,6 +899,7 @@ impl LocalGrantAuthority {
                 derived,
                 chain,
                 now_ms,
+                terms_digest,
             },
         ) {
             let uncertain = self
@@ -901,6 +973,32 @@ impl LocalGrantAuthority {
             .get(id)
             .map(|record| lineage_ref(&owner, record))
             .transpose()
+    }
+
+    /// The references of the grants this owner issued and has not revoked
+    /// whose id `select` selects, in id order. The read is of the owner's
+    /// resident state: the owner holds every grant it issued in memory (a
+    /// durable owner restores all of them from its journal when it starts,
+    /// [`Self::restore`]), so it reads no store and wakes nothing. An
+    /// expired grant is listed until it is revoked.
+    ///
+    /// # Errors
+    /// [`GrantRefusal::Unavailable`] when the owner cannot say now.
+    pub fn unrevoked_grants(
+        &self,
+        select: impl Fn(&EvidenceId) -> bool,
+    ) -> Result<Vec<GrantLineageRef>, GrantRefusal> {
+        let owner = self.owner.lock().map_err(|_| GrantRefusal::Unavailable)?;
+        if let Some(durable) = &self.durable {
+            durable.check_available()?;
+        }
+        let state = owner.state();
+        state
+            .records
+            .values()
+            .filter(|record| select(&record.id) && !state.revoked.contains(&record.id))
+            .map(|record| lineage_ref(&owner, record))
+            .collect()
     }
 
     /// Revocation never deletes or reuses an issued ID. Either the configured
@@ -1134,6 +1232,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             false,
         )
@@ -1153,6 +1252,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             true,
         )
@@ -1224,6 +1324,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             false,
         )
@@ -1246,6 +1347,7 @@ impl LocalGrantAuthority {
             LineageUse::Executor {
                 executor,
                 represented_subject,
+                use_facts: None,
             },
             true,
         )
@@ -1316,14 +1418,21 @@ impl LocalGrantAuthority {
         if let Some(durable) = &self.durable {
             durable.check_available()?;
         }
+        let mut use_facts = approval::UseFacts::none();
         let claimed = match lineage_use {
             LineageUse::Executor {
                 executor,
                 represented_subject,
-            } => Some((
-                principal(executor.clone())?,
-                represented_subject.cloned().map(principal).transpose()?,
-            )),
+                use_facts: facts,
+            } => {
+                if let Some(facts) = facts {
+                    use_facts = approval::UseFacts::of(facts)?;
+                }
+                Some((
+                    principal(executor.clone())?,
+                    represented_subject.cloned().map(principal).transpose()?,
+                ))
+            }
             LineageUse::LeafOwn => None,
         };
         let now_ms = self
@@ -1336,7 +1445,17 @@ impl LocalGrantAuthority {
         let leaf = exact_record(&owner, reference)?.clone();
         // A leaf-own use (liveness or a ceiling) names the retained leaf's
         // own identity, read here, under the same owner lock as the
-        // generated use below.
+        // generated use below: for an approval-carried leaf, its own
+        // requester, work and operation too.
+        if claimed.is_none()
+            && let Some(approval) = &leaf.approval
+        {
+            use_facts = approval::UseFacts {
+                requester: Some(approval.requester.clone()),
+                work: Some(approval.work.clone()),
+                operation: approval.operation.clone(),
+            };
+        }
         let (executor, represented_subject) =
             claimed.unwrap_or_else(|| (leaf.grantee.clone(), leaf.represented_subject.clone()));
         let chain = chain(&owner, &leaf)?;
@@ -1379,6 +1498,9 @@ impl LocalGrantAuthority {
                 incarnation: reference.authority_incarnation,
                 executor,
                 represented_subject,
+                requester: use_facts.requester,
+                work: use_facts.work,
+                operation: use_facts.operation,
                 leaf,
                 chain,
                 now_ms,
@@ -1404,6 +1526,9 @@ enum LineageUse<'a> {
     Executor {
         executor: &'a PrincipalRef,
         represented_subject: Option<&'a PrincipalRef>,
+        /// The use's requester, work and operation, for a leaf that carries
+        /// an approval; a use without them never resolves one.
+        use_facts: Option<GrantUse<'a>>,
     },
     /// The retained leaf's own grantee and represented subject, read under
     /// the same owner lock as the use: a liveness check or a ceiling, never
@@ -1521,6 +1646,8 @@ pub(crate) mod test_boundary {
     }
 }
 
+#[cfg(test)]
+mod approval_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]

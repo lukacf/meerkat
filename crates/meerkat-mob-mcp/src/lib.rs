@@ -7789,6 +7789,12 @@ impl MobMcpState {
     /// first `message_count` messages (its committed end when `None`). The
     /// new member takes the source member's profile and runtime mode unless
     /// `profile` or `runtime_mode` names others.
+    ///
+    /// An `identity` the roster already holds is refused with
+    /// [`MobError::MemberAlreadyExists`] before anything is forked. A member
+    /// seated under it between that read and the fork's own seat gets the
+    /// engine's answer, [`MobError::ForkMemberProvisionFailed`], whose
+    /// committed fork session stays recoverable.
     pub async fn mob_fork_member(
         &self,
         mob_id: &MobId,
@@ -7803,6 +7809,9 @@ impl MobMcpState {
             .get_member(source_identity)
             .await?
             .ok_or_else(|| MobError::MemberNotFound(source_identity.clone()))?;
+        if handle.get_member(&identity).await?.is_some() {
+            return Err(MobError::MemberAlreadyExists(identity));
+        }
         let spec = SpawnMemberSpec::new(profile.unwrap_or(source.role), identity)
             .with_runtime_mode(runtime_mode.unwrap_or(source.runtime_mode));
         handle

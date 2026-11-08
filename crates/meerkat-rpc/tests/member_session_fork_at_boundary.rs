@@ -666,6 +666,80 @@ async fn mob_fork_member_forks_a_member_into_a_new_member_at_a_boundary() {
     assert!(held.error.is_none(), "{:?}", held.error);
 }
 
+/// A fork onto an identity that is already a member (the child of an earlier
+/// fork, as a retried call sends it) is refused before the fork commits, as a
+/// fork onto the source identity is: the answer is the already-a-member
+/// refusal (invalid params), not a provisioning failure with a committed fork
+/// session and a recovery hint; no session is committed, and the seated child
+/// keeps its session.
+#[tokio::test]
+async fn mob_fork_member_onto_a_seated_identity_commits_nothing() {
+    const CHILD: &str = "main-branch";
+    let rig = rig();
+    rig.seat_main(None).await;
+    for prompt in PROMPTS {
+        rig.member_turn(MAIN, prompt).await;
+    }
+    let params = json!({
+        "mob_id": MOB_ID,
+        "source_member_id": MAIN,
+        "agent_identity": CHILD,
+        "message_index": BOUNDARY
+    });
+    let first = rig.call("mob/fork_member", params.clone()).await;
+    assert!(
+        first.error.is_none(),
+        "setup: the first fork seats the child: {:?}",
+        first.error
+    );
+    let child_session = rig.member_session(CHILD).await;
+    let sessions_before = rig.ok("session/list", json!({})).await["sessions"]
+        .as_array()
+        .map_or(0, Vec::len);
+
+    let again = rig.call("mob/fork_member", params).await;
+    let error = again
+        .error
+        .expect("a fork onto a seated identity is refused");
+    let sessions_after = rig.ok("session/list", json!({})).await["sessions"]
+        .as_array()
+        .map_or(0, Vec::len);
+    assert_eq!(
+        sessions_after, sessions_before,
+        "a refused fork onto a seated identity commits no session: {}",
+        error.message
+    );
+    let data = error.data.clone().unwrap_or(Value::Null);
+    assert!(
+        data.get("fork_session_id").is_none() && data.get("recovery").is_none(),
+        "a refused fork onto a seated identity names no fork session and no recovery: {} {data}",
+        error.message
+    );
+    assert_ne!(
+        data["kind"], "fork_member_provision_failed",
+        "the refusal names the taken identity, not a failed seat: {} {data}",
+        error.message
+    );
+    assert_eq!(
+        error.code,
+        meerkat_rpc::error::INVALID_PARAMS,
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains(&format!("mob member already exists: {CHILD}")),
+        "the refusal is the already-a-member refusal: {}",
+        error.message
+    );
+    assert_eq!(rig.member_session(CHILD).await, child_session);
+    assert_eq!(
+        rig.roster().await,
+        vec![MAIN.to_string(), CHILD.to_string()]
+    );
+}
+
 /// The identity `main` cannot be re-seated on another member's session. The
 /// in-process fork child and `main` are retired, and `mob/spawn` of `main`
 /// with `launch_mode = resume` on the child's session is refused: the session

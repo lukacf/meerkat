@@ -477,42 +477,46 @@ them.
   computes the operation's digest from its exact arguments, and holds a
   `grant.child` decision for the offering grant's rule's approver id, in
   the human stage only (a `grant.child` hold that names a reviewer is
-  refused `review_stage_not_allowed`). Its held request (`grant.child.v1`,
-  `GrantChildRequest`) carries the exact terms the grant is issued with,
-  whose digest is the decision's request digest, and its rendering
-  (`grant.render-v1`) every term the approver approves; it is read only as
-  Core held it (`GrantChildRequestError`): the operation's digest is the
-  digest of the arguments the rendering shows, the reply goes to the terms'
-  requester, and the terms name the decision's approved work. An offer is
-  refused at hold, typed (`AccessOfferRefusal`, its kind and reason), when
-  nothing approved could run: `no_child_approval_rule` (with its reason:
-  `no_parent_grant`, `parent_not_current` or `parent_cannot_delegate`),
-  `reply_route_unavailable`, `approval_branch_unavailable` (with its reason:
-  `not_branchable`, `controller_cannot_admit_child`, or `subject_mismatch`
-  when the offering grant acts for another principal than the asking
-  agent's controller grant, so an approved work has one represented
-  subject), `uses_over_policy` and `window_over_policy` (`ApprovalGrantPolicy`:
-  one use and a 15-minute window by default), `window_over_parent` (the
-  offering grant's window ends first) and `outside_parent_bounds` (with its
-  reason: `processor_excluded` or `audience_excluded`, when the offering
-  grant's bounds exclude the approval branch or the requester). The
-  executor (`GrantDecisionExecutor`, from `ApprovalGrants::executor`, for the
-  `DecisionExecutorLoop` of the runtime that holds the grant owner's
-  single-writer custody) executes an approved offer only for a person's
-  decision whose offering grant still resolves and whose effective terms
-  are still the presented ones. Before it opens anything it opens the
-  decision's cleanup (see the next entry); it then opens a one-time
-  approval branch of the asking agent (a member forked from it at an empty
-  prefix, labelled `decision.approval_branch` with the decision id), issues
-  the branch a controller grant, a child of the asking agent's own (depth 0,
-  processed by the branch only, its id derived from the decision and
-  recovered on retry), and the approval-carried grant, and records the
-  decision executed. An execution refused for good ends the decision
-  refused with its token: `malformed_request`, `not_a_human_decision`,
-  `parent_refused`, `terms_changed`, `terms_unbounded`,
-  `approval_branch_unavailable`, `assurance_below_rule`,
-  `no_child_approval_rule` or `decision_carried`. Its notice admits the
-  approved work into the branch the execution opened
+  refused `review_stage_not_allowed`), until the host's decision window
+  passes or, when the offering grant's window ends sooner, until that
+  window's end less the requested window: an approval after it could only
+  end `terms_changed`, so the decision expires instead. Its held request
+  (`grant.child.v1`, `GrantChildRequest`) carries the exact terms the
+  grant is issued with, whose digest is the decision's request digest, and
+  its rendering (`grant.render-v1`) every term the approver approves; it is
+  read only as Core held it (`GrantChildRequestError`): the operation's
+  digest is the digest of the arguments the rendering shows, the reply goes
+  to the terms' requester, and the terms name the decision's approved
+  work. An offer is refused at hold, typed (`AccessOfferRefusal`, its kind
+  and reason), when nothing approved could run: `no_child_approval_rule`
+  (with its reason: `no_parent_grant`, `parent_not_current` or
+  `parent_cannot_delegate`), `reply_route_unavailable`,
+  `approval_branch_unavailable` (with its reason: `not_branchable`,
+  `controller_cannot_admit_child`, or `subject_mismatch` when the offering
+  grant acts for another principal than the asking agent's controller
+  grant, so an approved work has one represented subject),
+  `uses_over_policy` and `window_over_policy` (`ApprovalGrantPolicy`: one
+  use and a 15-minute window by default), `window_over_parent` (the
+  offering grant's window ends first, or leaves no time to decide) and
+  `outside_parent_bounds` (with its reason: `processor_excluded` or
+  `audience_excluded`, when the offering grant's bounds exclude the
+  approval branch or the requester). The executor (`GrantDecisionExecutor`,
+  from `ApprovalGrants::executor`, for the `DecisionExecutorLoop` of the
+  runtime that holds the grant owner's single-writer custody) executes an
+  approved offer only for a person's decision whose offering grant still
+  resolves and whose effective terms are still the presented ones. Before
+  it opens anything it opens the decision's cleanup (see the next entry);
+  it then opens a one-time approval branch of the asking agent (a member
+  forked from it at an empty prefix, labelled `decision.approval_branch`
+  with the decision id), issues the branch a controller grant, a child of
+  the asking agent's own (depth 0, processed by the branch only, its id
+  derived from the decision and recovered on retry), and the
+  approval-carried grant, and records the decision executed. An execution
+  refused for good ends the decision refused with its token:
+  `malformed_request`, `not_a_human_decision`, `parent_refused`,
+  `terms_changed`, `terms_unbounded`, `approval_branch_unavailable`,
+  `assurance_below_rule`, `no_child_approval_rule` or `decision_carried`.
+  Its notice admits the approved work into the branch the execution opened
   (`ApprovalCarriedIngress`): the request's requester, the decision ingress
   as its ingress actor, the grant's represented subject, the branch as its
   executor, one target lineage (the bound operation's, ending at the
@@ -520,34 +524,45 @@ them.
   originals before its admission, in the origin's realm and ingress domain.
   Only then is the origin told that access was approved, with no content;
   an admission that fails for good tells it the request was refused. A
-  redelivered notice admits nothing new, and once the branch ended it
-  settles and forks nothing. The approved work runs the approved operation
-  once and replies once (`reply_to_requester`: Core's rule of the approved
-  work, never a grant). The decision settles the reply by the digest of its
-  text before the host's route delivers it: the same text again is handed
-  to the route, which answers the first delivery, and another text is
-  refused `reply_already_delivered`, whatever the route does. When the
-  approved work ends or the grant's window does, whichever is first, the
-  branch is retired, its controller grant revoked and the decision's
-  cleanup settled; what a stop, a busy custody or an unavailable read left
-  is swept by Core's pass (`DecisionExecutor::sweep`), from the grant
-  owner's unrevoked branch controller grants and the host's open branches,
-  and `ApprovalGrants::sweep_branches` runs that sweep at once. A declined,
-  expired, withdrawn or refused offer tells its origin how it ended, with
-  no content, once its branch is retired. A `decisions` tool refused for
-  good answers `execution_failed` with typed data, at its plan as at its
-  effect: `not_governed_work` (outside governed work of one original),
-  `not_an_approved_work`, `reply_already_delivered`, or an offer's refusal
-  kind and reason; a grant owner that cannot answer now answers the
-  retryable `tool_unavailable` (`temporarily_unavailable`). Hosts compose it
+  redelivered notice admits nothing new. Once the branch ended it forks
+  nothing and tells the origin how its request ended, from the decision's
+  reply fact (approved when the work settled a reply, refused when it
+  settled none), and settles with the origin's receipt; while the origin
+  cannot be told, the notice stays owed. The approved work runs the
+  approved operation once and replies once (`reply_to_requester`: Core's
+  rule of the approved work, never a grant). The decision settles the
+  reply by the digest of its text before the host's route delivers it: the
+  same text again is handed to the route, which answers the first
+  delivery, and another text is refused `reply_already_settled`, whatever
+  the route does. A delivery the route cannot make now answers
+  `reply_route_unavailable` with `retry: same_text`: the settled text is
+  the one to send again. When the approved work ends or the grant's window
+  does, whichever is first, the branch is retired, its controller grant
+  revoked and the decision's cleanup settled; what a stop, a busy custody
+  or an unavailable read left is swept by Core's pass
+  (`DecisionExecutor::sweep`), from the grant owner's unrevoked branch
+  controller grants and the host's open branches, and
+  `ApprovalGrants::sweep_branches` runs that sweep at once; a branch its
+  host will not retire has its controller grant revoked all the same, and
+  its settled cleanup is reported once. A declined, expired, withdrawn
+  or refused offer tells its origin how it ended, with no content, once
+  its branch is retired. A `decisions` tool refused for good answers
+  `execution_failed` with typed data, at its plan as at its effect:
+  `not_governed_work` (outside governed work of one original),
+  `not_an_approved_work`, `reply_already_settled`, `reply_route_unavailable`
+  (with `retry: same_text`), or an offer's refusal kind and reason; a
+  grant owner that cannot answer now answers the retryable
+  `tool_unavailable` (`temporarily_unavailable`). Hosts compose it
   (`ApprovalGrants`, `ApprovalGrantsConfiguration`) from their decision
-  owner, their grant owner, their approval branches (`ApprovalBranchHost`),
-  their requester reply route (`RequesterReplyRoute`, with `can_deliver`)
-  and the native custody that revokes a retired branch's controller grant
-  (`ApprovalControllerCustody`, implemented by `MeerkatMachine`), give their
-  agents the `decisions` tools (`ApprovalGrants::tools`,
-  `DecisionsToolDispatcher`), and compose their grant owner with
-  `DecisionApprovalUseCurrentness`.
+  owner, their grant owner, their approval branches (`ApprovalBranchHost`,
+  whose list of open branches is whole or not given: a host that cannot
+  list every open branch without waking a member or a mob answers
+  unavailable), their requester reply route (`RequesterReplyRoute`, with
+  `can_deliver`) and the native custody that revokes a retired branch's
+  controller grant (`ApprovalControllerCustody`, implemented by
+  `MeerkatMachine`), give their agents the `decisions` tools
+  (`ApprovalGrants::tools`, `DecisionsToolDispatcher`), and compose their
+  grant owner with `DecisionApprovalUseCurrentness`.
 
 - `meerkat-core`, `meerkat-runtime`: two facts of an executed durable
   decision, owned by the `DurableDecisionMachine` (see Breaking) and
@@ -610,7 +625,9 @@ them.
   rotation and policy spawn that takes them, and every wire, unwire or
   respawn of an open branch, is refused `MobError::ApprovalBranchReserved`
   (`approval_branch_reserved`) by the mob itself, so every surface answers
-  it. `MobHandle::retire_approval_branch` retires a branch and
+  it. No role-addressed dispatch (a flow step, its target provisioning, a
+  supervisor escalation) selects an open branch.
+  `MobHandle::retire_approval_branch` retires a branch and
   `MobHandle::approval_branches` lists the open ones, by their recorded
   source.
 
@@ -757,10 +774,20 @@ them.
   (`DecisionMachineState`, `deny_unknown_fields`, in
   `crates/meerkat-core/src/approval/decision/record.rs`), and its decision
   store reads a row it cannot decode as `DecisionRow::Unreadable` (`decode`,
-  in `crates/meerkat-store/src/approval_decision_store.rs`). Every other
-  decision's row is unchanged, byte for byte, and both releases read it.
-  Before a rollback, let the approval branches end and their cleanups
-  settle.
+  in `crates/meerkat-store/src/approval_decision_store.rs`). Such a row
+  stays unreadable there for good: a settled cleanup and a settled reply
+  are stored too, so settling them does not make the row readable to
+  0.9.10. Every other decision's row is unchanged, byte for byte, and both
+  releases read it.
+
+- 0.9.10 knows nothing of approval branches: it reads an open branch as an
+  ordinary member (it ignores the member's recorded creation source), so
+  nothing keeps wiring, flows or messages off it there, and nothing
+  retires it. Before a rollback, let the approval branches end and their
+  cleanups settle, so that no approval branch is open at the rollback.
+  The archived session of a retired branch, which holds its approved
+  work and its answer, stays as readable on 0.9.10 as any archived
+  session.
 
 ### Known limitations
 

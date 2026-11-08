@@ -264,9 +264,15 @@ them.
   the process a confined launch's `NativeChild` owns (its `id()`, the
   launch's process group leader, the PID custody records) is the launch's
   init, pid 1 of the launch's own pid namespace, no longer the command: the
-  command runs as pid 2 there, and its `$$` and `getpid()` are 2. Every
-  process the command leaves running ends when the command ends, where it
-  ran on until its caller ended the process group. See Changed.
+  command runs as pid 2 there, and its `$$` and `getpid()` are 2. A signal
+  other than SIGKILL or SIGSTOP sent to `NativeChild::id()` alone reaches
+  only the init, which ignores it; the process group still reaches the
+  command. Every process the command leaves running ends when the command
+  ends, where it ran on until its caller ended the process group. A host
+  without pid or cgroup namespaces in its user namespaces, without network
+  namespaces (for a requirement without IP access), or whose
+  `vm.memfd_noexec` is 2 now refuses (`BackendUnavailable`) the confined
+  launches it ran before. See Changed.
 
 ### Added
 
@@ -714,21 +720,16 @@ them.
   launch also gets a cgroup namespace of its own, so `/proc/self/cgroup`
   shows no host cgroup path. A host that refuses the mount (a masked or
   overmounted `/proc`, a kernel before 5.8) still launches, without
-  `/proc`, as before. The launch's first
-  process runs the setup, starts the command, then executes a small init
-  that the backend carries in a sealed memory file. The init holds none of
-  the host's memory, the command cannot inspect it, it reaps every orphan,
-  and it reports the command's exit status, which `NativeChild` returns
-  (the exit code, or the signal that ended the command); killing the
-  launch's PID ends the whole launch at once. With IP access, Unix stream
-  and seqpacket socket pairs are allowed, so a confined Rust program can
-  start processes (`cargo`, and `rustc`'s linker call, failed with
-  `EPERM`); datagram pairs stay refused. A confined launch is now two
-  processes, and the backend needs pid and cgroup namespaces, network
-  namespaces for a launch without IP access, and memory files it may execute
-  (`vm.memfd_noexec` below 2); a host without them refuses confined
-  launches (`BackendUnavailable`), and its startup report names such a
-  setting where the backend can tell (see Added). See Breaking.
+  `/proc`, as before. The launch's first process runs the setup, starts the
+  command, then executes a small init that the backend carries in a sealed
+  memory file. The init holds none of the host's memory, the command cannot
+  inspect it, it reaps every orphan, and it reports the command's exit
+  status, which `NativeChild` returns (the exit code, or the signal that
+  ended the command); killing the launch's PID ends the whole launch at
+  once. With IP access, Unix stream and seqpacket socket pairs are allowed,
+  so a confined Rust program can start processes (`cargo`, and `rustc`'s
+  linker call, failed with `EPERM`); datagram pairs stay refused. A
+  confined launch is now two processes. See Breaking.
 
 ### Deprecated
 

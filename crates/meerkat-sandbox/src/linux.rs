@@ -2058,9 +2058,10 @@ fn filter(architecture: u32, ip: bool) -> Vec<libc::sock_filter> {
         code.push(jump(equal, syscall as u32, 0, 1));
         code.push(statement(ret, refuse));
     }
-    // The host and target do not share filesystem/IPC views, but retain
-    // kernel PID numbers. Never let a PID-targeted mutator reach another
-    // process. Pid zero means this task and preserves ordinary local setup.
+    // Each launch is a pid namespace of its own, so its processes cannot name
+    // a host process by PID at all; these rules stay as defence in depth:
+    // no PID-targeted mutator reaches another process, even one of the
+    // launch. Pid zero means this task and preserves ordinary local setup.
     for syscall in [
         libc::SYS_prlimit64,
         libc::SYS_sched_setparam,

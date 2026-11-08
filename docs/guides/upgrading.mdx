@@ -195,7 +195,12 @@ names are restored as recorded; and an adopted identity whose roster
 declared it again returns to store custody by the adoption's step. A name
 another holder keeps (a roster or a member seated on it meanwhile, or
 another row) is left as that holder has it, and the import's receipt reports
-it (`name_taken_meanwhile`).
+it (`name_taken_meanwhile`). A re-import under a new operation reports a
+record whose restored row differs from it (the import left out an owned edge
+another identity held, or the identity changed since) as
+`name_taken_meanwhile` too: the identity is store-owned already, its row is
+left as it is, and a retry under the import's own operation replays its
+receipt.
 
 ## Upgrading to 0.9.10
 

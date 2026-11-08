@@ -730,7 +730,9 @@ pub enum NotAdoptableReason {
     /// The member is bound to no session.
     NoSession,
     /// The roster-owned identity is hosted on its first use: retryable
-    /// once its first use seated it.
+    /// once its first use seated it. One placed on a member host is
+    /// seated as a placed member, whose adoption is refused `Placed`,
+    /// which is not retryable.
     HostedOnFirstUse,
     /// The roster-owned identity awaits its held creation: retryable once
     /// its host released the held creation.
@@ -767,7 +769,9 @@ impl NotAdoptableReason {
     /// preparation) is adopted once its host settled it. Only the host's
     /// own action settles it (the first use, the held creation's release,
     /// the preparation), so a caller retries after it and bounds its
-    /// retries.
+    /// retries. An identity placed on a member host is the exception: its
+    /// first use seats a placed member, whose adoption is refused
+    /// `Placed`, which is not retryable.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(
@@ -850,7 +854,9 @@ impl IdentityChangeRefusal {
     /// settle, a member step in flight and an open declared apply end with
     /// their own steps, and an adoption of a roster-owned identity its host
     /// still settles ([`NotAdoptableReason::is_retryable`]) commits once
-    /// the host settled it.
+    /// the host settled it. An identity placed on a member host is the
+    /// exception: its first use seats a placed member, whose adoption is
+    /// refused `not_adoptable` (`placed`), which is not retryable.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {

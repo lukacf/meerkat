@@ -651,7 +651,9 @@ them.
   model override is `ProfileOverride`, and a roster-owned identity its host
   still settles is retryable, `NotAdoptableReason::is_retryable`: after its
   first use, its held creation's release or its host's preparation, the
-  host's own action, so a caller bounds its retries),
+  host's own action, so a caller bounds its retries; one placed on a member
+  host is the exception, since its first use seats a placed member, whose
+  adoption is refused `Placed`, which is not retryable),
   `PredecessorMismatch` (`predecessor_mismatch`), and the retryable
   `AdmissionUnsettled` (`admission_unsettled`) and `DeclaredApplyOpen`
   (`declared_apply_open`). No start, reconcile or declared apply adopts.
@@ -689,8 +691,12 @@ them.
   name another holder keeps (a plain member on another session among them) is
   left as it is and reported (receipt outcome
   `IdentityChangeEntryOutcome::NameTakenMeanwhile`); a record whose row the
-  store holds is `Unchanged`. An export of more records than one change
-  commits is refused `batch_too_large`, with nothing written.
+  store holds is `Unchanged`. A re-import under a new operation reports a
+  record whose restored row differs from it (the import left out an owned
+  edge another identity held, or the identity changed since) as
+  `NameTakenMeanwhile` and leaves the row as it is; a retry under the
+  import's own operation replays its receipt. An export of more records than
+  one change commits is refused `batch_too_large`, with nothing written.
 
 - Credential and configuration administration admissions settle a typed
   record to a recorder the host supplies. A host's `AdministrationEntry`

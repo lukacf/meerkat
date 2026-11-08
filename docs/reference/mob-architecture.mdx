@@ -734,7 +734,10 @@ composition without the built-in identity and member store commits no change
   first use waits for that first use, one awaiting its held creation for
   the held creation's release, and one awaiting its host's preparation for
   that preparation. Only the host's own action settles each, so a caller
-  retries after it and bounds its retries. No start,
+  retries after it and bounds its retries. An identity placed on a member
+  host is the exception: its first use seats a placed member, whose
+  adoption is refused `not_adoptable` (`placed`), which is not retryable.
+  No start,
   reconcile or declared apply adopts; a roster that keeps listing an adopted
   identity gets the quiet `OwnedByStore` note.
 - **The downgrade cycle (0.9.11).** A release before 0.9.9 does not read a

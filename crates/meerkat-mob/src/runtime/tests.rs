@@ -89231,6 +89231,10 @@ struct MobRuntimeParitySnapshotSummary {
     member_instruction_owed: BTreeMap<String, u64>,
     member_instruction_recorded: BTreeMap<String, u64>,
     member_instruction_blocked: BTreeMap<String, String>,
+    // The identity life marker: the mob's resets, and each identity's ends
+    // since the last reset.
+    identity_life_resets: u64,
+    identity_life_ends: BTreeMap<String, u64>,
     // Row #320 / #293 / #314 / #351: machine-owned state folded into MobMachine.
     orphan_budget: u64,
     topology_default_policy: String,
@@ -91024,6 +91028,14 @@ async fn mob_runtime_parity_snapshot_summary(
         .iter()
         .map(|(identity, block)| (format!("{identity:?}"), format!("{block:?}")))
         .collect::<BTreeMap<_, _>>();
+    // The identity life marker, read from the runtime's formal state as the
+    // operator instruction fields are.
+    let identity_life_resets = formal_state.identity_life_resets;
+    let identity_life_ends = formal_state
+        .identity_life_ends
+        .iter()
+        .map(|(identity, ends)| (format!("{identity:?}"), *ends))
+        .collect::<BTreeMap<_, _>>();
 
     Some(MobRuntimeParitySnapshotSummary {
         phase: phase.as_str().to_string(),
@@ -91139,6 +91151,8 @@ async fn mob_runtime_parity_snapshot_summary(
         member_instruction_owed,
         member_instruction_recorded,
         member_instruction_blocked,
+        identity_life_resets,
+        identity_life_ends,
         orphan_budget,
         topology_default_policy,
         external_member_rebind_capability,
@@ -91743,6 +91757,13 @@ fn mob_runtime_parity_field_value(
                 .keys()
                 .map(|key| (key.clone(), 0))
                 .collect(),
+        )),
+        // The identity life marker, from the runtime's formal state.
+        "identity_life_resets" => Some(MobRuntimeParityExprValue::U64(
+            snapshot.identity_life_resets,
+        )),
+        "identity_life_ends" => Some(MobRuntimeParityExprValue::Map(
+            snapshot.identity_life_ends.clone(),
         )),
         "externally_addressable_runtime_ids" => Some(MobRuntimeParityExprValue::Set(
             snapshot.externally_addressable_runtime_ids.clone(),

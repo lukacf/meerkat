@@ -3917,6 +3917,7 @@ mod tests {
                     "retired_cause",
                     "retired_entry",
                     "retired_rotation",
+                    "retired_identity_ended",
                 ] {
                     kind.remove(key);
                 }

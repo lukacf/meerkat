@@ -9335,11 +9335,13 @@ mod tests {
 
         /// A complete roster's seal ends every unseated entry it does not
         /// list in its one step, and their grants with them, before the
-        /// step commits. When the end of any entry's grants fails, the
-        /// whole step fails and commits nothing: both entries and all their
-        /// grants stand, and the next apply ends them all.
+        /// step commits. When no entry's grant end succeeds (the grant
+        /// store fails), the step fails and nothing commits: both entries
+        /// and all their grants stand, and the next apply ends them all.
+        /// Ending grants for several identities is not atomic: the row
+        /// after this one fails the second entry's end only.
         #[tokio::test]
-        async fn a_seal_ends_the_grants_of_every_unseated_entry_it_unlists_or_none() {
+        async fn a_seal_whose_grant_store_fails_is_refused_and_the_next_apply_ends_them() {
             let rig = rig().await;
             create_mob(&rig, "seal-step", shell_gated_role()).await;
             let handle = mob_handle(&rig, "seal-step").await;

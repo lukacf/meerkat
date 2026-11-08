@@ -38,9 +38,12 @@
 //! An identity's end ends its live scoped tool grants, with those of the
 //! session MobMachine holds for it then (its member's session, or its
 //! entry's archived session record), before the step that ends it commits; a
-//! failure fails that step. MobMachine names the ends of the one-entry
-//! unlist and the removal of an unseated entry, and of a respawn abandoned
-//! after its old member's archive (`IdentityEnded`). The retirement terminal
+//! failure fails that step. Ending grants for several identities in one step
+//! is not atomic: the ends already made stay made (they fail closed), and a
+//! retry ends the rest. MobMachine names the ends of the one-entry unlist and
+//! the removal of an unseated entry, and of a respawn abandoned after its old
+//! member's archive, whether its own step or a resume abandons it
+//! (`IdentityEnded`). The retirement terminal
 //! that ends an identity (a plain retire of a worker, or the end of an
 //! unlisted or removed entry's retirement: `retirement_ends_identity`) and
 //! the mob's reset, which ends every identity the mob held, read MobMachine's

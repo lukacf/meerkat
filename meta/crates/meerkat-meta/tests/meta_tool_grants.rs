@@ -46,6 +46,8 @@ mod llm_usage;
 const IDENTITY: &str = "agent-a";
 /// The tool the identity's profile gates: a built-in that has no side effect.
 const GATED_TOOL: &str = "datetime";
+/// The built-in family [`GATED_TOOL`] belongs to.
+const GATED_FAMILY: &str = "utility";
 /// The marker of a probe turn: such a turn calls the gated tool once.
 const PROBE: &str = "TOOL-GRANT-PROBE";
 /// Bounds a failure only; a passing row never waits for it.
@@ -56,6 +58,16 @@ const TEN_MINUTES_MS: u64 = 600_000;
 static NEXT_MOB: AtomicU64 = AtomicU64::new(0);
 
 fn definition(mob_id: &str) -> MobDefinition {
+    gated_definition(mob_id, &format!("tools = [\"{GATED_TOOL}\"]"))
+}
+
+/// A definition whose profile gates the whole built-in family the probed
+/// tool belongs to.
+fn family_definition(mob_id: &str) -> MobDefinition {
+    gated_definition(mob_id, &format!("families = [\"{GATED_FAMILY}\"]"))
+}
+
+fn gated_definition(mob_id: &str, gate: &str) -> MobDefinition {
     MobDefinition::from_toml(&format!(
         r#"
 [mob]
@@ -69,7 +81,7 @@ runtime_mode = "turn_driven"
 [profiles.worker.tools]
 comms = true
 builtins = true
-grant_gated = {{ tools = ["{GATED_TOOL}"] }}
+grant_gated = {{ {gate} }}
 "#
     ))
     .expect("parse the gated definition")
@@ -207,13 +219,18 @@ struct Rig {
 
 /// Boot the gateway's runtime composition on `state` for the mob `mob_id`.
 async fn boot(state: &Path, mob_id: &str) -> Rig {
+    boot_with(state, definition(mob_id)).await
+}
+
+/// Boot the gateway's runtime composition on `state` for `definition`.
+async fn boot_with(state: &Path, definition: MobDefinition) -> Rig {
     let (results, probes) = mpsc::unbounded_channel();
     let client = ProbeClient {
         next_call: Arc::new(AtomicUsize::new(0)),
         results,
     };
     let builder = UnifiedRuntimeBuilder::default()
-        .definition(definition(mob_id))
+        .definition(definition)
         .persistent_state(state)
         .continuity_from_state_dir(state)
         .await
@@ -423,6 +440,59 @@ async fn an_identity_grant_opens_a_gated_tool_of_a_meta_member_and_its_revoke_cl
         ended["result"]["grants"][0]["status"],
         json!("revoked"),
         "{ended:#?}"
+    );
+    rig.shutdown().await;
+}
+
+/// A family a member's profile gates is mounted closed: a family grant to the
+/// identity opens the family's tools at the next turn, names the tools it
+/// opened, and its revoke closes them again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_family_grant_opens_a_gated_family_of_a_meta_member_and_its_revoke_closes_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut rig = boot_with(temp.path(), family_definition(&fresh_mob_id())).await;
+
+    let closed = rig.probe().await;
+    assert_eq!(
+        grant_refusal(&closed),
+        Some("tool_grant_required"),
+        "the gated family is closed before a grant: {closed}"
+    );
+
+    let granted = rig
+        .grant(json!({
+            "identity": IDENTITY,
+            "target": {"kind": "family", "family": GATED_FAMILY},
+            "duration_ms": TEN_MINUTES_MS,
+        }))
+        .await;
+    let target = &granted["grant"]["target"];
+    assert_eq!(target["kind"], json!("family"), "{granted:#?}");
+    assert_eq!(target["family"], json!(GATED_FAMILY), "{granted:#?}");
+    assert!(
+        target["names"]
+            .as_array()
+            .is_some_and(|names| names.contains(&json!(GATED_TOOL))),
+        "the family grant names the tools it opens: {granted:#?}"
+    );
+    let grant_id = granted["grant"]["grant_id"].clone();
+
+    let open = rig.probe().await;
+    assert_eq!(
+        grant_refusal(&open),
+        None,
+        "the family grant opens the family's tools at the next turn: {open}"
+    );
+
+    let revoked = rig
+        .rpc("meta/tool_grants/revoke", json!({"grant_id": grant_id}))
+        .await;
+    assert!(revoked["error"].is_null(), "{revoked:#?}");
+    let closed_again = rig.probe().await;
+    assert_eq!(
+        grant_refusal(&closed_again),
+        Some("tool_grant_revoked"),
+        "the revoke closes the family: {closed_again}"
     );
     rig.shutdown().await;
 }

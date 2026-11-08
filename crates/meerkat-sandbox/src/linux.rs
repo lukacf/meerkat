@@ -1069,6 +1069,7 @@ struct KernelSignalAction {
     restorer: usize,
     mask: u64,
 }
+const _: () = assert!(std::mem::size_of::<KernelSignalAction>() == 32);
 
 /// Returns `number`'s current handler and, when `default` is set, sets its
 /// action to the default first, by the rt_sigaction system call itself.

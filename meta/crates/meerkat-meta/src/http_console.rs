@@ -1463,7 +1463,7 @@ pub async fn console_rpc_handler(
     // server, a refusal included (`crate::console_audit`): a caller that
     // goes away cuts neither short.
     let (status, mut response) =
-        match audit::ConsoleAuditIntent::of(&state, &auth_context, &parsed_request) {
+        match audit::ConsoleAuditIntent::of_console_rpc(&state, &auth_context, &parsed_request) {
             None => console_rpc_answer(&state, voice, &auth_context, parsed_request).await,
             Some(intent) => intent
                 .run(
@@ -1605,9 +1605,25 @@ async fn console_rpc_answer(
         .await;
         return (StatusCode::OK, answer);
     }
+    // Test hook: a durable decision request that names a decision waits
+    // here, accepted and before its caller is checked again.
+    #[cfg(test)]
     if request_method.starts_with(crate::durable_decisions::DECISIONS_METHOD_PREFIX)
-        && let Some(response) =
-            console_decision_rpc(state, auth_context, read_only, &parsed_request)
+        && let Some(decision_id) = parsed_request
+            .params
+            .get("decision_id")
+            .and_then(Value::as_str)
+    {
+        console_decide_holds::pass(decision_id).await;
+    }
+    if request_method.starts_with(crate::durable_decisions::DECISIONS_METHOD_PREFIX)
+        && let Some(response) = console_decision_rpc(
+            state,
+            auth_context,
+            read_only,
+            &parsed_request,
+            expected_caller_scope.as_deref(),
+        )
     {
         return (StatusCode::OK, response);
     }
@@ -1692,18 +1708,29 @@ const VOICE_READINESS_SERVER_BUDGET: Duration = Duration::from_secs(4);
 
 /// `meta/decisions/*` on the Console: the reads and the administrator's
 /// withdraw ([`crate::durable_decisions::console`]), for the caller this
-/// request authenticated. `None` for a decision method the Console does
-/// not serve, which it then answers as any other unknown method.
+/// request authenticated. The withdraw is a console change: it passes the
+/// caller checks every console change passes, against the
+/// `expected_caller_scope` the request carried. `None` for a decision
+/// method the Console does not serve, which it then answers as any other
+/// unknown method.
 fn console_decision_rpc(
     state: &ConsoleJsonState,
     auth_context: &ConsoleHttpAuthContext,
     read_only: bool,
     request: &JsonRpcRequest,
+    expected_caller_scope: Option<&str>,
 ) -> Option<Value> {
     let id = request.id.clone().unwrap_or(Value::Null);
+    let caller_current = || refuse_unless_current(auth_context.verification.as_ref());
     crate::durable_decisions::console::handle_console_decision_rpc(
         &state.durable_decisions,
         &console_decision_caller(auth_context),
+        &crate::durable_decisions::console::ConsoleChangeChecks {
+            other_caller: auth_context
+                .refuse_other_caller(expected_caller_scope)
+                .err(),
+            caller_current: &caller_current,
+        },
         read_only,
         &request.method,
         &id,
@@ -3385,6 +3412,10 @@ mod console_sign_out_tests;
 #[cfg(test)]
 #[path = "console_flow_editor_caller_tests.rs"]
 mod console_flow_editor_caller_tests;
+
+#[cfg(test)]
+#[path = "console_decision_caller_tests.rs"]
+mod console_decision_caller_tests;
 
 #[cfg(test)]
 #[path = "console_approver_tests.rs"]
@@ -10914,10 +10945,10 @@ impl ConsoleDecideRefusal {
 
 /// Test hook: holds a Console decision right before its last step, until the
 /// test releases it: a gating decide once it holds the gating owner, a
-/// WorkGraph goal confirmation or a memory quarantine review right before its
-/// caller is checked again, and a WorkGraph release once it has read the
-/// item. Keyed by the pending id, the binding id, the memory id or the item
-/// id.
+/// WorkGraph goal confirmation, a memory quarantine review or a durable
+/// decision request right before its caller is checked again, and a WorkGraph
+/// release once it has read the item. Keyed by the pending id, the binding id,
+/// the memory id, the decision id or the item id.
 #[cfg(test)]
 pub(crate) mod console_decide_holds {
     use std::collections::BTreeMap;

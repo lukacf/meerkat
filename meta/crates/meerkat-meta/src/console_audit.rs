@@ -104,7 +104,8 @@ const TARGET_NAMED: &[&str] = &[
 /// wiring), `mob_id`, `schedule_id`, `memory_id`, `pending_id` and
 /// `approver_id` (a gating decision), `operation_id` (a topology
 /// operation), `binding_id` (a WorkGraph binding), `subscription_id`,
-/// `source_id` and `batch_id` (announcements) and `blob_id`.
+/// `source_id` and `batch_id` (announcements), `blob_id` and `decision_id`
+/// (a durable decision withdraw).
 const TARGET_IDS: &[&str] = &[
     "id",
     "run_id",
@@ -128,6 +129,7 @@ const TARGET_IDS: &[&str] = &[
     "source_id",
     "batch_id",
     "blob_id",
+    "decision_id",
 ];
 
 /// The fields of an owner's answer that a receipt keeps besides its `id`

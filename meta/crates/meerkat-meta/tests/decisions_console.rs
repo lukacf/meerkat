@@ -1524,3 +1524,158 @@ async fn an_unreadable_row_reads_as_not_found_to_a_non_administrator() {
         runtime.shutdown().await;
     }
 }
+
+/// The console audit log's rows of `meta/decisions/withdraw`, read by the
+/// access admin, read again for a short while until there are `expected` of
+/// them (a row lands with its change's answer, or just after it).
+async fn withdraw_audit_rows(app: &axum::Router, expected: usize) -> Vec<Value> {
+    let mut rows = Vec::new();
+    for _ in 0..50 {
+        let read = rpc(
+            app,
+            Some(ADMIN),
+            "meta/console/audit",
+            json!({"log": "changes"}),
+        )
+        .await;
+        assert!(
+            read["error"].is_null(),
+            "the console keeps an audit log: {read}"
+        );
+        rows = read["result"]["records"]
+            .as_array()
+            .unwrap_or_else(|| panic!("records: {read}"))
+            .iter()
+            .filter(|row| row["method"] == json!(WITHDRAW))
+            .cloned()
+            .collect();
+        if rows.len() >= expected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    rows
+}
+
+/// A Console withdraw is a console change: the console audit log records
+/// it, the administrator's withdraw as committed and a refused one as
+/// refused with its code and kind, each naming the decision.
+#[tokio::test]
+async fn a_console_withdraw_writes_a_console_audit_row() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ENFORCED), true).await;
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+    let decision_id = held.decision_id.to_string();
+
+    let refused = rpc(
+        &app,
+        Some(ALICE),
+        WITHDRAW,
+        json!({"decision_id": decision_id}),
+    )
+    .await;
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("access_denied"),
+        "{refused}"
+    );
+    let withdrawn = rpc(
+        &app,
+        Some(ADMIN),
+        WITHDRAW,
+        json!({"decision_id": decision_id}),
+    )
+    .await;
+    assert!(withdrawn["error"].is_null(), "{withdrawn}");
+
+    let rows = withdraw_audit_rows(&app, 2).await;
+    assert_eq!(rows.len(), 2, "one row for each withdraw: {rows:#?}");
+    let refused_row = rows
+        .iter()
+        .find(|row| row["outcome"] == json!("refused"))
+        .unwrap_or_else(|| panic!("a refused row: {rows:#?}"));
+    assert_eq!(refused_row["code"], json!(-32030), "{refused_row:#}");
+    assert_eq!(
+        refused_row["kind"],
+        json!("access_denied"),
+        "{refused_row:#}"
+    );
+    let committed_row = rows
+        .iter()
+        .find(|row| row["outcome"] == json!("committed"))
+        .unwrap_or_else(|| panic!("a committed row: {rows:#?}"));
+    for row in [refused_row, committed_row] {
+        assert_eq!(row["target"]["decision_id"], json!(decision_id), "{row:#}");
+    }
+    drop(app);
+    runtime.shutdown().await;
+}
+
+/// A Console withdraw is a console change: one made for another caller
+/// than its token (`expected_caller_scope`) is refused `caller_changed` and
+/// withdraws nothing, and the caller's own scope withdraws. With access
+/// control off the Console serves no withdraw, whatever scope it names.
+#[tokio::test]
+async fn a_console_withdraw_made_for_another_caller_is_refused() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = dir.path().join("state");
+    let (runtime, app) = console(&state, Some(ENFORCED), true).await;
+    let owner = decisions_of(&state);
+    let held = hold(&owner, "release", "a", "team:owners", agent_requester());
+    let params = |scope: &str| {
+        json!({
+            "decision_id": held.decision_id.to_string(),
+            "expected_caller_scope": scope,
+        })
+    };
+
+    let refused = rpc(
+        &app,
+        Some(ADMIN),
+        WITHDRAW,
+        params("console-caller:another"),
+    )
+    .await;
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("caller_changed"),
+        "{refused}"
+    );
+    assert_withdraw_refused(&refused, -32056, &owner, &held);
+
+    // The caller's own scope, as `meta/console/whoami` reports it, withdraws.
+    let whoami = rpc(&app, Some(ADMIN), "meta/console/whoami", json!({})).await;
+    let scope = whoami["result"]["caller_scope"]
+        .as_str()
+        .unwrap_or_else(|| panic!("caller scope: {whoami}"))
+        .to_string();
+    let withdrawn = rpc(&app, Some(ADMIN), WITHDRAW, params(&scope)).await;
+    assert!(withdrawn["error"].is_null(), "{withdrawn}");
+    assert_eq!(
+        owner.get(&held.decision_id).expect("row").state.phase,
+        DecisionPhase::Withdrawn
+    );
+    drop(app);
+    runtime.shutdown().await;
+
+    let off_dir = tempfile::tempdir().expect("dir");
+    let off_state = off_dir.path().join("state");
+    let (off_runtime, off_app) = console(&off_state, Some(ACCESS_OFF), true).await;
+    let off_owner = decisions_of(&off_state);
+    let off_held = hold(&off_owner, "release", "b", "team:owners", agent_requester());
+    let not_served = rpc(
+        &off_app,
+        Some(ADMIN),
+        WITHDRAW,
+        json!({
+            "decision_id": off_held.decision_id.to_string(),
+            "expected_caller_scope": "console-caller:another",
+        }),
+    )
+    .await;
+    assert_withdraw_refused(&not_served, -32601, &off_owner, &off_held);
+    drop(off_app);
+    off_runtime.shutdown().await;
+}

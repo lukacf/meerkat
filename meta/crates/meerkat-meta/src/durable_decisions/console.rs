@@ -26,9 +26,11 @@
 //! While access control is enforced, the reads need `decisions.view`. The
 //! withdraw is the administrator's, `decisions.admin` while access control
 //! is enforced; with access control off, or without an access controller,
-//! the Console serves no withdraw (the stdio host withdraws). The Console
-//! decides nothing yet: `meta/decisions/decide` and `present` are not
-//! Console methods.
+//! the Console serves no withdraw (the stdio host withdraws). A withdraw
+//! the Console serves is a console change: it passes the caller checks
+//! every console change passes (`caller_changed`, `caller_not_current`),
+//! and the console audit log records it. The Console decides nothing yet:
+//! `meta/decisions/decide` and `present` are not Console methods.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,6 +52,7 @@ use super::wire::{
     RENDERING_METHOD, WITHDRAW_METHOD,
 };
 use crate::access::{ACTION_DECISIONS_ADMIN, ACTION_DECISIONS_VIEW, AccessView};
+use crate::http_console::ConsoleCallerRefusal;
 
 /// The kinds whose requester may read what it asked for.
 const REQUESTER_READS_CONTENT: &[&str] = &["tool_grant.issue"];
@@ -158,6 +161,28 @@ impl<'a> Viewer<'a> {
     }
 }
 
+/// The checks a Console change passes, as every console change does: one
+/// made for another caller than its token (`expected_caller_scope`) is
+/// refused `caller_changed`, and one whose caller's login ended before it
+/// is made is refused `caller_not_current`.
+pub(crate) struct ConsoleChangeChecks<'a> {
+    /// The refusal of a change made for another caller, read with the
+    /// request.
+    pub(crate) other_caller: Option<ConsoleCallerRefusal>,
+    /// Checks again that the caller's login is current: called right before
+    /// the change is made.
+    pub(crate) caller_current: &'a dyn Fn() -> Result<(), ConsoleCallerRefusal>,
+}
+
+/// Whether the Console serves `caller` the decision change `method`: the
+/// withdraw, while access control is enforced. With access control off, or
+/// without an access controller, nobody administers decisions on the
+/// Console and it serves no withdraw. The console audit log records the
+/// changes the Console serves.
+pub(crate) fn is_served_decision_change(method: &str, caller: &ConsoleDecisionCaller<'_>) -> bool {
+    method == WITHDRAW_METHOD && caller.enforced()
+}
+
 /// The decision methods the Console offers `caller`: the reads where it may
 /// call them, and the withdraw to an administrator on a writable Console.
 pub(crate) fn advertised_methods(
@@ -176,11 +201,13 @@ pub(crate) fn advertised_methods(
 
 /// The answer to a Console decision request, or `None` when the Console
 /// serves no such method (it then answers it as any other method: not
-/// found). The withdraw's refusal is decided before any store read, and is
-/// the same for every decision id.
+/// found). The withdraw is a console change, checked by `change`; its
+/// refusals are decided before any store read, and are the same for every
+/// decision id.
 pub(crate) fn handle_console_decision_rpc(
     decisions: &RuntimeDecisions,
     caller: &ConsoleDecisionCaller<'_>,
+    change: &ConsoleChangeChecks<'_>,
     read_only: bool,
     method: &str,
     id: &Value,
@@ -195,15 +222,46 @@ pub(crate) fn handle_console_decision_rpc(
         RENDERING_METHOD => rendering(decisions, caller, id, params),
         // With access control off, or without an access controller, nobody
         // administers decisions on the Console: it serves no withdraw.
-        WITHDRAW_METHOD if !caller.enforced() => return None,
-        WITHDRAW_METHOD if read_only => {
-            crate::http_console::console_read_only_rpc_error(id.clone())
-        }
-        WITHDRAW_METHOD if !caller.administers() => access_denied(id, ACTION_DECISIONS_ADMIN),
-        WITHDRAW_METHOD => withdraw(decisions, id, params),
+        WITHDRAW_METHOD if !is_served_decision_change(method, caller) => return None,
+        WITHDRAW_METHOD => withdraw_change(decisions, caller, change, read_only, id, params),
         _ => return None,
     };
     Some(answer)
+}
+
+/// The Console withdraw, a console change, refused in this order: made for
+/// another caller (`caller_changed`), on a read-only Console (`-32010`), by
+/// a caller without `decisions.admin` (`access_denied`), and, checked again
+/// right before the withdraw is made, by a caller whose login ended
+/// (`caller_not_current`).
+fn withdraw_change(
+    decisions: &RuntimeDecisions,
+    caller: &ConsoleDecisionCaller<'_>,
+    change: &ConsoleChangeChecks<'_>,
+    read_only: bool,
+    id: &Value,
+    params: Value,
+) -> Value {
+    if let Some(refusal) = change.other_caller {
+        return caller_refused(id, refusal);
+    }
+    if read_only {
+        return crate::http_console::console_read_only_rpc_error(id.clone());
+    }
+    if !caller.administers() {
+        return access_denied(id, ACTION_DECISIONS_ADMIN);
+    }
+    if let Err(refusal) = (change.caller_current)() {
+        return caller_refused(id, refusal);
+    }
+    withdraw(decisions, id, params)
+}
+
+/// The refusal of a console change for its caller, as the Console's other
+/// changes answer it (`-32056`).
+fn caller_refused(id: &Value, refusal: ConsoleCallerRefusal) -> Value {
+    let error = refusal.json_rpc_error();
+    wire::failure(id, error.code, error.message, error.data)
 }
 
 fn access_denied(id: &Value, action: &str) -> Value {

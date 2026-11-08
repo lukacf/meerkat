@@ -1847,7 +1847,12 @@ withdraw `decisions.admin`; a caller without them is refused `-32030`
 (`data.kind = "access_denied"`), the withdraw before any decision is read and
 alike for every id. With access control off, or without an access controller,
 nobody administers decisions on the Console: it serves no withdraw (`-32601`),
-and the stdio gateway's host withdraws. A list pages over what the caller may
+and the stdio gateway's host withdraws. A withdraw the Console serves is a
+console change: one made for another caller than its token
+(`expected_caller_scope`) is refused `-32056` (`data.kind = "caller_changed"`),
+one whose caller's login ended before it is made `-32056`
+(`data.kind = "caller_not_current"`), and the console audit log records it.
+A list pages over what the caller may
 see: an administrator reads the store's own pages, and any other caller reads
 the decisions of the approver ids it holds and its own requests, and learns
 of no other decision. `meta/decisions/rendering` for a caller that

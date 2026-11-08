@@ -11,8 +11,8 @@
 \*
 \*   AuditEndedOwnerAcceptsNothing: once the custody ended (Released or
 \*     Uncertain) the owner accepts no input other than a release: no
-\*     configuration, issuance, revocation (new or repeated), use, or second
-\*     uncertain append.
+\*     configuration, issuance, revocation (new or repeated), use, spend of
+\*     a use (its approver current or not), or second uncertain append.
 \*   AuditReleaseEndsInReleased: after a release the owner is Released.
 \*   AuditUncertainAppendEndsCustody: after an uncertain append, until a
 \*     release, the owner is Uncertain.
@@ -20,8 +20,8 @@
 \*     returns to Active, and Released never changes phase.
 \*   AuditCustodyEndKeepsTheFacts (action property): the step that ends the
 \*     custody and every later step keep the owner's identity, revision,
-\*     records and revocations, so a successor restores exactly what the
-\*     store retained.
+\*     records, revocations, spent uses and carried decisions, so a
+\*     successor restores exactly what the store retained.
 \*
 \* Reachability (the runner): four scenarios are checked as expected
 \* violations of their negations: a release after an issuance
@@ -76,8 +76,8 @@ AuditIssueRoot ==
 AuditIssueChild ==
     /\ \E actor \in GrantPrincipalValues : \E record \in GrantRecordValues :
        \E derived \in DerivedChildRestrictionsValues : \E chain \in SeqOfGrantRecordValues :
-       \E now_ms \in 0..2 :
-           IssueChild(actor, record, derived, chain, now_ms)
+       \E now_ms \in 0..2 : \E terms_digest \in Sha256DigestValues :
+           IssueChild(actor, record, derived, chain, now_ms, terms_digest)
     /\ AcceptedNotRelease
 
 AuditRevokeNew ==
@@ -92,10 +92,46 @@ AuditRevokeAlready ==
 AuditResolveUse ==
     /\ \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 :
        \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues :
-       \E represented_subject \in OptionGrantPrincipalValues : \E leaf \in GrantRecordValues :
+       \E represented_subject \in OptionGrantPrincipalValues :
+       \E requester \in OptionGrantPrincipalValues : \E work \in OptionOriginalWorkRefValues :
+       \E operation \in OptionGrantOperationBindingValues : \E leaf \in GrantRecordValues :
        \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 :
            ResolveUse(arg_namespace, arg_generation, arg_incarnation, executor,
-                      represented_subject, leaf, chain, now_ms)
+                      represented_subject, requester, work, operation, leaf, chain, now_ms)
+    /\ AcceptedNotRelease
+
+\* The spend of an approval-carried leaf's use, as the generated Next drives
+\* it: its approver current (ConsumeUse) or no longer current
+\* (ConsumeUseRefusedApproverRevoked, accepted with nothing spent). Either
+\* arm, in every phase, accepts only a leaf that carries an approval and has
+\* an entry in `spent`, so only such a leaf is tried: the same transitions,
+\* without enumerating the use of a leaf no spend arm accepts.
+AuditSpendLeaves == {leaf \in GrantRecordValues : leaf.approval # None /\ leaf.id \in DOMAIN spent}
+
+AuditConsumeUse ==
+    /\ \E leaf \in AuditSpendLeaves :
+       \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 :
+       \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues :
+       \E represented_subject \in OptionGrantPrincipalValues :
+       \E requester \in OptionGrantPrincipalValues : \E work \in OptionOriginalWorkRefValues :
+       \E operation \in OptionGrantOperationBindingValues :
+       \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 :
+           ConsumeUse(arg_namespace, arg_generation, arg_incarnation, executor,
+                      represented_subject, requester, work, operation, leaf, chain, now_ms,
+                      TRUE)
+    /\ AcceptedNotRelease
+
+AuditConsumeUseRefusedApproverRevoked ==
+    /\ \E leaf \in AuditSpendLeaves :
+       \E arg_namespace \in EvidenceIdValues : \E arg_generation \in 0..2 :
+       \E arg_incarnation \in GrantAuthorityIncarnationValues : \E executor \in GrantPrincipalValues :
+       \E represented_subject \in OptionGrantPrincipalValues :
+       \E requester \in OptionGrantPrincipalValues : \E work \in OptionOriginalWorkRefValues :
+       \E operation \in OptionGrantOperationBindingValues :
+       \E chain \in SeqOfGrantRecordValues : \E now_ms \in 0..2 :
+           ConsumeUseRefusedApproverRevoked(arg_namespace, arg_generation, arg_incarnation,
+                                            executor, represented_subject, requester, work,
+                                            operation, leaf, chain, now_ms, FALSE)
     /\ AcceptedNotRelease
 
 AuditRecordUncertainAppend ==
@@ -127,6 +163,8 @@ AuditNext ==
     \/ AuditRevokeNew
     \/ AuditRevokeAlready
     \/ AuditResolveUse
+    \/ AuditConsumeUse
+    \/ AuditConsumeUseRefusedApproverRevoked
     \/ AuditRecordUncertainAppend
     \/ AuditReleaseCustody
     \/ AuditReleaseUncertainCustody
@@ -138,6 +176,8 @@ AuditStateConstraint ==
     /\ model_step_count <= AuditMaxSteps
     /\ Cardinality(DOMAIN records) <= 2
     /\ Cardinality(revoked) <= 2
+    /\ Cardinality(DOMAIN spent) <= 2
+    /\ Cardinality(carried_decisions) <= 2
 
 \* --- properties --------------------------------------------------------
 
@@ -153,7 +193,8 @@ AuditCustodyEndLatches ==
 
 AuditCustodyEndKeepsTheFacts ==
     [][ (phase \in AuditEnded \/ phase' \in AuditEnded)
-          => UNCHANGED << root, namespace, generation, incarnation, revision, records, revoked >> ]_all_vars
+          => UNCHANGED << root, namespace, generation, incarnation, revision, records, revoked,
+                          spent, consumed, carried_decisions >> ]_all_vars
 
 \* --- witnesses (the runner requires each negation violated) -----------
 

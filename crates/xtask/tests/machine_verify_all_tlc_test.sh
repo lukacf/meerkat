@@ -708,14 +708,16 @@ fi
 # into the terminal Released; an append whose outcome is unknown,
 # RecordUncertainAppend, into Uncertain, which a later close releases) is
 # model-checked by a hand-written audit over the same generated model: every
-# generated arm over the generated domains, under every generated invariant
+# generated arm over the generated domains, the spend of an approval-carried
+# use included, under every generated invariant
 # plus three invariants (an ended custody accepts no input but a release; a
 # release ends in Released; an uncertain append ends the custody until a
 # release) and two action properties (an ended custody never returns to
 # Active and Released never changes; the ending step and every later step
-# keep the owner's identity, revision, records and revocations). It requires
-# its four witnesses reached and refuses eleven seeded defects (--mutants),
-# each by its target property alone. 6 steps reach every witness and mutant.
+# keep the owner's identity, revision, records, revocations, spent uses and
+# carried decisions). It requires its four witnesses reached and refuses
+# fourteen seeded defects (--mutants), each by its target property alone.
+# 6 steps reach every witness and mutant.
 # It runs in shard audits-r.
 grant_custody_end_audit="${workspace_root}/specs/machines/grant_authority/custody_end_audit.sh"
 if [[ ! -x "${grant_custody_end_audit}" ]]; then
@@ -1619,8 +1621,9 @@ run_machine_verify() {
 # locally with 4 TLC workers, about 130-190 s at the 1.13-1.66x its
 # archive, unlist, placement and recovered runs took hosted over their
 # 202 s there), and the GrantAuthorityMachine custody end audit with
-# --mutants (sixteen runs, not yet measured hosted; 17 s locally with 4 TLC
-# workers, about 40 s at 2.3x): about 420-605 s without the settle audit;
+# --mutants (nineteen runs over the spend arms too, not yet measured hosted;
+# 109 s locally with 4 TLC workers, about 250 s at 2.3x): about 630-815 s
+# without the settle audit;
 # audits-s = the AuthMachine source-credential publication audit, 250-479
 # hosted (168 s locally): 712-719 s with the created identity removal run
 # (158-233), which moved to audits-u, so about 479-489 s, plus the requester

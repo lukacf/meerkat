@@ -27,14 +27,17 @@
 #   - ReleaseUncertainCustody staying Uncertain (AuditReleaseEndsInReleased);
 #   - RecordUncertainAppend staying Active (AuditUncertainAppendEndsCustody);
 #   - IssueRoot after a release, IssueChild after an uncertain append,
-#     RevokeAlready and ResolveUse after a release, and a second uncertain
-#     append after a release (AuditEndedOwnerAcceptsNothing);
+#     RevokeAlready and ResolveUse after a release, a second uncertain
+#     append after a release, ConsumeUse after an uncertain append, and
+#     ConsumeUseRefusedApproverRevoked after a release
+#     (AuditEndedOwnerAcceptsNothing);
 #   - ReleaseCustodyAgain into Active (action property
 #     AuditCustodyEndLatches);
-#   - RevokeNew after a release, and a release that changes the owner's
-#     generation (action property AuditCustodyEndKeepsTheFacts; a release
-#     that changes the retained records or revocations breaks the generated
-#     revision accounting first).
+#   - RevokeNew after a release, a release that changes the owner's
+#     generation, and a release that changes a spent use (action property
+#     AuditCustodyEndKeepsTheFacts; a release that changes the retained
+#     records, revocations or spend count breaks the generated revision
+#     accounting first).
 # An arm this script expects but cannot find fails the run. Each TLC run is
 # held to the canonical lane's per-run cap (tlc_run_cap.sh) and fails closed
 # as TLC INCOMPLETE.
@@ -66,7 +69,8 @@ import os
 text = open(os.environ["MODEL"]).read()
 arms = {
     "Configure": "(", "IssueRoot": "(", "IssueChild": "(", "RevokeNew": "(",
-    "RevokeAlready": "(", "ResolveUse": "(", "ReleaseCustody": " ==",
+    "RevokeAlready": "(", "ResolveUse": "(", "ConsumeUse": "(",
+    "ConsumeUseRefusedApproverRevoked": "(", "ReleaseCustody": " ==",
     "RecordUncertainAppend": " ==", "ReleaseUncertainCustody": " ==",
     "ReleaseCustodyAgain": " ==",
 }
@@ -77,7 +81,8 @@ declared = [line for line in text.split("\n") if line.startswith("VARIABLES ")]
 assert len(declared) == 1, "VARIABLES line not found in model.tla"
 variables = sorted(name.strip() for name in declared[0][len("VARIABLES "):].split(","))
 expected = sorted(["phase", "model_step_count", "root", "namespace", "generation",
-                   "incarnation", "revision", "records", "revoked"])
+                   "incarnation", "revision", "records", "revoked", "spent", "consumed",
+                   "carried_decisions"])
 assert variables == expected, f"the audit names the generated variables {expected}, model.tla declares {variables}"
 PY
 
@@ -288,6 +293,12 @@ PY
   mutate uncertain_append_after_release "Invariant AuditEndedOwnerAcceptsNothing" \
     AuditEndedOwnerAcceptsNothing \
     'RecordUncertainAppend|    /\ phase = "Active"|    /\ phase \in {"Active", "Released"}'
+  mutate spend_after_uncertain "Invariant AuditEndedOwnerAcceptsNothing" \
+    AuditEndedOwnerAcceptsNothing \
+    'ConsumeUse|    /\ phase = "Active"|    /\ phase \in {"Active", "Uncertain"}'
+  mutate refused_spend_after_release "Invariant AuditEndedOwnerAcceptsNothing" \
+    AuditEndedOwnerAcceptsNothing \
+    'ConsumeUseRefusedApproverRevoked|    /\ phase = "Active"|    /\ phase \in {"Active", "Released"}'
   mutate second_release_reactivates "Action property AuditCustodyEndLatches" \
     AuditCustodyEndLatches \
     'ReleaseCustodyAgain|    /\ phase'"'"' = "Released"|    /\ phase'"'"' = "Active"'
@@ -299,5 +310,10 @@ PY
   # identity breaks only this property.
   mutate release_changes_identity "Action property AuditCustodyEndKeepsTheFacts" \
     AuditCustodyEndKeepsTheFacts 'ReleaseCustody|FRAME|generation|generation + 1'
+  # A spent use that changes at the close, with the spend count kept, breaks
+  # only this property: an approval child's one use counted spent.
+  mutate release_changes_a_spent_use "Action property AuditCustodyEndKeepsTheFacts" \
+    AuditCustodyEndKeepsTheFacts \
+    'ReleaseCustody|FRAME|spent|IF DOMAIN spent = {} THEN spent ELSE MapSet(spent, CHOOSE id \in DOMAIN spent : TRUE, 1)'
 fi
 echo "grant custody end audit passed at model_step_count <= ${max_steps}"

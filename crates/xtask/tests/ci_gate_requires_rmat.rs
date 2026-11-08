@@ -682,8 +682,6 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
 #[test]
 fn nightly_covers_the_deferred_heavy_lanes() {
     let nightly_yml = workflow_yml_path("nightly.yml");
-    let nightly = std::fs::read_to_string(&nightly_yml)
-        .unwrap_or_else(|e| panic!("read {}: {e}", nightly_yml.display()));
     let doc = read_workflow(&nightly_yml);
 
     // Schedule plus manual dispatch. Read as YAML 1.2, the bare `on:` key is
@@ -698,9 +696,28 @@ fn nightly_covers_the_deferred_heavy_lanes() {
     );
     assert!(triggers.contains_key("workflow_dispatch"));
 
+    // What the jobs run, read from their steps and from the workflows they
+    // call, never from the file's text: a text search passed for a lane named
+    // only in a comment (the header names `make test-unit`) or inside a longer
+    // command (`make lint` in `make lint-feature-matrix`, `make
+    // machine-verify` in `make machine-verify-deep-compositions`).
+    let jobs = doc
+        .get("jobs")
+        .and_then(serde_json::Value::as_object)
+        .expect("nightly jobs mapping");
+    let commands: Vec<String> = jobs
+        .values()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|job| {
+            job_step_text(job)
+                .lines()
+                .map(|line| line.trim().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
     // Together with the per-push cargo lane this must cover the complete
     // `make ci` target set — these are the targets deliberately moved off
-    // the hot path, not dropped.
+    // the hot path, not dropped. Each is a whole step command.
     for lane in [
         "make lint",
         "make lint-feature-matrix",
@@ -714,17 +731,40 @@ fn nightly_covers_the_deferred_heavy_lanes() {
         "make test-unit",
         "make test-int",
         "make e2e-fast",
-        // The TLC lane's machine-verify part (the bounded adaptive witness
-        // and the `machine-verify --all` sweep): ci.yml's tlc-audits job
-        // runs the lane's audit shards on every machine-authority change.
-        "make machine-verify",
-        "test-sdk-python test-sdk-typescript",
-        "uses: ./.github/workflows/mob-dense-topology.yml",
-        "uses: ./.github/workflows/buildbuddy.yml",
-        "mode: full-fresh",
+        // The TLC lane's machine-verify part, exactly: the bounded adaptive
+        // witness and the `machine-verify --all` sweep, which no per-change
+        // lane runs. ci.yml's tlc-audits job runs the lane's audit shards on
+        // every machine-authority change
+        // (ci_runs_the_bounded_tlc_audits_on_machine_authority_changes).
+        "make machine-verify MACHINE_VERIFY_PART=machine-verify",
+        "make -j2 test-sdk-python test-sdk-typescript",
     ] {
-        assert!(nightly.contains(lane), "nightly must run `{lane}`");
+        assert!(
+            commands.iter().any(|command| command == lane),
+            "a nightly job step must run `{lane}`"
+        );
     }
+    // The dense Mob topology and the whole Bazel graph, in full-fresh mode,
+    // as jobs that call those workflows.
+    let calls = |workflow: &str| {
+        jobs.values()
+            .filter(|job| job.get("uses").and_then(serde_json::Value::as_str) == Some(workflow))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        calls("./.github/workflows/mob-dense-topology.yml").len(),
+        1,
+        "nightly must call the dense Mob topology workflow"
+    );
+    let graph = calls("./.github/workflows/buildbuddy.yml");
+    assert_eq!(graph.len(), 1, "nightly must call the BuildBuddy graph");
+    assert_eq!(
+        graph[0]
+            .pointer("/with/mode")
+            .and_then(serde_json::Value::as_str),
+        Some("full-fresh"),
+        "nightly runs the whole Bazel graph in full-fresh mode"
+    );
 }
 
 #[test]

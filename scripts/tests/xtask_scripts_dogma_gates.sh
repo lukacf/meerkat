@@ -134,6 +134,20 @@ for gate_owner in .github/workflows/ci.yml .github/workflows/cargo.yml Makefile 
     bad "machine-authority-changed ignored its gate owner $gate_owner"
   fi
 done
+# The one TLC install every TLC lane runs (the JDK and the mirrored TLC jar)
+# is a machine-authority input: nightly runs only the lane's machine-verify
+# part, so a jar or JDK change reaches the audit shards through ci.yml's
+# tlc-audits job alone. Another action stays out of the machine lanes.
+if scripts/machine-authority-changed -- .github/actions/setup-tlc-ci/action.yml >/dev/null; then
+  ok "machine-authority-changed protects the TLC install .github/actions/setup-tlc-ci/action.yml"
+else
+  bad "machine-authority-changed ignored the TLC install .github/actions/setup-tlc-ci/action.yml"
+fi
+if scripts/machine-authority-changed -- .github/actions/setup-rust-ci/action.yml >/dev/null; then
+  bad "machine-authority-changed routes an action without TLC to the machine lanes"
+else
+  ok "an action without TLC (.github/actions/setup-rust-ci/action.yml) stays out of the machine lanes"
+fi
 edge_out=$(printf 'crates/xtask/src/rmat_policy.rs\n' | scripts/buildbuddy-edge-changes --paths-from-stdin)
 if printf '%s' "$edge_out" | grep -Fq 'changed=true'; then
   ok "buildbuddy-edge-changes marks rmat_policy.rs as changed"

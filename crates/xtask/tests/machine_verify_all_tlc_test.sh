@@ -29,8 +29,9 @@ set -euo pipefail
 #   audits-w        hand-written audit shard W
 #   audits-x        hand-written audit shard X
 #   audits-y        hand-written audit shard Y
-#   all             every part (the default: `make machine-verify`, the
-#                   nightly bounded TLC job and the release gate)
+#   all             every part (the default: `make machine-verify` without
+#                   MACHINE_VERIFY_PART, and the release gate); the nightly
+#                   bounded TLC job runs the machine-verify part only
 # Bazel runs the twenty-five parts as separate targets
 # (machine_verify_all_tlc_test, machine_verify_audits_a_tlc_test,
 # machine_verify_audits_b_tlc_test, machine_verify_audits_c_tlc_test,

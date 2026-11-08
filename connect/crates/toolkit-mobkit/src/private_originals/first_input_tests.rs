@@ -810,6 +810,15 @@ impl<S> FirstFixture<S> {
             .unwrap()
             .unwrap()
     }
+    /// [`Self::binding`] after this host's close, from the record a new
+    /// opener of the same database reads.
+    pub(crate) async fn closed_binding(&self) -> Option<InputAuthorityAssociation> {
+        let record = self.closed_source_record().await;
+        self.source
+            .decode_record(&record, &self.submission.original)
+            .unwrap()
+            .final_association
+    }
     pub(crate) fn cold_source_custody(
         &self,
         association: &InputAuthorityAssociation,

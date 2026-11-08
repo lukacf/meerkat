@@ -239,8 +239,8 @@ async fn exercise(case: Case) {
             assert_eq!(&receipt.input_id, input.id());
             assert!(!receipt.deduplicated);
             assert!(fixture.source.owner.has_admitted_source(&association).unwrap());
-            // Read A's durable binding while this host is open: its settled
-            // close releases the store the binding is read from.
+            // Read A's durable binding while this host is open; after its close
+            // it is read again from the store, as the next opener reads it.
             let a_association = fixture.binding().await.unwrap().unwrap();
             fixture.source.stop_custody_recovery();
             drop(release_round.take());
@@ -252,6 +252,11 @@ async fn exercise(case: Case) {
             } else { assert!(source.is_ok(), "actual promoted close: {source:?}"); }
             // The close released the store: read what it retained as the next
             // opener does.
+            assert_eq!(
+                fixture.closed_binding().await.as_ref(),
+                Some(&a_association),
+                "A's binding survives the close"
+            );
             let row = fixture.closed_store().get(&helper_key).await.unwrap().unwrap();
             assert!(attempt(&row).decision() == if fail_terminal { CustodyDecision::Pending } else { CustodyDecision::Promoted });
             assert_eq!(row.data.body["bound_input"], enrolled.data.body["bound_input"]);

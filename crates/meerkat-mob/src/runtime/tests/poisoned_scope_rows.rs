@@ -445,7 +445,7 @@ async fn a_healthy_runtime_backlog_drains_while_another_runtime_scope_is_poisone
         pass.failures
             .iter()
             .any(|failure| failure.contains(&doomed.0)
-                && failure.contains("unavailable until the store is reopened")),
+                && failure.contains("is refused by the store")),
         "the pass names the poisoned runtime's refusal: {pass:?}"
     );
     assert_eq!(
@@ -783,7 +783,8 @@ async fn a_recorded_refusal_answers_only_for_the_target_it_was_read_for() {
             .filter(|fields| {
                 field(fields, "bridge_session_id") == Some(session.as_str())
                     && field(fields, "message").is_some_and(|message| {
-                        message.contains("refused until the host store realm is reopened")
+                        message
+                            .contains("member status session view read refused by the host store")
                     })
             })
             .count()

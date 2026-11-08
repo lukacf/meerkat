@@ -2985,20 +2985,22 @@ pub enum RuntimeStoreError {
     /// inconsistent. A re-read answers the same until it is repaired.
     #[error("Store data is corrupt: {0}")]
     Corrupt(String),
-    /// A host store refuses the call until its realm is reopened: scopes the
-    /// call needs are poisoned. A batch that touched each of them failed, or
-    /// its outcome stayed unknown, after the process's memory changed, so
-    /// that memory may hold what the host does not. Nothing was read or
-    /// written. Every later call that needs one of these scopes answers the
-    /// same until the process opens the realm again, and a call that needs
-    /// none of them is served: this is no outage a later call gets past, and
-    /// a caller does not retry it.
-    #[error(
-        "Store refused until the host store realm is reopened: {}",
-        RefusedScopesDisplay(scopes)
-    )]
+    /// A host store refuses the call: scopes the call needs are poisoned or
+    /// quarantined. A poisoned scope's batch failed, or its outcome stayed
+    /// unknown, after the process's memory changed, so that memory may hold
+    /// what the host does not: it refuses until the process opens the realm
+    /// again. A quarantined scope is one the store reports a conflict for
+    /// (two batches hold one of its versions): it refuses until it is
+    /// repaired in the store and the realm is reopened, and a reopen without
+    /// the repair quarantines it again. Nothing was read or written. Every
+    /// later call that needs one of these scopes answers the same, and a call
+    /// that needs none of them is served: this is no outage a later call gets
+    /// past, and a caller does not retry it.
+    #[error("{}", ScopeRefusedDisplay(scopes))]
     ScopeRefused {
-        /// The poisoned scopes the call needs, each with its poison cause.
+        /// The refused scopes the call needs, each with its cause: a
+        /// poisoned scope's poison cause, or a quarantined scope's conflict
+        /// and its repair.
         scopes: Vec<RefusedScope>,
     },
     /// A host store realm lost its fence (another writer holds it, or this
@@ -3040,34 +3042,63 @@ pub enum RuntimeStoreError {
 }
 
 impl RuntimeStoreError {
-    /// Whether the store refuses this call until its realm is reopened
-    /// ([`Self::ScopeRefused`], [`Self::RealmRefused`]): every later call
-    /// that needs the same scopes answers the same, so the refusal can be
-    /// remembered and is never retried as an outage.
+    /// Whether the store refuses this call until its realm is reopened, or
+    /// beyond ([`Self::ScopeRefused`], [`Self::RealmRefused`]): every later
+    /// call that needs the same scopes answers the same, so the refusal can
+    /// be remembered and is never retried as an outage. A quarantined
+    /// scope's refusal outlasts a reopen: it lasts until the scope is
+    /// repaired in the store and the realm is reopened.
     #[must_use]
     pub fn is_refused_until_reopen(&self) -> bool {
         matches!(self, Self::ScopeRefused { .. } | Self::RealmRefused { .. })
     }
 }
 
-/// One poisoned host store scope a refused call needs
-/// ([`RuntimeStoreError::ScopeRefused`]).
+/// One host store scope a refused call needs
+/// ([`RuntimeStoreError::ScopeRefused`]): a poisoned scope, refused until the
+/// realm is reopened, or a quarantined one (the store reports a conflict for
+/// it), refused until it is repaired in the store and the realm is reopened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RefusedScope {
     /// The scope, as its family tag and key: `<tag>:<key>`. A runtime's
     /// scope is `rt:<runtime id>`.
     pub scope: String,
-    /// Why the scope was poisoned.
+    /// Why the scope is refused: its poison cause, or the conflict that
+    /// quarantined it, with the repair.
     pub cause: String,
+    /// Whether the store quarantined the scope (a poisoned one otherwise):
+    /// what the refusal's text says lifts it.
+    quarantined: bool,
 }
 
 impl RefusedScope {
+    /// The refusal of a poisoned scope.
     #[must_use]
     pub fn new(scope: impl Into<String>, cause: impl Into<String>) -> Self {
         Self {
             scope: scope.into(),
             cause: cause.into(),
+            quarantined: false,
+        }
+    }
+
+    /// The refusal of a quarantined scope.
+    #[must_use]
+    pub(crate) fn of_quarantined(scope: impl Into<String>, cause: impl Into<String>) -> Self {
+        Self {
+            scope: scope.into(),
+            cause: cause.into(),
+            quarantined: true,
+        }
+    }
+
+    /// The state the refusal's text names.
+    fn state(&self) -> &'static str {
+        if self.quarantined {
+            "quarantined"
+        } else {
+            "poisoned"
         }
     }
 }
@@ -3076,9 +3107,30 @@ impl std::fmt::Display for RefusedScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "host store scope {} is poisoned: {}",
-            self.scope, self.cause
+            "host store scope {} is {}: {}",
+            self.scope,
+            self.state(),
+            self.cause
         )
+    }
+}
+
+/// A [`RuntimeStoreError::ScopeRefused`]: what lifts the refusal, then its
+/// scopes. Only a reopen lifts a poisoned scope's; a quarantined scope's
+/// needs its repair in the store first.
+struct ScopeRefusedDisplay<'a>(&'a [RefusedScope]);
+
+impl std::fmt::Display for ScopeRefusedDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.iter().any(|scope| scope.quarantined) {
+            f.write_str(
+                "Store refused until the quarantined scopes are repaired in the store and the \
+                 realm is reopened: ",
+            )?;
+        } else {
+            f.write_str("Store refused until the host store realm is reopened: ")?;
+        }
+        RefusedScopesDisplay(self.0).fmt(f)
     }
 }
 
@@ -3091,6 +3143,7 @@ impl std::fmt::Display for RefusedScopesDisplay<'_> {
             [] => f.write_str("a host store scope is poisoned"),
             [only] => only.fmt(f),
             several => {
+                let poisoned = several.iter().all(|scope| !scope.quarantined);
                 f.write_str("host store scopes ")?;
                 for (index, scope) in several.iter().enumerate() {
                     if index > 0 {
@@ -3098,12 +3151,20 @@ impl std::fmt::Display for RefusedScopesDisplay<'_> {
                     }
                     f.write_str(&scope.scope)?;
                 }
-                f.write_str(" are poisoned (")?;
+                f.write_str(if poisoned {
+                    " are poisoned ("
+                } else {
+                    " are refused ("
+                })?;
                 for (index, scope) in several.iter().enumerate() {
                     if index > 0 {
                         f.write_str("; ")?;
                     }
-                    write!(f, "{}: {}", scope.scope, scope.cause)?;
+                    if poisoned {
+                        write!(f, "{}: {}", scope.scope, scope.cause)?;
+                    } else {
+                        write!(f, "{} is {}: {}", scope.scope, scope.state(), scope.cause)?;
+                    }
                 }
                 f.write_str(")")
             }
@@ -3112,7 +3173,8 @@ impl std::fmt::Display for RefusedScopesDisplay<'_> {
 }
 
 /// A runtime a store-wide read could not answer for: the store refuses the
-/// runtime's scope until its realm is reopened
+/// runtime's scope, poisoned until its realm is reopened, or quarantined
+/// until the scope is repaired in the store and the realm is reopened
 /// ([`RuntimeStore::list_runtime_delivery_authorities_or_unavailable`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -10101,13 +10163,15 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// Whether this store refuses every later call that needs `runtime_id`'s
-    /// state until its realm is reopened: a host store realm that lost its
-    /// fence, or whose scope of that runtime is poisoned (a batch of it
-    /// failed, or its outcome stayed unknown). Nothing a caller writes for
-    /// the runtime lands before that reopen, so the store keeps the runtime's
-    /// inputs as it last committed them, for the next start. A store answers
-    /// `true` exactly while every call that needs the runtime's state answers
-    /// a refusal until reopen ([`RuntimeStoreError::ScopeRefused`] or
+    /// state until its realm is reopened, or beyond: a host store realm that
+    /// lost its fence, or whose scope of that runtime is poisoned (a batch of
+    /// it failed, or its outcome stayed unknown) or quarantined (the store
+    /// reports a conflict for it, refused until the scope is repaired in the
+    /// store and the realm is reopened). Nothing a caller writes for the
+    /// runtime lands before that, so the store keeps the runtime's inputs as
+    /// it last committed them, for the next start. A store answers `true`
+    /// exactly while every call that needs the runtime's state answers such a
+    /// refusal ([`RuntimeStoreError::ScopeRefused`] or
     /// [`RuntimeStoreError::RealmRefused`]), and `false` otherwise; the
     /// runtime then tells the waiters of the inputs the store keeps that
     /// they stay queued. A store with no such refusal answers `false`, the

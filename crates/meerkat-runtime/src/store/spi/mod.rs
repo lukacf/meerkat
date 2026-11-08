@@ -256,18 +256,20 @@ impl SpiError {
     }
 
     /// The typed refusal a poisoned realm or scope answers until the realm
-    /// is reopened: [`RuntimeStoreError::RealmRefused`] for a realm that lost
-    /// its fence, [`RuntimeStoreError::ScopeRefused`] naming each poisoned or
-    /// quarantined scope the call needs. Any other error comes back
-    /// unchanged.
+    /// is reopened, and a quarantined scope until it is repaired in the
+    /// store and the realm is reopened: [`RuntimeStoreError::RealmRefused`]
+    /// for a realm that lost its fence, [`RuntimeStoreError::ScopeRefused`]
+    /// naming each poisoned or quarantined scope the call needs. Any other
+    /// error comes back unchanged.
     fn into_refusal(self) -> Result<RuntimeStoreError, Self> {
         match self {
             Self::RealmPoisoned(cause) => Ok(RuntimeStoreError::RealmRefused { cause }),
-            Self::ScopePoisoned { scope, cause } | Self::ScopeQuarantined { scope, cause } => {
-                Ok(RuntimeStoreError::ScopeRefused {
-                    scopes: vec![RefusedScope::new(scope, cause)],
-                })
-            }
+            Self::ScopePoisoned { scope, cause } => Ok(RuntimeStoreError::ScopeRefused {
+                scopes: vec![RefusedScope::new(scope, cause)],
+            }),
+            Self::ScopeQuarantined { scope, cause } => Ok(RuntimeStoreError::ScopeRefused {
+                scopes: vec![RefusedScope::of_quarantined(scope, cause)],
+            }),
             Self::ScopesPoisoned { scopes } => Ok(RuntimeStoreError::ScopeRefused {
                 scopes: scopes
                     .into_iter()
@@ -281,7 +283,9 @@ impl SpiError {
                 Ok(RuntimeStoreError::ScopeRefused {
                     scopes: quarantined
                         .into_iter()
-                        .map(|quarantined| RefusedScope::new(quarantined.scope, quarantined.cause))
+                        .map(|quarantined| {
+                            RefusedScope::of_quarantined(quarantined.scope, quarantined.cause)
+                        })
                         .chain(poisoned.into_iter().map(|poisoned| {
                             RefusedScope::new(poisoned.id.to_string(), poisoned.cause)
                         }))
@@ -311,7 +315,10 @@ struct QuarantinedScopesDisplay<'a>(&'a [QuarantinedScope], &'a [PoisonedScope])
 
 impl std::fmt::Display for QuarantinedScopesDisplay<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("host store scopes refuse until the realm is reopened (")?;
+        f.write_str(
+            "host store scopes refuse until the quarantined ones are repaired in the store and \
+             the realm is reopened (",
+        )?;
         let quarantined = self
             .0
             .iter()

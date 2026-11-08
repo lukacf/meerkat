@@ -177,6 +177,7 @@ use super::writer_fence::{
     WriterFenceAcquireStep, WriterFenceListingOutcome, WriterFenceLostCause, WriterFenceRefusal,
     WriterFenceRenewOutcome, WriterFenceStopCause,
 };
+use crate::store::RefusedScope;
 
 /// A row entry value larger than this goes to a chunk scope.
 pub const INLINE_VALUE_LIMIT: usize = 256 * 1024;
@@ -1468,9 +1469,10 @@ impl SpiRealm {
             .collect()
     }
 
-    /// The scopes of `family` that refuse every call until the realm is
-    /// reopened, poisoned or quarantined, in scope order, each with its
-    /// refusal's cause: the reads that list runtimes name each one.
+    /// The scopes of `family` that refuse every call, poisoned until the
+    /// realm is reopened or quarantined until they are repaired in the
+    /// store and the realm is reopened, in scope order, each with its
+    /// refusal: the reads that list runtimes name each one.
     ///
     /// # Errors
     /// [`SpiError::ScopesQuarantined`] naming each quarantined scope of
@@ -1479,16 +1481,22 @@ impl SpiRealm {
     pub(crate) fn refused_scopes_of(
         &self,
         family: ScopeFamily,
-    ) -> Result<Vec<(ScopeId, String)>, SpiError> {
-        let mut refused: Vec<(ScopeId, String)> = self
+    ) -> Result<Vec<(ScopeId, RefusedScope)>, SpiError> {
+        let mut refused: Vec<(ScopeId, RefusedScope)> = self
             .poisoned_scopes_of(family)
             .into_iter()
-            .map(|scope| (scope.id, scope.cause))
+            .map(|scope| {
+                let refusal = RefusedScope::new(scope.id.to_string(), scope.cause);
+                (scope.id, refusal)
+            })
             .collect();
         let mut unnamed = Vec::new();
         for (scope, id) in self.quarantined_where(Some(&[family])) {
             match id {
-                Some(id) => refused.push((id, scope.cause)),
+                Some(id) => {
+                    let refusal = RefusedScope::of_quarantined(id.to_string(), scope.cause);
+                    refused.push((id, refusal));
+                }
                 None => unnamed.push(scope),
             }
         }

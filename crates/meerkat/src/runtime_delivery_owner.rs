@@ -1371,8 +1371,7 @@ async fn run_pass(
     runtimes.retain(|runtime_id| seen.insert(runtime_id.clone()));
     for unavailable in &owner.unavailable {
         pass.failures.push(format!(
-            "delivery runtime {} is unavailable until the store is reopened, and its rows \
-             stay pending: {}",
+            "delivery runtime {} is refused by the store, and its rows stay pending: {}",
             unavailable.runtime_id, unavailable.refusal
         ));
     }

@@ -800,7 +800,7 @@ impl SpiRuntimeStore {
     async fn cross_scope_read_per_runtime<T, F>(
         &self,
         op: F,
-    ) -> Result<(T, Vec<(ScopeId, String)>), RuntimeStoreError>
+    ) -> Result<(T, Vec<(ScopeId, RefusedScope)>), RuntimeStoreError>
     where
         F: std::future::Future<Output = Result<T, RuntimeStoreError>> + Send,
         T: Send,
@@ -1621,12 +1621,7 @@ impl RuntimeStore for SpiRuntimeStore {
         records.retain(|(runtime_id, _)| !unavailable.contains(runtime_id.0.as_str()));
         let unavailable = refused
             .into_iter()
-            .map(|(id, cause)| {
-                UnavailableRuntime::new(
-                    LogicalRuntimeId::new(id.key.clone()),
-                    RefusedScope::new(id.to_string(), cause),
-                )
-            })
+            .map(|(id, refusal)| UnavailableRuntime::new(LogicalRuntimeId::new(id.key), refusal))
             .collect();
         Ok(RuntimeDeliveryAuthorityListing::new(records, unavailable))
     }

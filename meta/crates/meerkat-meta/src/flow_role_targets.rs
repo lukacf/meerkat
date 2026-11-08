@@ -295,19 +295,15 @@ pub(crate) fn run_flow_error_data(error: &meerkat_mob::MobError) -> Option<Value
 }
 
 /// The bound members a `meta/run_flow` request names, as the public aliases
-/// the console scopes its `agent.send` check to. Malformed entries are
+/// the console scopes its `agent.send` check to: the members the console's
+/// one member field table reads in the request
+/// ([`crate::http_console::console_method_members`]). Malformed entries are
 /// skipped here, and a generated alias is checked as its durable identity;
 /// the handler refuses a malformed binding and a stale alias before anything
 /// runs.
 pub(crate) fn role_target_members_for_access(params: &Value) -> Vec<String> {
-    let Some(roles) = params.get(ROLE_TARGETS_PARAM).and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    let mut members = roles
-        .values()
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(Value::as_str)
+    let mut members = crate::http_console::console_method_members("meta/run_flow", params)
+        .iter()
         .map(|member| {
             runtime_alias_str(roster_member_id_for_supplied_id(member).as_str()).into_owned()
         })

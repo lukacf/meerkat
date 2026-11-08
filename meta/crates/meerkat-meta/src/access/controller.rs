@@ -14,7 +14,7 @@ use super::engine::{
 };
 use super::model::{
     ACTION_AGENT_VIEW, AccessConfigError, AccessControlConfig, AccessGroup, AccessRule,
-    check_declared_ingresses, validate_access_config,
+    check_declared_ingresses, private_owner, validate_access_config,
 };
 
 /// Cached resource attributes for one agent, keyed by console identity.
@@ -248,6 +248,15 @@ impl AccessController {
         Self::new(AccessControlConfig::default()).unwrap_or_else(|_| unreachable!())
     }
 
+    /// A controller with no access configuration that only holds the agent
+    /// attributes the private-owner rule reads ([`super::PRIVATE_TO_LABEL`]):
+    /// the agent audience of a console without access control, one per
+    /// request. Nothing edits it.
+    pub(crate) fn audience_only() -> Self {
+        Self::with_edit_identity(AccessControlConfig::default(), None)
+            .unwrap_or_else(|_| unreachable!())
+    }
+
     /// Load a controller from an explicitly configured TOML file and remember
     /// the path, so administrator edits persist back to it. The file is read
     /// and validated directly: a missing path, a directory, or an unreadable
@@ -431,7 +440,7 @@ impl AccessController {
             )
         };
         if !self
-            .view_from_config(Arc::clone(&config), subject)
+            .view_from_config(Arc::clone(&config), subject, None)
             .can_administer()
         {
             return Err(AccessEditError::Denied);
@@ -451,11 +460,11 @@ impl AccessController {
         target: Option<&str>,
     ) -> Result<AccessView, AccessEditError> {
         let (config, _) = self.snapshot();
-        let caller_view = self.view_from_config(Arc::clone(&config), caller);
+        let caller_view = self.view_from_config(Arc::clone(&config), caller, None);
         if !caller_view.can_administer() {
             return Err(AccessEditError::Denied);
         }
-        Ok(self.view_from_config(config, target))
+        Ok(self.view_from_config(config, target, None))
     }
 
     /// Every HTTP write reevaluates current administration under the same
@@ -593,13 +602,19 @@ impl AccessController {
     /// lock, so it lands either before the fence (and the decision sees it)
     /// or after the guarded mutation completes. Never await, call back into
     /// this controller, or deliver notifications while holding it.
-    pub(crate) fn decision_fence(&self, subject: Option<&str>) -> AccessDecisionFence<'_> {
+    /// `private_owner_key` is the caller's, as for
+    /// [`Self::view_for_caller`].
+    pub(crate) fn decision_fence(
+        &self,
+        subject: Option<&str>,
+        private_owner_key: Option<&str>,
+    ) -> AccessDecisionFence<'_> {
         let state = self
             .inner
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let view = self.view_from_config(Arc::clone(&state.config), subject);
+        let view = self.view_from_config(Arc::clone(&state.config), subject, private_owner_key);
         let attributes = self
             .inner
             .attributes
@@ -613,20 +628,35 @@ impl AccessController {
     }
 
     /// Build the per-request view for an authenticated subject (or `None`
-    /// for an open/unauthenticated console).
+    /// for an open/unauthenticated console). The view owns no private
+    /// member: an agent private to a person ([`super::PRIVATE_TO_LABEL`]) is
+    /// hidden from it unless the subject is an admin.
     pub fn view_for_subject(&self, subject: Option<&str>) -> AccessView {
         self.view_and_revision(subject).0
     }
 
+    /// [`Self::view_for_subject`] for a caller who owns the agents private
+    /// to `private_owner_key` ([`super::PRIVATE_TO_LABEL`]): a signed-in
+    /// person's console caller scope, `None` for every other caller.
+    pub fn view_for_caller(
+        &self,
+        subject: Option<&str>,
+        private_owner_key: Option<&str>,
+    ) -> AccessView {
+        let (config, _) = self.snapshot();
+        self.view_from_config(config, subject, private_owner_key)
+    }
+
     pub(crate) fn view_and_revision(&self, subject: Option<&str>) -> (AccessView, u64) {
         let (config, revision) = self.snapshot();
-        (self.view_from_config(config, subject), revision)
+        (self.view_from_config(config, subject, None), revision)
     }
 
     fn view_from_config(
         &self,
         config: Arc<AccessControlConfig>,
         subject: Option<&str>,
+        private_owner_key: Option<&str>,
     ) -> AccessView {
         let principal = match subject {
             Some(subject) => AccessPrincipal {
@@ -644,6 +674,10 @@ impl AccessController {
             config,
             principal,
             is_admin,
+            private_owner_key: private_owner_key
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .map(str::to_string),
         }
     }
 
@@ -820,14 +854,18 @@ impl AccessDecisionFence<'_> {
 
     /// `agent.view` on an agent, resolving lineage from the held attributes.
     pub(crate) fn can_view_agent(&self, identity: &str) -> bool {
+        let alias = self.view.runtime_alias_member(identity);
+        let lineage = AccessView::lineage_in(&self.attributes, alias.member_key(identity));
+        if self.view.private_owner_hides(&lineage) {
+            return false;
+        }
         if !self.view.config.enabled {
             return true;
         }
         // A runtime alias is judged as the member it names, as in
         // `AccessView::decide_agent`.
-        let member;
-        let identity = match self.view.runtime_alias_member(identity) {
-            RuntimeAliasMember::NotAnAlias => identity,
+        let identity = match &alias {
+            RuntimeAliasMember::NotAnAlias(member_key) => member_key.as_str(),
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
                 if super::engine::matching_deny_rule(
@@ -840,12 +878,10 @@ impl AccessDecisionFence<'_> {
                 {
                     return false;
                 }
-                member = member_key;
-                member.as_str()
+                member_key.as_str()
             }
-            RuntimeAliasMember::NotCurrent => return self.view.is_admin,
+            RuntimeAliasMember::NotCurrent(_) => return self.view.is_admin,
         };
-        let lineage = AccessView::lineage_in(&self.attributes, identity);
         if lineage.is_empty() {
             return self
                 .view
@@ -892,10 +928,29 @@ fn lineage_exceeds_walk(
 
 /// How an agent spelling relates to the runtime alias namespace.
 enum RuntimeAliasMember {
-    NotAnAlias,
+    /// Not a runtime alias: the member cache key the spelling names, decoded
+    /// from the roster's comms-safe encoding (`mk--...`), so that every
+    /// spelling of a member is judged as that member.
+    NotAnAlias(String),
     /// The current incarnation of a known identity: its member cache key.
     Current(String),
-    NotCurrent,
+    /// A runtime alias that is stale, unknown or malformed: the member cache
+    /// key of the durable identity it names, when it names one.
+    NotCurrent(Option<String>),
+}
+
+impl RuntimeAliasMember {
+    /// The member cache key whose lineage the private-owner rule reads for
+    /// `spelling`: the member a runtime alias names, current or not, else
+    /// the member the decoded spelling names.
+    fn member_key<'a>(&'a self, spelling: &'a str) -> &'a str {
+        match self {
+            Self::Current(member_key)
+            | Self::NotCurrent(Some(member_key))
+            | Self::NotAnAlias(member_key) => member_key,
+            Self::NotCurrent(None) => spelling,
+        }
+    }
 }
 
 /// An immutable per-request snapshot of one principal's access.
@@ -909,6 +964,9 @@ pub struct AccessView {
     config: Arc<AccessControlConfig>,
     principal: AccessPrincipal,
     is_admin: bool,
+    /// The private-owner key this caller owns private agents under
+    /// ([`super::PRIVATE_TO_LABEL`]); `None` for a caller who owns none.
+    private_owner_key: Option<String>,
 }
 
 impl AccessView {
@@ -927,6 +985,47 @@ impl AccessView {
 
     pub fn is_admin(&self) -> bool {
         self.is_admin
+    }
+
+    /// The private-owner key this caller owns private agents under
+    /// ([`super::PRIVATE_TO_LABEL`]), if any.
+    pub fn private_owner_key(&self) -> Option<&str> {
+        self.private_owner_key.as_deref()
+    }
+
+    /// The controller this view was taken from, for the attribute priming
+    /// its decisions read.
+    pub(crate) fn controller(&self) -> AccessController {
+        AccessController {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Whether the private-owner rule keeps this caller out of an agent whose
+    /// lineage is `lineage`: a link of it is private to a person
+    /// ([`super::PRIVATE_TO_LABEL`]) whose key is not this caller's, and the
+    /// caller is not an admin. A link whose attributes are not known names
+    /// no owner.
+    fn private_owner_hides(&self, lineage: &[LineageLink]) -> bool {
+        !self.is_admin
+            && lineage.iter().any(|link| {
+                link.attributes
+                    .as_deref()
+                    .and_then(|attributes| private_owner(&attributes.labels))
+                    .is_some_and(|owner| self.private_owner_key.as_deref() != Some(owner))
+            })
+    }
+
+    /// Whether this caller may not know `identity` exists: the agent, or a
+    /// link of its lineage, is private to another person
+    /// ([`super::PRIVATE_TO_LABEL`]) and the caller is not an admin. Every
+    /// agent action on it is denied, configuration or not, and a console
+    /// answers the caller as for an unknown agent, never as access denied. A
+    /// runtime alias is judged as the member it names, current or not. An
+    /// agent the attribute cache does not know names no owner.
+    pub fn hides_agent(&self, identity: &str) -> bool {
+        let alias = self.runtime_alias_member(identity);
+        self.private_owner_hides(&self.lineage_for(alias.member_key(identity)))
     }
 
     /// The approver identities this principal holds in this snapshot of the
@@ -996,7 +1095,15 @@ impl AccessView {
     /// that chain refuses. A lineage deeper than the walk's bound (the agent
     /// and seven ancestors) is refused: a deny on an ancestor past the bound
     /// would not be seen.
+    ///
+    /// Before all of this, with the configuration enabled or not, an agent
+    /// this caller may not know of ([`Self::hides_agent`]) is denied.
     pub fn decide_agent(&self, action: &str, identity: &str) -> AccessDecision {
+        let alias = self.runtime_alias_member(identity);
+        let lineage = self.lineage_for(alias.member_key(identity));
+        if self.private_owner_hides(&lineage) {
+            return private_owner_denial(identity);
+        }
         if !self.config.enabled {
             return AccessDecision::Allow;
         }
@@ -1005,9 +1112,8 @@ impl AccessView {
         // incarnation; a stale or unknown generation is refused rather than
         // judged as a name no rule describes. An admin passes, as for any
         // resource.
-        let member;
-        let identity = match self.runtime_alias_member(identity) {
-            RuntimeAliasMember::NotAnAlias => identity,
+        let identity = match &alias {
+            RuntimeAliasMember::NotAnAlias(member_key) => member_key.as_str(),
             RuntimeAliasMember::Current(member_key) => {
                 // A deny written against the requested spelling still holds.
                 if let Some(rule) = super::engine::matching_deny_rule(
@@ -1020,11 +1126,10 @@ impl AccessView {
                         reason: format!("denied by rule {rule}"),
                     };
                 }
-                member = member_key;
-                member.as_str()
+                member_key.as_str()
             }
-            RuntimeAliasMember::NotCurrent if self.is_admin => return AccessDecision::Allow,
-            RuntimeAliasMember::NotCurrent => {
+            RuntimeAliasMember::NotCurrent(_) if self.is_admin => return AccessDecision::Allow,
+            RuntimeAliasMember::NotCurrent(_) => {
                 return AccessDecision::Deny {
                     reason: format!(
                         "{identity} does not name the current incarnation of a known member"
@@ -1032,7 +1137,6 @@ impl AccessView {
                 };
             }
         };
-        let lineage = self.lineage_for(identity);
         if lineage.is_empty() {
             return self.decide(action, &AccessResource::for_identity(identity));
         }
@@ -1047,16 +1151,21 @@ impl AccessView {
     /// labels therefore never come from the alias-keyed shared cache, where a
     /// later incarnation of the same alias could otherwise replace the
     /// authority being evaluated. Trusted cached ancestors still participate
-    /// in spawn-lineage inheritance.
+    /// in spawn-lineage inheritance. The private-owner rule reads the
+    /// snapshot's labels and the cached ancestors', as
+    /// [`Self::decide_agent`] reads the cached ones.
     pub(crate) fn decide_agent_with_attributes(
         &self,
         action: &str,
         attributes: &AgentResourceAttributes,
     ) -> AccessDecision {
+        let lineage = self.lineage_for_attributes(attributes);
+        if self.private_owner_hides(&lineage) {
+            return private_owner_denial(&attributes.identity);
+        }
         if !self.config.enabled {
             return AccessDecision::Allow;
         }
-        let lineage = self.lineage_for_attributes(attributes);
         self.decide_agent_lineage(action, attributes.identity.as_str(), &lineage)
     }
 
@@ -1111,17 +1220,22 @@ impl AccessView {
     /// a known identity (with that member's cache key), or a runtime alias
     /// that is stale, unknown, or malformed.
     fn runtime_alias_member(&self, key: &str) -> RuntimeAliasMember {
-        let (namespace, alias) = match key.rfind("/rt:") {
+        // A console namespace (`<namespace>/<identity>`) keeps its prefix: an
+        // identity holds no `/`, so the last one ends the namespace.
+        let (namespace, alias) = match key.rfind('/') {
             Some(at) => (Some(&key[..at]), &key[at + 1..]),
             None => (None, key),
         };
         let alias = crate::member_comms_id::runtime_alias_str(alias);
         if !crate::member_comms_id::is_reserved_generated_alias(&alias) {
-            return RuntimeAliasMember::NotAnAlias;
+            return RuntimeAliasMember::NotAnAlias(match namespace {
+                Some(namespace) => format!("{namespace}/{alias}"),
+                None => alias.into_owned(),
+            });
         }
         let Some(durable) = crate::member_comms_id::durable_identity_from_runtime_alias(&alias)
         else {
-            return RuntimeAliasMember::NotCurrent;
+            return RuntimeAliasMember::NotCurrent(None);
         };
         let (member_key, alias_key) = match namespace {
             Some(namespace) => (
@@ -1140,7 +1254,7 @@ impl AccessView {
         if current {
             RuntimeAliasMember::Current(member_key)
         } else {
-            RuntimeAliasMember::NotCurrent
+            RuntimeAliasMember::NotCurrent(Some(member_key))
         }
     }
 
@@ -1152,9 +1266,9 @@ impl AccessView {
     /// and as unknown otherwise.
     pub(crate) fn lineage_links(&self, identity: &str) -> usize {
         match self.runtime_alias_member(identity) {
-            RuntimeAliasMember::NotAnAlias => self.lineage_for(identity).len(),
-            RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
-            RuntimeAliasMember::NotCurrent => 0,
+            RuntimeAliasMember::NotAnAlias(member_key)
+            | RuntimeAliasMember::Current(member_key) => self.lineage_for(&member_key).len(),
+            RuntimeAliasMember::NotCurrent(_) => 0,
         }
     }
 
@@ -1270,7 +1384,29 @@ impl AccessView {
     ///
     /// So a relabel never reveals a record its captured attributes hide, and
     /// a member relabelled into a denied class hides its earlier records.
+    ///
+    /// Before all of this, with the configuration enabled or not, a record
+    /// whose captured lineage names a private owner other than this caller
+    /// ([`super::PRIVATE_TO_LABEL`]), or whose member this caller may not
+    /// know of now ([`Self::hides_agent`]), is refused to everyone but an
+    /// admin.
     pub(crate) fn can_view_captured_member(&self, lineage: &[CapturedLineageLink]) -> bool {
+        if !self.is_admin
+            && lineage.iter().any(|link| {
+                link.attributes
+                    .as_ref()
+                    .and_then(|attributes| private_owner(&attributes.labels))
+                    .is_some_and(|owner| self.private_owner_key.as_deref() != Some(owner))
+            })
+        {
+            return false;
+        }
+        if lineage
+            .first()
+            .is_some_and(|own| self.hides_agent(&own.identity))
+        {
+            return false;
+        }
         if !self.config.enabled {
             return true;
         }
@@ -1365,18 +1501,18 @@ impl AccessView {
     /// member attributes (written before they were captured, or with no
     /// confirmed incarnation). Any applicable deny the bare identity cannot
     /// decide refuses it (fails closed); otherwise it is decided as the
-    /// identity, as before, so allow rules keep their behaviour.
+    /// identity, as before, so allow rules keep their behaviour. A member
+    /// this caller may not know of ([`Self::hides_agent`]) is refused with
+    /// the configuration enabled or not.
     pub(crate) fn can_view_uncaptured_member(&self, identity: &str) -> bool {
-        if !self.config.enabled {
-            return true;
-        }
-        if super::engine::deny_undecidable_by_identity(
-            &self.config,
-            &self.principal,
-            ACTION_AGENT_VIEW,
-            identity,
-        )
-        .is_some()
+        if self.config.enabled
+            && super::engine::deny_undecidable_by_identity(
+                &self.config,
+                &self.principal,
+                ACTION_AGENT_VIEW,
+                identity,
+            )
+            .is_some()
         {
             return false;
         }
@@ -1411,6 +1547,8 @@ impl AccessView {
     /// the one-time subscribe prime and re-prime the cache before deciding, so
     /// the deny resolves against real attributes instead of failing open.
     pub fn knows_agent(&self, identity: &str) -> bool {
+        let alias = self.runtime_alias_member(identity);
+        let identity = alias.member_key(identity);
         let cache = self
             .inner
             .attributes
@@ -1420,6 +1558,17 @@ impl AccessView {
             || cache
                 .values()
                 .any(|attributes| attributes.agent_id.as_deref() == Some(identity))
+    }
+
+    /// Whether a console with sign-in withholds from this caller the member
+    /// `identity` names because the attribute cache does not know it: a
+    /// member that ended before this process read who it was private to may
+    /// have been private, so a signed-in caller who is not an admin is shown
+    /// no memory scope of it and attaches no session of it. An anonymous
+    /// caller of a console without sign-in, and an admin, are withheld
+    /// nothing for it.
+    pub(crate) fn withholds_unknown_member(&self, identity: &str) -> bool {
+        self.principal.subject.is_some() && !self.is_admin && !self.knows_agent(identity)
     }
 
     /// Can this principal read and edit the access configuration?
@@ -1448,17 +1597,25 @@ impl std::fmt::Debug for AccessView {
             .field("groups", &self.principal.groups)
             .field("is_admin", &self.is_admin)
             .field("enforced", &self.config.enabled)
+            .field("owns_private_agents", &self.private_owner_key.is_some())
             .finish()
+    }
+}
+
+/// The decision on an agent the private-owner rule keeps from the caller.
+/// Its reason names nothing the caller may not know: the agent is answered
+/// as unknown.
+fn private_owner_denial(identity: &str) -> AccessDecision {
+    AccessDecision::Deny {
+        reason: format!("unknown identity: {identity}"),
     }
 }
 
 impl AccessView {
     /// This principal's view under the configuration committed now.
     pub(crate) fn refreshed(&self) -> AccessView {
-        AccessController {
-            inner: Arc::clone(&self.inner),
-        }
-        .view_for_subject(self.subject())
+        self.controller()
+            .view_for_caller(self.subject(), self.private_owner_key())
     }
 }
 
@@ -3340,5 +3497,148 @@ mod tests {
             ),
             Err(AccessPublicationAlreadyJoined)
         );
+    }
+
+    /// An agent private to one person, and every agent of its lineage below
+    /// it, is denied for every agent action to every caller but that person
+    /// and the admins, and hidden from them, with the configuration disabled
+    /// or enabled. The audience-only controller of a console without access
+    /// control decides it too. Its source, and a member that names no owner,
+    /// are decided as before.
+    #[test]
+    fn a_private_owner_label_binds_every_agent_action_with_or_without_access_config() {
+        let everyone_drives = |enabled: bool| {
+            AccessController::new(AccessControlConfig {
+                enabled,
+                admins: vec!["root@example.test".to_string()],
+                rules: vec![AccessRule {
+                    id: "everyone-drives-every-agent".to_string(),
+                    subjects: vec!["*".to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..AccessRule::default()
+                }],
+                ..AccessControlConfig::default()
+            })
+            .expect("controller")
+        };
+        let record = |controller: &AccessController, identity: &str, labels: &[(&str, &str)]| {
+            controller.record_agent_attributes(AgentResourceAttributes {
+                identity: identity.to_string(),
+                agent_id: Some(identity.to_string()),
+                role: Some("worker".to_string()),
+                labels: labels
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect(),
+            });
+        };
+        let private_to = crate::access::PRIVATE_TO_LABEL;
+        for controller in [
+            everyone_drives(false),
+            everyone_drives(true),
+            AccessController::audience_only(),
+        ] {
+            let enforced = controller.enabled();
+            record(&controller, "alpha", &[]);
+            record(
+                &controller,
+                "alpha-side",
+                &[
+                    (crate::side_chat::SIDE_CHAT_OF_LABEL, "alpha"),
+                    (private_to, "owner-key"),
+                ],
+            );
+            record(
+                &controller,
+                "helper",
+                &[(crate::console_spawn::SPAWNED_BY_LABEL, "alpha-side")],
+            );
+            record(
+                &controller,
+                "shared-side",
+                &[
+                    (crate::side_chat::SIDE_CHAT_OF_LABEL, "alpha"),
+                    (private_to, ""),
+                ],
+            );
+            let owner = controller.view_for_caller(Some("alice@example.test"), Some("owner-key"));
+            let other = controller.view_for_caller(Some("bob@example.test"), Some("other-key"));
+            let keyless = controller.view_for_subject(Some("carol@example.test"));
+            let anonymous = controller.view_for_caller(None, None);
+            let admin = controller.view_for_subject(Some("root@example.test"));
+            for identity in ["alpha-side", "helper"] {
+                for action in [
+                    ACTION_AGENT_VIEW,
+                    crate::access::ACTION_AGENT_SEND,
+                    crate::access::ACTION_AGENT_RETIRE,
+                    crate::access::ACTION_AGENT_MEMORY_READ,
+                ] {
+                    assert!(owner.allows_agent(action, identity), "{identity} {action}");
+                    for caller in [&other, &keyless, &anonymous] {
+                        assert!(
+                            !caller.allows_agent(action, identity),
+                            "{identity} {action} {caller:?}"
+                        );
+                    }
+                    // The admins see it: a configuration names them; the
+                    // audience-only controller has none.
+                    assert_eq!(
+                        admin.allows_agent(action, identity),
+                        !controller.snapshot().0.admins.is_empty(),
+                        "{identity} {action}"
+                    );
+                }
+                assert!(!owner.hides_agent(identity));
+                assert!(other.hides_agent(identity) && anonymous.hides_agent(identity));
+                let fence = controller.decision_fence(Some("bob@example.test"), Some("other-key"));
+                assert!(!fence.can_view_agent(identity), "{identity}");
+                drop(fence);
+                let fence =
+                    controller.decision_fence(Some("alice@example.test"), Some("owner-key"));
+                assert!(fence.can_view_agent(identity), "{identity}");
+                drop(fence);
+            }
+            assert!(
+                !other.hides_agent("alpha") && other.can_view_agent("alpha"),
+                "the source stays shared"
+            );
+            assert!(
+                !other.hides_agent("shared-side") && other.can_view_agent("shared-side"),
+                "a side chat private to no one is shared"
+            );
+            assert_eq!(
+                anonymous.can_view_agent("alpha"),
+                !enforced,
+                "an anonymous caller gets what the configuration gives it"
+            );
+
+            // Exact attributes and captured lineages carry the owner too.
+            let attributes = AgentResourceAttributes {
+                identity: "alpha-side".to_string(),
+                agent_id: Some("alpha-side".to_string()),
+                role: Some("worker".to_string()),
+                labels: BTreeMap::from([(private_to.to_string(), "owner-key".to_string())]),
+            };
+            assert!(
+                owner
+                    .decide_agent_with_attributes(ACTION_AGENT_VIEW, &attributes)
+                    .is_allow()
+            );
+            assert!(
+                !other
+                    .decide_agent_with_attributes(ACTION_AGENT_VIEW, &attributes)
+                    .is_allow()
+            );
+            let captured = [CapturedLineageLink {
+                identity: "gone-side".to_string(),
+                attributes: Some(AgentResourceAttributes {
+                    identity: "gone-side".to_string(),
+                    ..attributes.clone()
+                }),
+            }];
+            assert!(owner.can_view_captured_member(&captured));
+            assert!(!other.can_view_captured_member(&captured));
+        }
     }
 }

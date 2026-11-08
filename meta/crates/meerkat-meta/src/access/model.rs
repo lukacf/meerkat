@@ -105,6 +105,37 @@ pub const ACTION_AUDIT_VIEW: &str = "audit.view";
 /// Read and mutate the access-control configuration itself.
 pub const ACTION_ACCESS_ADMIN: &str = "access.admin";
 
+/// The console label that makes a member private to one person: its value is
+/// that person's private-owner key, the opaque caller scope
+/// `meta/console/whoami` reports to a signed-in person (`caller_scope`).
+///
+/// A member whose console labels, or the labels of any link of its lineage
+/// (its spawners, a side chat's source), carry a non-blank value is visible
+/// to that person and to the access admins (`admins`) only, for every agent
+/// action, whether or not an access configuration is installed or enabled.
+/// Every other caller is answered as for an unknown member. Only Meta writes
+/// it on a roster: on a side chat at fork, and on every member a private
+/// member's own turn spawns or a fork of it seats, which gets its owner; or
+/// the host declares it. Every caller label path refuses it
+/// (`crate::member_comms_id::RESERVED_AUTHORITY_LABELS`), so the label on a
+/// member's own roster row is its owner, after the member that passed it
+/// on retired too.
+pub const PRIVATE_TO_LABEL: &str = "console.private_to";
+
+/// The private-owner key `labels` name: the non-blank [`PRIVATE_TO_LABEL`].
+pub(crate) fn private_owner(labels: &BTreeMap<String, String>) -> Option<&str> {
+    labels
+        .get(PRIVATE_TO_LABEL)
+        .map(|owner| owner.trim())
+        .filter(|owner| !owner.is_empty())
+}
+
+/// The private owner of a member whose retirement the memory store recorded
+/// as private when no record names the person it was private to (it ended
+/// before this process read who its members belong to): a key no caller's
+/// scope equals, so it is hidden from everyone but the access admins.
+pub(crate) const UNKNOWN_PRIVATE_OWNER: &str = "console-caller:v1:unknown";
+
 /// The full action vocabulary, in display order.
 pub const ACCESS_ACTIONS: &[&str] = &[
     #[cfg(feature = "extension-state")]

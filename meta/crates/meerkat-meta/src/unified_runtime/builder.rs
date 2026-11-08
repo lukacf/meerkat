@@ -2072,6 +2072,16 @@ impl UnifiedRuntimeBuilder {
             )
         });
         let agent_customizer = self.composed_agent_customizer(agent_memory_provider.clone());
+        // A console side chat inherits its source's tool overlay, recorder
+        // included: every member build binds a side chat's `memory` tool to
+        // the side chat's own identity with this provider, on the classic
+        // and the identity-first path alike.
+        if let Some(provider) = agent_memory_provider.as_ref() {
+            mob_spec.side_chat_memory_slot().fill(
+                provider.clone(),
+                self.agent_memory_config.clone().unwrap_or_default(),
+            );
+        }
 
         // Classic (roster-less) agent memory: register the per-spawn memory
         // customizer on the mob runtime itself, so every member spawn —
@@ -2626,6 +2636,7 @@ impl UnifiedRuntimeBuilder {
                     persistent_state,
                     transcript_store,
                     event_sink: Some(runtime.memory_event_sink()),
+                    private_members: Some(runtime.mob_runtime.private_member_source()),
                     ..Default::default()
                 },
                 self.provider_auth_persistence.clone(),
@@ -2633,6 +2644,14 @@ impl UnifiedRuntimeBuilder {
             .map_err(UnifiedRuntimeBuilderError::Io)?;
             if let Some(panel) = stack.panel.clone() {
                 runtime.set_memory_panel_store(panel);
+            }
+            // The retirements the memory store recorded as private are part
+            // of the private-owner record's durable reads.
+            if let Some(store) = stack.steward_store.clone() {
+                runtime
+                    .mob_runtime
+                    .private_owners()
+                    .bind_private_retirements(store, config.realm.clone());
             }
             // §10.1 dispatch-time taint join: bind the stack's tracker into
             // the member pre-build seam so every member's LLM client marks

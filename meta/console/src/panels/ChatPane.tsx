@@ -48,6 +48,7 @@ import {
 } from "@console-components";
 import type { ConsoleAgent } from "../types";
 import { responsePhaseWords } from "../lib/agents";
+import { sideChatAudienceText } from "../lib/side-chat";
 import type { LiveSpeechItem } from "../lib/voice-session";
 import { VoiceButton } from "./VoiceBar";
 import { humanizeEnum } from "../../../packages/console-components/src/panel-kit/format";
@@ -2543,6 +2544,8 @@ export function ChatPane({
       publishDraft();
     }
   };
+  // Who may see this side chat, as the server decided it for this viewer.
+  const sideChatAudience = sideChatOfLabel ? sideChatAudienceText(agent, sideChatOfLabel) : null;
 
   return (
     <ConversationPresentationProvider labels={presentationLabels} viewportKey={viewportKey} autoFold={scroll.mode === "following-end"}>
@@ -2583,6 +2586,12 @@ export function ChatPane({
           <span className="conv__notice-icon" aria-hidden="true"><Icon name="i-branch" /></span>
           <span className="conv__notice-text">
             Side chat of <strong><SideChatSourceName id={agent?.side_chat_of} label={sideChatOfLabel} /></strong>. It started from the agent's conversation; the agent itself is unchanged.
+            {sideChatAudience ? (
+              <>
+                {" "}
+                <span data-testid={`side-chat-audience:${identity}`}>{sideChatAudience}</span>
+              </>
+            ) : null}
           </span>
           {onCloseSideChat ? (
             <Button size="sm" className="conv__notice-action" icon={<Icon name="i-close" />} onClick={onCloseSideChat}

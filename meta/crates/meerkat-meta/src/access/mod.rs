@@ -26,6 +26,14 @@
 //! 3. Otherwise the matching rules decide: any matching `deny` rule denies,
 //!    else any matching `allow` rule allows, else the check denies.
 //!
+//! One rule holds before all of these and needs no configuration: an agent
+//! private to one person ([`PRIVATE_TO_LABEL`]: a side chat opened on a
+//! console with sign-in, and the members its own turn creates or forks) is
+//! denied for every agent action to everyone but that person and the
+//! `admins`, with the config disabled or enabled, and
+//! [`AccessView::hides_agent`] says so, so the console answers as for an
+//! unknown agent.
+//!
 //! # Live configuration
 //!
 //! [`AccessController`] is the shared handle: it holds the current config
@@ -60,6 +68,7 @@ pub use model::{
     ACTION_TOPOLOGY_RECONNECT, ACTION_TOPOLOGY_VIEW, ACTION_WORKGRAPH_MANAGE,
     ACTION_WORKGRAPH_VIEW, AccessApprover, AccessApproverPerson, AccessConfigError,
     AccessControlConfig, AccessEffect, AccessGroup, AccessIngressSubject, AccessRule,
-    OPERATOR_INGRESS, normalize_access_config_for_memory_actions,
+    OPERATOR_INGRESS, PRIVATE_TO_LABEL, normalize_access_config_for_memory_actions,
     normalize_access_config_for_schedule_actions, validate_access_config,
 };
+pub(crate) use model::{UNKNOWN_PRIVATE_OWNER, private_owner};

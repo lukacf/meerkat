@@ -18,6 +18,7 @@ pub mod hygienist;
 pub mod records;
 pub mod review;
 pub mod secrets;
+pub(crate) mod side_chat_memory;
 pub mod spawn_customizer;
 pub mod sqlite_store;
 pub mod staged;

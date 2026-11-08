@@ -1246,6 +1246,15 @@ them.
   a host reports its own operation's waits (a governed input's "not now"
   waits) to the operation refusal observer it installed.
 
+- `meerkat-mob`: `MobBuilder::with_member_tool_audience` takes a host's
+  `MemberToolAudience`, the host's rule for the members of the mob that
+  another member's own mob operator tools may not know of. The member tools
+  `member_status`, `retire_member` and `force_cancel_member` answer a member
+  it hides from the calling member exactly as a member the mob does not
+  hold (`member_not_found`), for a caller with manage scope too, and do
+  nothing to it. Without an audience every member is known to every
+  member's tools, as before.
+
 ### Changed
 
 - `meerkat-mcp`: an MCP server released at sign-out whose re-add after the
@@ -1526,6 +1535,20 @@ them.
   its historical admission callback) panics, naming `publication.writer`, so
   a host whose admission callback takes it there fails in a debug build.
   Release builds check nothing.
+
+- `meerkat-mob`: a member seated exempt from the definition's wiring rules
+  (`SpawnMemberSpec::definition_wiring`, `DefinitionWiring::Exempt`) is
+  also outside the definition's role-wide flow dispatch: a role-wide step
+  never dispatches to it, a flow's supervisor escalation never picks it,
+  and a role whose only Active members are exempt gets a provisioned flow
+  member. A run whose role targets name it still dispatches to it.
+
+- `meerkat-mob`: a durable fork of a member seated exempt from the
+  definition's wiring rules is seated exempt too, whatever seating its
+  spawn request states (`MobHandle::fork_member`, an agent's `fork_off`
+  child, a temporary council's local participant, and the live delegation
+  worker `MobHandle::fork_member_at_turn_boundary` seats). A fork of a
+  member the rules apply to keeps the seating its request states.
 
 ### Deprecated
 
@@ -2083,6 +2106,12 @@ them.
   conflict, and keeps the field unchanged through compare-and-swap, as the
   bundled stores do; `requester: None` keeps a struct literal compiling, not
   a store correct.
+
+- A Rust host that seats members `DefinitionWiring::Exempt` and wants them
+  to take part in a flow's role-wide steps names them in the run's role
+  targets (`MobHandle::run_flow_with_role_targets`). The forks of such a
+  member are seated exempt as well; a host that wants a fork wired by the
+  definition wires it explicitly.
 
 ### Known limitations
 

@@ -20,9 +20,21 @@ use crate::live_wiring::{
 
 pub(crate) struct ConsoleLiveGrant {
     pub principal: String,
+    /// The private-owner key of the person the grant was made for
+    /// ([`crate::access::PRIVATE_TO_LABEL`]): they own the agents private to
+    /// them, so a voice on their own private side chat passes the grant's
+    /// access checks. `None` for every other caller.
+    pub private_owner_key: Option<String>,
     pub identity: meerkat_mob::AgentIdentity,
     pub session: SessionId,
     pub revoked: AtomicBool,
+}
+
+impl ConsoleLiveGrant {
+    /// The grant's access view under `access`'s current configuration.
+    pub(crate) fn access_view(&self, access: &AccessController) -> crate::access::AccessView {
+        access.view_for_caller(Some(&self.principal), self.private_owner_key.as_deref())
+    }
 }
 
 #[derive(Default)]
@@ -32,6 +44,7 @@ impl GrantRegistry {
     fn register(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: meerkat_mob::AgentIdentity,
         session: SessionId,
     ) -> Result<Arc<ConsoleLiveGrant>, VoiceError> {
@@ -47,6 +60,7 @@ impl GrantRegistry {
             // only the separate open-request fence enforces channel exclusivity.
             return if !existing.revoked.load(Ordering::SeqCst)
                 && existing.principal == principal
+                && existing.private_owner_key.as_deref() == private_owner_key
                 && existing.identity == identity
             {
                 Ok(existing)
@@ -57,6 +71,7 @@ impl GrantRegistry {
         grants.retain(|_, grant| grant.strong_count() > 0);
         let grant = Arc::new(ConsoleLiveGrant {
             principal: principal.to_string(),
+            private_owner_key: private_owner_key.map(str::to_string),
             identity,
             session: session.clone(),
             revoked: AtomicBool::new(false),
@@ -106,10 +121,12 @@ impl ConsoleLiveBindingAuthority {
     pub(crate) fn register(
         &self,
         principal: &str,
+        private_owner_key: Option<&str>,
         identity: meerkat_mob::AgentIdentity,
         session: SessionId,
     ) -> Result<Arc<ConsoleLiveGrant>, VoiceError> {
-        self.grants.register(principal, identity, session)
+        self.grants
+            .register(principal, private_owner_key, identity, session)
     }
 
     fn for_session(
@@ -122,7 +139,7 @@ impl ConsoleLiveBindingAuthority {
             self.handle.clone(),
             Arc::clone(&self.machine),
             grant.identity.clone(),
-            self.access.view_for_subject(Some(&grant.principal)),
+            grant.access_view(&self.access),
             Arc::new(ConsoleBindingPolicy {
                 grant,
                 binding: self.binding.clone(),
@@ -254,25 +271,26 @@ mod tests {
         let session = SessionId::new();
         let identity = meerkat_mob::AgentIdentity::from("agent-a");
         assert!(matches!(
-            registry.register("", identity.clone(), session.clone()),
+            registry.register("", None, identity.clone(), session.clone()),
             Err(VoiceError::Unauthorized)
         ));
         let grant = registry
-            .register("alice", identity.clone(), session.clone())
+            .register("alice", None, identity.clone(), session.clone())
             .expect("owner");
         assert!(Arc::ptr_eq(
             &grant,
             &registry
-                .register("alice", identity.clone(), session.clone())
+                .register("alice", None, identity.clone(), session.clone())
                 .expect("same owner")
         ));
         assert!(matches!(
-            registry.register("bob", identity.clone(), session.clone()),
+            registry.register("bob", None, identity.clone(), session.clone()),
             Err(VoiceError::Busy)
         ));
         assert!(matches!(
             registry.register(
                 "alice",
+                None,
                 meerkat_mob::AgentIdentity::from("other"),
                 session.clone()
             ),
@@ -284,7 +302,52 @@ mod tests {
             "disposal revokes admission"
         );
         registry
-            .register("bob", identity, session)
+            .register("bob", None, identity, session)
             .expect("new owner after disposal");
+    }
+
+    /// A grant decides as the person it was made for: they own the agents
+    /// private to them, so a voice on their own private side chat passes
+    /// the grant's access checks, and a grant that names no owner does not.
+    #[test]
+    fn a_grant_decides_as_the_person_it_was_made_for() {
+        let access = AccessController::audience_only();
+        access.record_agent_attributes(crate::access::AgentResourceAttributes {
+            identity: "alpha-side".to_string(),
+            agent_id: Some("alpha-side".to_string()),
+            role: Some("worker".to_string()),
+            labels: std::collections::BTreeMap::from([(
+                crate::access::PRIVATE_TO_LABEL.to_string(),
+                "alice-key".to_string(),
+            )]),
+        });
+        let registry = GrantRegistry::default();
+        let identity = meerkat_mob::AgentIdentity::from("alpha-side");
+        let owned = registry
+            .register(
+                "alice",
+                Some("alice-key"),
+                identity.clone(),
+                SessionId::new(),
+            )
+            .expect("the owner's grant");
+        let keyless = registry
+            .register("alice", None, identity, SessionId::new())
+            .expect("a grant that names no owner");
+        for action in [
+            crate::access::ACTION_AGENT_VIEW,
+            crate::access::ACTION_AGENT_SEND,
+        ] {
+            assert!(
+                owned
+                    .access_view(&access)
+                    .allows_agent(action, "alpha-side")
+            );
+            assert!(
+                !keyless
+                    .access_view(&access)
+                    .allows_agent(action, "alpha-side")
+            );
+        }
     }
 }

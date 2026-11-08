@@ -49,6 +49,30 @@ export function sideChatSource(agent: ConsoleAgent | null | undefined): string |
 }
 
 /**
+ * The sentence that names who may see a side chat, from the audience the
+ * server decided for the viewer, else null when it named none. On a console
+ * with sign-in a side chat is private to the person who opened it (access
+ * admins see it too); on a console without sign-in, and for a side chat
+ * opened before side chats were private, everyone who may see its source
+ * sees it.
+ */
+export function sideChatAudienceText(
+  agent: ConsoleAgent | null | undefined,
+  sourceLabel: string,
+): string | null {
+  switch (agent?.side_chat_audience) {
+    case "private_to_you":
+      return "Private: only you and access admins can see it.";
+    case "private_to_creator":
+      return "Private to the person who opened it. You see it as an access admin.";
+    case "shared":
+      return `Shared: everyone who can see ${sourceLabel} can see it.`;
+    default:
+      return null;
+  }
+}
+
+/**
  * A fresh member alias for a side chat of `sourceIdentity`: the source's
  * identity, `-side-` and a nonce, kept out of the runtime-owned namespaces
  * (`rt:` generated aliases, `mk--` encoded roster ids).

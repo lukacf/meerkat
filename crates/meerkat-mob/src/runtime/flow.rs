@@ -616,14 +616,24 @@ impl FlowEngine {
         }
 
         // ── 4. Target selection ────────────────────────────────────────────
-        let runnable_role_members: Vec<AgentIdentity> = self
+        // A member seated exempt from the definition's wiring rules
+        // (`DefinitionWiring::Exempt`) is outside the shared topology, and
+        // outside role-wide steps too: only a role-targeted run that names
+        // it binds it.
+        let mut runnable_role_members: Vec<AgentIdentity> = Vec::new();
+        let mut role_wide_members: Vec<AgentIdentity> = Vec::new();
+        for entry in self
             .handle
             .list_runnable_members()
             .await
             .into_iter()
             .filter(|entry| entry.role == step.role)
-            .map(|entry| entry.agent_identity)
-            .collect();
+        {
+            if !entry.definition_wiring().is_exempt() {
+                role_wide_members.push(entry.agent_identity.clone());
+            }
+            runnable_role_members.push(entry.agent_identity);
+        }
         let mut targets: Vec<AgentIdentity> = match role_targets {
             // A role-targeted run: the candidates are exactly the members
             // admitted for this role that the same projection still lists as
@@ -664,7 +674,7 @@ impl FlowEngine {
                 available
             }
             None => {
-                let mut targets = runnable_role_members;
+                let mut targets = role_wide_members;
                 targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
                 targets
             }

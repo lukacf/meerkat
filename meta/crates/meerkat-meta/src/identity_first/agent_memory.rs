@@ -1582,15 +1582,36 @@ impl RecorderToolDispatcher {
         inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
         recorder: MemoryRecorder,
     ) -> Self {
+        Self::composed(inner, recorder, true)
+    }
+
+    /// The `memory` tool of `inner`, a build's tool overlay that already
+    /// carries one bound to another identity (a console side chat inherits
+    /// its source's overlay), bound to `recorder` instead: the inner `memory`
+    /// tool is replaced, and every other tool stays `inner`'s, in its order.
+    pub(crate) fn rebinding(
+        inner: Arc<dyn meerkat_core::agent::AgentToolDispatcher>,
+        recorder: MemoryRecorder,
+    ) -> Self {
+        Self::composed(Some(inner), recorder, false)
+    }
+
+    fn composed(
+        inner: Option<Arc<dyn meerkat_core::agent::AgentToolDispatcher>>,
+        recorder: MemoryRecorder,
+        warn_on_shadow: bool,
+    ) -> Self {
         let mut tools: Vec<Arc<meerkat_core::ToolDef>> = Vec::new();
         if let Some(inner) = inner.as_ref() {
             for tool in inner.tools().iter() {
                 if tool.name.as_ref() == MEMORY_TOOL_NAME {
-                    tracing::warn!(
-                        "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
-                         memory recorder; rename the external tool or disable \
-                         agent_memory.recorder_tool"
-                    );
+                    if warn_on_shadow {
+                        tracing::warn!(
+                            "external tool named '{MEMORY_TOOL_NAME}' is shadowed by the agent \
+                             memory recorder; rename the external tool or disable \
+                             agent_memory.recorder_tool"
+                        );
+                    }
                     continue;
                 }
                 tools.push(tool.clone());

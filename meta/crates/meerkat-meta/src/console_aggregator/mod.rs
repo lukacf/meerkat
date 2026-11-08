@@ -10170,13 +10170,14 @@ enum FrameProjection {
 /// - a member frame without it fails closed under any applicable deny its
 ///   bare identity cannot decide
 ///   ([`crate::access::AccessView::can_view_uncaptured_member`]).
+///
+/// With the access configuration enabled or not: a member private to
+/// another person ([`crate::access::PRIVATE_TO_LABEL`]) is hidden whatever
+/// the configuration says.
 pub(crate) fn timeline_frame_visible_to(
     view: &crate::access::AccessView,
     frame: &ConsoleFrame,
 ) -> bool {
-    if !view.enforced() {
-        return true;
-    }
     // An update marker cannot reveal a frame the same view hides.
     if frame.kind == "frame_updated" {
         let Some(value) = frame.payload.get("frame") else {
@@ -10222,11 +10223,13 @@ fn captured_lineage(
         // Lineage capture predates side chats, so a provenance captured
         // without it names a spawner at most: a `side_chat_of` (or side chat
         // creator) label a member carried then is an ordinary label, neither
-        // a parent nor a side chat's lineage.
+        // a parent nor a side chat's lineage, and a private owner, which Meta
+        // writes only since lineage capture exists, is none.
         let mut labels = record.labels.clone();
         labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL);
         labels.remove(crate::side_chat::SIDE_CHAT_CREATOR_LABEL);
+        labels.remove(crate::access::PRIVATE_TO_LABEL);
         let parent =
             crate::console_spawn::lineage_parent(&labels).map(|parent| parent.identity.to_string());
         let mut lineage = vec![crate::access::CapturedLineageLink {
@@ -10285,9 +10288,6 @@ impl TimelineFrameDecider {
     }
 
     pub(crate) fn visible(&self, frame: &ConsoleFrame) -> bool {
-        if !self.view.enforced() {
-            return true;
-        }
         // Update markers carry a second frame; they are decided whole.
         if frame.kind == "frame_updated" {
             return timeline_frame_visible_to(&self.view, frame);

@@ -2,11 +2,12 @@
 //! `reply_to_requester` answers says what happened to the reply.
 
 use meerkat_core::authorization::{
-    OperationAuthorizationError, OperationReviewTier, PreparedAuthorizationBinding,
-    PreparedOperationAuthorization,
+    AuthorizationOperation, OperationAuthorizationError, OperationAuthorizationFacts,
+    OperationReviewTier, PreparedAuthorizationBinding, PreparedOperationAuthorization,
+    PreparedOperationCheck, ToolAuthorizationFacts, ToolAuthorizationTarget,
 };
 use meerkat_core::types::ToolCallView;
-use meerkat_core::{AgentToolDispatcher, ToolDispatchContext};
+use meerkat_core::{AgentToolDispatcher, ToolDispatchContext, WorkAuthorizationContext};
 
 use super::binding::resolution;
 use super::*;
@@ -47,9 +48,9 @@ impl meerkat_core::WorkAuthorization for AdmitsAll {
     }
 }
 
-/// A dispatch in the approved work of `decision`: the work its terms name,
-/// for their requester, run by its branch.
-fn approved_work(fixture: &Fixture, decision: &DecisionId) -> ToolDispatchContext {
+/// The governed work of the approved work of `decision`: the work its terms
+/// name, for their requester, run by its branch.
+fn approved_work(fixture: &Fixture, decision: &DecisionId) -> WorkAuthorizationContext {
     let request = GrantChildRequest::of(&fixture.stored(decision)).expect("a grant.child request");
     let association = InputAuthorityAssociation::new(InputAuthorityAssociationCandidate {
         requester: request.terms.requester.clone(),
@@ -92,34 +93,63 @@ fn approved_work(fixture: &Fixture, decision: &DecisionId) -> ToolDispatchContex
     })
     .expect("the approved work's claims");
     let origin = GovernedPeerOrigin::from_associations([&association]).expect("origin");
-    let work = meerkat_core::WorkAuthorizationContext::new(
+    WorkAuthorizationContext::new(
         Arc::new(AdmitsAll),
         meerkat_core::OperationExecutionScope::Domain,
     )
-    .with_governed_send_origin(Some(origin.to_send_origin()));
-    ToolDispatchContext::default().with_work_authorization(Some(work))
+    .with_governed_send_origin(Some(origin.to_send_origin()))
 }
 
-/// What one `reply_to_requester` call of `text` answers in `context`: the
-/// result's JSON, or the error's payload.
+/// What one `reply_to_requester` call of `text` answers in `work`, dispatched
+/// as a fenced dispatch dispatches it: with its resolved plan and the call's
+/// operation prepared in the work, the call and the plan being the prepared
+/// ones. The result's JSON, or the error's payload.
 async fn reply(
     tools: &DecisionsToolDispatcher,
-    context: &ToolDispatchContext,
+    work: &WorkAuthorizationContext,
     id: &str,
     text: &str,
 ) -> Result<serde_json::Value, serde_json::Value> {
-    let args =
-        serde_json::value::to_raw_value(&serde_json::json!({ "text": text })).expect("arguments");
-    let call = ToolCallView {
-        id,
-        name: REPLY_TO_REQUESTER_TOOL,
-        args: &args,
-    };
+    let arguments: Arc<serde_json::value::RawValue> = Arc::from(
+        serde_json::value::to_raw_value(&serde_json::json!({ "text": text })).expect("arguments"),
+    );
+    let context = ToolDispatchContext::default().with_work_authorization(Some(work.clone()));
     let plan = tools
-        .resolve_execution_plan(call, context, &resolution())
+        .resolve_execution_plan(
+            ToolCallView {
+                id,
+                name: REPLY_TO_REQUESTER_TOOL,
+                args: &arguments,
+            },
+            &context,
+            &resolution(),
+        )
         .expect("the reply resolves its plan");
+    let prepared = PreparedOperationCheck::prepare(
+        work.clone(),
+        PreparedAuthorizationBinding::new(OperationAuthorizationFacts {
+            operation_id: meerkat_core::OperationId::new(),
+            execution_scope: work.execution_scope().clone(),
+            run_id: None,
+            context_revision: None,
+            operation: AuthorizationOperation::Tool(ToolAuthorizationFacts {
+                call_id: Arc::from(id),
+                name: REPLY_TO_REQUESTER_TOOL.into(),
+                arguments,
+                target: ToolAuthorizationTarget::Dispatcher(Arc::new(plan)),
+            }),
+        }),
+    )
+    .expect("the reply's operation is prepared in its work");
+    let AuthorizationOperation::Tool(tool) = &prepared.binding().facts().operation else {
+        panic!("a tool operation");
+    };
+    let ToolAuthorizationTarget::Dispatcher(plan) = &tool.target else {
+        panic!("a dispatched tool operation");
+    };
+    let context = context.__test_with_prepared_authorization(prepared.clone());
     match tools
-        .dispatch_resolved_with_context(call, context, &plan)
+        .dispatch_resolved_with_context(tool.call(), &context, plan)
         .await
     {
         Ok(outcome) => {
@@ -138,10 +168,10 @@ async fn a_reply_whose_delivery_failed_is_retried_with_its_text_and_never_called
     let fixture = Fixture::new();
     let decision = executed(&fixture).await;
     let tools = DecisionsToolDispatcher::new(fixture.grants.clone());
-    let context = approved_work(&fixture, &decision);
+    let work = approved_work(&fixture, &decision);
     // The route cannot deliver the first reply now.
     fixture.route.delivery_failures.store(1, Ordering::SeqCst);
-    let failed = reply(&tools, &context, "reply-1", ANSWER)
+    let failed = reply(&tools, &work, "reply-1", ANSWER)
         .await
         .expect_err("the delivery failed");
     assert_eq!(failed["error"], "execution_failed", "{failed}");
@@ -152,7 +182,7 @@ async fn a_reply_whose_delivery_failed_is_retried_with_its_text_and_never_called
     );
     assert!(fixture.route.delivered().is_empty());
     // Another text: the settled reply is not this one.
-    let another = reply(&tools, &context, "reply-2", ANOTHER_ANSWER)
+    let another = reply(&tools, &work, "reply-2", ANOTHER_ANSWER)
         .await
         .expect_err("another text is refused");
     assert_eq!(another["error"], "execution_failed", "{another}");
@@ -170,11 +200,11 @@ async fn a_reply_whose_delivery_failed_is_retried_with_its_text_and_never_called
     );
     assert!(fixture.route.delivered().is_empty());
     // The same text again is delivered, once.
-    let delivered = reply(&tools, &context, "reply-3", ANSWER)
+    let delivered = reply(&tools, &work, "reply-3", ANSWER)
         .await
         .expect("the same text is delivered");
     assert_eq!(delivered["delivered"], true, "{delivered}");
-    let again = reply(&tools, &context, "reply-4", ANSWER)
+    let again = reply(&tools, &work, "reply-4", ANSWER)
         .await
         .expect("the same text again answers the first delivery");
     assert_eq!(again["delivery"], delivered["delivery"]);

@@ -3909,6 +3909,39 @@ for (const path of [
   }
 }
 
+// The facade's MCP service-secret owner updates
+// (mcp_service_secrets::tests::owner_updates, a module compiled only with
+// session-store and local-authorization) run per change: in the facade's
+// own unit row on a pull request that changes the facade, and in main-unit's
+// facade row on every push that reaches Core. Both rows pass the facade's
+// test features, which hold both; a row without one compiles the module out,
+// and then only nightly's workspace unit lane ran it.
+{
+  const source = readFileSync(resolve(root, "crates/meerkat/src/mcp_service_secrets/tests.rs"), "utf8");
+  const gate = source.match(/#\[cfg\((all\([^\n]*\))\)\]\nmod owner_updates \{/);
+  assert.ok(gate, "mcp_service_secrets::tests holds the owner_updates module behind one cfg line");
+  const gated = [...gate[1].matchAll(/feature = "([^"]+)"/g)].map((match) => match[1]).sort();
+  assert.deepEqual(gated, ["local-authorization", "session-store"], "the owner_updates module's features");
+  const featuresOf = (flags) => {
+    const words = flags.split(/\s+/);
+    const at = words.indexOf("--features");
+    return at < 0 ? [] : words[at + 1].split(",");
+  };
+  const enables = (row, feature) => featuresOf(row.package_flags).some((entry) => entry === feature || entry === `meerkat/${feature}`);
+  const pullRequest = planFor(["crates/meerkat/src/mcp_service_secrets.rs"], ["--event", "pull_request"]);
+  const facadeRow = pullRequest.unit_shards.find((row) => row.packages.includes("meerkat"));
+  assert.ok(facadeRow, "a pull request that changes the facade runs the facade's unit row");
+  assert.match(facadeRow.targets, /--lib\b/, "the facade's unit row runs its lib tests");
+  const push = planFor(["crates/meerkat-core/src/lib.rs"], ["--event", "push"]);
+  const mainRow = push.main_unit_shards.find((row) => row.packages.includes("meerkat"));
+  assert.ok(mainRow, "a push that reaches Core runs the facade's lib tests in main-unit");
+  assert.match(mainRow.targets, /--lib\b/, "main-unit's facade row runs its lib tests");
+  for (const feature of gated) {
+    assert.ok(enables(facadeRow, feature), `the facade's pull-request unit row enables ${feature}: ${facadeRow.package_flags}`);
+    assert.ok(enables(mainRow, feature), `main-unit's facade row enables ${feature}: ${mainRow.package_flags}`);
+  }
+}
+
 // Bad arguments fail loudly.
 {
   const result = run(["--format", "yaml", "--", "crates/meerkat-core/src/lib.rs"]);

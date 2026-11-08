@@ -1816,10 +1816,10 @@ async fn linux_launch_procfs_is_read_only_and_shows_no_host_state() {
 
 /// Pid 1 of the launch's own pid namespace is the backend's minimal init,
 /// an executed image of its own: it carries no copy of the host's memory
-/// (the host here holds a 64 MiB heap), and it is not dumpable, so the
-/// command can open neither its memory, environment, mappings, root or
-/// executable, nor its status pipe, to read or to write. It is the custody
-/// PID itself. The command is pid 2.
+/// (the host here holds a 64 MiB heap) and none of the host's descriptors,
+/// and it is not dumpable, so the command can open neither its memory,
+/// environment, mappings, root or executable, nor its status pipe, to read
+/// or to write. It is the custody PID itself. The command is pid 2.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[cfg_attr(
@@ -1845,6 +1845,7 @@ async fn linux_launch_runs_under_a_minimal_init_of_its_own_pid_namespace() {
           if readlink /proc/1/fd/3 > /dev/null 2>&1; then printf 'readable=status\n'; fi
           if (exec 9> /proc/1/fd/3) 2> /dev/null; then printf 'writable=status\n'; fi
           if (exec 9< /proc/1/mem) 2> /dev/null; then printf 'readable=mem\n'; fi
+          ls /proc/1/fd > init-fds
         } > report
         printf ready > ready
         exec /bin/sleep 60
@@ -1855,6 +1856,7 @@ async fn linux_launch_runs_under_a_minimal_init_of_its_own_pid_namespace() {
     let custody = child.id().unwrap();
     fixture.ready("ready").await;
     let report = std::fs::read_to_string(fixture.work.join("report")).unwrap();
+    let init_descriptors = std::fs::read_to_string(fixture.work.join("init-fds")).unwrap();
     let namespaced = host_status_field(custody, "NSpid:");
     let resident_kib: u64 = host_status_field(custody, "VmRSS:")[0].parse().unwrap();
     child.kill().await.unwrap();
@@ -1868,6 +1870,14 @@ async fn linux_launch_runs_under_a_minimal_init_of_its_own_pid_namespace() {
         report,
         ["pid=2", "cmdline=meerkat-init", "comm=meerkat-init"],
         "the command is pid 2 under the backend's init, which it cannot inspect"
+    );
+    // The init runs with its status pipe (3) and, until it has released the
+    // command, which it closes right after, the release pipe (4): never with
+    // the host's stdin, stdout or stderr.
+    let init_descriptors: Vec<&str> = init_descriptors.split_whitespace().collect();
+    assert!(
+        init_descriptors == ["3"] || init_descriptors == ["3", "4"],
+        "the init's descriptors: {init_descriptors:?}"
     );
     assert_eq!(
         namespaced,
@@ -1926,6 +1936,72 @@ async fn linux_killing_the_custody_pid_ends_every_process_of_the_launch() {
     assert!(
         after.is_empty(),
         "processes of the launch outlived its custody PID: {after:?} of {before:?}"
+    );
+}
+
+/// A process the command leaves running ends when the command ends, even
+/// one that ignores SIGTERM and SIGHUP: the init exits once it has reaped
+/// the command, which ends its pid namespace, so the launch (and its
+/// output) ends with its command, never with its last process.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
+async fn linux_processes_the_command_leaves_running_end_with_it() {
+    let fixture = Fixture::new();
+    let started = std::time::Instant::now();
+    let output = fixture
+        .shell(
+            fixture.spec(),
+            "trap '' TERM HUP; /bin/sleep 30 & exit 0",
+            &[],
+        )
+        .await;
+    let elapsed = started.elapsed();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the launch outlived its command: {elapsed:?}"
+    );
+}
+
+/// The init reaps every process the launch orphans while the command still
+/// runs: an orphan that has ended is no zombie in the launch's procfs.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "Linux positive confinement acceptance lane; requires an eligible host"
+)]
+async fn linux_init_reaps_orphans_while_the_command_runs() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .shell(
+            fixture.spec(),
+            "(/bin/sleep 0.1 &); /bin/sleep 1; cat /proc/[0-9]*/stat",
+            &[],
+        )
+        .await;
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // (command name, state) of every process of the launch.
+    let states: Vec<(String, String)> = stdout
+        .lines()
+        .filter_map(|line| {
+            let (head, rest) = line.rsplit_once(')')?;
+            let name = head.split_once('(')?.1.to_owned();
+            Some((name, rest.split_whitespace().next()?.to_owned()))
+        })
+        .collect();
+    assert!(
+        states.iter().any(|(name, _)| name == "meerkat-init"),
+        "{stdout}"
+    );
+    assert!(
+        states.iter().all(|(_, state)| state != "Z"),
+        "an orphan was left a zombie while the command ran: {states:?}"
     );
 }
 

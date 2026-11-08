@@ -321,6 +321,12 @@ them.
   and a role whose only Active members are exempt gets a provisioned flow
   member. A run whose role targets name it still dispatches to it.
 
+- `meerkat-mob`: a durable fork of a member seated exempt from the
+  definition's wiring rules is seated exempt too, whatever seating its
+  spawn request states (`MobHandle::fork_member`, an agent's `fork_off`
+  child, a temporary council's local participant). A fork of a member the
+  rules apply to keeps the seating its request states.
+
 - `meerkat-runtime`: `DecisionExecutorLoop` claims the executor role of each
   decision kind it registers instead of the whole store, so two runtimes on
   one store each execute their own kinds. A kind another executor holds is
@@ -438,7 +444,9 @@ them.
 
 - A Rust host that seats members `DefinitionWiring::Exempt` and wants them
   to take part in a flow's role-wide steps names them in the run's role
-  targets (`MobHandle::run_flow_with_role_targets`).
+  targets (`MobHandle::run_flow_with_role_targets`). The forks of such a
+  member are seated exempt as well; a host that wants a fork wired by the
+  definition wires it explicitly.
 
 ### Known limitations
 

@@ -19040,12 +19040,16 @@ impl MobHandle {
                 super::session_service::durable_fork_unsupported(),
             ));
         }
-        let (role, labels) = {
+        let (role, labels, definition_wiring) = {
             let roster = self.roster.read().await;
             let entry = roster
                 .get(source_identity)
                 .ok_or_else(|| MobError::MemberNotFound(source_identity.clone()))?;
-            (entry.role.clone(), entry.labels.clone())
+            (
+                entry.role.clone(),
+                entry.labels.clone(),
+                entry.definition_wiring,
+            )
         };
         let (external_tools, external_tools_origin) = {
             let retained = self.per_spawn_external_tools.read().await;
@@ -19108,6 +19112,7 @@ impl MobHandle {
             labels,
             external_tools,
             external_tools_origin,
+            definition_wiring,
         );
         inheritance.creation_source = Some(creation_source);
         Ok((inheritance, app_context_from_fork_child))

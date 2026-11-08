@@ -6386,6 +6386,22 @@ mod tests {
         ) -> Result<Config, meerkat_core::ConfigError> {
             Err(meerkat_core::ConfigError::Validation("boom".to_string()))
         }
+
+        async fn set_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _config: Config,
+        ) -> Result<(), meerkat_core::ConfigError> {
+            Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+        }
+
+        async fn patch_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _delta: meerkat_core::ConfigDelta,
+        ) -> Result<Config, meerkat_core::ConfigError> {
+            Err(meerkat_core::ConfigError::Validation("boom".to_string()))
+        }
     }
 
     async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
@@ -6413,9 +6429,15 @@ mod tests {
         )
         .expect("compose the RPC session runtime");
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+        // A document's generation sidecar lies beside it, under the same
+        // admission fence; a store without a document keeps it here.
+        let state_path = config_store.admission_fence().map_or_else(
+            || temp.path().join("config_state.json"),
+            |fence| fence.directory().join("config_state.json"),
+        );
         runtime.set_config_runtime(Arc::new(ConfigRuntime::new(
             Arc::clone(&config_store),
-            temp.path().join("config_state.json"),
+            state_path,
         )));
         let runtime = Arc::new(runtime);
         let (notif_tx, notif_rx) = mpsc::channel(100);
@@ -20431,6 +20453,94 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         let set_req = make_request("config/set", serde_json::json!({ "config": config }));
         let set_resp = router.dispatch(set_req).await.unwrap();
         assert_eq!(error_code(&set_resp), error::INVALID_PARAMS);
+    }
+
+    /// The RPC router over `config_store` with no config runtime: config
+    /// writes go straight to the store.
+    async fn test_router_without_config_runtime(
+        config_store: Arc<dyn ConfigStore>,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime = SessionRuntime::new(
+            factory,
+            anthropic_test_config(),
+            10,
+            runtime_backed_persistence(store),
+            NotificationSink::noop(),
+        )
+        .expect("compose the RPC session runtime");
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient::anthropic())));
+        let (notif_tx, notif_rx) = mpsc::channel(100);
+        let router = MethodRouter::new(
+            Arc::new(runtime),
+            config_store,
+            NotificationSink::new(notif_tx),
+        )
+        .expect("construct runtime authority");
+        (router, notif_rx)
+    }
+
+    /// While an admission holds the realm document's fence, `config/set` and
+    /// `config/patch` refuse with the admission code (-32038) and write
+    /// nothing, through the config runtime and on the path without one.
+    #[tokio::test]
+    async fn config_writes_refuse_admission_in_progress_with_its_code() {
+        const ADMISSION_IN_PROGRESS: i32 = -32038;
+        let temp = tempfile::tempdir().unwrap();
+        let document = temp.path().join("realm").join("config.toml");
+        tokio::fs::create_dir_all(document.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&document, "max_tokens = 100\n")
+            .await
+            .unwrap();
+        let store: Arc<dyn ConfigStore> = Arc::new(meerkat_core::FileConfigStore::new(
+            document.clone(),
+            meerkat_models::canonical(),
+        ));
+        let (with_runtime, _rx) = test_router_with_config_store(Arc::clone(&store)).await;
+        let (without_runtime, _rx2) = test_router_without_config_runtime(Arc::clone(&store)).await;
+        let get = with_runtime
+            .dispatch(make_request_no_params("config/get"))
+            .await
+            .unwrap();
+        let mut replaced = result_value(&get)["config"].clone();
+        replaced["max_tokens"] = serde_json::json!(200);
+
+        let fence = store.admission_fence().unwrap();
+        fence.ensure_exists().unwrap();
+        let mut held = meerkat_core::AdmissionHold::try_acquire(vec![fence]).unwrap();
+        let set = || {
+            make_request(
+                "config/set",
+                serde_json::json!({ "config": replaced.clone() }),
+            )
+        };
+        let patch = || {
+            make_request(
+                "config/patch",
+                serde_json::json!({ "patch": { "max_tokens": 300 } }),
+            )
+        };
+        let (runtime_set, runtime_patch, store_set, store_patch) = tokio::join!(
+            with_runtime.dispatch(set()),
+            with_runtime.dispatch(patch()),
+            without_runtime.dispatch(set()),
+            without_runtime.dispatch(patch()),
+        );
+        for response in [runtime_set, runtime_patch, store_set, store_patch] {
+            assert_eq!(error_code(&response.unwrap()), ADMISSION_IN_PROGRESS);
+        }
+        assert_eq!(
+            tokio::fs::read_to_string(&document).await.unwrap(),
+            "max_tokens = 100\n"
+        );
+        held.release();
+
+        let patched = with_runtime.dispatch(patch()).await.unwrap();
+        assert_eq!(result_value(&patched)["config"]["max_tokens"], 300);
     }
 
     /// 12. `config/patch` merges a delta.

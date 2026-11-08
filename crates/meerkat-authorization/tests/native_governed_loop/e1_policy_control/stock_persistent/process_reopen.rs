@@ -128,6 +128,7 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("cold-controller"),
             principal("executor"),
@@ -137,6 +138,7 @@ async fn read_and_run_fresh_turn(root: &std::path::Path, cleanup: &CleanupSlot, 
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("cold-read-only"),
             principal("executor"),

@@ -15,6 +15,7 @@ fn issue(
             f.owner
                 .grants
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &intent.issuer,
                     intent.parent_lineage.last().unwrap(),
                     intent.id.clone(),
@@ -177,6 +178,7 @@ async fn account_selection_refuses_report_parent_and_retains_narrow_target_revoc
     f.owner
         .grants
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &account.issuer,
             account_lineage.last().unwrap(),
             &mut custody,
@@ -355,7 +357,12 @@ async fn public_request_child_is_independent_and_partial_settlement_recovers_the
         let mut custody = native.try_controller_grant_mutation().unwrap();
         f.owner
             .grants
-            .revoke(&public.issuer, public_lineage.last().unwrap(), &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &public.issuer,
+                public_lineage.last().unwrap(),
+                &mut custody,
+            )
             .unwrap();
         drop(custody);
         assert!(source.policy_source().is_ok());

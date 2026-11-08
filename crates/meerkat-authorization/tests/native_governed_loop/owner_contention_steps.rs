@@ -452,6 +452,7 @@ impl StepWorld {
         let issue_root = |name: &str, grantee: &str, restrictions| {
             grants
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("grant-owner"),
                     id(name),
                     principal(grantee),

@@ -506,6 +506,7 @@ async fn exercise_search(controller_server: &Server, helper_server: &Server, cas
     let issue = |name: &str, bounds: ExecutionRestrictions| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id(name),
                 principal("executor"),
@@ -619,7 +620,12 @@ async fn exercise_search(controller_server: &Server, helper_server: &Server, cas
                 }
             }
             grants
-                .revoke(&principal("grant-owner"), &lineage, &mut NoController)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &principal("grant-owner"),
+                    &lineage,
+                    &mut NoController,
+                )
                 .expect("revocation before the helper");
         })
     };

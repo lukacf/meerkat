@@ -67,6 +67,7 @@ fn helper_parent(fixture: &Fixture) -> GrantLineageRef {
     fixture
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("helper-parent"),
             who("helper-operator"),
@@ -306,16 +307,21 @@ fn host_facing_entries_that_never_wait_stay_unavailable_under_the_hold() {
             "{hold:?}: an owner change begun without waiting"
         );
         assert_eq!(
-            fixture
-                .grants
-                .issue_or_recover_child_under_exclusion(&intent, || Err(GrantRefusal::Denied)),
+            fixture.grants.issue_or_recover_child_under_exclusion(
+                &meerkat_core::AdmissionGuard::none(),
+                &intent,
+                || Err(GrantRefusal::Denied)
+            ),
             Err(ChildGrantRefusal::Unavailable),
             "{hold:?}: a host's child issuance"
         );
         assert_eq!(
-            fixture
-                .grants
-                .revoke(&who("root"), &fixture.controller, &mut NoControllerWork),
+            fixture.grants.revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &who("root"),
+                &fixture.controller,
+                &mut NoControllerWork
+            ),
             Err(GrantRefusal::Unavailable),
             "{hold:?}: a revocation"
         );

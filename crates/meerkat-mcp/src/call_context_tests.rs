@@ -815,3 +815,163 @@ async fn a_bound_server_without_its_preparation_is_refused_locally() {
     router.shutdown().await;
     fixture.finish(result).await;
 }
+
+/// A credential owner whose lease holds the publication a test sets: every
+/// request carries its bearer, and it states that publication for the
+/// target.
+pub(super) struct PublishingOwner {
+    publication: std::sync::Mutex<Option<meerkat_core::handles::CredentialLeasePublication>>,
+}
+
+impl PublishingOwner {
+    pub(super) fn holding(
+        publication: Option<meerkat_core::handles::CredentialLeasePublication>,
+    ) -> Self {
+        Self {
+            publication: std::sync::Mutex::new(publication),
+        }
+    }
+
+    /// The owner's lease now holds `publication`, or no credential.
+    pub(super) fn publish(
+        &self,
+        publication: Option<meerkat_core::handles::CredentialLeasePublication>,
+    ) {
+        *self.publication.lock().unwrap() = publication;
+    }
+}
+
+#[async_trait]
+impl McpAuthResolver for PublishingOwner {
+    async fn stored_bearer_token(
+        &self,
+        _target: &McpServerIdentity,
+    ) -> Result<Option<String>, meerkat_auth_core::McpOAuthError> {
+        Ok(Some("fixture-only-bearer".to_owned()))
+    }
+
+    async fn interactive_login(
+        &self,
+        target: &McpServerIdentity,
+        _www_authenticate: Option<&str>,
+    ) -> Result<String, meerkat_auth_core::McpOAuthError> {
+        Err(
+            meerkat_auth_core::McpOAuthError::HumanAuthorizationRequired {
+                server_name: target.server_name().to_owned(),
+            },
+        )
+    }
+
+    fn credential_publication(
+        &self,
+        _target: &McpServerIdentity,
+    ) -> Option<meerkat_core::handles::CredentialLeasePublication> {
+        self.publication.lock().unwrap().clone()
+    }
+}
+
+/// The publication of generation `generation` of one fixture lease.
+pub(super) fn lease_publication(
+    generation: u64,
+) -> meerkat_core::handles::CredentialLeasePublication {
+    let lease = meerkat_core::handles::LeaseKey::new(
+        meerkat_core::connection::RealmId::parse("team").unwrap(),
+        meerkat_core::BindingId::parse("mcp-fixture").unwrap(),
+        None,
+    );
+    meerkat_core::handles::CredentialLeasePublication::of(
+        lease,
+        &meerkat_core::handles::AuthLeaseSnapshot {
+            phase: None,
+            expires_at: None,
+            credential_present: true,
+            generation,
+            credential_published_at_millis: None,
+        },
+    )
+    .expect("a lease that holds a credential has a publication")
+}
+
+/// Records the lease publication each prepared call target names.
+struct PublicationProvider {
+    selected: McpServerConfig,
+    publications: std::sync::Mutex<Vec<Option<meerkat_core::handles::CredentialLeasePublication>>>,
+}
+
+#[async_trait]
+impl McpCallContextProvider for PublicationProvider {
+    async fn prepare(
+        &self,
+        target: McpCallTarget<'_>,
+        _: ToolCallView<'_>,
+        _: &ToolDispatchContext,
+    ) -> Result<Option<McpCallContext>, McpCallContextError> {
+        if target.config == &self.selected {
+            self.publications
+                .lock()
+                .unwrap()
+                .push(target.credential_publication);
+        }
+        Ok(None)
+    }
+}
+
+/// Each call target over an OAuth connection names the lease publication of
+/// the credential its requests carry, as the connection's credential owner
+/// states it when the call is prepared: a later publication is named by the
+/// calls after it, and none once the owner holds no credential.
+#[tokio::test]
+async fn call_target_records_the_lease_publication_used() {
+    let fixture = Fixture::start().await;
+    let config = fixture.config.clone();
+    let provider = Arc::new(PublicationProvider {
+        selected: config.clone(),
+        publications: Default::default(),
+    });
+    let owner = Arc::new(PublishingOwner::holding(Some(lease_publication(1))));
+    let mut router = McpRouter::new_with_surface_handle_and_stdio_profile(
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+        crate::McpStdioLaunchProfile::trusted_host(),
+    )
+    .with_mcp_auth(
+        McpAuthMode::Stored,
+        Some(owner.clone() as Arc<dyn McpAuthResolver>),
+    )
+    .with_call_context_provider(provider.clone());
+    tokio::time::timeout(LIMIT, router.add_server(config))
+        .await
+        .unwrap()
+        .unwrap();
+    let result = AssertUnwindSafe(async {
+        let args = serde_json::value::to_raw_value(&json!({"action":"ok"})).unwrap();
+        let call = ToolCallView {
+            id: "lease-publication",
+            name: "read",
+            args: &args,
+        };
+        router
+            .dispatch_with_context(call, &context())
+            .await
+            .unwrap();
+        owner.publish(Some(lease_publication(2)));
+        router
+            .dispatch_with_context(call, &context())
+            .await
+            .unwrap();
+        owner.publish(None);
+        router
+            .dispatch_with_context(call, &context())
+            .await
+            .unwrap();
+        assert_eq!(
+            *provider.publications.lock().unwrap(),
+            vec![Some(lease_publication(1)), Some(lease_publication(2)), None],
+            "each call target names the publication its owner held when it was prepared"
+        );
+        assert_eq!(fixture.server.requests.lock().unwrap().len(), 3);
+    })
+    .catch_unwind()
+    .await;
+    router.shutdown().await;
+    fixture.finish(result).await;
+}

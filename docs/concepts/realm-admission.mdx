@@ -1,0 +1,132 @@
+---
+title: "Realm Admission Fences"
+description: "How a realm's admission fences serialize writes of the files an admission reads, and what a refused write means."
+icon: "lock"
+---
+
+An admission reads a realm's configuration and authorization files and
+decides from them. A realm admission fence keeps those files still while it
+does: a fence is a lock file, `admission.lock`, in a directory whose files an
+admission reads. An admission holds its set of fences SHARED; a writer of one
+of those files takes its fence EXCLUSIVE first, so it waits for the admission
+to end, and writers of one fence exclude each other the same way. Fences are
+native only (`meerkat_core::realm_admission`); a browser runtime has none.
+They are a different mechanism from a governed helper's admission fence, the
+authorization check of the
+[authorization integration guide](/guides/authorization-integration).
+
+## The Fences
+
+| Fence | Directory | Covers |
+|-------|-----------|--------|
+| U, the user document fence | the user rkat root | the user-global `config.toml` and the `config_state.json` beside it |
+| C(r), a credential fence | `<credential root>/<r>` | the credentials a persisted credential store keeps for realm id `r`: the file and auto stores fence under their own root, a keychain store under the default one (`<config dir>/meerkat/credentials`); a process-local store has none |
+| R(p), a realm fence | `<state root>/<p>` | realm `p`'s own `config.toml` and `config_state.json`, and its `authorization/` files (the grant log and the stock selection) |
+| a fence beside a document | the document's directory | any other config document and the files beside it |
+
+Every fence file is `<directory>/admission.lock`. A realm fence is named by
+the realm layout (the id sanitized), and an id that is `.`, `..` or more than
+one path component is refused.
+
+## The Order
+
+An operation that takes more than one fence takes them in one global order:
+U, then C by realm id, then R from the chain root out to the head, then the
+fence beside a document. Every comparison is by bytes. Two realm fences go
+together only as a composed chain's (`AdmissionFence::realm_chain`, the one
+function that gives realm fences their chain positions), and a fence beside a
+document is only ever the one fence of its operation: a set that breaks
+either rule is refused with `ADMISSION_FENCE_UNAVAILABLE` before anything is
+locked.
+
+A fenced operation that waits for its fences takes them before any other lock
+it takes (a document's custody, a grant owner's administrative custody, a
+store's maintenance fence or a realm's leases), other than the config
+runtime's own in-process write mutex, which only that runtime's own writes
+take. An operation that already holds another lock takes its fences only
+with the form that never waits: the work owner's child issuance, beside its
+reservation, and the staged grant, under the stage's custody. A persisted
+credential store's coordinator is the exception to both rules: an entry for a
+credential key takes the coordinator's in-process gate for that key first (a
+refresh first joins one already running for the key), then waits for C of the
+key's realm, unless its operation already holds it, and then for the key's
+lock file, both within the entry's bound.
+
+## Writers And Holders
+
+`AdmissionGuard` takes a set EXCLUSIVE, for a writer: `acquire` waits up to
+its bound, `try_acquire` never waits. `AdmissionHold` takes a set SHARED, for
+an admission, and never creates a fence. A guard proves its fences to every
+write it reaches: a store's write takes the operation's guard and refuses one
+that does not hold the file's fence, with nothing written
+(`AdmissionGuard::covers`, by fence file). Once its guard is held an operation
+settles on a task of its own that owns the guard, so a caller that stops
+waiting releases nothing before the last write returned.
+
+| Write | Fences | Wait |
+|-------|--------|------|
+| A config document write (`ConfigRuntime::set`, `patch` and `patch_entered`, and `FileConfigStore`'s public writes), from every surface: `rkat config set`, `config patch`, `--default-model`, `skill add` and `remove`, `mcp add` and `remove` with `--scope realm`, `auth login`'s login target and Copilot route writes, JSON-RPC `config/set` and `config/patch`, the REST config writes and the MCP `meerkat_config` tool | the document's (U for the user document, R for a realm's own, the fence beside it otherwise) and its `config_state.json`'s | up to 5 s |
+| A document a store creates on its first read | the document's | none: while it is held the document reads as empty |
+| A stock grant command: `grant_stock_agent` and its reviewed installation form, `revoke_stock_agent`, `record_stock_grant_selection` and `govern_stock_realm` (`rkat realm grant`, `revoke-grant` and `govern`) | R of the realm | up to 5 s |
+| `StagedStockRealm::grant_stock_agent`, a stock grant under a staged realm's custody | R of the realm | none: a held fence refuses at once |
+| `finalize_reviewed_connector` | R of the realm (for `global`, U then R(global)) | up to 5 s |
+| A child grant issuance, by a work owner or a helper's prepared issuance | R of the realm whose grant log it appends | none; the forms that wait for a rebuild wait a held fence out within the same bounds |
+| `rkat realm delete` and `rkat realm prune` | R of the realm | none: `--force` overrides heartbeat leases only, and prune keeps a held realm as active |
+| `rkat storage migrate --apply`'s split-brain archive | R of every copy, before its maintenance fence | none: the resolution is refused |
+| An entry of a persisted credential store's coordinator (`RefreshCoordinator`: a refresh or an exclusive mutation of one credential key), which every write of the store runs inside: a login, a logout, a token refresh, an MCP service secret, a connector client's secret | C of the key's realm, after the coordinator's in-process gate for the key and before the key's lock file | up to 2 min; for a store that can wait on an operating-system keychain, none for unattended work and up to 5 s for interactive work |
+| A connector client update: `put_connector_client`, `rotate_connector_client_secret` and `remove_connector_client` (`rkat auth connector-client set`, `rotate-secret` and `remove`) | the realm's own document's (U for `global`, R otherwise) and C of the realm, in one set; its coordinator entry then takes C no second time (`with_exclusive_mutation_under`) | up to 5 s |
+
+Only a realm delete or prune and the migration archive remove or move a live
+`admission.lock`, and only while they hold it.
+
+## Refusals
+
+| Refusal | Code | JSON-RPC | HTTP | CLI exit | Meaning |
+|---------|------|----------|------|----------|---------|
+| Admission in progress | `ADMISSION_IN_PROGRESS` | -32038 | 409 | 58 | The fence is held beyond the write's bound. Nothing started or was written. It may be retried once the hold ends, which after an interrupted admission can be only when the holding process restarts. |
+| Admission fence unavailable | `ADMISSION_FENCE_UNAVAILABLE` | -32039 | 503 | 59 | The fence could not be opened, created, locked or identity-checked. Nothing started or was written; the write fails closed. |
+
+Neither is an unknown outcome. In Rust they are
+`AdmissionRefusal::InProgress` and `AdmissionRefusal::Unavailable`, with a
+typed `FenceUnavailableCause`, and each fenced API has its own variants:
+`AdmissionInProgress` and `AdmissionFenceUnavailable` in `ConfigError`,
+`ConfigRuntimeError`, `StockGrantError`, `StockGovernanceError` and
+`ReviewedConnectorRefusal`, `AdmissionInProgress` in
+`HelperChildIssuanceRefusal`, and `AdmissionFence` in the grant owner's
+`GrantRefusal`, `GrantStoreError` and `GrantDurabilityError`.
+
+The credential writes have their own variants: `AdmissionInProgress` and
+`AdmissionFenceUnavailable` in `RefreshError`, `CredentialMutationError` and
+`McpServiceSecretUpdateError` (a coordinator with no credential root to fence
+under refuses as unavailable), and `AdmissionFence` in `TokenStoreError`, a
+store write whose guard does not hold the store's fence. The other credential
+surfaces report the two refusals as ones they already have, and no credential
+refusal carries an `ADMISSION_*` code: connector login and MCP OAuth as
+`CredentialAccess` pending or unavailable, the host-auth wire reason as
+`credential_access_pending` or `credential_store_unavailable`, a provider's
+`AuthError` as `CredentialAccessPending` or `CredentialStoreUnavailable`, and
+a connector client update as `ConnectorClientUpdateError::Ownership`, which
+did not start.
+
+## Permissions
+
+The first participant creates a fence exclusively, mode exactly 0640 whatever
+the umask, with its directory's group: a setgid directory gives it, otherwise
+the creator sets it. A creator that cannot set the mode or the group refuses
+with `ADMISSION_FENCE_UNAVAILABLE`, and so does every participant the file
+denies, until its owner corrects it. A fence is a regular file with one link,
+opened without following a symbolic link, and every descriptor is
+close-on-exec. Only the process that took a guard or a hold unlocks it.
+
+## Filesystems And Installs
+
+A fence lives only on a local filesystem whose `flock` is native: on Linux
+ext2/3/4, XFS, Btrfs, tmpfs, ramfs, F2FS, overlayfs, ZFS and bcachefs; on
+macOS APFS and HFS+. Other platforms host no fence.
+`rkat storage hosts-fences DIR...` answers that question for each directory,
+with the same predicate the writers use.
+
+On any other filesystem a standalone install skips the fence, since no
+holder can exist there. A composed install, whose roots (the state root, the
+user rkat root and the credential root) hold `composed-install.json`, never
+skips: such a fence refuses with `ADMISSION_FENCE_UNAVAILABLE`.

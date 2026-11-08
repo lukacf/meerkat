@@ -826,6 +826,163 @@ them.
   gate. A member whose own gate or role gate names anything is refused
   placement on another host.
 
+- `meerkat`, `meerkat-core`, `meerkat-mcp`: MCP service-secret write
+  witnesses (see Added). `meerkat`: `set_mcp_service_secret` and
+  `set_mcp_service_secret_entered` return the write's
+  `McpServiceSecretWitness` instead of its `McpServiceSecretRef`
+  (`witness.reference()` is the reference; a caller that ignores the result
+  is unchanged), and `McpServiceSecretObservation` gains the public field
+  `witnesses: BTreeMap<String, McpServiceSecretWitness>`. `meerkat-core`:
+  the struct variant `McpOperationObservation::Callable` gains the field
+  `service_secret_launch: Option<McpServiceSecretLaunch>`. `meerkat-mcp`:
+  `McpCallTarget` and `McpResourceTarget` gain the public field
+  `service_secret_launch: Option<&McpServiceSecretLaunch>`. Code that builds
+  one of them literally must set the new field (`None`, or an empty
+  `witnesses`, where no write is named), and an exhaustive pattern names it
+  or ends with `..`.
+
+- Behaviour-only (not measured by the gate): `meerkat-core`: a
+  service-secret value is now stored with its write identity beside its
+  reference record. Earlier versions do not read such a row: they report the
+  slot as not stored and refuse the server's launch. Values stored by
+  earlier versions are read and launched as before, with no witness.
+
+- `meerkat-core`, `meerkat-auth-core`, `meerkat`: credential writes take the
+  admission guard of the operation they belong to. `meerkat-core`:
+  `TokenStore::save`, `clear`, `save_for` and `clear_for` take
+  `&AdmissionGuard` as their first parameter, and `TokenStoreError` gains
+  `AdmissionFence`: a persisted store refuses a write whose guard does not
+  cover the credential fence of the written credential's realm under its
+  root, before any byte is written; a store with no fence accepts any guard,
+  `AdmissionGuard::none()` included. The `RefreshFn` and
+  `CredentialMutationFn` closures receive the operation's
+  `Arc<AdmissionGuard>`, and `RefreshError` and `CredentialMutationError`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable`.
+  `save_mcp_service_secret` and `clear_mcp_service_secret` take the guard
+  first. `meerkat-auth-core`: `save_connector_client_secret` and
+  `clear_connector_client_secret` take the guard first;
+  `ManagedStoreOAuthRefreshPrepareFn` receives it first, and
+  `ManagedStoreOAuthRefreshPreparationSlot::claim_refresh_owner`,
+  `prepare_managed_store_oauth_refresh_under_lock`,
+  `prepare_existing_managed_store_oauth_refresh_under_lock` and
+  `publish_managed_store_tokens_lifecycle_and_save` take it first.
+  `meerkat`: `McpServiceSecretUpdateError` gains `AdmissionInProgress` and
+  `AdmissionFenceUnavailable`.
+
+- Behaviour-only (not measured by the gate): `meerkat-auth-core`: a
+  `FileLockCoordinator` takes the credential fence of the key's realm,
+  `<credential root>/<realm>/admission.lock` (the credential root being its
+  lock directory's parent), for every refresh and exclusive mutation: after
+  in-process coalescing and before its lock file and the closure, within the
+  same wait as the lock file. While an admission or another fenced operation
+  holds that fence, a refresh sends no token request and a mutation writes
+  nothing: both refuse `AdmissionInProgress`. A store and a coordinator over
+  different credential roots now refuse every write: pair them as
+  `TokenStoreBackend::open_with_refresh_authority` does. A `KeyringTokenStore`
+  is fenced under the default credential root, the base its refresh locks
+  use. A realm's MCP attachment identity key is read first, without the
+  fence; only a missing key is created under it.
+
+- `meerkat`: the connector-client writers change a client's document entry
+  and its secret as one guarded operation. `put_connector_client`,
+  `rotate_connector_client_secret` and `remove_connector_client` take the
+  realm config documents, `Arc<meerkat_store::FilesystemRealmConfigSource>`,
+  in place of a `ConfigStore`, and write the realm's own document there.
+  Before anything starts they take, in the global order and waiting up to
+  5 s for a holder, the realm document's admission fence (the realm's R, or
+  the user document fence for `global`) and the realm's credential fence;
+  a held or unusable fence refuses as `ConnectorClientUpdateError::Ownership`
+  with nothing written. The update then runs on its own task, which a caller
+  that stops waiting does not cancel and which releases the fences only after
+  its last write; the document write moves its generation. The facade no
+  longer re-exports `save_connector_client_secret` and
+  `clear_connector_client_secret` (`meerkat_auth_core::connector_login`
+  keeps them; `load_connector_client_secret` stays re-exported).
+  `rkat auth connector-client set`, `rotate-secret` and `remove` run through
+  these writers and, under a held fence, exit non-zero with nothing written.
+
+- `meerkat-mcp`: `McpCallTarget` and `McpResourceTarget` gain the public
+  field `credential_publication: Option<CredentialLeasePublication>` (see
+  Added). Code that builds one of them literally sets it (`None` where no
+  credential lease serves the call).
+
+- `meerkat-contracts`: `ErrorCode` gains `AdmissionInProgress`
+  (`ADMISSION_IN_PROGRESS`: JSON-RPC -32038, HTTP 409, CLI exit 58) and
+  `AdmissionFenceUnavailable` (`ADMISSION_FENCE_UNAVAILABLE`: -32039, HTTP
+  503, exit 59), and the closed error vocabularies gain them with it: the
+  generated schemas and the Python, TypeScript and Web SDK error codes. A
+  config write a realm admission fence refused before it started reports
+  them instead of an internal error: JSON-RPC `config/set` and
+  `config/patch` (with or without a config runtime), the REST config writes,
+  the MCP `meerkat_config` tool, and `rkat config set`, `config patch`,
+  `--default-model`, `skill add` and `remove`, `mcp add` and `remove` with
+  `--scope realm`, and `auth login`'s login target and Copilot route
+  writes. `meerkat-rest`: `ApiError` gains
+  `AdmissionInProgress(String)` and `AdmissionFenceUnavailable(String)`.
+- `meerkat-core`: config document writes are fenced by the realm admission
+  fences. `ConfigStore` gains the required raw writes `set_held` and
+  `patch_held`, and the provided `admission_fence` and
+  `patch_held_with_warnings`: they take the `AdmissionGuard` of a caller that
+  already holds the document's fence and custody, and a document-backed store
+  refuses a guard that does not hold its fence, with nothing written. Every
+  implementation must provide them. `ConfigError` and `ConfigRuntimeError`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable(String)`: the
+  write did not start and wrote nothing (`EnteredConfigWriteError::NotWritten`
+  and `McpRealmPersistError::Config` carry the runtime's).
+  `ConfigRuntimeError::Config` is no longer built by `#[from]`; the `From`
+  conversion remains and reports a store's admission refusal as the
+  runtime's own variant. Behaviour: `ConfigRuntime::set`, `patch` and
+  `patch_entered` take the admission fences of the document and of its
+  generation sidecar (named by kind, the user document's and the realm's,
+  for a host's runtime of the `global` realm) before their custody, waiting
+  up to 5 s for a holder. `FileConfigStore`'s public `set`, `patch` and
+  `patch_with_warnings` run the same sequence for their document and now move
+  the generation sidecar beside it. A store that bootstraps its document on
+  read creates it only while its fence and custody are free, never waiting,
+  and otherwise reads it as empty. A runtime whose generation sidecar lies
+  outside its document's directory, other than a user-document store's
+  sidecar in a directory named by a realm id (as a host's runtime of the
+  `global` realm keeps it), now refuses every write with
+  `AdmissionFenceUnavailable` (a fence set outside the global order). Writes
+  create `admission.lock` beside each document they write, and in the
+  `global` realm's directory for a host's `global` write; a store's own
+  writes and create-on-read also write `config_state.json` beside the
+  document. A `ConfigStore` backed by a document must return its fence from
+  `admission_fence` and check `AdmissionGuard::covers` in its raw writes: the
+  default, `None`, declares a store with no document, whose writes the
+  runtime fences by its generation sidecar alone.
+- `meerkat-authorization`: grant log writes are fenced by the realm
+  admission fences. `GrantOwnerStore::create` and `append` take the
+  operation's `&AdmissionGuard`, and the trait gains the provided
+  `admission_fence`. `FileGrantOwnerStore::new` takes the log's
+  `GrantLogFence`: `Realm(fence)` for a realm's own grant log, whose
+  `create` and `append` refuse a guard that does not hold that fence before
+  they write, or `NotAdmissionRead` for a log no admission reads, which
+  accepts any guard. `LocalGrantAuthority::new_durable`, `issue_root`,
+  `issue_child`, `issue_or_recover_child_under_exclusion`, `revoke` and
+  `revoke_expecting` take the guard as their first argument. `GrantRefusal`,
+  `GrantStoreError` and `GrantDurabilityError` gain `AdmissionFence`:
+  refused before anything was written, never uncertain (a revocation reports
+  it as refused). Behaviour: `FileGrantOwnerStore::load` never writes; a
+  torn tail stays until the first `append` truncates it under its guard.
+- `meerkat`: every stock grant command takes the realm's admission fence
+  first, before its custody, waiting up to 5 s for a holder:
+  `grant_stock_agent`, `grant_stock_agent_for_reviewed_installation`,
+  `revoke_stock_agent`, `record_stock_grant_selection`, `govern_stock_realm`
+  (now settled on its own task, which a caller that stops waiting does not
+  cancel) and `finalize_reviewed_connector`, which takes the realm's fence
+  (for the `global` realm the user document fence and the `global` realm's)
+  and runs every later step on its own task. `StagedStockRealm`'s
+  `grant_stock_agent`, which runs under the stage's custody, takes the
+  realm's fence without waiting: a held fence refuses at once.
+  `StockGrantError`, `StockGovernanceError` and `ReviewedConnectorRefusal`
+  gain `AdmissionInProgress` and `AdmissionFenceUnavailable(String)`, and
+  `HelperChildIssuanceRefusal` gains `AdmissionInProgress`: a helper's child
+  issuance takes the realm grant log's fence without waiting, beside its
+  reservation, and the waiting forms wait a held fence out like a refusal to
+  rebuild. `rkat realm govern`, `grant` and `revoke-grant` refused by a held
+  or unusable fence exit 58 or 59.
+
 ### Added
 
 - `meerkat-mob`: a declared roster entry says what its spec carries of the
@@ -1732,6 +1889,127 @@ them.
   `WireMobToolConfig` and `MobToolConfigInput` carry `grant_gated` as the
   generated `WireGrantGatedTools`.
 
+- `meerkat-core`, `meerkat-mcp`, `meerkat`: a credential continuity witness
+  for MCP stdio service secrets. Every write of a service secret draws a
+  write identity (`McpServiceSecretWriteId`: 128 bits of OS entropy, never
+  derived from the value) and stores it in the same row, beside the
+  reference record. The write's `McpServiceSecretWitness` (the defining
+  realm, the server, the slot, the server's launch meaning and the write;
+  nonsecret, and serializable in a checked form a host can keep with what it
+  binds to the credential) is what `set_mcp_service_secret` and
+  `set_mcp_service_secret_entered` return, what
+  `RealmMcpServiceSecrets::observe` reports as each slot's current write
+  (`McpServiceSecretObservation::witnesses`; the core read is
+  `observe_mcp_service_secret_witness`), and what a stdio launch records for
+  each value it injects. The realm custody reads each value with its write
+  from the same row (`load_mcp_service_secret_into`), and the connection
+  keeps that record (`McpServiceSecretLaunch`) for its lifetime: it is
+  stated by `McpConnection::service_secret_launch`, by a callable
+  `McpOperationObservation` and by the `McpCallTarget` and
+  `McpResourceTarget` a host's call preparation receives for every request
+  over that connection, so each actual call names the writes whose values
+  serve it. A host reads the witness of a stored row with
+  `McpServiceSecretRef::witness_of`, and the launch record of the values it
+  read with `McpServiceSecretValues::launch`. `RealmMcpServiceSecrets::recheck`
+  later answers for a witness from durable state (the realm documents and the
+  credential store, read unattended and uncached) with an
+  `McpServiceSecretRecheck`, returning no value: `Current`, `Rotated` (a
+  newer write, or one that names none), `Removed`, or `DefinitionChanged`
+  (the server's defining realm or definition is no longer the one the
+  witness names, or it was uninstalled; an identical reinstallation in the
+  same realm is the same reference). `recheck_mcp_service_secret` is its
+  store read. A value stored before writes were named launches and observes
+  as before with no witness, and every witness rechecks against it as
+  `Rotated` until the next write names one.
+
+- `meerkat-authorization`: `GrantLogFence`, and
+  `LocalGrantAuthority::admission_fences`, the fences of an owner's writes
+  (its durable log's fence, none in memory).
+- `meerkat-core`: `authorization::ChildIssuanceAdmissionInProgress`, a work
+  owner's answer, boxed in place of the grant owner's outcome, for a child
+  issuance a held grant log fence refused before anything was decided or
+  appended; the waiting child issuance forms wait it out like a refusal to
+  rebuild, within the same bounds.
+- `meerkat-core`: `ConfigRuntime::set_under`, `patch_under`,
+  `patch_entered_under` and `admission_fences`, and
+  `McpRealmPersistTarget::add_under`, for an operation that already holds the
+  document's admission fences; `FileConfigStore` is `Clone`.
+- `meerkat-core`: `realm_admission` (native targets), the realm admission
+  fences. `AdmissionFence` names a fence file (`admission.lock`) and its
+  place in one global order: `user_document` (U), `credentials` (C of a
+  realm id), `realm` and `realm_chain` (R; chain positions come only from the
+  composed chain), and `beside` (a document's directory, only ever the one
+  fence of its set). `AdmissionGuard::acquire` and `try_acquire` take a set
+  EXCLUSIVE in that order, with bounded waits that never block a runtime
+  thread; a refusal is `AdmissionRefusal::InProgress` or
+  `AdmissionRefusal::Unavailable(FenceUnavailable)`, with a typed
+  `FenceUnavailableCause`, and nothing has started. `covers` answers only
+  from the guard's own acquisition, matching by fence file, and
+  `AdmissionGuard::none` covers nothing. `AdmissionHold` takes a set SHARED
+  and never creates a fence; `settle_entered` keeps an entered operation's
+  guard until its work returns; `directory_hosts_fences` is the one
+  filesystem predicate; `file_coverage`, `require_files_covered` and
+  `credential_entry_coverage` (with `FileCoverage` and
+  `ImmutableInstallationFiles`) check that every file a verifier reads is
+  fenced or an immutable installation file. A fence root that holds
+  `composed-install.json` makes acquisition refuse, instead of skip, a fence
+  on a filesystem that cannot host one. It also adds `AdmissionFenceKind`,
+  `FenceIdentity` (the device and inode of a fence file), `EnteredWorkLost`,
+  `UncoveredFile` and `UncoveredCredentialEntry`; the constants
+  `ADMISSION_LOCK_FILE`, `INTERACTIVE_FENCE_WAIT` and `COMPOSED_INSTALL_FILE`;
+  and, for a verifier, `AdmissionFence::ensure_exists`, `identity`,
+  `covers_file`, `directory`, `path` and `kind`, `AdmissionGuard::fences` and
+  `identities`, `AdmissionHold::identities`, `fences`, `require_current` and
+  `release`, and `ImmutableInstallationFiles::from_checked_install_owner`,
+  `none` and `contains`.
+- `meerkat-rpc`: `error::ADMISSION_IN_PROGRESS` (-32038) and
+  `error::ADMISSION_FENCE_UNAVAILABLE` (-32039), the JSON-RPC codes of a
+  request a realm admission fence refused before it started, taken from
+  `ErrorCode`.
+- `rkat storage hosts-fences DIR...`: whether each directory's filesystem can
+  host a realm admission fence, from the one predicate fence writers, holders
+  and verifiers use (`meerkat_core::realm_admission::directory_hosts_fences`),
+  run in the process's own view of the filesystem before any realm, state,
+  config, auth or migration step. It prints one JSON object per directory and
+  line, in argument order, and nothing else on stdout:
+  `{"dir": PATH, "hosts": BOOL}`, or
+  `{"dir": PATH, "unavailable": {"kind": KIND, "cause": TEXT}}`, KIND being
+  the new `FenceUnavailableCause::kind()`, a stable snake_case name per cause.
+  Exit 0 when every directory was evaluated, 1 when the report could not be
+  written, 2 on a usage error (no directory, or any global option) or, as for
+  every command, when the process could not start at all.
+
+- `meerkat-core`: `RefreshCoordinator::with_exclusive_mutation_under`, for an
+  operation that already holds the credential fence of the key's realm (its
+  default refuses with nothing run), and `AdmissionGuard` on wasm32, with
+  `none()` only. `meerkat-auth-core`: `TokenStoreBackend::credential_root`.
+
+- `meerkat-core`: `RefreshCoordinator::credential_fence` (native targets), the
+  credential fence a coordinator takes for a realm's keys, for an operation
+  that takes it in one set with other fences and then enters through
+  `with_exclusive_mutation_under`; `None` for a store with no fence, and its
+  default refuses.
+
+- `meerkat-core`, `meerkat-auth-core`, `meerkat-mcp`: lease publications on
+  MCP calls. `handles::CredentialLeasePublication` names one publication of
+  credential material to an auth lease (the lease, the generation the
+  publication advanced it to and its publication time; nonsecret), taken
+  from a lease snapshot with `CredentialLeasePublication::of` and read with
+  `lease`, `generation` and `credential_published_at_millis`. The time is
+  part of the name: a lease that adopts a credential another process
+  published keeps the larger of the two generations, so after a logout and a
+  login elsewhere two credentials can share a generation in one process.
+  `McpOAuthAuthority::credential_publication` reads the publication its
+  lease for a target holds, from the lease alone;
+  `McpAuthResolver::credential_publication` states it for a resolver (none by
+  default; a resolver that wraps another forwards it), and
+  `McpConnection::credential_publication` for a connection's credential
+  owner. Every `McpCallTarget` and `McpResourceTarget` a host's call
+  preparation receives names the publication read when the call was
+  prepared: the call's requests carry that publication or a later one, so a
+  host that finds the lease's current publication different knows the
+  credential changed.
+
 ### Changed
 
 - `meerkat-runtime`: DurableDecisionMachine, not the decision service, decides
@@ -1964,6 +2242,18 @@ them.
   credentials current then. A held resume of retained work still causes
   them, within its 30 s budget, and a revocation of a grant in a held
   input's stored controller lineage is still refused as in use.
+
+- `rkat realm delete` and `rkat realm prune` take the realm's admission fence
+  first, without waiting and before the lease check, and hold it through the
+  removal: a realm an admission holds is not removed, whatever `--force` says
+  (it overrides heartbeat leases only). `realm delete` then exits 58
+  (`ADMISSION_IN_PROGRESS`), or 59 for an unusable fence; `realm prune` keeps
+  the realm, counted as active, and reports an unusable fence as a leftover.
+  `rkat storage migrate --apply` takes the admission fence of every copy of a
+  split-brain realm the same way, before its maintenance fence, and refuses
+  the resolution while any of them is held or unusable, naming the fence.
+  These are the only operations that remove or move a live `admission.lock`,
+  and only while they hold it.
 
 ### Deprecated
 
@@ -2612,6 +2902,21 @@ them.
   `sqlite.rs:606-625`, `IdentityAuthorityBlocked`). Recover by upgrading
   again: 0.9.10 refuses a new adoption of such an identity too, as it
   refuses every write over a malformed intent row (`sqlite.rs:5975-6006`).
+
+- Upgrade every process that launches from a realm's credential store
+  before setting MCP service-secret values with this version: a rollback to
+  0.9.10 or earlier reads a value stored by this version as not stored and
+  refuses the server's launch (see Breaking). After such a rollback, set the
+  value again with the earlier version.
+
+- A custom `TokenStore` takes the guard in its writes, and a persisted one
+  refuses a guard that does not cover its credential fence
+  (`AdmissionFence::credentials` of its root and the key's realm). A custom
+  `RefreshCoordinator` hands its closures the guard of the operation: the
+  coordinator of a persisted store acquires the credential fence, and that of
+  a store with no fence hands `AdmissionGuard::none()`. The connector-client
+  writers enter it through `credential_fence` and
+  `with_exclusive_mutation_under`, whose defaults refuse.
 
 ### Known limitations
 

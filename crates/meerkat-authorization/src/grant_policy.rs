@@ -1208,9 +1208,11 @@ fn grant_refusal(refusal: GrantRefusal) -> meerkat_core::OperationAuthorizationE
         // ControllerInUse belongs to administration and is preserved by revoke.
         // Current resolution cannot produce it; never invent policy denial if
         // a future resolver reports an unsupported operational condition.
-        GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
-            meerkat_core::OperationAuthorizationError::Unavailable
-        }
+        // Resolution writes nothing, so it never meets an admission fence.
+        GrantRefusal::ControllerInUse
+        | GrantRefusal::Duplicate
+        | GrantRefusal::Unavailable
+        | GrantRefusal::AdmissionFence => meerkat_core::OperationAuthorizationError::Unavailable,
     }
 }
 

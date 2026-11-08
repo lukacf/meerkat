@@ -1774,6 +1774,7 @@ impl McpRouter {
                         account: binding.account.clone(),
                     }
                 }),
+                service_secret_launch: connection.service_secret_launch().cloned(),
             };
         }
         let Some(snapshot) = self.surface_owner.surface_snapshot(server) else {
@@ -4696,10 +4697,15 @@ impl McpRouter {
             &self.progress,
         );
         let result = async {
+            // One reading for the whole read: every target it states names the
+            // same publication.
+            let credential_publication = connection.credential_publication();
             let target = || crate::McpResourceTarget {
                 config: connection.config(),
                 connection_id: connection.connection_id(),
                 uri,
+                service_secret_launch: connection.service_secret_launch(),
+                credential_publication: credential_publication.clone(),
             };
             let prepared = if let Some(work) = context.work_authorization() {
                 let target = self
@@ -4919,6 +4925,8 @@ impl McpRouter {
                                 connection_id: conn.connection_id(),
                                 raw_operation: &route.raw_operation,
                                 origin: &origin,
+                                service_secret_launch: conn.service_secret_launch(),
+                                credential_publication: conn.credential_publication(),
                             },
                             call,
                             context,

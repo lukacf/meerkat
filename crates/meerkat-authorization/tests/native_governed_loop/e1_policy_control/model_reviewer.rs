@@ -822,6 +822,7 @@ async fn exercise_review(controller_server: &Server, review_server: &Server, cas
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -837,6 +838,7 @@ async fn exercise_review(controller_server: &Server, review_server: &Server, cas
     operations.resource_domains = DomainRestriction::exact([domain(), input_domain()]);
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("reviewable-operations"),
             principal("executor"),

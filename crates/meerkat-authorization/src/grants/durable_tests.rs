@@ -42,6 +42,7 @@ fn configuration() -> LocalGrantConfiguration {
 }
 fn durable(store: Arc<dyn GrantOwnerStore>) -> LocalGrantAuthority {
     LocalGrantAuthority::new_durable(
+        &meerkat_core::AdmissionGuard::none(),
         configuration(),
         store,
         LocalAuthorizationPublication::new(),
@@ -55,6 +56,7 @@ fn restart(store: Arc<dyn GrantOwnerStore>) -> Result<LocalGrantAuthority, Grant
 fn issue(owner: &LocalGrantAuthority, name: &str) -> GrantLineageRef {
     owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id(name),
             who("holder"),
@@ -97,18 +99,26 @@ impl GrantOwnerStore for Scripted {
     fn load(&self) -> Result<Option<DurableGrantOwner>, GrantStoreError> {
         self.inner.load()
     }
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError> {
-        self.inner.create(identity)
+    fn create(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError> {
+        self.inner.create(guard, identity)
     }
     fn release(&self) {
         self.inner.release();
     }
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError> {
+    fn append(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError> {
         match *self.next.lock().expect("script") {
-            Append::Acknowledge => self.inner.append(change),
+            Append::Acknowledge => self.inner.append(guard, change),
             Append::RefuseBeforeWrite => Err(GrantStoreError::Refused),
             Append::UncertainLanded => {
-                self.inner.append(change)?;
+                self.inner.append(guard, change)?;
                 Err(GrantStoreError::Uncertain)
             }
             Append::UncertainLost => Err(GrantStoreError::Uncertain),
@@ -117,6 +127,7 @@ impl GrantOwnerStore for Scripted {
 }
 fn try_issue(owner: &LocalGrantAuthority, name: &str) -> Result<GrantLineageRef, GrantRefusal> {
     owner.issue_root(
+        &meerkat_core::AdmissionGuard::none(),
         &who("root"),
         id(name),
         who("holder"),
@@ -132,7 +143,12 @@ fn restored_owner_keeps_identity_records_and_revocations() {
     let allowed = issue(&owner, "allowed");
     let revoked = issue(&owner, "revoked");
     owner
-        .revoke(&who("root"), &revoked, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &revoked,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     let before = state(&owner);
     drop(owner);
@@ -154,6 +170,7 @@ fn restored_owner_keeps_identity_records_and_revocations() {
     assert!(
         matches!(
             restored.issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("root"),
                 id("revoked"),
                 who("holder"),
@@ -177,6 +194,7 @@ fn restored_owner_keeps_a_narrowed_three_level_chain() {
     let owner = durable(store.clone());
     let root = owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("root-grant"),
             who("holder"),
@@ -194,6 +212,7 @@ fn restored_owner_keeps_a_narrowed_three_level_chain() {
         .expect("root");
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &root,
             id("child"),
@@ -203,6 +222,7 @@ fn restored_owner_keeps_a_narrowed_three_level_chain() {
         .expect("child");
     let leaf = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("child"),
             &child,
             id("leaf"),
@@ -248,9 +268,11 @@ fn tamper(
         .expect("child row");
     edit(record);
     let copy = Arc::new(InMemoryGrantOwnerStore::new());
-    copy.create(&retained.identity).expect("copy identity");
+    copy.create(&meerkat_core::AdmissionGuard::none(), &retained.identity)
+        .expect("copy identity");
     for change in &retained.changes {
-        copy.append(change).expect("copy change");
+        copy.append(&meerkat_core::AdmissionGuard::none(), change)
+            .expect("copy change");
     }
     copy.release();
     copy
@@ -262,6 +284,7 @@ fn restore_refuses_a_widened_or_tampered_persisted_child() {
     let owner = durable(store.clone());
     let parent = owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("parent"),
             who("holder"),
@@ -277,6 +300,7 @@ fn restore_refuses_a_widened_or_tampered_persisted_child() {
         .expect("parent");
     owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -317,7 +341,12 @@ fn lost_store_is_not_replaced_by_a_new_root_issuance() {
     let original = issue(&owner, "activation");
     let revoked = issue(&owner, "revoked");
     owner
-        .revoke(&who("root"), &revoked, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &revoked,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     drop(owner);
     drop(store);
@@ -345,6 +374,7 @@ fn lost_store_is_not_replaced_by_a_new_root_issuance() {
     assert!(
         matches!(
             LocalGrantAuthority::new_durable(
+                &meerkat_core::AdmissionGuard::none(),
                 configuration(),
                 lost,
                 LocalAuthorizationPublication::new(),
@@ -441,7 +471,12 @@ fn uncertain_write_makes_the_owner_unavailable_and_invalidates_observations() {
             Err(GrantRefusal::Unavailable)
         ));
         assert_eq!(
-            owner.revoke(&who("root"), &kept, &mut IsolatedGrantTestCustody),
+            owner.revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &who("root"),
+                &kept,
+                &mut IsolatedGrantTestCustody
+            ),
             Err(GrantRefusal::Unavailable)
         );
         assert_eq!(try_issue(&owner, "after"), Err(GrantRefusal::Unavailable));
@@ -483,6 +518,7 @@ fn restored_owner_preserves_the_unfinished_controller_revocation_veto() {
     let ((), stamp) = restored.publication.observe(|| ()).expect("stamp");
     assert_eq!(
         restored.revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &controller,
             &mut Veto(Some(ControllerCustodyRefusal::ControllerInUse))
@@ -502,7 +538,12 @@ fn restored_owner_preserves_the_unfinished_controller_revocation_veto() {
         .resolve_lineage(std::slice::from_ref(&controller), &who("holder"), None)
         .expect("vetoed grant stays usable");
     again
-        .revoke(&who("root"), &controller, &mut Veto(None))
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &controller,
+            &mut Veto(None),
+        )
         .expect("permitted revocation");
     drop(again);
     let last = restart(store).expect("restore after revoke");
@@ -516,18 +557,29 @@ fn restored_owner_preserves_the_unfinished_controller_revocation_veto() {
 fn file_store_round_trips_and_truncates_only_a_torn_tail() {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("grant-owner.jsonl");
-    let store = Arc::new(FileGrantOwnerStore::new(&path));
+    let store = Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    ));
     assert_eq!(store.durability(), GrantStoreDurability::OsCrash);
     let owner = durable(store);
     let kept = issue(&owner, "kept");
     let revoked = issue(&owner, "revoked");
     owner
-        .revoke(&who("root"), &revoked, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &revoked,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     let before = state(&owner);
     assert!(
         matches!(
-            restart(Arc::new(FileGrantOwnerStore::new(&path))),
+            restart(Arc::new(FileGrantOwnerStore::new(
+                &path,
+                crate::grants::GrantLogFence::NotAdmissionRead
+            ))),
             Err(GrantDurabilityError::StoreUnavailable)
         ),
         "the live store is the exclusive writer"
@@ -540,14 +592,23 @@ fn file_store_round_trips_and_truncates_only_a_torn_tail() {
         "every acknowledged line is complete"
     );
 
-    // A torn tail is an incomplete record. It is never restored, and it is
-    // physically truncated under the exclusive lock before any later append.
-    let mut torn = acknowledged.clone();
+    // A torn tail is an incomplete record. It is never restored; a load
+    // leaves it on disk, and the first append truncates it under the
+    // exclusive lock before it writes.
+    let mut torn = acknowledged;
     torn.extend_from_slice(b"{\"change\":{\"revision\":");
     std::fs::write(&path, &torn).expect("torn write");
-    let restored = restart(Arc::new(FileGrantOwnerStore::new(&path))).expect("restore");
+    let restored = restart(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )))
+    .expect("restore");
     assert_eq!(state(&restored), before);
-    assert_eq!(std::fs::read(&path).expect("read"), acknowledged);
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        torn,
+        "a load never writes"
+    );
     restored
         .resolve_lineage(&[kept], &who("holder"), None)
         .expect("kept");
@@ -558,7 +619,8 @@ fn file_store_round_trips_and_truncates_only_a_torn_tail() {
     let later = issue(&restored, "later");
     drop(restored);
     let again = restart(Arc::new(
-        FileGrantOwnerStore::new(&path).with_durability(GrantStoreDurability::ProcessCrash),
+        FileGrantOwnerStore::new(&path, crate::grants::GrantLogFence::NotAdmissionRead)
+            .with_durability(GrantStoreDurability::ProcessCrash),
     ))
     .expect("restore after append");
     again
@@ -571,13 +633,20 @@ fn file_store_round_trips_and_truncates_only_a_torn_tail() {
     corrupt.extend_from_slice(b"not json\n");
     std::fs::write(&path, &corrupt).expect("corrupt");
     assert!(matches!(
-        restart(Arc::new(FileGrantOwnerStore::new(&path))),
+        restart(Arc::new(FileGrantOwnerStore::new(
+            &path,
+            crate::grants::GrantLogFence::NotAdmissionRead
+        ))),
         Err(GrantDurabilityError::RestartRequired)
     ));
     assert!(matches!(
         LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             configuration(),
-            Arc::new(FileGrantOwnerStore::new(&path)),
+            Arc::new(FileGrantOwnerStore::new(
+                &path,
+                crate::grants::GrantLogFence::NotAdmissionRead
+            )),
             LocalAuthorizationPublication::new(),
             Arc::new(Clock),
         ),
@@ -622,7 +691,12 @@ fn race_restores(store: Arc<dyn GrantOwnerStore>) {
         Err(GrantDurabilityError::StoreUnavailable)
     ));
     winner
-        .revoke(&who("root"), &base, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &base,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("only the lease holder mutates");
     drop(winner);
 
@@ -643,6 +717,7 @@ fn racing_restores_of_one_store_leave_exactly_one_mutation_owner() {
     let directory = tempfile::tempdir().expect("tempdir");
     race_restores(Arc::new(FileGrantOwnerStore::new(
         directory.path().join("grant-owner.jsonl"),
+        crate::grants::GrantLogFence::NotAdmissionRead,
     )));
 }
 
@@ -650,22 +725,32 @@ fn racing_restores_of_one_store_leave_exactly_one_mutation_owner() {
 fn a_second_file_opener_cannot_take_the_lease() {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("grant-owner.jsonl");
-    let owner = durable(Arc::new(FileGrantOwnerStore::new(&path)));
+    let owner = durable(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )));
     issue(&owner, "held");
-    let other = FileGrantOwnerStore::new(&path);
+    let other = FileGrantOwnerStore::new(&path, crate::grants::GrantLogFence::NotAdmissionRead);
     assert_eq!(other.load(), Err(GrantStoreError::Unavailable));
     assert_eq!(
-        other.append(&GrantOwnerChange {
-            revision: 2,
-            kind: durable::GrantOwnerChangeKind::Revoked {
-                grant_id: id("held")
-            },
-        }),
+        other.append(
+            &meerkat_core::AdmissionGuard::none(),
+            &GrantOwnerChange {
+                revision: 2,
+                kind: durable::GrantOwnerChangeKind::Revoked {
+                    grant_id: id("held")
+                },
+            }
+        ),
         Err(GrantStoreError::Refused),
         "an opener without the lease is refused before writing"
     );
     drop(owner);
-    let restored = restart(Arc::new(FileGrantOwnerStore::new(&path))).expect("restore");
+    let restored = restart(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )))
+    .expect("restore");
     assert_eq!(state(&restored).revision, 1);
 }
 
@@ -675,7 +760,12 @@ fn a_second_live_owner_cannot_read_stale_grants() {
     let first = durable(store.clone());
     let revoked = issue(&first, "revoked");
     first
-        .revoke(&who("root"), &revoked, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &revoked,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     assert_eq!(store.load(), Err(GrantStoreError::Unavailable));
     assert!(
@@ -699,17 +789,22 @@ fn file_create_holds_the_lease_before_the_identity_is_published() {
     let path = directory.path().join("grant-owner.jsonl");
     let observed = Arc::new(Mutex::new(None));
     let seen = observed.clone();
-    let store = FileGrantOwnerStore::new(&path).after_publish(move |published| {
-        let other = FileGrantOwnerStore::new(published);
-        let loaded = other.load();
-        let appended = other.append(&GrantOwnerChange {
-            revision: 1,
-            kind: durable::GrantOwnerChangeKind::Revoked {
-                grant_id: id("intruder"),
-            },
+    let store = FileGrantOwnerStore::new(&path, crate::grants::GrantLogFence::NotAdmissionRead)
+        .after_publish(move |published| {
+            let other =
+                FileGrantOwnerStore::new(published, crate::grants::GrantLogFence::NotAdmissionRead);
+            let loaded = other.load();
+            let appended = other.append(
+                &meerkat_core::AdmissionGuard::none(),
+                &GrantOwnerChange {
+                    revision: 1,
+                    kind: durable::GrantOwnerChangeKind::Revoked {
+                        grant_id: id("intruder"),
+                    },
+                },
+            );
+            *seen.lock().expect("seen") = Some((loaded, appended));
         });
-        *seen.lock().expect("seen") = Some((loaded, appended));
-    });
     let owner = durable(Arc::new(store));
     let (loaded, appended) = observed
         .lock()
@@ -721,7 +816,11 @@ fn file_create_holds_the_lease_before_the_identity_is_published() {
     let first = issue(&owner, "first");
     drop(owner);
 
-    let restored = restart(Arc::new(FileGrantOwnerStore::new(&path))).expect("restore");
+    let restored = restart(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )))
+    .expect("restore");
     assert_eq!(state(&restored).revision, 1, "exactly one revision 1");
     restored
         .resolve_lineage(&[first], &who("holder"), None)
@@ -732,14 +831,15 @@ fn file_create_holds_the_lease_before_the_identity_is_published() {
 fn process_crash_file_is_restored_under_os_crash_durability() {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("grant-owner.jsonl");
-    let weak = FileGrantOwnerStore::new(&path).with_durability(GrantStoreDurability::ProcessCrash);
+    let weak = FileGrantOwnerStore::new(&path, crate::grants::GrantLogFence::NotAdmissionRead)
+        .with_durability(GrantStoreDurability::ProcessCrash);
     let owner = durable(Arc::new(weak));
     let early = issue(&owner, "early");
     drop(owner);
 
     // Load under the stronger profile syncs the file and its name first;
     // in-process tests cannot observe that sync, only that the upgrade works.
-    let strong = FileGrantOwnerStore::new(&path);
+    let strong = FileGrantOwnerStore::new(&path, crate::grants::GrantLogFence::NotAdmissionRead);
     assert_eq!(strong.durability(), GrantStoreDurability::OsCrash);
     let restored = restart(Arc::new(strong)).expect("upgrade on load");
     restored
@@ -747,10 +847,13 @@ fn process_crash_file_is_restored_under_os_crash_durability() {
         .expect("weakly written change restored");
     let late = issue(&restored, "late");
     drop(restored);
-    restart(Arc::new(FileGrantOwnerStore::new(&path)))
-        .expect("restore")
-        .resolve_lineage(&[late], &who("holder"), None)
-        .expect("strongly acknowledged change");
+    restart(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )))
+    .expect("restore")
+    .resolve_lineage(&[late], &who("holder"), None)
+    .expect("strongly acknowledged change");
 }
 
 /// Append that waits for the test to release it, then reports an uncertain
@@ -768,13 +871,21 @@ impl GrantOwnerStore for HeldAppend {
     fn load(&self) -> Result<Option<DurableGrantOwner>, GrantStoreError> {
         self.inner.load()
     }
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError> {
-        self.inner.create(identity)
+    fn create(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError> {
+        self.inner.create(guard, identity)
     }
     fn release(&self) {
         self.inner.release();
     }
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError> {
+    fn append(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError> {
         let held = self.hold.lock().expect("hold").take();
         match held {
             Some((entered, release)) => {
@@ -782,7 +893,7 @@ impl GrantOwnerStore for HeldAppend {
                 release.recv().expect("released");
                 Err(GrantStoreError::Uncertain)
             }
-            None => self.inner.append(change),
+            None => self.inner.append(guard, change),
         }
     }
 }
@@ -890,9 +1001,11 @@ fn a_child_intent_is_issued_once_only_within_its_conjunct() {
         ),
     ] {
         assert_eq!(
-            owner.issue_or_recover_child_under_exclusion(&child_intent(&parent, "child"), || {
-                conjunct
-            }),
+            owner.issue_or_recover_child_under_exclusion(
+                &meerkat_core::AdmissionGuard::none(),
+                &child_intent(&parent, "child"),
+                || { conjunct }
+            ),
             Err(expected)
         );
         assert_eq!(state(&owner), before, "nothing appended");
@@ -906,7 +1019,11 @@ fn a_child_intent_is_issued_once_only_within_its_conjunct() {
         ..child_intent(&parent, "finite")
     };
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&finite, || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &finite,
+            || Ok(open())
+        ),
         Err(ChildGrantRefusal::Denied),
         "a child no controller recovery could use is refused before append"
     );
@@ -914,6 +1031,7 @@ fn a_child_intent_is_issued_once_only_within_its_conjunct() {
 
     owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("other"),
@@ -923,20 +1041,27 @@ fn a_child_intent_is_issued_once_only_within_its_conjunct() {
         .expect("another child");
     let taken = state(&owner);
     assert_eq!(
-        owner
-            .issue_or_recover_child_under_exclusion(&child_intent(&parent, "other"), || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &child_intent(&parent, "other"),
+            || Ok(open())
+        ),
         Err(ChildGrantRefusal::Denied),
         "an id naming another grant is never recovered"
     );
     assert_eq!(state(&owner), taken);
 
     let issued = owner
-        .issue_or_recover_child_under_exclusion(&child_intent(&parent, "child"), || {
-            Ok(ChildGrantValidity {
-                expires_at_ms: 101,
-                ..open()
-            })
-        })
+        .issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &child_intent(&parent, "child"),
+            || {
+                Ok(ChildGrantValidity {
+                    expires_at_ms: 101,
+                    ..open()
+                })
+            },
+        )
         .expect("issued");
     let ChildGrantOutcome::Issued { lineage } = issued else {
         panic!("first append issues")
@@ -946,17 +1071,22 @@ fn a_child_intent_is_issued_once_only_within_its_conjunct() {
         .expect("the helper's controller lineage");
     let landed = state(&owner);
     assert_eq!(
-        owner
-            .issue_or_recover_child_under_exclusion(&child_intent(&parent, "child"), || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &child_intent(&parent, "child"),
+            || Ok(open())
+        ),
         Ok(ChildGrantOutcome::Recovered {
             lineage: lineage.clone()
         })
     );
     assert_eq!(state(&owner), landed, "recovery appends nothing");
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&child_intent(&parent, "child"), || Err(
-            GrantRefusal::Denied
-        )),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &child_intent(&parent, "child"),
+            || Err(GrantRefusal::Denied)
+        ),
         Err(ChildGrantRefusal::Denied),
         "a retained child is not usable without its current conjunct"
     );
@@ -970,11 +1100,20 @@ fn a_child_intent_is_issued_once_only_within_its_conjunct() {
     );
 
     owner
-        .revoke(&who("root"), &parent, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &parent,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke the parent");
     let revoked = state(&owner);
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&child_intent(&parent, "late"), || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &child_intent(&parent, "late"),
+            || Ok(open())
+        ),
         Err(ChildGrantRefusal::Denied),
         "a revoked parent issues nothing"
     );
@@ -995,7 +1134,10 @@ fn an_owner_scoped_parent_issues_and_recovers_its_exact_child_across_the_journal
     };
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("grant-owner.jsonl");
-    let owner = durable(Arc::new(FileGrantOwnerStore::new(&path)));
+    let owner = durable(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )));
     let app = who("app");
     let session = |authority: &PrincipalRef| ResourceDomain {
         authority: authority.clone(),
@@ -1003,6 +1145,7 @@ fn an_owner_scoped_parent_issues_and_recovers_its_exact_child_across_the_journal
     };
     let parent = owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("parent"),
             who("holder"),
@@ -1020,9 +1163,11 @@ fn an_owner_scoped_parent_issues_and_recovers_its_exact_child_across_the_journal
         },
         ..child_intent(&parent, "child")
     };
-    let Ok(ChildGrantOutcome::Issued { lineage }) =
-        owner.issue_or_recover_child_under_exclusion(&intent(&app), || Ok(open()))
-    else {
+    let Ok(ChildGrantOutcome::Issued { lineage }) = owner.issue_or_recover_child_under_exclusion(
+        &meerkat_core::AdmissionGuard::none(),
+        &intent(&app),
+        || Ok(open()),
+    ) else {
         panic!("first append issues")
     };
     let resolved = owner
@@ -1033,20 +1178,32 @@ fn an_owner_scoped_parent_issues_and_recovers_its_exact_child_across_the_journal
         DomainRestriction::exact([session(&app)])
     );
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&intent(&app), || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent(&app),
+            || Ok(open())
+        ),
         Ok(ChildGrantOutcome::Recovered {
             lineage: lineage.clone()
         })
     );
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&intent(&who("other-app")), || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent(&who("other-app")),
+            || Ok(open())
+        ),
         Err(ChildGrantRefusal::Denied),
         "another application's domain is not this child"
     );
     let before = state(&owner);
     drop(owner);
 
-    let restored = restart(Arc::new(FileGrantOwnerStore::new(&path))).expect("restore");
+    let restored = restart(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )))
+    .expect("restore");
     assert_eq!(state(&restored), before);
     let resolved = restored
         .resolve_controller_lineage(&lineage, &who("helper"), None)
@@ -1091,6 +1248,7 @@ fn restore_refuses_a_child_widened_past_its_owner_scoped_parent() {
     let owner = durable(store.clone());
     let parent = owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("parent"),
             who("holder"),
@@ -1103,6 +1261,7 @@ fn restore_refuses_a_child_widened_past_its_owner_scoped_parent() {
         .expect("owner-scoped parent");
     owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -1139,9 +1298,11 @@ fn an_uncertain_child_append_is_recovered_by_the_same_intent() {
         let parent = issue(&owner, "parent");
         store.set(outcome);
         assert_eq!(
-            owner.issue_or_recover_child_under_exclusion(&child_intent(&parent, "child"), || Ok(
-                open()
-            )),
+            owner.issue_or_recover_child_under_exclusion(
+                &meerkat_core::AdmissionGuard::none(),
+                &child_intent(&parent, "child"),
+                || Ok(open())
+            ),
             Err(ChildGrantRefusal::Uncertain)
         );
         store.set(Append::Acknowledge);
@@ -1151,9 +1312,11 @@ fn an_uncertain_child_append_is_recovered_by_the_same_intent() {
             "the failed live owner cannot say"
         );
         assert_eq!(
-            owner.issue_or_recover_child_under_exclusion(&child_intent(&parent, "child"), || Ok(
-                open()
-            )),
+            owner.issue_or_recover_child_under_exclusion(
+                &meerkat_core::AdmissionGuard::none(),
+                &child_intent(&parent, "child"),
+                || Ok(open())
+            ),
             Err(ChildGrantRefusal::Unavailable)
         );
         drop(owner);
@@ -1165,6 +1328,7 @@ fn an_uncertain_child_append_is_recovered_by_the_same_intent() {
         if landed {
             assert_eq!(
                 restored.issue_or_recover_child_under_exclusion(
+                    &meerkat_core::AdmissionGuard::none(),
                     &child_intent(&parent, "child"),
                     || { Err(GrantRefusal::Denied) }
                 ),
@@ -1180,7 +1344,11 @@ fn an_uncertain_child_append_is_recovered_by_the_same_intent() {
             );
         }
         let recovered = restored
-            .issue_or_recover_child_under_exclusion(&child_intent(&parent, "child"), || Ok(open()))
+            .issue_or_recover_child_under_exclusion(
+                &meerkat_core::AdmissionGuard::none(),
+                &child_intent(&parent, "child"),
+                || Ok(open()),
+            )
             .expect("same intent");
         if landed {
             assert!(matches!(recovered, ChildGrantOutcome::Recovered { .. }));
@@ -1250,15 +1418,209 @@ impl Drop for DescriptorCopy {
 fn a_released_lease_is_free_while_a_spawned_process_holds_its_descriptor() {
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("grant-owner.jsonl");
-    let store = Arc::new(FileGrantOwnerStore::new(&path));
+    let store = Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    ));
     let owner = durable(store.clone());
     issue(&owner, "held");
     let writer = store.writer_descriptor_copy().expect("the lease's writer");
     let copy = DescriptorCopy::spawn(&writer);
     drop(writer);
     drop(owner);
-    let restored = restart(Arc::new(FileGrantOwnerStore::new(&path)))
-        .expect("a released lease is free while a spawned process holds a copy of its descriptor");
+    let restored = restart(Arc::new(FileGrantOwnerStore::new(
+        &path,
+        crate::grants::GrantLogFence::NotAdmissionRead,
+    )))
+    .expect("a released lease is free while a spawned process holds a copy of its descriptor");
     assert_eq!(state(&restored).revision, 1);
     drop(copy);
+}
+
+/// The realm grant log's fence (`GrantLogFence::Realm`) admits only an
+/// operation whose guard holds it: no guard, or a guard over another fence,
+/// is refused before anything is written, for the new owner and for every
+/// mutation, and the refusal leaves the owner available. A log no admission
+/// reads (`GrantLogFence::NotAdmissionRead`) accepts any guard.
+#[test]
+fn durable_custody_refuses_a_guard_that_does_not_cover_it() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let realm = |name: &str| meerkat_core::connection::RealmId::parse(name).expect("realm id");
+    let fence = AdmissionFence::realm(directory.path(), &realm("fenced")).expect("fence");
+    let elsewhere = AdmissionFence::realm(directory.path(), &realm("other")).expect("fence");
+    let path = fence
+        .directory()
+        .join("authorization")
+        .join("grant-owner.jsonl");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+    let store = || -> Arc<dyn GrantOwnerStore> {
+        Arc::new(FileGrantOwnerStore::new(
+            &path,
+            GrantLogFence::Realm(fence.clone()),
+        ))
+    };
+    let new_owner = |guard: &AdmissionGuard| {
+        LocalGrantAuthority::new_durable(
+            guard,
+            configuration(),
+            store(),
+            LocalAuthorizationPublication::new(),
+            Arc::new(Clock),
+        )
+    };
+    let root = |owner: &LocalGrantAuthority, guard: &AdmissionGuard, name: &str| {
+        owner.issue_root(
+            guard,
+            &who("root"),
+            id(name),
+            who("holder"),
+            None,
+            ExecutionRestrictions::unrestricted(),
+        )
+    };
+
+    assert!(
+        matches!(
+            new_owner(&AdmissionGuard::none()),
+            Err(GrantDurabilityError::AdmissionFence)
+        ),
+        "the new owner is refused without the log's fence"
+    );
+    assert!(!path.exists(), "and nothing was created");
+
+    let held = AdmissionGuard::try_acquire(vec![fence.clone()]).expect("the log's fence");
+    let owner = new_owner(&held).expect("the new owner under its fence");
+    assert_eq!(owner.admission_fences(), vec![fence.clone()]);
+    let first = root(&owner, &held, "first").expect("issued under the fence");
+    let written = std::fs::read(&path).expect("read");
+
+    let other = AdmissionGuard::try_acquire(vec![elsewhere]).expect("another fence");
+    for (label, guard) in [
+        ("no guard", AdmissionGuard::none()),
+        ("another fence", other),
+    ] {
+        assert_eq!(
+            root(&owner, &guard, "refused"),
+            Err(GrantRefusal::AdmissionFence),
+            "{label}: issuance"
+        );
+        assert_eq!(
+            owner.revoke(&guard, &who("root"), &first, &mut IsolatedGrantTestCustody),
+            Err(GrantRefusal::AdmissionFence),
+            "{label}: revocation"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            written,
+            "{label}: nothing was appended"
+        );
+    }
+    // Refused before the write, never uncertain: the owner stays available
+    // and the refused id was never issued.
+    assert_eq!(owner.issued_reference(&id("refused")), Ok(None));
+    root(&owner, &held, "refused").expect("issued under the fence after the refusals");
+    drop(owner);
+
+    // A log no admission reads accepts any guard, `none()` included.
+    let private = directory.path().join("private-grant-owner.jsonl");
+    let unfenced = LocalGrantAuthority::new_durable(
+        &AdmissionGuard::none(),
+        configuration(),
+        Arc::new(FileGrantOwnerStore::new(
+            &private,
+            GrantLogFence::NotAdmissionRead,
+        )),
+        LocalAuthorizationPublication::new(),
+        Arc::new(Clock),
+    )
+    .expect("a log no admission reads takes no guard");
+    assert!(unfenced.admission_fences().is_empty());
+    root(&unfenced, &AdmissionGuard::none(), "private").expect("issued with no guard");
+}
+
+/// A torn tail stays on disk through a load, which never writes; the first
+/// append under the log's guard truncates it before it writes, and a refused
+/// append (a guard without the log's fence) leaves it in place.
+#[test]
+fn load_never_truncates_and_the_first_append_truncates_a_torn_tail() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let realm = meerkat_core::connection::RealmId::parse("torn").expect("realm id");
+    let fence = AdmissionFence::realm(directory.path(), &realm).expect("fence");
+    let path = fence
+        .directory()
+        .join("authorization")
+        .join("grant-owner.jsonl");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+    let store = || {
+        Arc::new(FileGrantOwnerStore::new(
+            &path,
+            GrantLogFence::Realm(fence.clone()),
+        ))
+    };
+    let root = |owner: &LocalGrantAuthority, guard: &AdmissionGuard, name: &str| {
+        owner.issue_root(
+            guard,
+            &who("root"),
+            id(name),
+            who("holder"),
+            None,
+            ExecutionRestrictions::unrestricted(),
+        )
+    };
+    let held = AdmissionGuard::try_acquire(vec![fence.clone()]).expect("the log's fence");
+    let owner = LocalGrantAuthority::new_durable(
+        &held,
+        configuration(),
+        store(),
+        LocalAuthorizationPublication::new(),
+        Arc::new(Clock),
+    )
+    .expect("new durable owner");
+    let kept = root(&owner, &held, "kept").expect("kept");
+    drop(owner);
+    let acknowledged = std::fs::read(&path).expect("read");
+    let mut torn = acknowledged.clone();
+    torn.extend_from_slice(b"{\"change\":{\"revision\":");
+    std::fs::write(&path, &torn).expect("torn write");
+
+    let restored = restart(store()).expect("restore");
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        torn,
+        "a load never writes"
+    );
+    restored
+        .resolve_lineage(std::slice::from_ref(&kept), &who("holder"), None)
+        .expect("kept");
+    assert_eq!(
+        root(&restored, &AdmissionGuard::none(), "refused"),
+        Err(GrantRefusal::AdmissionFence)
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        torn,
+        "a refused append leaves the tail"
+    );
+
+    let later = root(&restored, &held, "later").expect("appended under the fence");
+    let appended = std::fs::read(&path).expect("read");
+    assert!(
+        appended.starts_with(&acknowledged),
+        "the acknowledged lines stay"
+    );
+    let tail = &appended[acknowledged.len()..];
+    assert_eq!(
+        tail.iter().position(|byte| *byte == b'\n'),
+        Some(tail.len().saturating_sub(1)),
+        "one new line, the tail's last byte"
+    );
+    serde_json::from_slice::<serde_json::Value>(tail)
+        .expect("the torn bytes are gone: the new line is whole");
+    drop(restored);
+    let again = restart(store()).expect("restore after the truncating append");
+    for lineage in [kept, later] {
+        again
+            .resolve_lineage(std::slice::from_ref(&lineage), &who("holder"), None)
+            .expect("acknowledged");
+    }
 }

@@ -42,6 +42,17 @@ pub struct McpCallTarget<'a> {
     pub raw_operation: &'a str,
     /// The same native projection inserted into the wire metadata.
     pub origin: &'a meerkat_core::WireCallOrigin,
+    /// The service-secret writes this connection's stdio server was launched
+    /// with ([`crate::McpConnection::service_secret_launch`]): the call is
+    /// served by exactly these writes' values. `None` when the launch
+    /// injected no service secret.
+    pub service_secret_launch: Option<&'a meerkat_core::auth::McpServiceSecretLaunch>,
+    /// The lease publication of the credential this call's requests carry
+    /// ([`crate::McpConnection::credential_publication`]), read when the call
+    /// is prepared: each request reads the credential owner's credential when
+    /// it is sent, so it carries this publication or a later one. `None`
+    /// when the connection resolves no bearer, or its owner keeps no lease.
+    pub credential_publication: Option<meerkat_core::handles::CredentialLeasePublication>,
 }
 
 /// A resource read on the exact existing MCP connection. It is not a tool
@@ -50,6 +61,12 @@ pub struct McpResourceTarget<'a> {
     pub config: &'a McpServerConfig,
     pub connection_id: McpConnectionId,
     pub uri: &'a str,
+    /// The service-secret writes this connection's stdio server was launched
+    /// with, as [`McpCallTarget::service_secret_launch`] states them.
+    pub service_secret_launch: Option<&'a meerkat_core::auth::McpServiceSecretLaunch>,
+    /// The lease publication of the credential the read's requests carry,
+    /// as [`McpCallTarget::credential_publication`] states it.
+    pub credential_publication: Option<meerkat_core::handles::CredentialLeasePublication>,
 }
 
 /// Trusted process-local preparation, separate from serialized agent config.

@@ -224,6 +224,23 @@ async fn test_config_store_contract() -> Result<(), Box<dyn std::error::Error>> 
             }
             Ok(guard.clone())
         }
+
+        // In memory: no document, so no admission fence.
+        async fn set_held(
+            &self,
+            _admission: &meerkat_core::AdmissionGuard,
+            config: Config,
+        ) -> Result<(), meerkat_core::config::ConfigError> {
+            self.set(config).await
+        }
+
+        async fn patch_held(
+            &self,
+            _admission: &meerkat_core::AdmissionGuard,
+            delta: ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            self.patch(delta).await
+        }
     }
 
     let store = MemoryStore {

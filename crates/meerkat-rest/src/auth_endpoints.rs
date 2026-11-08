@@ -552,6 +552,7 @@ async fn save_marked_token_commit_unlocked(
     };
     if let Err(e) = token_store
         .save_for(
+            &meerkat_core::AdmissionGuard::none(),
             &commit.key,
             &committed_tokens,
             TokenStoreAccess::Interactive,
@@ -587,7 +588,7 @@ async fn save_tokens_and_publish_lifecycle(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |_fence| {
                 Box::pin(async move {
                     let lease_key =
                         meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
@@ -643,7 +644,12 @@ async fn rollback_token_commit(
                     .release_credential_lifecycle(&commit.lease_key)
                     .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
                 token_store
-                    .save_for(&commit.key, previous, TokenStoreAccess::Interactive)
+                    .save_for(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &commit.key,
+                        previous,
+                        TokenStoreAccess::Interactive,
+                    )
                     .await
                     .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
                 let restored_transition = meerkat_core::restore_token_lifecycle_snapshot(
@@ -661,6 +667,7 @@ async fn rollback_token_commit(
                         .map_err(|e| format!("AuthMachine rollback marker handoff failed: {e}"))?;
                     token_store
                         .save_for(
+                            &meerkat_core::AdmissionGuard::none(),
                             &commit.key,
                             &restored_previous,
                             TokenStoreAccess::Interactive,
@@ -674,7 +681,12 @@ async fn rollback_token_commit(
                     .release_credential_lifecycle(&commit.lease_key)
                     .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
                 token_store
-                    .save_for(&commit.key, previous, TokenStoreAccess::Interactive)
+                    .save_for(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &commit.key,
+                        previous,
+                        TokenStoreAccess::Interactive,
+                    )
                     .await
                     .map_err(|e| format!("TokenStore rollback save failed: {e}"))?;
             }
@@ -684,7 +696,11 @@ async fn rollback_token_commit(
                 .release_credential_lifecycle(&commit.lease_key)
                 .map_err(|e| format!("AuthMachine lifecycle rollback release failed: {e}"))?;
             token_store
-                .clear_for(&commit.key, TokenStoreAccess::Interactive)
+                .clear_for(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &commit.key,
+                    TokenStoreAccess::Interactive,
+                )
                 .await
                 .map_err(|e| format!("TokenStore rollback clear failed: {e}"))?;
         }
@@ -776,7 +792,7 @@ async fn save_tokens_and_consume_device_flow(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |_fence| {
                 Box::pin(async move {
                     let lease_key =
                         meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
@@ -889,7 +905,7 @@ async fn save_tokens_and_consume_browser_flow(
     let outcome = refresh_coordinator
         .with_exclusive_mutation(
             key,
-            Box::new(move || {
+            Box::new(move |_fence| {
                 Box::pin(async move {
                     let lease_key =
                         meerkat_core::handles::LeaseKey::from_auth_binding(&auth_binding);
@@ -2243,7 +2259,22 @@ mod tests {
             .unwrap();
         let key = TokenKey::from_auth_binding(&openai_auth_binding());
         let tokens = api_key_tokens_with_secret("sk-isolated");
-        state.token_store().save(&key, &tokens).await.unwrap();
+        // The state's store is a persisted file store under the test root: a
+        // write outside its coordinator takes the key's credential fence.
+        let fence = meerkat_core::AdmissionGuard::try_acquire(vec![
+            meerkat_core::AdmissionFence::credentials(
+                &temp.path().join("credentials"),
+                key.realm(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        state
+            .token_store()
+            .save(&fence, &key, &tokens)
+            .await
+            .unwrap();
+        drop(fence);
 
         let under_root = meerkat_providers::auth_store::TokenStoreBackend::File {
             root: temp.path().join("credentials"),
@@ -2418,6 +2449,7 @@ mod tests {
 
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &TokenKey,
             _tokens: &PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
@@ -2426,6 +2458,7 @@ mod tests {
 
         async fn clear(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             Ok(())
@@ -2485,19 +2518,21 @@ mod tests {
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &TokenKey,
             tokens: &PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             self.save_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
 
         async fn list(
@@ -2528,6 +2563,7 @@ mod tests {
 
         async fn save(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &TokenKey,
             _tokens: &PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
@@ -2538,6 +2574,7 @@ mod tests {
 
         async fn clear(
             &self,
+            _fence: &meerkat_core::AdmissionGuard,
             _key: &TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
             Ok(())
@@ -4041,7 +4078,10 @@ mod tests {
         let key = TokenKey::from_auth_binding(&auth_binding);
         let orphan = chatgpt_oauth_tokens_with_secret("orphan-access");
         assert!(!meerkat_core::tokens_lifecycle_published(&orphan));
-        store.save(&key, &orphan).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &orphan)
+            .await
+            .unwrap();
 
         let restored = meerkat_core::rehydrate_marked_tokens_for_status(
             store.as_ref(),
@@ -4292,7 +4332,10 @@ mod tests {
         let auth_binding = managed_auth_binding_in("rest-browser-stale-previous");
         let key = TokenKey::from_auth_binding(&auth_binding);
         let stale = api_key_tokens_with_secret("sk-stale");
-        store.save(&key, &stale).await.unwrap();
+        store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &stale)
+            .await
+            .unwrap();
 
         let err = save_tokens_and_consume_browser_flow(
             ProviderAuthPersistence::new(store.clone(), test_refresh_coordinator()),
@@ -4340,7 +4383,11 @@ mod tests {
         let key = TokenKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
         store
-            .save(&key, &api_key_tokens_with_secret("sk-stale"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &api_key_tokens_with_secret("sk-stale"),
+            )
             .await
             .unwrap();
         let mut failed_tokens = api_key_tokens_with_secret("sk-new");
@@ -4415,7 +4462,11 @@ mod tests {
         let lease_key = LeaseKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
         store
-            .save(&key, &api_key_tokens_with_secret("sk-stale"))
+            .save(
+                &meerkat_core::AdmissionGuard::none(),
+                &key,
+                &api_key_tokens_with_secret("sk-stale"),
+            )
             .await
             .unwrap();
         let state = meerkat_providers::oauth_flow::OAuthFlowAuthority::start(
@@ -4694,6 +4745,7 @@ mod tests {
         state
             .token_store()
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &PersistedTokens {
                     auth_mode: PersistedAuthMode::ApiKey,
@@ -4762,6 +4814,7 @@ mod tests {
         state
             .token_store()
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &mark_tokens_lifecycle_published_for_test(&tokens, &auth_binding),
             )
@@ -4863,6 +4916,7 @@ mod tests {
         state
             .token_store()
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &PersistedTokens::api_key("sk-stale-api-key"),
             )
@@ -4921,6 +4975,7 @@ mod tests {
         state
             .token_store()
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &PersistedTokens {
                     auth_mode: PersistedAuthMode::ChatgptOauth,
@@ -4985,6 +5040,7 @@ mod tests {
         state
             .token_store()
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &PersistedTokens {
                     auth_mode: PersistedAuthMode::ApiKey,
@@ -5069,17 +5125,19 @@ mod tests {
 
         async fn save(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
             tokens: &meerkat_providers::auth_store::PersistedTokens,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.save(key, tokens).await
+            self.inner.save(fence, key, tokens).await
         }
 
         async fn clear(
             &self,
+            fence: &meerkat_core::AdmissionGuard,
             key: &meerkat_providers::auth_store::TokenKey,
         ) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-            self.inner.clear(key).await
+            self.inner.clear(fence, key).await
         }
 
         async fn list(
@@ -5262,6 +5320,7 @@ mod tests {
         state
             .token_store()
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &TokenKey::from_auth_binding(&auth_binding),
                 &PersistedTokens::api_key("sk-live"),
             )

@@ -3395,6 +3395,7 @@ dependencies = [
  "meerkat-machine-kernels",
  "meerkat-machine-schema",
  "parking_lot",
+ "rustix 1.1.5",
  "schemars 1.2.3",
  "serde",
  "serde_json",

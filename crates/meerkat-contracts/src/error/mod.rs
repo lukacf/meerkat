@@ -89,6 +89,17 @@ pub enum ErrorCode {
     /// data. A fork request may set `inherited_instructions` to
     /// `reactivate_inherited` to carry the source's effective activations.
     ForkInstructionRefused,
+    /// A realm admission fence the operation needs is held, by an admission
+    /// or another fenced operation, beyond the operation's bound. The
+    /// operation did not start and wrote nothing. It may be retried once the
+    /// hold ends, which after an interrupted admission can be only when the
+    /// process holding it restarts: an immediate retry is not promised to
+    /// succeed.
+    AdmissionInProgress,
+    /// A realm admission fence the operation needs could not be opened,
+    /// created, locked or identity-checked. The operation did not start and
+    /// wrote nothing; it fails closed.
+    AdmissionFenceUnavailable,
 }
 
 impl ErrorCode {
@@ -124,6 +135,8 @@ impl ErrorCode {
             Self::ApprovalCommitUnknown => -32035,
             Self::StaleDeliveryScope => -32036,
             Self::ForkInstructionRefused => -32037,
+            Self::AdmissionInProgress => -32038,
+            Self::AdmissionFenceUnavailable => -32039,
         }
     }
 
@@ -159,6 +172,8 @@ impl ErrorCode {
             -32035 => Some(Self::ApprovalCommitUnknown),
             -32036 => Some(Self::StaleDeliveryScope),
             -32037 => Some(Self::ForkInstructionRefused),
+            -32038 => Some(Self::AdmissionInProgress),
+            -32039 => Some(Self::AdmissionFenceUnavailable),
             _ => None,
         }
     }
@@ -174,7 +189,8 @@ impl ErrorCode {
             | Self::StaleFence
             | Self::MemberReloadRequired
             | Self::ApprovalConflict
-            | Self::StaleDeliveryScope => 409,
+            | Self::StaleDeliveryScope
+            | Self::AdmissionInProgress => 409,
             Self::RequestCancelled => 499,
             Self::ProviderError => 502,
             Self::BudgetExhausted => 429,
@@ -186,7 +202,8 @@ impl ErrorCode {
             Self::HostUnavailable
             | Self::InputNotReady
             | Self::SessionRuntimeUnavailable
-            | Self::ApprovalStoreUnavailable => 503,
+            | Self::ApprovalStoreUnavailable
+            | Self::AdmissionFenceUnavailable => 503,
             Self::StaleCursor => 410,
         }
     }
@@ -223,6 +240,8 @@ impl ErrorCode {
             Self::ApprovalCommitUnknown => 55,
             Self::StaleDeliveryScope => 56,
             Self::ForkInstructionRefused => 57,
+            Self::AdmissionInProgress => 58,
+            Self::AdmissionFenceUnavailable => 59,
         }
     }
 }
@@ -296,6 +315,11 @@ impl ErrorCode {
             Self::ApprovalStoreUnavailable => ErrorCategory::Capability,
             Self::ApprovalConflict => ErrorCategory::Session,
             Self::InternalError | Self::ApprovalCommitUnknown => ErrorCategory::Internal,
+            // Admission fence outcomes: a held fence is conflict-class (the
+            // operation waits its turn, nothing started); a fence that cannot
+            // be used is capability unavailability, fail closed.
+            Self::AdmissionInProgress => ErrorCategory::Session,
+            Self::AdmissionFenceUnavailable => ErrorCategory::Capability,
         }
     }
 }
@@ -913,6 +937,42 @@ mod tests {
             ),
         ];
         for (code, rpc, http, cli, category) in cases {
+            assert_eq!(code.jsonrpc_code(), *rpc, "{code:?} jsonrpc pin");
+            assert_eq!(code.http_status(), *http, "{code:?} http pin");
+            assert_eq!(code.cli_exit_code(), *cli, "{code:?} cli pin");
+            assert_eq!(code.category(), *category, "{code:?} category pin");
+            assert_eq!(
+                ErrorCode::from_jsonrpc_code(*rpc),
+                Some(*code),
+                "{code:?} jsonrpc round-trip pin"
+            );
+        }
+    }
+
+    /// Exact-value pins for the two realm admission fence codes: the wire
+    /// name and all four renderings each, plus the JSON-RPC round trip.
+    #[test]
+    fn admission_fence_error_codes_render_exact_values() {
+        let cases: &[(ErrorCode, &str, i32, u16, i32, ErrorCategory)] = &[
+            (
+                ErrorCode::AdmissionInProgress,
+                "ADMISSION_IN_PROGRESS",
+                -32038,
+                409,
+                58,
+                ErrorCategory::Session,
+            ),
+            (
+                ErrorCode::AdmissionFenceUnavailable,
+                "ADMISSION_FENCE_UNAVAILABLE",
+                -32039,
+                503,
+                59,
+                ErrorCategory::Capability,
+            ),
+        ];
+        for (code, wire, rpc, http, cli, category) in cases {
+            assert_eq!(code.to_string(), *wire, "{code:?} wire name pin");
             assert_eq!(code.jsonrpc_code(), *rpc, "{code:?} jsonrpc pin");
             assert_eq!(code.http_status(), *http, "{code:?} http pin");
             assert_eq!(code.cli_exit_code(), *cli, "{code:?} cli pin");

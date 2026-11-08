@@ -68,9 +68,11 @@ pub use mcp_attachment_identity_key::{
     McpAttachmentIdentityKey, McpAttachmentIdentityKeyError, load_mcp_attachment_identity_key,
 };
 pub use mcp_service_secret::{
-    McpServiceSecretPresence, McpServiceSecretRef, McpServiceSecretRefusal, McpServiceSecretValue,
-    McpServiceSecretValues, clear_mcp_service_secret, load_mcp_service_secret,
-    observe_mcp_service_secret, save_mcp_service_secret,
+    McpServiceSecretLaunch, McpServiceSecretPresence, McpServiceSecretRecheck, McpServiceSecretRef,
+    McpServiceSecretRefusal, McpServiceSecretValue, McpServiceSecretValues,
+    McpServiceSecretWitness, McpServiceSecretWriteId, clear_mcp_service_secret,
+    load_mcp_service_secret, load_mcp_service_secret_into, observe_mcp_service_secret,
+    observe_mcp_service_secret_witness, recheck_mcp_service_secret, save_mcp_service_secret,
 };
 pub use metadata::{
     AnthropicAuthMetadata, AnthropicRouteHints, AuthMetadata, AuthMetadataDefaults, AuthRouteHints,

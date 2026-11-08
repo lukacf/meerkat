@@ -972,6 +972,7 @@ impl Fixture {
         );
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("controller"),
                 principal("executor"),
@@ -981,6 +982,7 @@ impl Fixture {
             .expect("actual controller lineage");
         let operation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("read-only"),
                 principal("executor"),
@@ -990,6 +992,7 @@ impl Fixture {
             .expect("actual operation grant");
         let invocation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("invocation"),
                 principal("requester"),

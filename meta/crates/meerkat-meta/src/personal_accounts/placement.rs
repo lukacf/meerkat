@@ -13,13 +13,15 @@
 //! shows the profile that spec carries. The guard refuses a profile that
 //! declares a server under a personal server's name, whatever its shape and
 //! whichever of them asks ([`PersonalAccountRefusal::Unsupported`] with
-//! [`UnsupportedPersonalServer::HostedElsewhere`]): so a member placed before
-//! the server was marked personal fails its revival, broken, rather than
-//! keep the server. It reads the composition's personal accounts when it is
-//! asked, so it can sit in the spawn customizers of every mob a composition
-//! builds from its spec and in the agent mob tools' child customizer slot,
-//! for every mob an agent creates, before the composition names its
-//! personal servers.
+//! [`UnsupportedPersonalServer::HostedElsewhere`]): so this host fails the
+//! revival of a member placed before the server was marked personal, and
+//! marks it broken, without sending it anything. A runtime its host still
+//! keeps, or revives on its own after a restart, keeps the server until the
+//! member is retired. The guard reads the composition's personal accounts
+//! when it is asked, so it can sit in the spawn customizers of every mob a
+//! composition builds from its spec and in the agent mob tools' child
+//! customizer slot, for every mob an agent creates, before the composition
+//! names its personal servers.
 
 use std::sync::Arc;
 

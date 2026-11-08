@@ -145,8 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   personal server's name, since that host would serve it with its own
   credentials; so is its respawn, before anything is retired. A member
   placed before the server was marked personal is refused when it is woken
-  again from its stored profile (the member is broken): spawn it again on
-  this host, or mark the server `system` again.
+  again from its stored profile (the member is broken): retire it and spawn
+  it again on this host, or mark the server `system` again.
 - Rust: `McpAccountsConfig`, `McpAccountMode`, `McpServerAccounts`,
   `McpAccountsConfigError`, `PersonalMcpAccounts`,
   `PersonalAccountOwnerCheck`, `PersonalAccountCredentials`,
@@ -176,8 +176,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`personal_account_not_owner`).
 - Personal accounts on MCP servers: a member placed on another host before
   a server in its profile was marked personal keeps that server on its host
-  until this host wakes it again: while its host keeps it running, and when
-  its host revives it on its own after a restart of that host.
+  until the member is retired: while its host keeps it running, and when
+  its host revives it on its own after a restart of that host. A wake that
+  this host refuses stops nothing there.
 
 ## [0.9.10] - 2026-11-04
 

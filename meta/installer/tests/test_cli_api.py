@@ -494,11 +494,21 @@ async def test_log_open_settings_and_export(forge, tmp_path):
                                                               "url": "http://127.0.0.1:4200/"}]}
     result = await run(forge, "installation", "open", GUIDE_ID)
     assert "http://127.0.0.1:4110/console" in result.stdout and "http://127.0.0.1:4200/" in result.stdout
+    forge.deployment.settings_options.side_effect = DraftConflict(
+        "Stop this installed application before changing its private settings.")
+    refused = await run(forge, "installation", "settings", "show", GUIDE_ID, "--json")
+    assert (refused.code, refused.document["error"]["code"]) == (82, "conflict")
+    assert refused.document["error"]["detail"] == ("Forge shows the private settings of a stopped installation "
+                                                   "only; this one is running.")
+    assert refused.document["next"][0]["command"] == f"meta-forge installation stop {GUIDE_ID}"
+    forge.deployment.settings_options.side_effect = None
+    forge.deployment.status.return_value = receipt(status="stopped", phase="stopped", console_url=None)
     forge.deployment.settings_options.return_value = {"fields": [{"key": "OPENAI_API_KEY", "secret": True,
                                                                   "required": True, "configured": True}]}
     result = await run(forge, "installation", "settings", "show", GUIDE_ID)
     assert "OPENAI_API_KEY" in result.stdout and "present" in result.stdout
-    forge.deployment.settings_options.assert_awaited_once_with(GUIDE_ID, DEPLOYMENT_ID)
+    forge.deployment.settings_options.assert_awaited_with(GUIDE_ID, DEPLOYMENT_ID)
+    assert forge.deployment.settings_options.await_count == 2
     result = await run(forge, "installation", "export", GUIDE_ID, "--out", str(tmp_path / "x.zip"), "--json")
     assert result.code == 2 and "plan package" in result.document["next"][0]["command"]
     payload = b"installed-package"

@@ -79,7 +79,8 @@ def register(commands, command_parser):
     parser.set_defaults(func=installation_open, name="installation open")
     settings = command_parser(actions, "settings", "Private settings: field names and presence only.")
     settings_actions = settings.add_subparsers(dest="settings_action", metavar="ACTION", required=True)
-    parser = command_parser(settings_actions, "show", "Field names, required or optional, and presence (never values).")
+    parser = command_parser(settings_actions, "show", "Field names, required or optional, and presence (never "
+                            "values), of a stopped installation.")
     parser.add_argument("setup", metavar="SETUP")
     parser.set_defaults(func=installation_settings, name="installation settings show")
     parser = command_parser(actions, "export", "Download the installed application package (no private settings).")
@@ -490,8 +491,17 @@ async def installation_settings(context):
     client = await context.client()
     identity = await client.resolve_setup(context.args.setup)
     receipt = await read_receipt(client, identity)
-    value = await client.get(guide_path(identity, "/deployment/settings"),
-                             params={"deployment_id": receipt.get("deployment_id")}, read_timeout=120.0)
+    try:
+        value = await client.get(guide_path(identity, "/deployment/settings"),
+                                 params={"deployment_id": receipt.get("deployment_id")}, read_timeout=120.0)
+    except CliError as error:
+        # Forge reads an installation's private settings only while it is stopped.
+        if error.code == "conflict" and receipt.get("status") != "stopped":
+            error.detail = (f"Forge shows the private settings of a stopped installation only; this one is "
+                            f"{receipt.get('status')}.")
+            error.next = [step(f"meta-forge installation stop {identity}", "Stop it, then show its settings."),
+                          status_step(identity)]
+        raise
     lines = [f"Private settings of installation {short(receipt.get('deployment_id'))} (presence only):"]
     for field in value.get("fields") or []:
         if not isinstance(field, dict):

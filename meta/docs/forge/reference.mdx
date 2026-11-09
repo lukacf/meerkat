@@ -186,7 +186,7 @@ HOST`) and open `http://127.0.0.1:8787` on your own computer.
 | `installation request SETUP ID` | Reads the record of the action with this request ID, for example after a lost answer. |
 | `installation log SETUP` | Bounded, redacted log lines; `--follow` keeps printing new ones. |
 | `installation open SETUP` | The Console and application links. |
-| `installation settings show SETUP` | The private settings' names and whether each is set. It never shows a value. |
+| `installation settings show SETUP` | The private settings' names and whether each is set, never a value. Forge reads them while the installation is stopped. |
 | `installation export SETUP --out FILE` | Downloads the installed package, without private settings. |
 
 `SETUP` is a full setup ID, a unique prefix of at least 8 of its hex digits,

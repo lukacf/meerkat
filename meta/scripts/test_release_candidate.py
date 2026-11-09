@@ -34,6 +34,11 @@ RUN = 101
 TRAILING_RUN = 102
 ATTEMPT = 2
 CI = 99
+# The release commit's first parent, whose copy of the root's product-scoped
+# CI evidence reader judges a failed exact-main CI run, and the commit's tree.
+PARENT_SHA = "1" * 40
+SOURCE_TREE = "2" * 40
+EVIDENCE_READER = Path(__file__).resolve().parents[2] / "scripts" / "ci-product-evidence.mjs"
 # The Core release the root Cargo.toml pins, and the tree of crates/ that
 # both the source commit and Core's tag carry unless a test changes one.
 CORE = "0.8.31"
@@ -257,6 +262,10 @@ class CandidateProtocolTests(unittest.TestCase):
                       for name in CORE_CRATE_NAMES}
         self.unreadable = set()
         self.toolchain = TOOLCHAIN
+        # The release commit's first parent holds the CI evidence reader, and
+        # the commit changes these paths against it.
+        self.parent_reader = True
+        self.changed_paths = ("meta/crates/meerkat-meta/src/lib.rs",)
         for name, effect in (("index_entries", self.index_response),
                              ("core_crate_list", lambda: list(CORE_CRATE_NAMES)),
                              ("rustc_version", lambda: self.toolchain)):
@@ -301,6 +310,17 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def git_response(self, *args):
         self.git_calls.append(args)
+        if args == ("rev-parse", "--verify", f"{SHA}^1"):
+            return PARENT_SHA
+        if args == ("rev-parse", "--verify", f"{SHA}^{{tree}}"):
+            return SOURCE_TREE
+        if args == ("show", f"{PARENT_SHA}:scripts/ci-product-evidence.mjs"):
+            if not self.parent_reader:
+                raise helper.ProtocolError("git show failed: fatal: path 'scripts/ci-product-evidence.mjs' "
+                                           f"does not exist in '{PARENT_SHA}'")
+            return EVIDENCE_READER.read_text().strip()
+        if args == ("diff", "--name-only", PARENT_SHA, SHA):
+            return "\n".join(self.changed_paths)
         if args[:2] == ("rev-parse", "--verify") and args[2].endswith(":crates"):
             if args[2] not in self.crates_trees:
                 raise helper.ProtocolError(f"git rev-parse failed: fatal: invalid object name '{args[2]}'")
@@ -1284,6 +1304,74 @@ class CandidateProtocolTests(unittest.TestCase):
                 self.assertEqual(len(reads), 1, "collection polled main CI instead of refusing")
                 self.assertFalse(any("/zip" in c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"))
                 self.assertFalse((self.root / f"refused-{status}").exists())
+
+    def red_ci(self, failed, *, result="failure", **overrides):
+        """Main CI run CI attempt 1 failed, and left an exact-tree attestation
+        whose product evidence shows only the `failed` jobs (name: product)
+        red; `overrides` replace attestation fields."""
+        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")].update(conclusion="failure")
+        jobs = [{"name": "Change classification", "conclusion": "success", "product": "core", "downstream": False},
+                {"name": "Main unit tests (core)", "conclusion": "success", "product": "core", "downstream": False},
+                {"name": "Main unit tests (meta)", "conclusion": "success", "product": "meta", "downstream": False},
+                *({"name": name, "conclusion": "failure", "product": product, "downstream": False}
+                  for name, product in failed.items())]
+        record = {"schema_version": 4, "validation_backend": "github-hosted-cargo", "validation_result": result,
+                  "repository": REPO, "commit_sha": SHA, "tree_sha": SOURCE_TREE, "workflow": "CI",
+                  "workflow_run_id": str(CI), "workflow_run_attempt": "1", "event": "push",
+                  "ref": "refs/heads/main", "plan": {"mode": "workspace"},
+                  "product_evidence": {"version": 1, "plan_errors": 0, "failed_lanes": ["Main unit tests"],
+                                       "jobs": jobs},
+                  **overrides}
+        folder = self.fresh("ci-attestation")
+        folder.mkdir()
+        (folder / "attestation.json").write_text(json.dumps(record))
+        packed = self.fresh("ci-attestation-zip")
+        self.pack(packed, folder, ["attestation.json"])
+        name = f"meerkat-ci-attestation-{SHA}-1"
+        metadata = self.add_artifact(777, name, packed, run_id=CI)
+        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}/artifacts?name={name}&per_page=100")] = [
+            {"artifacts": [metadata], "total_count": 1}]
+        self.save()
+
+    def test_the_candidate_path_completes_on_a_red_ci_run_meta_does_not_depend_on(self):
+        """A red main CI run that the candidate's gate accepted for Meta (only
+        a Connect row failed) carries the candidate through collection,
+        promotion, publication and the published-release check: each re-check
+        of the bound CI run judges its attestation with the release commit's
+        first parent's copy of the root's evidence reader, as the gate did."""
+        self.red_ci({"Main unit tests (connect[console])": "connect"})
+        core, manifest = self.promote_core()
+        self.assertEqual((manifest["ci"]["run_id"], manifest["ci"]["run_attempt"]), (CI, 1))
+        self.assertFalse(self.state["release"]["draft"])
+        reads = [c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"]
+        self.assertTrue(any(f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1" in r for r in reads),
+                        "the CI run's attestation was read")
+        self.assertIn(("show", f"{PARENT_SHA}:scripts/ci-product-evidence.mjs"), self.git_calls)
+        os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
+        stdout, _ = self.command("verify-published")
+        self.assertIn("trailing tier not added yet", stdout)
+
+    def test_a_red_ci_run_refuses_the_candidate_unless_the_parents_reader_accepts_it_for_meta(self):
+        connect = {"Main unit tests (connect[console])": "connect"}
+        for case, failed, setup, reason in (
+                ("a Meta row failed", {"Main unit tests (meta)": "meta"}, None,
+                 "meta depends on job Main unit tests (meta)"),
+                ("a Core row failed", {"Clippy (core)": "core"}, None, "meta depends on job Clippy (core)"),
+                ("the parent has no reader", connect, lambda: setattr(self, "parent_reader", False),
+                 "ci-product-evidence.mjs"),
+                ("the commit changes the reader", connect,
+                 lambda: setattr(self, "changed_paths", ("scripts/ci-product-evidence.mjs",)),
+                 "changes scripts/ci-product-evidence.mjs"),
+                ("the attestation names another commit", connect, None, "attestation")):
+            with self.subTest(case=case):
+                self.parent_reader, self.changed_paths = True, ("meta/crates/meerkat-meta/src/lib.rs",)
+                if setup:
+                    setup()
+                overrides = {"commit_sha": OTHER_SHA} if case == "the attestation names another commit" else {}
+                self.red_ci(failed, **overrides)
+                _, error = self.command("collect", "--output-dir", str(self.fresh("refused")),
+                                        "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)
+                self.assertIn(reason, error)
 
     def collect_with_own_run_reads(self, script, *, success=True, name="re-read"):
         """collect() with a scripted sequence of reads of its own run record."""

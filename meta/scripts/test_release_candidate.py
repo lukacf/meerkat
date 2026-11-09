@@ -1416,6 +1416,38 @@ class CandidateProtocolTests(unittest.TestCase):
                                         "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)
                 self.assertIn(reason, error)
 
+    def test_a_candidate_stays_bound_to_the_ci_attempt_it_judged_when_the_run_is_re_run(self):
+        """The shape of ci.yml run 42570473155: once re-run, the run's own
+        record answers its latest attempt (2, green) while attempt 1 failed.
+        A candidate bound to attempt 1, red only in a Connect row, is judged
+        on attempt 1 wherever the bound run is read again (collection,
+        promotion, the published-release check), so the re-run that Connect's
+        own release asks for changes nothing a stage reads. A stage that
+        wants attempt 2 binds it explicitly."""
+        self.red_ci({"Main unit tests (connect[console])": "connect"})
+        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")] = {**self.run_info(ci=True), "run_attempt": 2}
+        for attempt, conclusion in ((1, "failure"), (2, "success")):
+            self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}/attempts/{attempt}")] = {
+                **self.run_info(ci=True), "run_attempt": attempt, "conclusion": conclusion}
+        self.save()
+        core, manifest = self.promote_core()
+        self.assertEqual((manifest["ci"]["run_id"], manifest["ci"]["run_attempt"]), (CI, 1))
+        self.assertFalse(self.state["release"]["draft"])
+        os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
+        stdout, _ = self.command("verify-published")
+        self.assertIn("trailing tier not added yet", stdout)
+        reads = [c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"]
+        self.assertIn(helper.repo_endpoint(f"actions/runs/{CI}/attempts/1"), reads)
+        self.assertNotIn(helper.repo_endpoint(f"actions/runs/{CI}"), reads,
+                         "a stage read the run's latest attempt instead of the bound one")
+        # Attempt 2, bound explicitly, is a green run: no attestation needed.
+        self.state["calls"] = []
+        self.save()
+        self.assertEqual(helper.verify_run(CI, 2, SHA, ci=True)["conclusion"], "success")
+        self.load()
+        self.assertEqual([c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"],
+                         [helper.repo_endpoint(f"actions/runs/{CI}/attempts/2")])
+
     def collect_with_own_run_reads(self, script, *, success=True, name="re-read"):
         """collect() with a scripted sequence of reads of its own run record."""
         endpoint = helper.repo_endpoint(f"actions/runs/{RUN}")

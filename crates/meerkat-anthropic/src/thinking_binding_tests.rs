@@ -1,11 +1,12 @@
 //! Thinking-block binding (Anthropic "preserved thinking"), driven against a
 //! mock Messages endpoint that enforces the documented rules for an account
-//! created on or after 2026-08-31.
+//! created on or after 2026-08-31, which Claude Fable 5.2 and Mythos 5.2
+//! apply to every account, whatever its age.
 //!
-//! Claude Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a
-//! replayed thinking block only while the top-level `system`, the `tools` and
-//! every earlier message are unchanged; on such an account a changed prefix is
-//! a 400 unless the request sets
+//! Claude Fable 5.2, Mythos 5.2, Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5
+//! and Haiku 5.5 accept a replayed thinking block only while the top-level
+//! `system`, the `tools` and every earlier message are unchanged; on such an
+//! account a changed prefix is a 400 unless the request sets
 //! `thinking.block_binding.prefix_mismatch_behavior: "drop_block"`. That field
 //! needs the `thinking-binding-controls-2026-08-01` beta header, is accepted
 //! beside `adaptive` and `enabled` only (`between_tools` takes no other field;
@@ -14,6 +15,7 @@
 //! `input_transformations`.
 //! <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
 //! <https://platform.claude.com/docs/en/build-with-claude/thinking>
+//! <https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2>
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
@@ -42,6 +44,8 @@ const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 
 /// The models whose replayed thinking blocks the prefix check covers.
 const PREFIX_CHECKED: &[&str] = &[
+    "claude-fable-5-2",
+    "claude-mythos-5-2",
     "claude-fable-5-1",
     "claude-mythos-5-1",
     "claude-opus-5-5",
@@ -51,6 +55,8 @@ const PREFIX_CHECKED: &[&str] = &[
 
 /// The prefix-checked models Meerkat's catalog carries.
 const CATALOGUED_PREFIX_CHECKED: &[&str] = &[
+    "claude-fable-5-2",
+    "claude-mythos-5-2",
     "claude-fable-5-1",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
@@ -638,6 +644,84 @@ async fn default_config_survives_a_tools_change_on_an_enforcing_account() {
     );
     assert_eq!(sent.body["thinking"], expected_binding(), "{}", sent.body);
     assert!(sent.carries_binding_beta(), "{:?}", sent.betas);
+}
+
+/// Claude Fable 5.2 and Mythos 5.2 run the prefix check on every account,
+/// whatever its age, so the enforcing account is every account for them.
+/// With thinking omitted, every request of a session names the always-on
+/// adaptive default beside the control and carries the beta, the history is
+/// replayed whole, and the turn after an MCP server connects completes: the
+/// API drops the earlier turn's thinking instead of refusing the request.
+/// <https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2>
+#[tokio::test]
+async fn fable_5_2_and_mythos_5_2_with_thinking_omitted_survive_a_tools_change() {
+    let (account, client, server) = spawn_account().await;
+    for model in ["claude-fable-5-2", "claude-mythos-5-2"] {
+        let before = account.all().len();
+        let (_, second) = session_across_a_tools_change(&client, model, unchanged).await;
+        let sent = account.all().split_off(before);
+        assert!(
+            second.succeeded(),
+            "{model}: the turn after the tools change completes: {second:?}"
+        );
+        assert_eq!(sent.len(), 2, "{model}: one request a turn: {sent:#?}");
+        for request in &sent {
+            assert_eq!(
+                request.body["thinking"],
+                expected_binding(),
+                "{model}: {}",
+                request.body
+            );
+            assert!(
+                request.carries_binding_beta(),
+                "{model}: {:?}",
+                request.betas
+            );
+        }
+        assert_eq!(
+            replayed_thinking_blocks(&sent[1].body),
+            1,
+            "{model}: the completed turn's thinking is replayed: {}",
+            sent[1].body
+        );
+    }
+    server.abort();
+}
+
+/// A session that moves from Claude Fable 5.1 onto Claude Fable 5.2 keeps
+/// sending the earlier turn's thinking: Fable 5.2 reads Fable 5.1's blocks,
+/// and its requests carry the control, so nothing is held back. The API
+/// drops, without an error, any block the serving model cannot read.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+#[tokio::test]
+async fn a_session_moving_onto_fable_5_2_keeps_the_earlier_thinking() {
+    let (account, client, server) = spawn_account().await;
+    let first = run(
+        &client,
+        &LlmRequest::new("claude-fable-5-1", vec![first_question()]).with_tools(tools_before()),
+    )
+    .await;
+    assert!(first.succeeded(), "{first:?}");
+    let second = run(
+        &client,
+        &LlmRequest::new(
+            "claude-fable-5-2",
+            vec![first_question(), first.assistant(), second_question()],
+        )
+        .with_tools(tools_before()),
+    )
+    .await;
+    let sent = account.last();
+    server.abort();
+    assert!(second.succeeded(), "{second:?}");
+    assert_eq!(sent.body["thinking"], expected_binding(), "{}", sent.body);
+    assert!(sent.carries_binding_beta(), "{:?}", sent.betas);
+    assert_eq!(
+        replayed_thinking_blocks(&sent.body),
+        1,
+        "the Fable 5.1 turn's thinking is sent: {}",
+        sent.body
+    );
 }
 
 /// A prefix-checked model served under an id the catalog does not carry

@@ -8579,7 +8579,9 @@ mod thinking_binding_unit_tests {
     use super::*;
     use meerkat_core::UserMessage;
 
-    const BINDING_ROWS: [&str; 4] = [
+    const BINDING_ROWS: [&str; 6] = [
+        "claude-fable-5-2",
+        "claude-mythos-5-2",
         "claude-fable-5-1",
         "claude-opus-5-5",
         "claude-sonnet-5-5",

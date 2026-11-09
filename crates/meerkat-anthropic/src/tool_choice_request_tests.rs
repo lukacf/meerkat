@@ -1,9 +1,9 @@
 //! Typed tool choice lowered to Anthropic's `tool_choice`. `Auto` keeps
 //! today's bytes. A forced choice is refused locally under explicit thinking
 //! and on models proven to reject it (Claude Opus 5.5: live 400 "not
-//! supported for this model"; Claude Sonnet 5.5 and Claude Fable 5.1:
-//! documented 400); elsewhere it is sent, and the provider's own rejection
-//! maps to the same typed error.
+//! supported for this model"; Claude Sonnet 5.5, Claude Fable 5.1, Claude
+//! Fable 5.2 and Claude Mythos 5.2: documented 400); elsewhere it is sent,
+//! and the provider's own rejection maps to the same typed error.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::Arc;
@@ -83,7 +83,13 @@ fn every_choice_lowers_to_its_native_value_on_a_forceable_model() {
 
 #[test]
 fn forced_choice_is_refused_only_on_models_proven_to_reject_it() {
-    for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"] {
+    for model in [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-mythos-5-2",
+    ] {
         for choice in forced() {
             assert_eq!(
                 refusal(body(&request(model, choice.clone()))),
@@ -120,6 +126,11 @@ fn catalog_facts_match_the_live_probes() {
     // Documented: forced tool use is not supported on Fable 5.1 (Anthropic's
     // API errors reference, "Forced tool use not supported").
     assert_eq!(forced("claude-fable-5-1"), Some(false));
+    // Documented: `tool_choice` `any` or a named tool returns 400 on Fable 5.2
+    // and Mythos 5.2 (what's new in Claude Fable 5.2, "Forced tool use isn't
+    // supported").
+    assert_eq!(forced("claude-fable-5-2"), Some(false));
+    assert_eq!(forced("claude-mythos-5-2"), Some(false));
     assert_eq!(forced("claude-haiku-4-5-20251001"), Some(true));
     // claude-sonnet-5 is now a catalog row; the live probe accepted forced
     // choices, and its model documentation agrees.
@@ -288,7 +299,13 @@ fn forced_choice_is_sent_with_thinking_disabled_and_refused_with_thinking_on() {
 fn forced_choice_with_disabled_thinking_on_a_model_that_refuses_it_is_the_thinking_refusal() {
     // The model refuses `disabled`, so the request fails on that, typed and
     // before any body exists: the forced choice is never judged or sent.
-    for model in ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"] {
+    for model in [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-fable-5-2",
+        "claude-mythos-5-2",
+    ] {
         for choice in forced() {
             let disabled = request(model, choice.clone()).with_anthropic_tag_merge(|tag| {
                 tag.thinking = Some(AnthropicThinkingConfig::Disabled);

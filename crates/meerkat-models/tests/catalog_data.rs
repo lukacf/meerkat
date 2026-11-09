@@ -201,6 +201,48 @@ fn claude_fable_51_is_recommended_without_changing_default_ladder() {
     assert_eq!(global_default_model(), "gpt-6-astra");
 }
 
+/// Claude Fable 5.2 (released 2026-11-09) is the recommended Fable row and
+/// Claude Mythos 5.2, the same model for organizations Anthropic verifies, a
+/// supported row. Neither changes the Anthropic or the global default.
+/// <https://platform.claude.com/docs/en/models/fable-5-2/overview>
+/// <https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2>
+#[test]
+fn claude_fable_5_2_and_mythos_5_2_are_cataloged_without_changing_the_defaults() {
+    for (id, display_name, tier) in [
+        (
+            "claude-fable-5-2",
+            "Claude Fable 5.2",
+            ModelTier::Recommended,
+        ),
+        (
+            "claude-mythos-5-2",
+            "Claude Mythos 5.2",
+            ModelTier::Supported,
+        ),
+    ] {
+        let entry = entry_for(Provider::Anthropic, id)
+            .unwrap_or_else(|| panic!("{id} must be in the catalog"));
+        assert_eq!(entry.provider, "anthropic", "{id}");
+        assert_eq!(entry.display_name, display_name, "{id}");
+        assert_eq!(entry.tier, tier, "{id}");
+        assert_eq!(
+            entry.release_stage,
+            meerkat_core::ModelReleaseStage::Stable,
+            "{id}"
+        );
+        assert_eq!(entry.context_window, Some(1_000_000), "{id}");
+        assert_eq!(entry.max_input_tokens, None, "{id}");
+        assert_eq!(entry.max_output_tokens, Some(128_000), "{id}");
+        assert!(
+            allowed_models(Provider::Anthropic).any(|allowed| allowed == id),
+            "{id} must be in the Anthropic allowlist"
+        );
+        assert_eq!(infer_provider(id), Some(Provider::Anthropic), "{id}");
+    }
+    assert_eq!(default_model(Provider::Anthropic), Some("claude-opus-5-5"));
+    assert_eq!(global_default_model(), "gpt-6-astra");
+}
+
 #[test]
 fn gemini_4_argon_owns_the_gemini_default() {
     assert_eq!(default_model(Provider::Gemini), Some("gemini-4-argon"));
@@ -469,6 +511,8 @@ fn claude_sonnet_5_capability_row_matches_the_official_model_page() {
 fn anthropic_disabled_thinking_rows_follow_the_per_model_thinking_table() {
     use AnthropicDisabledThinking::{AnyEffort, AtOrBelowHighEffort, Refused};
     let expected = [
+        ("claude-fable-5-2", Refused),
+        ("claude-mythos-5-2", Refused),
         ("claude-fable-5-1", Refused),
         ("claude-fable-5", Refused),
         ("claude-opus-5-5", Refused),
@@ -518,7 +562,8 @@ enum OmittedThinking {
 /// The thinking-binding beta (`thinking.block_binding`) sits on exactly the
 /// catalogued models that check replayed thinking blocks against their
 /// request prefix (the preserved-thinking page's supported models: Claude
-/// Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5;
+/// Fable 5.2, Mythos 5.2, Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5 and
+/// Haiku 5.5; Fable 5.2 and Mythos 5.2 check on every account;
 /// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
 /// The client names adaptive beside the control when `thinking` is omitted,
 /// so every such row must be documented thinking-on by default ("Omit the
@@ -530,6 +575,8 @@ enum OmittedThinking {
 fn thinking_binding_rows_are_the_prefix_checked_models_that_think_by_default() {
     use OmittedThinking::{AlwaysOn, Off, On};
     const PREFIX_CHECKED: &[&str] = &[
+        "claude-fable-5-2",
+        "claude-mythos-5-2",
         "claude-fable-5-1",
         "claude-mythos-5-1",
         "claude-opus-5-5",
@@ -537,6 +584,8 @@ fn thinking_binding_rows_are_the_prefix_checked_models_that_think_by_default() {
         "claude-haiku-5-5",
     ];
     let omitted = [
+        ("claude-fable-5-2", AlwaysOn),
+        ("claude-mythos-5-2", AlwaysOn),
         ("claude-fable-5-1", AlwaysOn),
         ("claude-fable-5", AlwaysOn),
         ("claude-opus-5-5", AlwaysOn),
@@ -612,10 +661,12 @@ fn thinking_binding_rows_are_the_prefix_checked_models_that_think_by_default() {
 }
 
 /// Forced tool choice (`tool_choice` `any` or a named tool) per Anthropic
-/// row. Anthropic answers 400 to it on Claude Opus 5.5, Sonnet 5.5, Fable 5.1
-/// and Mythos 5.1: "Forced tool use not supported"
-/// (https://platform.claude.com/docs/en/api/errors) and the "Forcing tool
-/// use" table (https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools).
+/// row. Anthropic answers 400 to it on Claude Opus 5.5, Sonnet 5.5, Fable 5.2,
+/// Mythos 5.2, Fable 5.1 and Mythos 5.1: "Forced tool use not supported"
+/// (https://platform.claude.com/docs/en/api/errors), the "Forcing tool
+/// use" table (https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools)
+/// and, for Fable 5.2 and Mythos 5.2, "Forced tool use isn't supported"
+/// (https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2).
 /// The rows that refuse it locally are exactly the catalogued ones among
 /// them (Mythos 5.1 is not a catalog row); every other row sends it, and
 /// Anthropic's own refusal maps to the same typed error.
@@ -625,6 +676,8 @@ fn forced_tool_choice_refusals_are_the_documented_models() {
     const DOCUMENTED_REFUSALS: &[&str] = &[
         "claude-opus-5-5",
         "claude-sonnet-5-5",
+        "claude-fable-5-2",
+        "claude-mythos-5-2",
         "claude-fable-5-1",
         "claude-mythos-5-1",
     ];
@@ -1232,6 +1285,120 @@ fn claude_fable_51_is_cataloged_with_official_limits() {
     assert!(caps.supports_web_search);
     assert!(caps.effort_levels.contains(&EffortLevel::Xhigh));
     assert!(caps.effort_levels.contains(&EffortLevel::Max));
+}
+
+/// The Claude Fable 5.2 and Mythos 5.2 rows, per the model pages and the
+/// feature pages that list both ids: 1M context (the default and the
+/// maximum), 128K output on the synchronous Messages API and no output-300k
+/// beta, text and image input, adaptive thinking that is always on
+/// (`enabled` with `budget_tokens` and `disabled` return 400), the five
+/// effort levels `low` to `max`, no sampling parameters, no forced tool
+/// choice, and the prefix check on every account (the thinking-binding
+/// controls beta beside Fable 5.1's compaction, structured output and
+/// interleaved thinking betas).
+/// <https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2>
+/// <https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting>
+#[test]
+fn claude_fable_5_2_and_mythos_5_2_capability_rows_match_the_model_pages() {
+    let betas = |id: &str| -> Vec<(BetaFeature, &'static str, &'static str)> {
+        capabilities_for(Provider::Anthropic, id)
+            .unwrap_or_else(|| panic!("{id} row"))
+            .beta_headers
+            .iter()
+            .map(|header| (header.feature, header.header_name, header.header_value))
+            .collect()
+    };
+    for (id, family) in [
+        ("claude-fable-5-2", "claude-fable-5-2"),
+        ("claude-mythos-5-2", "claude-mythos-5-2"),
+    ] {
+        let caps = capabilities_for(Provider::Anthropic, id)
+            .unwrap_or_else(|| panic!("{id} must be in the Anthropic catalog"));
+        assert_eq!(caps.provider, Provider::Anthropic, "{id}");
+        assert_eq!(caps.model_family, family, "{id}");
+        assert_eq!(caps.context_window, Some(1_000_000), "{id}");
+        assert!(caps.context_window_beta.is_none(), "{id}");
+        assert_eq!(caps.max_output_tokens, Some(128_000), "{id}");
+        assert!(
+            caps.max_output_tokens_beta.is_none(),
+            "{id} is not listed for the output-300k beta"
+        );
+        assert!(caps.vision && caps.image_tool_results, "{id}");
+        assert!(
+            !caps.inline_video && !caps.realtime && !caps.image_generation,
+            "{id}: text and images in, text out"
+        );
+        assert_eq!(
+            caps.thinking,
+            ThinkingSupport::AnthropicAdaptiveOnly,
+            "{id}"
+        );
+        assert_eq!(
+            caps.anthropic_disabled_thinking,
+            AnthropicDisabledThinking::Refused,
+            "{id}: thinking is always on"
+        );
+        assert!(
+            !caps.supports_thinking_budget_legacy,
+            "{id}: `enabled` with budget_tokens returns 400"
+        );
+        assert!(
+            !caps.supports_temperature && !caps.supports_top_p && !caps.supports_top_k,
+            "{id}: omit temperature, top_p and top_k"
+        );
+        assert!(
+            !caps.supports_reasoning && !caps.supports_legacy_penalties,
+            "{id}"
+        );
+        assert_eq!(
+            caps.effort_levels,
+            &[
+                EffortLevel::Low,
+                EffortLevel::Medium,
+                EffortLevel::High,
+                EffortLevel::Xhigh,
+                EffortLevel::Max,
+            ],
+            "{id}"
+        );
+        assert!(
+            !caps.supports_forced_tool_choice,
+            "{id}: forced tool use returns 400"
+        );
+        assert!(caps.supports_compaction, "{id}");
+        assert!(caps.supports_structured_output, "{id}");
+        assert!(caps.supports_web_search, "{id}");
+        assert!(caps.supports_mid_conversation_system_messages, "{id}");
+        assert!(caps.supports_inference_geo, "{id}");
+        assert_eq!(caps.call_timeout_secs, Some(300), "{id}");
+        assert_eq!(caps.stream_inactivity_timeout_secs, None, "{id}");
+        assert_eq!(betas(id), betas("claude-fable-5-1"), "{id}");
+        assert!(
+            betas(id).iter().any(|(feature, _, value)| *feature
+                == BetaFeature::ThinkingBindingControls
+                && *value == "thinking-binding-controls-2026-08-01"),
+            "{id}: the prefix check applies on every account"
+        );
+    }
+}
+
+/// Claude Mythos 5.2 is Claude Fable 5.2 for organizations Anthropic
+/// verifies ("Same capabilities as Claude Fable 5.2", the same
+/// specifications and prices): apart from its identity, its row is Fable
+/// 5.2's.
+#[test]
+fn claude_mythos_5_2_row_is_the_claude_fable_5_2_row() {
+    let fable = *capabilities_for(Provider::Anthropic, "claude-fable-5-2")
+        .expect("claude-fable-5-2 must be in the Anthropic catalog");
+    let mut mythos = *capabilities_for(Provider::Anthropic, "claude-mythos-5-2")
+        .expect("claude-mythos-5-2 must be in the Anthropic catalog");
+    assert_eq!(mythos.display_name, "Claude Mythos 5.2");
+    assert_eq!(mythos.tier, ModelTier::Supported);
+    mythos.id = fable.id;
+    mythos.display_name = fable.display_name;
+    mythos.tier = fable.tier;
+    mythos.model_family = fable.model_family;
+    assert_eq!(format!("{mythos:?}"), format!("{fable:?}"));
 }
 
 #[test]
@@ -1994,6 +2161,39 @@ mod schema {
             .and_then(|t| t.get("enum"))
             .expect("fable 5 thinking type enum");
         assert_eq!(thinking_type, &serde_json::json!(["adaptive"]));
+    }
+
+    /// The params schema of Claude Fable 5.2 and Mythos 5.2 admits only
+    /// adaptive thinking and the five effort levels, with no legacy budget
+    /// and no `top_k`.
+    #[test]
+    fn fable_5_2_and_mythos_5_2_schemas_are_adaptive_only_with_the_full_effort_ladder() {
+        for id in ["claude-fable-5-2", "claude-mythos-5-2"] {
+            let caps =
+                capabilities_for(Provider::Anthropic, id).unwrap_or_else(|| panic!("{id} row"));
+            let schema = build_params_schema(caps);
+            let keys = property_keys(&schema);
+            for absent in ["thinking_budget", "top_k"] {
+                assert!(!keys.contains(absent), "{id} must not advertise {absent}");
+            }
+            for present in ["thinking", "effort", "inference_geo", "compaction"] {
+                assert!(keys.contains(present), "{id} must advertise {present}");
+            }
+            let efforts = enum_values_for(&schema, "effort").expect("effort enum");
+            assert_eq!(
+                efforts,
+                ["low", "medium", "high", "xhigh", "max"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<std::collections::BTreeSet<String>>(),
+                "{id}"
+            );
+            assert_eq!(
+                schema["properties"]["thinking"]["properties"]["type"]["enum"],
+                serde_json::json!(["adaptive"]),
+                "{id}"
+            );
+        }
     }
 
     #[test]

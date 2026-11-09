@@ -37,6 +37,15 @@ them.
 
 ### Fixed
 
+- `meerkat-runtime`: a process that opens a second handle of a realm's SQLite
+  runtime store and drops it no longer breaks that realm's credential
+  rotation and OAuth sign-ins. Every handle of one database shares the
+  realm's auth authority, and that authority followed only the handle opened
+  last: from the moment that handle was dropped, every auth lease release (a
+  credential rotation's included) failed with "runtime store is no longer
+  available", every OAuth sign-in failed to start, and sign-ins that another
+  process had persisted were not found. The authority now uses the newest
+  handle of the store that is still open. Affects 0.6.0 through 0.9.11.
 - `meerkat-runtime`: a run whose operation records an authorization audit
   observation after the run's terminal input rows were written now settles
   in the same process. The observation waits on the live input row for the

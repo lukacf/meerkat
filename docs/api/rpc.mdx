@@ -213,7 +213,7 @@ of this full catalog.
 | `mob/ingress_interaction` | Mob | `MobIngressInteractionParams` | `MobIngressInteractionResult` | Ensure an ingress member and deliver user input with replay anchors (mob feature) |
 | `mob/stream_open` | Mob | `MobStreamOpenParams` | `MobStreamOpenResult` | Open mob or member event stream (mob feature) |
 | `mob/stream_close` | Mob | `MobStreamCloseParams` | `MobStreamCloseResult` | Close mob or member event stream (mob feature) |
-| `mob/member_send` | Mob | `MobMemberSendParams` | `MobMemberSendResult` | Deliver ordinary content to a specific mob member via the host control plane (mob feature) |
+| `mob/member_send` | Mob | `MobMemberSendParams` | `MobMemberSendResult` | Deliver ordinary content to a specific mob member via the host control plane; an unkeyed send names the input the member's runtime admitted (`admission`) (mob feature) |
 | `mob/append_system_context` | Mob | `MobAppendSystemContextParams` | `MobAppendSystemContextResult` | Append one ordinary durable ordered System message to a member session (mob feature) |
 | `mob/set_instruction` | Mob | `MobSetInstructionParams` | `MobInstructionWriteResult` | Write one operator instruction for the members a target selects (every member, a profile's members, or one member); delivery is asynchronous (mob feature) |
 | `mob/revoke_instruction` | Mob | `MobRevokeInstructionParams` | `MobInstructionWriteResult` | Revoke one operator instruction of a mob at a higher revision (mob feature) |
@@ -1852,6 +1852,35 @@ canonical text: non-empty, no surrounding whitespace, no control characters,
 at most 256 bytes; any other key is refused with `-32602`. A server older than
 contract 0.9.5 ignores the field and admits the call unkeyed, so a raw JSON
 caller checks the `contract_version` from `initialize` before relying on it.
+
+### mob/member_send admission
+
+An unkeyed `mob/member_send` answers `admission` when the member's runtime
+admitted the send before the send answered: the member session and the input
+id the runtime admitted, the same pair a keyed send's `admitted` status names.
+Two sends of the same content get two different input ids, so each client can
+tell its own send apart:
+
+```json
+{
+  "mob_id": "mob-1",
+  "agent_identity": "worker-1",
+  "member_ref": "...",
+  "handling_mode": "steer",
+  "admission": { "session_id": "...", "input_id": "..." }
+}
+```
+
+Match `input_id` against `boundary_append_applied.input_id` (a steer that
+joined a running turn) and `boundary_appends_discarded.input_ids`, or follow
+it with `session/input_status`, which also covers a steer that started its own
+run. An applied event can arrive before the send's answer: keep unmatched
+applied input ids for a short time and match them when the answer arrives.
+`admission` is absent for a keyed send (its `continuation` status names its
+input), when the answer precedes runtime admission (an autonomous member's
+inbox delivery), for a member that is not served by a local runtime (not
+runtime-backed, peer-only or hosted elsewhere), and from a server older than
+contract 0.9.12. `mob/ingress_interaction` carries it in `delivery`.
 
 ### mob/member_send keys
 

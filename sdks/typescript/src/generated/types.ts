@@ -3013,7 +3013,13 @@ export interface WireContinuationReceipt {
   status: WireContinuationStatus;
 }
 
+export interface WireMemberInputAdmission {
+  input_id: string;
+  session_id: string;
+}
+
 export interface MobMemberSendResult {
+  admission?: WireMemberInputAdmission | null;
   agent_identity: string;
   continuation?: WireContinuationReceipt | null;
   handling_mode: WireHandlingMode;

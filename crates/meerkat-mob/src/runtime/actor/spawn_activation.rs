@@ -299,6 +299,7 @@ impl SpawnActivationWorkerContext {
                 self.readiness
                     .dispatch_autonomous(&agent_identity, *material)
                     .await
+                    .map(drop)
             }
             SubmitWorkDispatchCompletion::AwaitTurnAdmission {
                 operation_id,
@@ -308,6 +309,7 @@ impl SpawnActivationWorkerContext {
                 req,
                 completion_tx,
                 llm_identity_applied_tx,
+                admission_tx: _,
                 placed_identity: _,
                 placed_incarnation,
                 placed_input_id,
@@ -2993,6 +2995,8 @@ impl MobActor {
                     completion_tx: None,
                     bounded_result_spec: None,
                     llm_identity_applied_tx: None,
+                    // No caller reads a kickoff's admission.
+                    admission_tx: None,
                     ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
                     content_attribution: crate::mob_machine::WorkContentAttribution::Conversational,
                     // Mob-internal kickoff has no original requester.

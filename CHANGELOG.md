@@ -35,6 +35,39 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- `meerkat-contracts`: `MobMemberSendResult` gains the field
+  `admission: Option<WireMemberInputAdmission>` (see Added). Code that builds
+  it with a struct literal sets the new field; `None` keeps the earlier
+  answer. On the wire the field is optional and left out when absent, so a
+  client that does not read it is unaffected.
+
+### Added
+
+- `meerkat-mob`, `meerkat-contracts`, `meerkat-rpc`, `meerkat-mob-mcp`,
+  `meerkat-web-runtime`, the Python, TypeScript and Web SDKs: an unkeyed
+  `mob/member_send` names the input the member's runtime admitted for it, so
+  a client can tell its own send from another client's send of the same
+  content. The result carries `admission` (`WireMemberInputAdmission`:
+  `session_id` and `input_id`, the pair a keyed send's `admitted` status
+  names) when the member's runtime admitted the send before the send
+  answered; `input_id` is the id the runtime admitted, never a requested
+  one. Match it against `boundary_append_applied.input_id` and
+  `boundary_appends_discarded.input_ids`, or read the input with
+  `session/input_status`. It is absent for a keyed send (its `continuation`
+  status names its input), when the answer precedes runtime admission (an
+  autonomous member's inbox delivery), for a member that is not served by a
+  local runtime (not runtime-backed, peer-only or hosted elsewhere), and
+  from an older server. `mob/ingress_interaction`'s `delivery`, the public
+  MCP tool `meerkat_mob_member_send` and the Web runtime's `mob_member_send`
+  carry it too. In Rust, `MemberDeliveryReceipt` gains
+  `admission: Option<MemberInputAdmission>`, set by `MemberHandle::send` and
+  its variants, and `MemberInputAdmission` serializes and converts into
+  `WireMemberInputAdmission`. The SDKs keep it on the member-send receipt
+  (`admission`, with `sessionId` and `inputId` in TypeScript) and accept an
+  answer without it.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

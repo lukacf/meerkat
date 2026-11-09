@@ -945,7 +945,7 @@ pub async fn handle_public_tools_call(
                 )
                 .await
                 .map_err(|err| McpToolError::from_mob(&err))?;
-            Ok(json!({
+            let mut answer = json!({
                 "mob_id": mob_id,
                 "agent_identity": receipt.identity,
                 "member_ref": meerkat_contracts::WireMemberRef::encode(
@@ -953,7 +953,14 @@ pub async fn handle_public_tools_call(
                     receipt.identity.as_ref(),
                 ),
                 "handling_mode": input.handling_mode,
-            }))
+            });
+            // The input the member's runtime admitted, when it did before
+            // the send answered.
+            if let Some(admission) = receipt.admission.as_ref() {
+                answer["admission"] =
+                    json!(meerkat_contracts::WireMemberInputAdmission::from(admission));
+            }
+            Ok(answer)
         }
         "meerkat_mob_append_system_context" => {
             let input: MeerkatMobAppendSystemContextInput = parse_args(arguments)?;
@@ -2478,6 +2485,57 @@ mod tests {
         .expect_err("no continuation service is bound on an in-memory state");
         let data = err.data.clone().unwrap_or_default();
         assert_eq!(data["kind"], "idempotency_unavailable", "{err:?}");
+    }
+
+    /// An unkeyed send through the public MCP tool to a runtime-backed
+    /// member answers the input the member's runtime admitted for it.
+    #[tokio::test]
+    async fn mcp_member_send_tool_answers_the_admitted_input() {
+        let state = MobMcpState::new_in_memory();
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_create",
+            &json!({
+                "definition": {
+                    "id": "admission-mcp-mob",
+                    "profiles": {
+                        "worker": {
+                            "model": "gpt-5.4",
+                            "external_addressable": true,
+                            "tools": {"comms": true}
+                        }
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("typed public create");
+        handle_public_tools_call(
+            &state,
+            "meerkat_mob_spawn",
+            &json!({
+                "mob_id": "admission-mcp-mob",
+                "profile": "worker",
+                "agent_identity": "worker-1",
+                "runtime_mode": "turn_driven"
+            }),
+        )
+        .await
+        .expect("spawn a runtime-backed member");
+        let answer = handle_public_tools_call(
+            &state,
+            "meerkat_mob_member_send",
+            &json!({
+                "mob_id": "admission-mcp-mob",
+                "agent_identity": "worker-1",
+                "content": "unkeyed",
+            }),
+        )
+        .await
+        .expect("an unkeyed send is delivered");
+        assert!(answer.get("continuation").is_none(), "{answer}");
+        assert!(answer["admission"]["session_id"].is_string(), "{answer}");
+        assert!(answer["admission"]["input_id"].is_string(), "{answer}");
     }
 
     /// A native work authorization host that admits nothing: these rows only

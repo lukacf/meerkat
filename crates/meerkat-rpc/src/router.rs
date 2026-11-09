@@ -16188,6 +16188,10 @@ mod tests {
             receipt.get("agent_runtime_id").is_none(),
             "binding-era agent_runtime_id must not leak from ingress helper"
         );
+        assert!(
+            receipt["delivery"]["admission"]["input_id"].is_string(),
+            "the delivery names the input the member's runtime admitted: {receipt}"
+        );
 
         let second_resp = router
             .dispatch(make_request(
@@ -27443,6 +27447,10 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             assert!(
                 state == "pending" || state == "admitted",
                 "the first answer reports pending or admitted: {first}"
+            );
+            assert!(
+                first.get("admission").is_none(),
+                "a keyed send's continuation names its input, not `admission`: {first}"
             );
             let admitted = replay_until_admitted(&router, &mob_id, content, "item-7").await;
             let (replayed_id, replayed_at, _) = delivery(&admitted);

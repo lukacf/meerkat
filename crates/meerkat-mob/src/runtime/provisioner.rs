@@ -2006,6 +2006,19 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError>;
+    /// [`Self::admit_turn`], answering the member session's canonical
+    /// admission of the turn's input: `Some` when the member's runtime
+    /// admitted it, with the input id its accept outcome names (never a
+    /// requested id); `None` when no runtime admission is observed, as for a
+    /// member that is not runtime-backed or a delivery to a peer. The default
+    /// answers `None` after [`Self::admit_turn`].
+    async fn admit_turn_with_admission(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+    ) -> Result<Option<super::handle::MemberInputAdmission>, MobError> {
+        self.admit_turn(member_ref, req).await.map(|()| None)
+    }
     /// Admit a turn and resolve `completion_tx` from the authoritative runtime
     /// completion boundary without holding the mob actor until completion.
     async fn admit_tracked_turn(
@@ -7135,6 +7148,8 @@ impl SessionBackend {
         }))
     }
 
+    /// Admit `input` to `session_id` and answer the session's canonical
+    /// admission of it: `None` only when the accept outcome names no input.
     async fn admit_runtime_input(
         &self,
         session_id: &SessionId,
@@ -7142,7 +7157,7 @@ impl SessionBackend {
         event_tx: Option<TurnEventTx>,
         completion_tx: Option<super::handle::ExactTurnCompletionSender>,
         llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
-    ) -> Result<(), MobError> {
+    ) -> Result<Option<super::handle::MemberInputAdmission>, MobError> {
         self.admit_runtime_input_with_replay_policy(
             session_id,
             input,
@@ -7153,7 +7168,6 @@ impl SessionBackend {
             None,
         )
         .await
-        .map(drop)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -16324,6 +16338,16 @@ impl MobProvisioner for SessionBackend {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError> {
+        self.admit_turn_with_admission(member_ref, req)
+            .await
+            .map(drop)
+    }
+
+    async fn admit_turn_with_admission(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+    ) -> Result<Option<super::handle::MemberInputAdmission>, MobError> {
         let session_id = Self::require_session(member_ref, "admit turn")?;
         if self.runtime_adapter.is_some() {
             tracing::debug!(
@@ -16367,8 +16391,10 @@ impl MobProvisioner for SessionBackend {
                 reason: "a requester requires a runtime-backed member".to_string(),
             });
         }
+        // A member that is not runtime-backed has no runtime admission.
         self.admit_direct_session_turn(session_id, req, None, None)
             .await
+            .map(|()| None)
     }
 
     async fn admit_tracked_turn(
@@ -16392,7 +16418,8 @@ impl MobProvisioner for SessionBackend {
                     Some(completion_tx),
                     llm_identity_applied_tx,
                 )
-                .await;
+                .await
+                .map(drop);
         }
 
         if req.runtime.input_identity.is_some() {
@@ -16517,7 +16544,8 @@ impl MobProvisioner for SessionBackend {
             );
             return self
                 .admit_runtime_input(&session_id, input, req.event_tx, None, None)
-                .await;
+                .await
+                .map(drop);
         }
 
         self.admit_turn(member_ref, req).await
@@ -16554,7 +16582,8 @@ impl MobProvisioner for SessionBackend {
             );
             return self
                 .admit_runtime_input(&session_id, input, req.event_tx, None, None)
-                .await;
+                .await
+                .map(drop);
         }
 
         self.start_turn(member_ref, req).await
@@ -20953,6 +20982,24 @@ impl MobProvisioner for MultiBackendProvisioner {
                 session_id: None, ..
             } => self.start_turn(member_ref, req).await,
             _ => self.session.admit_turn(member_ref, req).await,
+        }
+    }
+
+    async fn admit_turn_with_admission(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+    ) -> Result<Option<super::handle::MemberInputAdmission>, MobError> {
+        match member_ref {
+            // A peer-only member's runtime is not ours to observe.
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => self.start_turn(member_ref, req).await.map(|()| None),
+            _ => {
+                self.session
+                    .admit_turn_with_admission(member_ref, req)
+                    .await
+            }
         }
     }
 

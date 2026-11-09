@@ -267,6 +267,75 @@ async def test_chat_keeps_secrets_out_of_the_terminal(forge):
     clean(result, label="chat")
 
 
+def private_files(forge):
+    """Forge's private files and Meerkat's stores, each holding the canary, and a link to one of them."""
+    home = forge.root / "home"
+    files = {
+        "Forge's saved provider keys": forge.settings,
+        "a file in Forge's state folder": forge.state / "notes.json",
+        "an installation's .env": forge.root / "team-folder" / ".env",
+        "an installation's .mobkit file": forge.root / "team-folder" / ".mobkit" / "settings.json",
+        "Meerkat's credential store": forge.config / "meerkat" / "credentials" / "global" / "default_openai.json",
+        "Meerkat's credential store under ~/.config":
+            home / ".config" / "meerkat" / "credentials" / "global" / "default_anthropic.json",
+        "Meerkat's user configuration": home / ".rkat" / "config.toml",
+    }
+    for path in files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(json.dumps({"token": CANARY}))
+    link = forge.root / "weekly-notes.json"
+    link.symlink_to(forge.settings)
+    files["a link to Forge's saved provider keys"] = link
+    return files
+
+
+def opened(result, path):
+    """The files the run opened that are this path."""
+    target = path.resolve()
+    return [arguments[0] for event, arguments in result.events_seen
+            if event == "open" and isinstance(arguments[0], (str, bytes, os.PathLike))
+            and Path(os.fsdecode(arguments[0])).resolve() == target]
+
+
+@pytest.mark.parametrize("reader", ["--text-file", "--attach", "plan validate", "chat /attach"])
+async def test_every_file_option_refuses_private_files_without_reading_them(forge, reader):
+    identity = (await run(forge, "setup", "new", "--json")).document["setup"]
+    problems = []
+    for label, path in private_files(forge).items():
+        forge.transport.requests.clear()
+        if reader == "chat /attach":
+            result = await run(forge, "chat", identity, stdin=Terminal(f"/attach {path}\n/quit\n"), terminal=True)
+            refused = result.code == 0 and "never reads it" in result.stderr
+        else:
+            argv = (["plan", "validate", str(path)] if reader == "plan validate"
+                    else ["setup", "send", identity, reader, str(path)])
+            result = await run(forge, *argv, "--json")
+            refused = (result.code == 2 and result.document.get("error", {}).get("code") == "invalid_request"
+                       and "never reads it" in result.document["error"]["detail"])
+        sent = [route for method, route, _, _ in forge.transport.requests if method == "POST"]
+        problems += [f"{label}: {problem}" for problem, found in (
+            (f"not refused (exit {result.code})", not refused), ("the canary was shown", CANARY in result.text),
+            ("opened", bool(opened(result, path))), (f"sent {sent}", bool(sent)),
+            ("a child process carried the canary", any(mentions(arguments) for event, arguments
+                                                        in result.events_seen if event != "open"))) if found]
+    assert not problems, f"{reader}: " + "; ".join(problems)
+
+
+@pytest.mark.parametrize("argv,option", [
+    (["setup", "send", "last", "--text-file", CANARY], "--text-file"),
+    (["setup", "send", "last", "--attach", CANARY + ".txt"], "--attach"),
+    (["plan", "validate", CANARY], "plan validate"),
+])
+@pytest.mark.parametrize("mode", [[], ["--json"]])
+async def test_a_file_argument_error_names_the_option_never_the_value(forge, argv, option, mode):
+    await run(forge, "setup", "new", "--json")
+    result = await run(forge, *mode, *argv)
+    assert result.code == 2, result.text
+    assert CANARY not in result.stdout + result.stderr
+    assert option in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("stray", [
     ["--password", CANARY], [f"--api-key={CANARY}"], [CANARY], ["--set", CANARY], ["--set", CANARY + "="],
     ["--set", f"{CANARY}=x"],

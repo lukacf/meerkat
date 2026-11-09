@@ -129,27 +129,27 @@ jobs:
           RELEASE_TIER: ${{ inputs.candidate_tier }}
         run: python3 meta/scripts/release-candidate.py resolve
 
-  # Refuses rather than waits: the tagged commit's exact-main CI (ci.yml on
-  # main) must already be green. In the monorepo that run's plan is
-  # product-scoped; a commit whose diff from the last green main left Meta
-  # alone still carries Meta's rows from the run that planned them. Meta CI
-  # (meta-ci.yml) must be green at the commit too, with Meta's lanes run.
+  # Waits (bounded) rather than refuses: the release commit's exact-main CI
+  # (ci.yml on main) must be green, and so must a Meta CI run (meta-ci.yml)
+  # at the commit that ran Meta's lanes. The gate polls both, the way
+  # release.yml's gate does, until both are green or 120 minutes elapsed; a
+  # red or cancelled run keeps it polling, because a green re-run attempt
+  # counts. In the monorepo the exact-main run's plan is product-scoped; a
+  # commit whose diff from the last green main left Meta alone still carries
+  # Meta's rows from the run that planned them. It needs only the resolver:
+  # a candidate's build legs run beside it, and collection needs both.
   require_ci_green:
     name: Require green exact-main CI
-    needs: [resolve_release, build_binaries]
+    needs: [resolve_release]
     if: >-
       !cancelled() &&
-      needs.resolve_release.result == 'success' &&
-      ((needs.resolve_release.outputs.mode == 'candidate' &&
-        needs.build_binaries.result == 'success') ||
-       (needs.resolve_release.outputs.mode != 'candidate' &&
-        needs.build_binaries.result == 'skipped'))
+      needs.resolve_release.result == 'success'
     runs-on: ubuntu-24.04
     outputs:
       run_id: ${{ steps.ci_run.outputs.run_id }}
       run_attempt: ${{ steps.ci_run.outputs.run_attempt }}
     steps:
-      - name: Refuse unless exact-main CI is already green for this commit
+      - name: Wait for green exact-main CI and Meta CI at this commit
         id: ci_run
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
@@ -163,76 +163,112 @@ jobs:
               core.info("Dry-run dispatch with no release_tag: nothing is published. Skipping the CI check.");
               return;
             }
-            const { data } = await github.rest.actions.listWorkflowRuns({
-              owner,
-              repo,
-              workflow_id: "ci.yml",
-              branch: "main",
-              event: "push",
-              head_sha: ref,
-              per_page: 100,
-            });
-            const runs = data.workflow_runs.filter(
-              (run) => run.head_sha === ref && run.head_branch === "main" && run.event === "push"
-            );
-            if (runs.length === 0) {
-              core.setFailed(`No exact-main CI run exists for release commit ${ref}. A tag is not evidence.`);
-              return;
-            }
-            const success = runs.find((run) => run.status === "completed" && run.conclusion === "success");
-            if (!success) {
-              core.setFailed(
-                `Release commit ${ref} has ${runs.length} exact-main CI run(s), none completed successfully. ` +
-                  `Fix the red or wait for the in-flight run; do not re-run CI for a second opinion.`
-              );
-              return;
-            }
-            core.info(`Release commit ${ref} has green exact-main CI: ${success.html_url}`);
-            core.setOutput("run_id", String(success.id));
-            core.setOutput("run_attempt", String(success.run_attempt));
+            const timeoutMs = 120 * 60 * 1000;
+            const pollMs = 30 * 1000;
+            const started = Date.now();
+            let cancelledReported = false;
 
-            // Meta's own suites (console, browser, SDK, flow editor and,
-            // on pull requests, its Rust tests) run in meta-ci.yml, whose
-            // "Meta gate" passes trivially when a push left Meta alone. The
-            // release needs a green Meta CI run at this commit that ran
-            // Meta's lanes: the push that reached Meta, or a dispatch on main.
-            const metaRuns = [];
-            for (const event of ["push", "workflow_dispatch"]) {
-              const { data: listing } = await github.rest.actions.listWorkflowRuns({
+            async function exactMainRuns() {
+              const { data } = await github.rest.actions.listWorkflowRuns({
                 owner,
                 repo,
-                workflow_id: "meta-ci.yml",
+                workflow_id: "ci.yml",
                 branch: "main",
-                event,
+                event: "push",
                 head_sha: ref,
                 per_page: 100,
               });
-              metaRuns.push(...listing.workflow_runs.filter((run) => run.head_sha === ref && run.head_branch === "main"));
-            }
-            let metaEvidence = null;
-            for (const run of metaRuns.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "success")) {
-              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
-                owner,
-                repo,
-                run_id: run.id,
-                attempt_number: run.run_attempt,
-                per_page: 100,
-              });
-              // meta-checks runs exactly when the run reached Meta (changes'
-              // meta output); warm-cache and the gate run either way.
-              if (jobs.some((job) => job.name === "meta-checks" && job.conclusion === "success")) {
-                metaEvidence = run;
-                break;
-              }
-            }
-            if (!metaEvidence) {
-              core.setFailed(
-                `Release commit ${ref} has no green Meta CI run that ran Meta's lanes ` +
-                  `(${metaRuns.length} run(s) found). Dispatch meta-ci.yml on main at this commit.`
+              return data.workflow_runs.filter(
+                (run) => run.head_sha === ref && run.head_branch === "main" && run.event === "push"
               );
-              return;
             }
-            core.info(`Release commit ${ref} has green Meta CI with Meta's lanes: ${metaEvidence.html_url}`);
+
+            // Meta's own suites (console, browser, SDK, flow editor and,
+            // on pull requests, its Rust tests) run in meta-ci.yml, whose
+            // "Meta gate" succeeds trivially when a push left Meta alone. The
+            // release needs a green Meta CI run at this commit that ran
+            // Meta's lanes: the push that reached Meta, or a dispatch on main.
+            async function metaEvidence() {
+              const metaRuns = [];
+              for (const event of ["push", "workflow_dispatch"]) {
+                const { data: listing } = await github.rest.actions.listWorkflowRuns({
+                  owner,
+                  repo,
+                  workflow_id: "meta-ci.yml",
+                  branch: "main",
+                  event,
+                  head_sha: ref,
+                  per_page: 100,
+                });
+                metaRuns.push(...listing.workflow_runs.filter((run) => run.head_sha === ref && run.head_branch === "main"));
+              }
+              for (const run of metaRuns.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "success")) {
+                const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+                  owner,
+                  repo,
+                  run_id: run.id,
+                  attempt_number: run.run_attempt,
+                  per_page: 100,
+                });
+                // meta-checks runs exactly when the run reached Meta (changes'
+                // meta output); warm-cache and the gate run either way.
+                if (jobs.some((job) => job.name === "meta-checks" && job.conclusion === "success")) {
+                  return { run, count: metaRuns.length };
+                }
+              }
+              return { run: null, count: metaRuns.length };
+            }
+
+            for (;;) {
+              const runs = await exactMainRuns();
+              if (runs.length > 0) {
+                core.info(
+                  runs
+                    .map((run) => `CI attempt ${run.run_attempt}: ${run.status}/${run.conclusion || "pending"} (${run.html_url})`)
+                    .join("\n")
+                );
+              } else {
+                core.info(`No exact-main CI run found yet for release commit ${ref}`);
+              }
+              const success = runs.find((run) => run.status === "completed" && run.conclusion === "success");
+              let meta = null;
+              if (success) {
+                core.info(`Release commit ${ref} has green exact-main CI: ${success.html_url}`);
+                meta = await metaEvidence();
+                if (meta.run) {
+                  core.info(`Release commit ${ref} has green Meta CI with Meta's lanes: ${meta.run.html_url}`);
+                  core.setOutput("run_id", String(success.id));
+                  core.setOutput("run_attempt", String(success.run_attempt));
+                  return;
+                }
+                core.info(`No green Meta CI run that ran Meta's lanes yet (${meta.count} run(s) found)`);
+              } else {
+                // ci.yml lets a newer main commit cancel an older commit's
+                // first attempt unless the commit names a release; it never
+                // cancels a re-run attempt, so re-running recovers.
+                const cancelled = runs.find((run) => run.status === "completed" && run.conclusion === "cancelled");
+                if (cancelled && !cancelledReported) {
+                  cancelledReported = true;
+                  core.warning(
+                    `Exact-main CI at ${ref} was cancelled: ${cancelled.html_url}. ` +
+                      `Re-run it with: gh run rerun ${cancelled.id} --repo ${owner}/${repo}`
+                  );
+                }
+              }
+
+              if (Date.now() - started >= timeoutMs) {
+                core.setFailed(
+                  success
+                    ? `Release commit ${ref} has no green Meta CI run that ran Meta's lanes after 120 minutes ` +
+                        `(${meta.count} run(s) found). Dispatch meta-ci.yml on main at this commit.`
+                    : `Release commit ${ref} has no green exact-main CI after 120 minutes (${runs.length} run(s) found). ` +
+                        `A tag is not evidence: fix the red, or re-run a cancelled run.`
+                );
+                return;
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, pollMs));
+            }
 
   release_validate:
     name: Validate Meta release state
@@ -277,8 +313,9 @@ jobs:
   # unpacked into a scratch workspace whose [patch.crates-io] covers only
   # Meta's own crates, resolve every Core crate from crates.io at the declared
   # version and build. In a lockstep release Core publishes first: this job
-  # waits (bounded) until the declared Core version is in the sparse index,
-  # so no separate orchestration orders the two releases. A candidate runs
+  # waits (bounded) until every Core crate is in the sparse index at the
+  # declared version, so no separate orchestration orders the two releases.
+  # A candidate runs
   # none: it may build at the release merge, before Core's crates exist.
   # Promotion publishes nothing (GitHub release, SDK packages, crates) until
   # this job succeeded.
@@ -321,24 +358,55 @@ jobs:
           echo "core_version=${core_version}" >> "${GITHUB_OUTPUT}"
           echo "Meta declares Core ${core_version}"
 
-      - name: Wait until the declared Core is on crates.io
+      # Core publishes its crates by dependency level, meerkat-core early;
+      # the floor check resolves every Core crate Meta needs, so one that
+      # started while Core was mid-publication would fail at resolution. It
+      # waits until every crate scripts/release-rust-crates.sh lists is in
+      # the sparse index at the declared version.
+      - name: Wait until every Core crate is on crates.io at the declared version
         shell: bash
         env:
           CORE_VERSION: ${{ steps.declared.outputs.core_version }}
         run: |
           set -euo pipefail
+          mapfile -t crates < <(scripts/release-rust-crates.sh)
+          if [[ ${#crates[@]} -eq 0 ]]; then
+            echo "::error::scripts/release-rust-crates.sh lists no crate" >&2
+            exit 1
+          fi
+          # The sparse index path of a crate name (lowercase).
+          index_path() {
+            local name="${1,,}"
+            case "${#name}" in
+              1) echo "1/${name}" ;;
+              2) echo "2/${name}" ;;
+              3) echo "3/${name:0:1}/${name}" ;;
+              *) echo "${name:0:2}/${name:2:2}/${name}" ;;
+            esac
+          }
           deadline=$(( $(date +%s) + 3600 ))
-          until curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' \
-              "https://index.crates.io/me/er/meerkat-core" \
-              | jq -es --arg v "${CORE_VERSION}" 'any(.[]; .vers == $v)' >/dev/null 2>&1; do
+          pending=("${crates[@]}")
+          while :; do
+            missing=()
+            for crate in "${pending[@]}"; do
+              if ! curl -fsSL --max-time 30 -H 'Cache-Control: no-cache' \
+                  "https://index.crates.io/$(index_path "${crate}")" \
+                  | jq -es --arg v "${CORE_VERSION}" 'any(.[]; .vers == $v)' >/dev/null 2>&1; then
+                missing+=("${crate}")
+              fi
+            done
+            if [[ ${#missing[@]} -eq 0 ]]; then
+              break
+            fi
             if (( $(date +%s) >= deadline )); then
-              echo "::error::meerkat-core ${CORE_VERSION} is not on crates.io after 60 minutes; release Core first (lockstep: tag v${CORE_VERSION} before meta-v)" >&2
+              echo "::error::${#missing[@]} of ${#crates[@]} Core crates are not on crates.io at ${CORE_VERSION} after 60 minutes (${missing[*]}); release Core first (lockstep: tag v${CORE_VERSION} before meta-v)" >&2
               exit 1
             fi
-            echo "waiting for meerkat-core ${CORE_VERSION} in the crates.io index"
+            echo "waiting for ${#missing[@]} of ${#crates[@]} Core crates at ${CORE_VERSION} in the crates.io index: ${missing[*]}"
+            pending=("${missing[@]}")
             sleep 30
           done
-          echo "meerkat-core ${CORE_VERSION} is on crates.io"
+          echo "every Core crate (${#crates[@]}) is on crates.io at ${CORE_VERSION}"
 
       - name: Build the packaged Meta crates against published Core
         run: python3 scripts/published_crates_standalone.py floor --product meta --mode release --out "${RUNNER_TEMP}/meta-floor"

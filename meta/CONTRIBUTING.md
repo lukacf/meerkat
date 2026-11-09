@@ -179,8 +179,9 @@ nothing; `--execute --no-tag --no-push` makes the release commit). Candidate
 production must run from that final merged commit, not a PR head or an earlier
 build. Candidate runs may start as soon as the commit is on main: their build
 legs run beside the commit's `ci.yml` **push-to-main** run, and collection
-refuses (it never waits) unless that run is already green by then. A refused
-candidate binds nothing; dispatch a new one once CI is green.
+waits (up to 120 minutes) until that run, and a Meta CI run at the commit that
+ran Meta's lanes, are green; a green re-run attempt counts. A candidate whose
+wait runs out binds nothing; dispatch a new one once CI is green.
 
 The five targets form two tiers, each built and bound by its own candidate run
 from the same commit. The core tier (Linux x86_64 and aarch64, macOS arm64) is
@@ -309,8 +310,9 @@ tier, which may arrive later, adds `index-trailing.json` and
 up to v0.9.1 keep one `index.json` and `checksums.sha256` for all five targets.
 
 Only the candidate manifest's attestation implies green exact-main CI: the
-build legs start beside CI and attest their archives before the gate runs, and
-collection, which attests the manifest, refuses unless CI is green.
+build legs run beside CI and attest their archives whatever CI concludes, and
+collection, which attests the manifest, waits for green CI and binds nothing
+without it.
 
 ### Recovery without replacing published bytes
 

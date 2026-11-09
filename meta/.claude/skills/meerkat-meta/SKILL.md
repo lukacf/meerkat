@@ -654,8 +654,9 @@ After merging the final release-version/dependency commit, use
 `make release-candidate SOURCE_SHA=<full-sha> TIER=trailing`. The dispatch must
 snapshot that same main SHA. Each run builds/signs/packages one tier (core:
 Linux x86_64 and aarch64, macOS arm64; trailing: macOS x86_64, Windows) beside
-the push-to-main CI run of that SHA, refuses at collection unless that CI run is
-already green, and emits an immutable run/attempt/tier/artifact/digest selection
+the push-to-main CI run of that SHA, waits at collection (up to 120 minutes)
+until that CI run and a Meta CI run that ran Meta's lanes are green, and emits
+an immutable run/attempt/tier/artifact/digest selection
 backed by signed provenance and outer/inner executable hashes. Save the
 selections outside the repo and obtain consumer acceptance against those bytes.
 

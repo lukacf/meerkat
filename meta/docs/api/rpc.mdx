@@ -370,6 +370,16 @@ registered, woken, respawned or retired. Label that member for the identity
 on its session, or retire it, then try again (see
 [Upgrading to 0.9.4](/guides/upgrading-to-0-9-4)).
 
+An identity created at runtime is store-owned: its record is its row in the
+mob's identity store, and Core's MobMachine drives its lifecycle. Meta serves
+its sends, dispatches and schedule fires through its door, and its lifecycle
+verbs (reload, retire, respawn, reset, delete, materialize) refuse it before
+anything acts, final: `-32603` with structured data
+`{kind: "identity_store_owned", identity, retryable: false}`
+(`meta/retire_member` and `meta/respawn_member` answer `-32000` and name the
+refusal in their message). Nothing is changed. Both SDKs surface the data on
+a plain `RpcError`.
+
 The `-32010` constant is exported from both SDKs as
 `MOB_EVENTS_STALE_CURSOR_CODE`. The Python and TypeScript SDKs auto-
 reify `-32010` errors into `MobEventsStaleError` (a typed subclass of
@@ -1046,11 +1056,20 @@ entries existed (its spawn row carries the legacy identity label naming it,
 or the durable-identity continuity marker) until this runtime's first
 roster pass, which adopts and registers it, has run. A read of Core's entry
 that Core could not serve answers `-32052` too. A name no roster pass of
-this runtime registers is refused for good: an identity created at runtime
-(Core's created entry, whose record the mob's identity store owns; Meta
-does not serve created identities yet) and a removed identity answer
+this runtime registers is refused for good: a removed identity answers
 `-32001`, and a name whose record Core cannot read answers `-32014`
 (`identity_name_unreadable`).
+
+An identity created at runtime (Core's created entry, whose record is its
+row in the mob's identity store) is served as a registered identity, though
+no host's roster lists it: each roster pass registers the created entries
+Core holds with the spec each row holds, and forgets one Core no longer
+holds. A send, a dispatch, a member mutation or a schedule fire that names
+one created since the last roster pass registers it from its row first. Its
+sends, dispatches and schedule fires reach its member through its door.
+Core drives its lifecycle, so Meta's lifecycle verbs refuse it
+(`identity_store_owned`, see
+[Meta-specific error codes](#meta-specific-error-codes)).
 
 ### Reset and work in flight
 

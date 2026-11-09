@@ -27398,13 +27398,15 @@ message = "review"
 
     /// A console member mutation of a name no roster pass of this runtime
     /// will ever register is refused for good, typed, and nothing is
-    /// retired: an identity created at runtime (Core holds it as a created
-    /// entry, whose record the mob's identity store owns) and a removed
-    /// identity are unknown to this runtime (`-32001`), and a name whose
-    /// record Core cannot read needs a repair or an upgrade (`-32014`,
-    /// `identity_name_unreadable`). A read of Core's entry that Core could
-    /// not serve refuses the mutation retryable (`-32052`,
-    /// `identity_history_unavailable`), never as an unknown identity.
+    /// retired: a removed identity is unknown to this runtime (`-32001`), and
+    /// a name whose record Core cannot read needs a repair or an upgrade
+    /// (`-32014`, `identity_name_unreadable`). A read of Core's entry that
+    /// Core could not serve refuses the mutation retryable (`-32052`,
+    /// `identity_history_unavailable`), never as an unknown identity. An
+    /// identity created at runtime (Core holds it as a created entry, whose
+    /// record the mob's identity store owns) is registered from its row and
+    /// goes through its door, which refuses the mutation: Core drives a
+    /// store-owned identity.
     ///
     /// RED before the door told them apart: `meta/retire_member` answered
     /// each of them with an untyped `-32000`.
@@ -27431,7 +27433,7 @@ message = "review"
             1,
             Some(meerkat_core::types::SessionId::new()),
         )?;
-        core_bridge.hold_created(&created);
+        core_bridge.hold_created(&created, "worker");
         core_bridge.hold_removed(&AgentIdentity::parse("console-removed")?);
         core_bridge.hold_unreadable(&AgentIdentity::parse("console-unreadable")?);
         let retire = |member_id: &str| {
@@ -27458,7 +27460,6 @@ message = "review"
         };
 
         for (name, code, data) in [
-            ("console-created", json!(-32001), Value::Null),
             ("console-removed", json!(-32001), Value::Null),
             (
                 "console-unreadable",
@@ -27479,6 +27480,22 @@ message = "review"
                 "{name}: the typed, final refusal: {response:#?}"
             );
         }
+        // The identity created at runtime goes through its door, which
+        // refuses the retire: Core drives a store-owned identity.
+        let response = retire("console-created").await;
+        assert!(response["result"].is_null(), "{response:#?}");
+        assert_eq!(response["error"]["code"], json!(-32000), "{response:#?}");
+        let detail = response["error"]["data"]["detail"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            detail.contains("retire_member (identity)") && detail.contains("store-owned"),
+            "the identity's door refused the retire: {response:#?}"
+        );
+        assert!(
+            identity_runtime.contains(&created).await,
+            "the door registered the identity created at runtime from its row"
+        );
         assert!(
             core_bridge.releases().is_empty(),
             "a refused mutation releases nothing"

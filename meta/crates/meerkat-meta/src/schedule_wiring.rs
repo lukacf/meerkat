@@ -4356,17 +4356,18 @@ external_addressable = true
 
     /// A schedule fire addressed to a name this runtime has not registered,
     /// which Core holds for an identity, is answered at the internal door by
-    /// the identity's refusal, never by a member door: an identity created at
-    /// runtime (a created entry, which no roster pass of this runtime
-    /// registers) ends the fire `TargetMissing`, and an entry a host
-    /// declared, before this process's roster pass registered it, leaves the
-    /// fire reclaimable (`DeliveryRepairDeferred`). Nothing reaches either
-    /// member.
+    /// the identity's refusal, never by a member door: a removed identity
+    /// (whose name no roster pass registers again) ends the fire
+    /// `TargetMissing`, and an entry a host declared, before this process's
+    /// roster pass registered it, leaves the fire reclaimable
+    /// (`DeliveryRepairDeferred`). Nothing reaches a member. (An identity
+    /// created at runtime is no such name: its door registers it from its
+    /// row, and the fire reaches its member.)
     ///
     /// RED: read `identity_for_member_mutation`'s refusal as "no identity"
     /// (the fire is then not the internal door's, and falls back to the
     /// surface's member door), or keep a final refusal reclaimable (the fire
-    /// of a created entry is then retried for good).
+    /// of a removed identity is then retried for good).
     #[tokio::test]
     async fn a_schedule_fire_to_an_unregistered_identity_name_ends_typed_or_stays_reclaimable() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -4415,22 +4416,21 @@ external_addressable = true
         .expect("bootstrap schedule test runtime");
 
         let bridge = Arc::new(crate::identity_first::core_test_bridge::CoreReadsBridge::default());
-        let created =
-            crate::identity_first::AgentIdentity::parse("sched-created").expect("identity");
+        let removed =
+            crate::identity_first::AgentIdentity::parse("sched-removed").expect("identity");
         let declared =
             crate::identity_first::AgentIdentity::parse("sched-declared").expect("identity");
-        // Core holds a member of the created entry and of the declared one.
-        for identity in [&created, &declared] {
-            crate::identity_first::core_test_bridge::bind_live(
-                &bridge.core,
-                identity,
-                &meerkat_mob::ProfileName::from("general"),
-                1,
-                Some(SessionId::new()),
-            )
-            .expect("Core's member");
-        }
-        bridge.hold_created(&created);
+        // Core holds a member of the declared entry; its read names no
+        // member of the removed identity.
+        crate::identity_first::core_test_bridge::bind_live(
+            &bridge.core,
+            &declared,
+            &meerkat_mob::ProfileName::from("general"),
+            1,
+            Some(SessionId::new()),
+        )
+        .expect("Core's member");
+        bridge.hold_removed(&removed);
         bridge.hold_declared(&declared);
         // This process has run no roster pass: it registered nothing.
         let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
@@ -4488,13 +4488,13 @@ external_addressable = true
         let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
         let content = meerkat_core::ContentInput::Text("deliver".to_string());
 
-        // A created entry: the fire ends typed, its target missing.
+        // A removed identity: the fire ends typed, its target missing.
         let dispatch = host
             .deliver_internal_member_prompt(
                 &occurrence,
                 &delivery,
                 "schedule-unregistered",
-                "sched-created",
+                "sched-removed",
                 &content,
             )
             .await
@@ -4527,10 +4527,7 @@ external_addressable = true
             Some(Ok(_)) => panic!("the fire of an entry before its roster pass is deferred"),
             None => panic!("the identity's refusal answers the fire, never a member door"),
         }
-        assert!(
-            bridge.delivered().is_empty(),
-            "nothing reaches either member"
-        );
+        assert!(bridge.delivered().is_empty(), "nothing reaches a member");
         runtime.shutdown().await;
     }
 
@@ -4562,6 +4559,9 @@ id = "schedule-created"
 [profiles.general]
 model = "gpt-5.5"
 external_addressable = true
+
+[profiles.general.tools]
+comms = true
 "#,
         )
         .expect("schedule test mob definition");
@@ -4620,6 +4620,14 @@ external_addressable = true
                 Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
             ),
             "{created:?}"
+        );
+        assert!(
+            matches!(
+                handle.identity_entry(&meerkat_mob::AgentIdentity::from("sched-keeper")),
+                Ok(meerkat_mob::IdentityEntryRead::Entry(entry))
+                    if matches!(entry.standing, meerkat_mob::EntryStanding::Seated(_))
+            ),
+            "Core seats the created identity's member"
         );
         let baseline_llm_calls = llm_calls.load(Ordering::SeqCst);
 

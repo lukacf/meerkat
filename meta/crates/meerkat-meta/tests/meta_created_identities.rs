@@ -63,6 +63,9 @@ id = "{mob_id}"
 model = "gpt-5.5"
 external_addressable = true
 runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
 "#
     ))
     .expect("parse the definition")

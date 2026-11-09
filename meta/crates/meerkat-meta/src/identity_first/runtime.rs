@@ -63,6 +63,7 @@ use crate::memory::records::{
 mod build_preparation;
 #[cfg(test)]
 mod core_views_tests;
+mod created;
 mod declare;
 mod lifecycle_projection;
 mod records;
@@ -1223,6 +1224,16 @@ pub enum IdentityRuntimeError {
     IdentityHostAdopted {
         identity: AgentIdentity,
     },
+    /// The identity is store-owned: created at runtime, or adopted into store
+    /// custody, its record is its row in the mob's identity store, and Core's
+    /// MobMachine drives its lifecycle (Core answers its identity management
+    /// `CreatedEntry`). Meta's lifecycle verbs refuse it before anything
+    /// acts, and nothing was changed; a send, a dispatch or a schedule fire
+    /// still reaches its member through its door. Final. JSON-RPC
+    /// internal-error code with `data.kind` `identity_store_owned`.
+    IdentityStoreOwned {
+        identity: AgentIdentity,
+    },
     /// The identity's member id is held by a member the host made directly
     /// on the mob: Core's live or retiring member under that id carries no
     /// `agent_identity` label naming the identity, and this runtime did not
@@ -1569,6 +1580,12 @@ impl std::fmt::Display for IdentityRuntimeError {
                 f,
                 "identity {identity} is adopted by its host: Core holds its identity intent \
                  and drives it, so Meta's lifecycle verbs refuse it"
+            ),
+            Self::IdentityStoreOwned { identity } => write!(
+                f,
+                "identity {identity} is store-owned: its record is its row in the mob's \
+                 identity store and Core drives its lifecycle, so Meta's lifecycle verbs \
+                 refuse it"
             ),
             Self::IdentityNameHeldByRawMember {
                 identity,
@@ -2118,6 +2135,11 @@ impl IdentityRuntimeError {
             Self::IdentityHostAdopted { identity } => Some(serde_json::json!({
                 "kind": "identity_host_adopted", "identity": identity, "retryable": false,
             })),
+            // A store-owned identity keeps the internal-error code; the kind
+            // tells its caller that Core, not a Meta verb, drives it.
+            Self::IdentityStoreOwned { identity } => Some(serde_json::json!({
+                "kind": "identity_store_owned", "identity": identity, "retryable": false,
+            })),
             // A member the host made under the identity's member id keeps the
             // internal-error code; the kind names the collision, the member
             // and its session, so the host can label or retire that member.
@@ -2313,6 +2335,13 @@ pub(crate) struct IdentityEntry {
     /// until Core answers a later declaration otherwise. Process-local and
     /// never read as truth: every door declares the identity again.
     pub declaration_refused: bool,
+    /// The registration is an identity created at runtime (or adopted into
+    /// store custody): its spec is its row's in the mob's identity store, not
+    /// a roster row, and Core's MobMachine drives its lifecycle. Each roster
+    /// pass registers it again from that row while the host's roster does
+    /// not list it, and forgets it once Core no longer holds it; the managed
+    /// topology never unwires an edge of it.
+    pub created: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -3264,6 +3293,9 @@ impl IdentityFirstRuntimeContext {
             self.runtime.fail_identity_bootstrap(generation, &error);
             return Err(error);
         }
+        // The identities created at runtime, which the host's roster never
+        // lists, are registered from their rows in the mob's identity store.
+        self.runtime.register_created_identities(roster).await;
         self.runtime
             .install_identity_bootstrap(generation, self.bootstrap_mode.clone(), roster, &result)
             .await;
@@ -6714,9 +6746,14 @@ impl IdentityRuntime {
         let owned = match self.identity_edge_ownership() {
             IdentityEdgeOwnership::TopologyProvider => {
                 let declared = self.definition_declared_identity_edges().await;
+                let created = self.created_registrations().await;
                 managed
                     .iter()
-                    .chain(wired.difference(&declared))
+                    .chain(
+                        wired
+                            .difference(&declared)
+                            .filter(|(a, b)| !created.contains(a) && !created.contains(b)),
+                    )
                     .cloned()
                     .collect::<BTreeSet<_>>()
             }
@@ -7079,16 +7116,20 @@ impl IdentityRuntime {
         // edge to a member that is not one of this runtime's identities never
         // appears here.
         // A live edge the mob definition's wiring declares has its own
-        // owner; it is never the topology's to prune.
+        // owner; it is never the topology's to prune. Nor is an edge of an
+        // identity created at runtime: its row's owned edges and the
+        // definition's wiring are Core's.
         let live_owned_edges: BTreeSet<(AgentIdentity, AgentIdentity)> = match (
             self.identity_edge_ownership(),
             current_logical_edges.as_ref(),
         ) {
             (IdentityEdgeOwnership::TopologyProvider, Some(live)) => {
                 let definition_declared = self.definition_declared_identity_edges().await;
+                let created = self.created_registrations().await;
                 live.iter()
                     .filter(|edge| in_scope(edge))
                     .filter(|edge| !definition_declared.contains(*edge))
+                    .filter(|(a, b)| !created.contains(a) && !created.contains(b))
                     .cloned()
                     .collect()
             }
@@ -7497,6 +7538,9 @@ impl IdentityRuntime {
                     last_delivery_error: None,
                     last_reload: None,
                     declaration_refused: declaration_refused.unwrap_or(previous_refused),
+                    // The host's declaration: a roster's listing of a created
+                    // entry registers the roster's row.
+                    created: false,
                 },
             );
         }
@@ -8065,9 +8109,7 @@ impl IdentityRuntime {
         expected_alias: Option<&str>,
         expected_spec_digest: Option<&str>,
     ) -> Result<(), IdentityRuntimeError> {
-        if !self.entries.read().await.contains_key(identity) {
-            return Err(self.unregistered_identity_refusal(identity).await);
-        }
+        self.ensure_registered(identity).await?;
         if self.core_live_member(identity).await?.is_some()
             && !self.has_pending_first_boot_row(identity)
             && !self.first_boot_unread()
@@ -9779,7 +9821,16 @@ impl IdentityRuntime {
         AgentIdentity,
         Result<Option<meerkat_mob::MemberDeliveryScope>, IdentityRuntimeError>,
     )> {
-        let identities = self.registered_identities().await;
+        // An identity created at runtime is Core's to drive: Meta's wake
+        // refuses it, and Core materializes its member on its first delivery.
+        let identities: Vec<AgentIdentity> = self
+            .entries
+            .read()
+            .await
+            .iter()
+            .filter(|(_, entry)| !entry.created)
+            .map(|(identity, _)| identity.clone())
+            .collect();
         stream::iter(identities.into_iter().map(|identity| async move {
             let result = self.materialize(&identity).await;
             (identity, result)
@@ -9792,7 +9843,8 @@ impl IdentityRuntime {
     /// Materialize every identity registered with the runtime (Core's wake,
     /// cause Operator), returning Core's delivery scope of each
     /// session-backed member. An explicit operator request: nothing in Meta
-    /// calls it to deliver.
+    /// calls it to deliver. An identity created at runtime is left to Core,
+    /// which drives it and materializes its member on its first delivery.
     ///
     /// Best-effort: one member that cannot build is skipped and surfaced
     /// through logs and the error hook rather than aborting unrelated
@@ -10433,10 +10485,13 @@ impl IdentityRuntime {
     }
 
     /// REQ-03: the send doors refuse an unknown or `InternalOnly` identity.
+    /// An identity created at runtime that this runtime has not registered
+    /// yet is registered from its row first ([`Self::ensure_registered`]).
     async fn refuse_unless_addressable(
         &self,
         identity: &AgentIdentity,
     ) -> Result<(), IdentityRuntimeError> {
+        self.ensure_registered(identity).await?;
         let addressability = self
             .entries
             .read()
@@ -10444,7 +10499,9 @@ impl IdentityRuntime {
             .get(identity)
             .map(|entry| entry.spec.addressability);
         let Some(addressability) = addressability else {
-            return Err(self.unregistered_identity_refusal(identity).await);
+            // Unregistered since the door registered it (a roster pass or a
+            // delete forgot it meanwhile).
+            return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
         };
         if addressability == AgentAddressability::InternalOnly {
             return Err(IdentityRuntimeError::NotAddressable(NotAddressable {
@@ -13151,7 +13208,10 @@ impl IdentityRuntime {
         input: &DispatchInput,
         track_turn: bool,
     ) -> Result<DispatchOutcome, IdentityRuntimeError> {
-        if !self.entries.read().await.contains_key(identity) {
+        // An identity created at runtime that this runtime has not registered
+        // yet is registered from its row; any other name it has not
+        // registered is unknown here.
+        if !matches!(self.admit_unregistered_name(identity).await, Ok(true)) {
             return Err(IdentityRuntimeError::UnknownIdentity(identity.clone()));
         }
         // A target Core does not hold yet (or whose first-boot row is still
@@ -15491,31 +15551,25 @@ impl IdentityRuntime {
     }
 
     /// The refusal of a door to `name`, which this runtime has not
-    /// registered, when Core holds the name for an identity; `None` when it
+    /// registered, from Core's entry of the name, `entry`, when Core holds
+    /// the name for an identity this runtime does not serve; `None` when it
     /// holds the name for none (no entry, and no legacy member waiting for
-    /// this runtime's first roster pass), or without a bridge: the name is
-    /// then a member of the mob's raw plane, if anything.
+    /// this runtime's first roster pass): the name is then a member of the
+    /// mob's raw plane, if anything. A created entry is no refusal's: the
+    /// door registers it from its row ([`Self::admit_unregistered_name`]).
     ///
     /// Retryable only when this runtime's next roster pass registers the
     /// name: an entry a host declared (an earlier process declared it, and
     /// this one's roster pass has not run yet), and a member seated before
     /// identity entries existed, while the first roster pass, which adopts
-    /// and registers it, has not completed. A read Core could not serve
-    /// refuses retryable too, never taken as "no identity's". Every other
-    /// name Core holds is refused for good: an identity created at runtime
-    /// (a created entry, whose record the mob's identity store owns; this
-    /// runtime registers no created identity) and a removed identity are
-    /// unknown to this runtime, and a name whose record Core cannot read is
-    /// refused as unreadable.
-    pub(crate) async fn unregistered_name_refusal(
+    /// and registers it, has not completed. Every other name Core holds is
+    /// refused for good: a removed identity is unknown to this runtime, and a
+    /// name whose record Core cannot read is refused as unreadable.
+    async fn unregistered_entry_refusal(
         &self,
         name: &AgentIdentity,
+        entry: &super::bridge::CoreIdentityEntry,
     ) -> Option<IdentityRuntimeError> {
-        let entry = match self.core_entry_of_name(name).await {
-            Ok(Some(entry)) => entry,
-            Ok(None) => return None,
-            Err(error) => return Some(error),
-        };
         match entry.kind {
             super::bridge::CoreNameKind::Entry if entry.is_declared_entry() => {
                 Some(IdentityRuntimeError::IdentityHistoryUnavailable {
@@ -15552,16 +15606,20 @@ impl IdentityRuntime {
         }
     }
 
-    /// The refusal of a door to `identity`, which this runtime has not
-    /// registered ([`Self::unregistered_name_refusal`]); a name Core holds
-    /// for no identity is unknown to this runtime.
-    async fn unregistered_identity_refusal(
+    /// `Ok` once `identity` is registered with this runtime: registered
+    /// already, or a created entry this door registers now from its row
+    /// ([`Self::admit_unregistered_name`]). Any other name is refused with
+    /// the door's typed refusal, and a name Core holds for no identity is
+    /// unknown to this runtime.
+    async fn ensure_registered(
         &self,
         identity: &AgentIdentity,
-    ) -> IdentityRuntimeError {
-        self.unregistered_name_refusal(identity)
-            .await
-            .unwrap_or_else(|| IdentityRuntimeError::UnknownIdentity(identity.clone()))
+    ) -> Result<(), IdentityRuntimeError> {
+        match self.admit_unregistered_name(identity).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(IdentityRuntimeError::UnknownIdentity(identity.clone())),
+            Err(error) => Err(error),
+        }
     }
 
     /// Whether this runtime's first roster pass has not completed yet: a
@@ -15643,26 +15701,23 @@ impl IdentityRuntime {
     /// A generated alias is its identity's whether or not that identity is
     /// still registered (the door refuses a deleted one), so it never falls
     /// back to the raw plane after a concurrent delete. A plain name is its
-    /// identity's when this runtime registered it. A name this runtime has
-    /// not registered that Core holds for an identity is refused with the
-    /// door's refusal ([`Self::unregistered_name_refusal`]): retryable when
-    /// the next roster pass registers it or Core's entry could not be read,
-    /// final otherwise. Never the raw plane on a read that could not tell.
+    /// identity's when this runtime registered it, or when Core holds it as a
+    /// created entry, which is registered now from its row. Any other name
+    /// this runtime has not registered that Core holds for an identity is
+    /// refused with the door's refusal ([`Self::admit_unregistered_name`]):
+    /// retryable when the next roster pass registers it or Core's entry could
+    /// not be read, final otherwise. Never the raw plane on a read that could
+    /// not tell.
     pub(crate) async fn identity_for_member_mutation(
         &self,
         alias: &str,
     ) -> Result<Option<AgentIdentity>, IdentityRuntimeError> {
         match Self::identity_from_member_alias(alias) {
             Some((identity, true)) => Ok(Some(identity)),
-            Some((identity, false)) => {
-                if self.contains(&identity).await {
-                    return Ok(Some(identity));
-                }
-                match self.unregistered_name_refusal(&identity).await {
-                    Some(refusal) => Err(refusal),
-                    None => Ok(None),
-                }
-            }
+            Some((identity, false)) => Ok(self
+                .admit_unregistered_name(&identity)
+                .await?
+                .then_some(identity)),
             None => Ok(None),
         }
     }
@@ -20301,6 +20356,65 @@ model = "gpt-5.5"
         assert!(
             !unwired_pair(&worker_rt, &helper_rt),
             "the definition-declared edge is kept: {unwired:?}"
+        );
+        Ok(())
+    }
+
+    /// With a topology provider, a live edge of an identity created at
+    /// runtime (registered from its row in the mob's identity store) is
+    /// Core's: its row's owned edges and the mob definition's wiring wire it,
+    /// so the topology never prunes it, though its desired set does not
+    /// contain it. An edge between two of the host's identities that no
+    /// declared owner wants is pruned.
+    #[tokio::test]
+    async fn an_edge_of_an_identity_created_at_runtime_is_not_the_topologys_to_prune()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let planner = AgentIdentity::parse("identity:planner")?;
+        let member = AgentIdentity::parse("identity:member")?;
+        let created = AgentIdentity::parse("identity:created")?;
+        let (_open_gate, gate) = watch::channel(false);
+        let bridge = Arc::new(WedgeableTopologyBridge::new(gate));
+        let runtime = runtime_with(bridge.clone(), "edge-prune-created")?;
+        runtime.set_identity_edge_ownership(IdentityEdgeOwnership::TopologyProvider);
+        let planner_rt = register_active(&runtime, &bridge, &planner, 0).await?;
+        let member_rt = register_active(&runtime, &bridge, &member, 0).await?;
+        // Core holds the created identity's member, and the runtime
+        // registered it from its row.
+        let created_rt = AgentRuntimeId::parse(&format!("rt:{}:0", created.as_str()))?;
+        let session_id = SessionId::new();
+        bridge.bind_session(&created_rt, &session_id);
+        bridge.core.bind(
+            &created,
+            &crate::identity_first::MemberRuntimeBinding {
+                agent_runtime_id: created_rt.clone(),
+                session_id: Some(session_id),
+            },
+            &spec(&created).profile,
+        );
+        {
+            let lifecycle_lock = runtime.lifecycle_lock_for(&created).await;
+            let _lifecycle_guard = lifecycle_lock.lock().await;
+            runtime.register_created_locked(spec(&created)).await;
+        }
+        bridge.land_wire(&planner_rt, &member_rt);
+        bridge.land_wire(&member_rt, &created_rt);
+        bridge.land_wire(&planner_rt, &created_rt);
+
+        runtime.reconcile_managed_peer_edges(&[]).await?;
+
+        let unwired = bridge.unwire_calls();
+        let unwired_pair = |x: &AgentRuntimeId, y: &AgentRuntimeId| {
+            unwired
+                .iter()
+                .any(|(a, b)| (a == x && b == y) || (a == y && b == x))
+        };
+        assert!(
+            unwired_pair(&planner_rt, &member_rt),
+            "the edge no declared owner wants is pruned: {unwired:?}"
+        );
+        assert!(
+            !unwired_pair(&member_rt, &created_rt) && !unwired_pair(&planner_rt, &created_rt),
+            "the created identity's edges are kept: {unwired:?}"
         );
         Ok(())
     }

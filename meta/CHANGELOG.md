@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- `IdentityRuntimeError` gains `IdentityStoreOwned { identity }`: a
+  lifecycle verb (reload, retire, respawn, reset, delete, materialize) of an
+  identity created at runtime, whose lifecycle Core's MobMachine drives,
+  answered `-32603` with the new kind `identity_store_owned` (see Fixed).
+  The enum is exhaustive, so a downstream exhaustive match needs the new
+  arm, or a wildcard arm.
+- `SessionBridge` has two new methods, `created_identities` and
+  `created_identity`: the identities Core holds as created entries, each
+  with the spec its row in the mob's identity store holds, which the
+  identity runtime registers. Their defaults answer
+  `BridgeError::Unsupported`: over a bridge that does not implement them the
+  identity runtime serves no identity created at runtime, as before. A
+  host's own wrapper of a session bridge forwards them to the bridge it
+  wraps.
+
+### Added
+
+- `CoreIdentityEntry::is_created_entry`: whether Core holds a name as an
+  identity entry created at runtime.
+
+### Fixed
+
+- Meta serves identities created at runtime (Core's created entries, whose
+  records are their rows in the mob's identity store). Each roster pass
+  registers the created entries Core holds that the host's roster does not
+  list, with the spec each row holds, after a restart too, and forgets one
+  Core no longer holds; a send, a dispatch, a member mutation or a schedule
+  fire that names one created since the last pass registers it from its row
+  first. A send by name, a dispatch or a schedule fire to one now reaches
+  its member through the identity's door, where it was refused `-32001`
+  (unknown identity) and nothing reached the member. Core drives a created
+  identity's lifecycle, so Meta's lifecycle verbs refuse it before anything
+  acts (`identity_store_owned`, final), and the managed topology never
+  unwires an edge of it. A truly unknown name still answers `-32001`, and
+  the `-32052` and `-32014` refusals of the names Core holds for other
+  identities are unchanged.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

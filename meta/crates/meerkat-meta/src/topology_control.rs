@@ -1650,14 +1650,20 @@ impl TopologyRuntimeHandle {
         // Reconcile unwires every managed edge that is not desired and, when
         // a topology provider owns the topology, every live identity edge
         // that no declared owner wants (one wired before a restart is live
-        // but unmanaged; one the definition's wiring declares is kept).
+        // but unmanaged; one the definition's wiring declares is kept, and so
+        // is one of an identity created at runtime, whose edges are Core's).
         let reconciled_away = match context.runtime.identity_edge_ownership() {
             crate::identity_first::runtime::IdentityEdgeOwnership::TopologyProvider => {
                 let definition_declared =
                     context.runtime.definition_declared_identity_edges().await;
+                let created = context.runtime.created_registrations().await;
                 managed
                     .iter()
-                    .chain(actual.difference(&definition_declared))
+                    .chain(
+                        actual
+                            .difference(&definition_declared)
+                            .filter(|(a, b)| !created.contains(a) && !created.contains(b)),
+                    )
                     .cloned()
                     .collect::<BTreeSet<_>>()
             }

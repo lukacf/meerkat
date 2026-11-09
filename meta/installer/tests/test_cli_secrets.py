@@ -351,6 +351,86 @@ async def test_a_secret_typed_in_the_wrong_place_is_never_repeated(forge, stray,
     assert not forge.transport.requests, "a usage error contacts no server"
 
 
+UPPER_CANARY = "CANARY_6F1D0C2A_SECRET_VALUE"
+HEX_CANARY = "6f1d0c2adeadbeef0123"
+
+
+def answering_forge():
+    """A Forge server's answers: GUIDE_ID asks a question beside a proposal; OTHER_ID has an accepted plan."""
+    from cli_support import GUIDE_ID, OTHER_ID
+    from test_cli_api import accepted_state, guide_state, options, plan
+    answers = {"/api/capabilities": {"version": cli_version(), "planner": {"available": True},
+                                     "agent_team_runtime": {}},
+               "/api/guide/list": {"setups": [{"id": identity, "name": "x", "status": "question", "stage": "purpose",
+                                               "updated_at": "2026-11-09T10:00"} for identity in (GUIDE_ID, OTHER_ID)]},
+               f"/api/guide/{GUIDE_ID}": guide_state(proposal=plan()),
+               f"/api/guide/{OTHER_ID}": accepted_state(id=OTHER_ID),
+               f"/api/guide/{OTHER_ID}/deployment/options": options()}
+
+    def handler(request):
+        if request.url.path in answers:
+            return httpx.Response(200, json=answers[request.url.path])
+        return httpx.Response(404, json={"detail": "Not Found"})
+    return httpx.MockTransport(handler)
+
+
+def argument_rows(tmp_path):
+    """Each way a value typed in the wrong place can reach an argument error, with the option it names."""
+    from cli_support import GUIDE_ID, OTHER_ID
+    taken = tmp_path / CANARY
+    taken.write_text("{}")
+    install = ["install", OTHER_ID, "--team", "--folder", str(tmp_path / "team")]
+    return [
+        ([CANARY], "COMMAND"), (["provider", CANARY], "ACTION"), (["setup", "revisit", GUIDE_ID, CANARY], "TOPIC"),
+        (["setup", "timeline", GUIDE_ID, "--limit", CANARY], "--limit"), (["-o", CANARY, "setup", "list"], "--output"),
+        ([*install, "--mode", CANARY], "--mode"), (["setup", "list", f"--no={CANARY}"], "--no"),
+        ([*install, f"--reuse-forge-keys={CANARY}"], "--reuse-forge-keys"),
+        (["install", OTHER_ID, f"--team={CANARY}", "--folder", str(tmp_path / "team")], "--team"),
+        (["setup", "list", f"--all={CANARY}"], "--all"), (["provider", "status", f"-k{CANARY}"], "-k"),
+        (["provider", "status", CANARY], "unrecognized"), (["provider", "status", f"--api-key={CANARY}"], "--api-key"),
+        (["setup", "show", CANARY], "SETUP"), (["setup", "show", HEX_CANARY], "SETUP"),
+        (["setup", "send", GUIDE_ID, "--answer", CANARY], "--answer"),
+        (["plan", "export", GUIDE_ID, "--out", str(taken)], "--out"),
+        ([*install, "--set", f"{UPPER_CANARY}="], "--set"),
+        ([*install, "--set", f"{UPPER_CANARY}=a", "--set", f"{UPPER_CANARY}=b"], "--set"),
+        ([*install, "--reuse-forge-keys", "--set", f"{UPPER_CANARY}=a"], "--set"),
+        ([*install, "--reuse-forge-keys", "--set", "CONSOLE_USER_ID=o", "--approve", CANARY], "--approve"),
+        (["--server", CANARY, "setup", "list"], "--server"), (["--timeout", CANARY, "setup", "list"], "--timeout"),
+        (["setup", "new", "--request-id", CANARY], "--request-id"),
+        (["installation", "request", GUIDE_ID, CANARY], "ID"),
+    ]
+
+
+@pytest.mark.parametrize("mode", ["text", "json"])
+async def test_argument_errors_name_the_option_never_the_value(tmp_path, mode):
+    problems = []
+    for argv, option in argument_rows(tmp_path):
+        result = await cli([*argv, *(["--json"] if mode == "json" else [])], transport=answering_forge(),
+                           environ={"META_FORGE_PORT": "8787", "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+        shown = result.text
+        if mode == "json":
+            document = json.loads(result.stdout)
+            shown = json.dumps(document) + result.stderr
+            if document["ok"] or option not in document["error"]["detail"]:
+                problems.append(f"{argv}: the JSON error does not name {option}: {document.get('error')}")
+        elif option not in result.stderr:
+            problems.append(f"{argv}: the error does not name {option}")
+        if result.code not in (2, 81):
+            problems.append(f"{argv}: exit {result.code}")
+        for value in (CANARY, UPPER_CANARY, HEX_CANARY):
+            if value in shown:
+                problems.append(f"{argv}: the value given is shown")
+    assert not problems, "\n".join(problems)
+
+
+async def test_an_unknown_chat_command_is_not_repeated():
+    from cli_support import GUIDE_ID
+    result = await cli(["chat", GUIDE_ID], transport=answering_forge(), stdin=Terminal(f"/{CANARY}\n/quit\n"),
+                       terminal=True)
+    assert result.code == 0, result.text
+    assert CANARY not in result.text and "/help" in result.text
+
+
 def environment_reads(tree):
     """String keys the source reads from an environment mapping or os.getenv."""
     names = set()

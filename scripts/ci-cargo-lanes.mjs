@@ -3333,6 +3333,36 @@ function plan(args) {
     closure_tests: waveOf("closure-tests", result.closure_test_rows, durations),
     feature_check: waveOf("feature-check", result.feature_check_jobs, durations),
   };
+  // Each planned row's product, per lane, for the CI gate's product
+  // evidence (scripts/ci-product-evidence.mjs): a row's own product, else
+  // the one product of its packages; null when its packages span products or
+  // name none, which the evidence treats as unknown. The archived lanes take
+  // their package's product. The downstream type-check rows say so: a pull
+  // request's `downstream <product>` Clippy rows and, when the plan reaches
+  // Core, the products' closure-check rows, which type-check them against
+  // the changed Core (a push runs no downstream Clippy row).
+  const rowProduct = (row) => {
+    if (row.product) return row.product;
+    const names = row.packages ?? [...String(row.package_flags ?? "").matchAll(/(?:^|\s)-p\s+(\S+)/g)].map((match) => match[1]);
+    const found = new Set(names.map((name) => productOf.get(name) ?? null));
+    return found.size === 1 ? [...found][0] : null;
+  };
+  const rowsOf = (rows, downstream = (row) => row.downstream === true) =>
+    rows.map((row) => ({ name: row.name, product: rowProduct(row), ...(downstream(row) ? { downstream: true } : {}) }));
+  const archiveProducts = new Map(result.main_archive_builds.map((row) => [row.archive, rowProduct(row)]));
+  result.row_products = {
+    clippy: rowsOf(result.shards),
+    unit: rowsOf([...result.unit_shards, ...result.unit_feature_shards]),
+    main_unit: rowsOf([...result.main_unit_shards, ...result.main_feature_unit_shards]),
+    main_archive_build: rowsOf(result.main_archive_builds),
+    main_archive_run: result.main_archive_runs.map((row) => ({ name: row.name, product: archiveProducts.get(row.archive) ?? null })),
+    integration: rowsOf([...result.integration_suites, ...result.reader_rows]),
+    closure_tests: rowsOf(result.closure_test_rows),
+    feature_check: rowsOf(result.feature_check_jobs),
+    closure_check: rowsOf(result.closure_check_rows ?? [], (row) => result.core_changed && rowProduct(row) !== CORE),
+    rustdoc: (result.rustdoc_rows ?? []).flatMap((row) =>
+      row.features.map((features) => ({ name: row.name, features, product: rowProduct(row) }))),
+  };
   return result;
 }
 
@@ -3713,6 +3743,8 @@ function githubOutput(result) {
   );
   scalar("downstream_products", productSection.downstream.map((row) => row.product).join(" "));
   scalar("connect_checks", String(productSection.lanes.includes("connect_checks")));
+  // Every planned row's product per lane, for the gate's product evidence.
+  scalar("row_products", JSON.stringify(result.row_products ?? {}));
   return `${lines.join("\n")}\n`;
 }
 

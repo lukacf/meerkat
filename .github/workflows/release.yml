@@ -275,7 +275,9 @@ jobs:
       # an earlier release's tag and tagged on that branch without reaching
       # main. No other branch qualifies, and neither does a pull-request or
       # dispatched run. On a tag run the step above has bound the version to
-      # the tag.
+      # the tag. A failed run of that kind qualifies only when its attestation
+      # shows every failure in rows Core does not depend on
+      # (scripts/ci-product-evidence.mjs; for example a Connect-only red row).
       - name: Require successful exact-main CI
         id: ci_run
         if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true') }}
@@ -338,6 +340,41 @@ jobs:
               return runs;
             }
 
+            // The product-scoped verdict for Core on one completed attempt,
+            // read once per attempt.
+            let evidence = null;
+            try {
+              const reader = require("path").resolve("scripts/ci-product-evidence.mjs");
+              evidence = await import(require("url").pathToFileURL(reader).href);
+            } catch (error) {
+              core.info(`This tree has no product-scoped CI evidence reader (${error.message}); only a green run counts.`);
+            }
+            const verdicts = new Map();
+            async function coreScopedVerdict(run) {
+              const key = `${run.id}/${run.run_attempt}`;
+              if (!verdicts.has(key)) {
+                let verdict = { accepted: false, reasons: ["no product-scoped evidence reader"] };
+                if (evidence) {
+                  try {
+                    const attestation = await evidence.attestationOfRun(github, {
+                      owner, repo, runId: run.id, attempt: run.run_attempt, commit: ref,
+                    });
+                    verdict = attestation
+                      ? evidence.acceptance(attestation, "core")
+                      : { accepted: false, reasons: ["the attempt has no exact-tree attestation"] };
+                  } catch (error) {
+                    verdict = { accepted: false, reasons: [`unreadable attestation: ${error.message}`] };
+                  }
+                }
+                verdicts.set(key, verdict);
+                core.info(
+                  `CI attempt ${run.run_attempt} on ${run.head_branch} (${run.html_url}) ` +
+                    `${verdict.accepted ? "is" : "is not"} enough for Core: ${verdict.reasons.join("; ")}`
+                );
+              }
+              return verdicts.get(key);
+            }
+
             for (;;) {
               const runs = await listExactCommitPushRuns();
               if (runs.length > 0) {
@@ -358,6 +395,26 @@ jobs:
                 core.setOutput("run_id", String(success.id));
                 core.setOutput("run_attempt", String(success.run_attempt));
                 return;
+              }
+
+              // A failed run still lets Core release when every failure sits
+              // in rows Core does not depend on (only its own rows and the
+              // downstream type-check rows count): the run's exact-tree
+              // attestation records each job's product, and this tree's
+              // scripts/ci-product-evidence.mjs judges it. Anything it cannot
+              // attribute, or a tree without that reader, keeps waiting for a
+              // green run.
+              for (const run of runs.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "failure")) {
+                const verdict = await coreScopedVerdict(run);
+                if (verdict.accepted) {
+                  core.warning(
+                    `Push CI on ${run.head_branch} at ${ref} failed (${run.html_url}), only in rows Core does not depend on: ` +
+                      verdict.reasons.join("; ")
+                  );
+                  core.setOutput("run_id", String(run.id));
+                  core.setOutput("run_attempt", String(run.run_attempt));
+                  return;
+                }
               }
 
               // ci.yml lets a newer main commit supersede (cancel) an older
@@ -456,11 +513,16 @@ jobs:
                .component_results.github_hosted_dense_mob == "success") or
               (.schema_version == 4 and
                .validation_backend == "github-hosted-cargo" and
-               .validation_result == "success" and
+               (.validation_result == "success" or .validation_result == "failure") and
                .component_results.changes == "success" and
                .component_results.fmt_governance == "success" and
                .component_results.ratchets == "success"))' \
             "${attestation}"
+          # A failed run counts only when every failure sits in rows Core
+          # does not depend on (the lookup above selected it for that).
+          if jq -e '.schema_version == 4 and .validation_result == "failure"' "${attestation}" >/dev/null; then
+            node scripts/ci-product-evidence.mjs accepts --product core "${attestation}"
+          fi
           schema="$(jq -r '.schema_version' "${attestation}")"
           echo "schema=${schema}" >> "${GITHUB_OUTPUT}"
           echo "Verified exact-tree CI attestation (schema ${schema}) for ${RELEASE_SHA} (${RELEASE_TREE})"

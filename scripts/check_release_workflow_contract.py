@@ -32,9 +32,11 @@ lookup), so the doctor and its contract test run wherever both do.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import re
@@ -1349,7 +1351,23 @@ async function judge(scenario) {
     const runs = served(scenario, params).map((run) => ({ ...run }));
     return { data: { total_count: runs.length, workflow_runs: runs } };
   };
-  const github = { rest: { actions: { listWorkflowRuns } } };
+  // The run's artifacts (the run id is a path parameter, always applied;
+  // the name filter only when the API applies its filters), each a zip.
+  const listWorkflowRunArtifacts = async (params) => {
+    calls += 1;
+    const artifacts = (scenario.artifacts ?? [])
+      .filter((artifact) => artifact.run_id === params.run_id)
+      .filter((artifact) => !scenario.filtered || params.name === undefined || artifact.name === params.name)
+      .map(({ id, name, expired }) => ({ id, name, expired }));
+    return { data: { total_count: artifacts.length, artifacts } };
+  };
+  const downloadArtifact = async (params) => {
+    calls += 1;
+    const artifact = (scenario.artifacts ?? []).find((candidate) => candidate.id === params.artifact_id);
+    if (!artifact) throw new Error(`no artifact ${params.artifact_id}`);
+    return { data: Buffer.from(artifact.zip, "base64") };
+  };
+  const github = { rest: { actions: { listWorkflowRuns, listWorkflowRunArtifacts, downloadArtifact } } };
   const context = { repo: { owner: "example", repo: "meerkat" } };
   try {
     await new AsyncFunction("require", "github", "context", "core", body)(wrapRequire, github, context, core);
@@ -1383,6 +1401,32 @@ class _LookupScenario:
     cargo: str = f'[workspace.package]\nversion = "{BINDING_VERSION}"\n'
     # The run is cancelled first: the lookup must say how to re-run it.
     warns: bool = False
+    # The exact-tree attestations the runs left: (run id, attempt, record).
+    attestations: tuple[tuple[int, int, dict], ...] = ()
+    # Whether the checkout holds the product-scoped evidence reader.
+    reader: bool = True
+
+
+# A failed push run's attestation with product evidence: every job but those
+# named in `failed` succeeded; `failed` maps a job to its product.
+def _scoped_attestation(failed: dict[str, str], *, evidence: bool = True, mode: str = "workspace") -> dict:
+    jobs = [
+        {"name": "Change classification", "conclusion": "success", "product": "core", "downstream": False},
+        {"name": "Main unit tests (core)", "conclusion": "success", "product": "core", "downstream": False},
+        *(
+            {"name": name, "conclusion": "failure", "product": product, "downstream": False}
+            for name, product in failed.items()
+        ),
+    ]
+    record = {
+        "schema_version": 4,
+        "validation_backend": "github-hosted-cargo",
+        "validation_result": "failure",
+        "plan": {"mode": mode},
+    }
+    if evidence:
+        record["product_evidence"] = {"version": 1, "plan_errors": 0, "failed_lanes": ["Main unit tests"], "jobs": jobs}
+    return record
 
 
 def _ci_run(run_id: int, branch: str, **overrides: object) -> dict:
@@ -1489,6 +1533,76 @@ def _lookup_scenarios() -> list[_LookupScenario]:
             cargo='[package]\nname = "binding"\nversion = "9.9.9"\n',
         ),
     ]
+    # A failed run counts for Core only through its attestation's product
+    # evidence, read by the checkout's scripts/ci-product-evidence.mjs: every
+    # failure must sit in a row Core does not depend on.
+    failed = {"conclusion": "failure"}
+    connect_red = {"Main unit tests (connect[console])": "connect"}
+    scenarios += [
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row",
+            ((_ci_run(30, "main", **failed),),),
+            ("30", "1"),
+            warns=True,
+            attestations=((30, 1, _scoped_attestation(connect_red)),),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose failures include a Core row",
+            ((_ci_run(31, "main", **failed),),),
+            None,
+            attestations=((31, 1, _scoped_attestation({**connect_red, "Clippy (core)": "core"})),),
+        ),
+        _LookupScenario(
+            "a failed push run on main whose attestation has no product evidence",
+            ((_ci_run(32, "main", **failed),),),
+            None,
+            attestations=((32, 1, _scoped_attestation(connect_red, evidence=False)),),
+        ),
+        _LookupScenario(
+            "a failed push run on main that left no attestation",
+            ((_ci_run(33, "main", **failed),),),
+            None,
+        ),
+        _LookupScenario(
+            "a failed push run on main whose only failure is a Connect row, in a tree without the evidence reader",
+            ((_ci_run(34, "main", **failed),),),
+            None,
+            attestations=((34, 1, _scoped_attestation(connect_red)),),
+            reader=False,
+        ),
+        _LookupScenario(
+            "a failed release-projection push run on main whose only failure is a Connect row",
+            ((_ci_run(35, "main", **failed),),),
+            None,
+            attestations=((35, 1, _scoped_attestation(connect_red, mode="release-projection")),),
+        ),
+        _LookupScenario(
+            "a failed push run on main with a Core row red, whose re-run fails only in a Connect row",
+            (
+                (_ci_run(36, "main", **failed),),
+                (_ci_run(36, "main", run_attempt=2, **pending),),
+                (_ci_run(36, "main", run_attempt=2, **failed),),
+            ),
+            ("36", "2"),
+            warns=True,
+            attestations=(
+                (36, 1, _scoped_attestation({"Clippy (core)": "core"})),
+                (36, 2, _scoped_attestation(connect_red)),
+            ),
+        ),
+        _LookupScenario(
+            "a cancelled push run on main whose attestation shows only a Connect row red",
+            ((_ci_run(37, "main", conclusion="cancelled"),),),
+            None,
+            attestations=((37, 1, _scoped_attestation(connect_red)),),
+        ),
+        _LookupScenario(
+            f"a failed push run on {release_branch} at another commit whose only failure is a Connect row",
+            ((_ci_run(38, release_branch, head_sha="2" * 40, **failed),),),
+            None,
+            attestations=((38, 1, _scoped_attestation(connect_red)),),
+        ),
+    ]
     return scenarios
 
 
@@ -1519,7 +1633,26 @@ def _run_github_script(step: Step, scenarios: list[dict]) -> list[dict]:
             checkout = Path(root, f"checkout-{index}")
             checkout.mkdir()
             Path(checkout, "Cargo.toml").write_text(scenario["cargo"], encoding="utf-8")
-            plan.append({"dir": str(checkout), "filtered": scenario["filtered"], "timeline": scenario["timeline"]})
+            if scenario.get("reader", True):
+                Path(checkout, "scripts").mkdir()
+                shutil.copy(REPO_ROOT / PRODUCT_EVIDENCE_READER, Path(checkout, PRODUCT_EVIDENCE_READER))
+            artifacts = []
+            for number, (run_id, attempt, record) in enumerate(scenario.get("attestations", ()), start=1):
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+                    bundle.writestr("attestation.json", json.dumps(record))
+                artifacts.append(
+                    {
+                        "id": 1000 * index + number,
+                        "run_id": run_id,
+                        "name": f"meerkat-ci-attestation-{LOOKUP_RELEASE_SHA}-{attempt}",
+                        "expired": False,
+                        "zip": base64.b64encode(archive.getvalue()).decode("ascii"),
+                    }
+                )
+            plan.append(
+                {"dir": str(checkout), "filtered": scenario["filtered"], "timeline": scenario["timeline"], "artifacts": artifacts}
+            )
         Path(root, "scenarios.json").write_text(json.dumps(plan), encoding="utf-8")
         results = Path(root, "results.json")
         try:
@@ -1549,10 +1682,15 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
     the release commit on main or on release/<version>, the version read
     from the checked-out Cargo.toml, and fail on every other run: another
     version's release branch or a near miss of this one, another commit, a
-    pull request, a dispatch or a failed run. The step runs under node as
-    actions/github-script v7 runs it, against a stub of the runs API and a
-    fake clock: once with the API applying its own filters, and once with an
-    API that ignores them, where the script's own filter alone must bind.
+    pull request, a dispatch or a failed run. A failed run counts only when
+    its exact-tree attestation's product evidence shows every failure in rows
+    Core does not depend on, judged by the checkout's
+    scripts/ci-product-evidence.mjs (never a cancelled run, a release
+    projection, a run without that evidence, or a tree without the reader).
+    The step runs under node as actions/github-script v7 runs it, against a
+    stub of the runs and artifacts APIs and a fake clock: once with the API
+    applying its own filters, and once with an API that ignores them, where
+    the script's own filter alone must bind.
     """
     steps = [step for step in job_steps(ci_block) if step.fields.get("id") == CI_RUN_STEP_ID]
     if len(steps) != 1:
@@ -1568,7 +1706,13 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
     results = _run_github_script(
         step,
         [
-            {"cargo": scenario.cargo, "timeline": scenario.timeline, "filtered": filtered}
+            {
+                "cargo": scenario.cargo,
+                "timeline": scenario.timeline,
+                "filtered": filtered,
+                "attestations": scenario.attestations,
+                "reader": scenario.reader,
+            }
             for scenario, filtered in cases
         ],
     )
@@ -1989,6 +2133,9 @@ PREBUILD_LOOKUP_SCRIPT = "scripts/release-find-prebuild"
 # non-input rules are the ones check_prebuild_non_inputs applies.
 PREBUILD_EQUIVALENCE = "scripts/release-prebuild-equivalent"
 PRODUCTS_FILE = "ci/products.json"
+# Judges a failed CI run's product evidence; require_ci_green's lookup reads
+# it from the release checkout.
+PRODUCT_EVIDENCE_READER = "scripts/ci-product-evidence.mjs"
 PREBUILD_BACKEND_REFUSAL = "A release prebuild builds with the backend its tag run selects"
 PROVENANCE_VERIFIER = "scripts/verify-release-asset-provenance"
 BINARY_BUILD_JOBS = (

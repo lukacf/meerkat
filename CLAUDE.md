@@ -743,8 +743,15 @@ and its CI must be green before a release tag (`require_ci_green`):
   main push and nightly); the lane table is reported on every non-cancelled
   run, failed runs included; a push or a dispatch is a full validation run
   that only reports the budget (a failure to measure only warns there);
-  schema-4 attestation (backend `github-hosted-cargo`) on successful pushes
-  to `main` and to `release/**` branches. For a `release-projection` plan
+  schema-4 attestation (backend `github-hosted-cargo`) on every push to
+  `main` and to a `release/**` branch that is not cancelled: its
+  `validation_result` is `success` only when the gate succeeded, and its
+  `product_evidence` lists each job of the attempt with its conclusion and
+  product (the planner's `row_products` for matrix rows, a fixed table in
+  `scripts/ci-product-evidence.mjs` for the other jobs, the gate's flagged
+  lanes and plan errors), so a release whose product depends on none of the
+  failed rows can still use a failed run (see `require_ci_green` below).
+  For a `release-projection` plan
   it re-verifies the reused parent
   attempt with the parent's copies of the scripts (`ci-release-evidence.mjs
   verify`: a completed, successful push run of `ci.yml` on `main` at exactly
@@ -853,7 +860,7 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 
 | Job | Trigger | What it does |
 |-----|---------|-------------|
-| `require_ci_green` | Always | Requires successful exact-main CI for the release commit (a successful push run of `ci.yml` at exactly that commit on `main`, or on `release/<version>` for a maintenance release, `<version>` being the checked-out workspace version; no other branch, pull-request or dispatched run); tag runs also verify its retained exact-tree attestation (schema 4, backend `github-hosted-cargo`; legacy schemas accepted; its ref `main` or that release branch) and, for a `release-projection` attestation, re-verify the reused first-parent run and its attestation with the parent's copies of the scripts; a prebuild dispatch instead verifies its request (on main, no publishing or recovery input, tag not yet created) and waits for nothing |
+| `require_ci_green` | Always | Requires successful exact-main CI for the release commit (a successful push run of `ci.yml` at exactly that commit on `main`, or on `release/<version>` for a maintenance release, `<version>` being the checked-out workspace version; no other branch, pull-request or dispatched run), or a failed run of that kind whose attestation's product evidence shows every failure in rows Core does not depend on (Core depends on its own rows and the downstream type-check rows; `scripts/ci-product-evidence.mjs`, which refuses whatever it cannot attribute: no evidence, a plan error, a release projection, a job of unknown product); tag runs also verify its retained exact-tree attestation (schema 4, backend `github-hosted-cargo`; legacy schemas accepted; its ref `main` or that release branch) and, for a `release-projection` attestation, re-verify the reused first-parent run and its attestation with the parent's copies of the scripts; a prebuild dispatch instead verifies its request (on main, no publishing or recovery input, tag not yet created) and waits for nothing |
 | `release_validate_buildbuddy_full` | Tag runs while `MEERKAT_GCP_BUILDBUDDY_ENABLED` is `true` | Runs the whole BuildBuddy/Bazel graph (`buildbuddy.yml`, `full-fresh`) on the release tree |
 | `release_validate_cargo` / `release_validate_buildbuddy` | Eligible manual dispatches; `release_validate_cargo` also on tags whose attestation does not prove its lanes ran, while the self-hosted graph is off | Validate release state through the selected lane; tag runs whose attestation covers those lanes (or with the graph on) reuse exact-tree CI and skip both jobs |
 | `release_validate_gate` | Tags and full/package dispatches | On tags require exact-tree CI plus the full BuildBuddy graph (graph on), or with the graph off pass on a verified attestation that covers the Cargo validation lanes (`release_validate_cargo` otherwise); on manual dispatches accept the selected validation lane; Web-only and asset-only recovery skip it |

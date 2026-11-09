@@ -150,6 +150,18 @@ jobs:
       run_id: ${{ steps.ci_run.outputs.run_id }}
       run_attempt: ${{ steps.ci_run.outputs.run_attempt }}
     steps:
+      # The release commit's product-scoped CI evidence reader: a failed
+      # exact-main run counts for Meta only when every failure sits in rows
+      # Meta does not depend on (Core's and Meta's rows count).
+      - name: Checkout the CI evidence reader
+        if: ${{ needs.resolve_release.outputs.ci_bypass != 'true' }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci-product-evidence.mjs
+          sparse-checkout-cone-mode: false
       - name: Wait for green exact-main CI and Meta CI at this commit
         id: ci_run
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -220,6 +232,42 @@ jobs:
               return { run: null, count: metaRuns.length };
             }
 
+            // A failed exact-main run still counts for Meta when every
+            // failure sits in rows Meta does not depend on (a Connect row,
+            // say): its exact-tree attestation records each job's product, and
+            // the release commit's scripts/ci-product-evidence.mjs judges it,
+            // once per attempt. Anything it cannot attribute, or no reader,
+            // keeps waiting for a green run.
+            let evidence = null;
+            try {
+              const reader = require("path").resolve("scripts/ci-product-evidence.mjs");
+              evidence = await import(require("url").pathToFileURL(reader).href);
+            } catch (error) {
+              core.info(`No product-scoped CI evidence reader (${error.message}); only a green run counts.`);
+            }
+            const verdicts = new Map();
+            async function metaScopedVerdict(run) {
+              const key = `${run.id}/${run.run_attempt}`;
+              if (!verdicts.has(key)) {
+                let verdict = { accepted: false, reasons: ["no product-scoped evidence reader"] };
+                if (evidence) {
+                  try {
+                    const attestation = await evidence.attestationOfRun(github, {
+                      owner, repo, runId: run.id, attempt: run.run_attempt, commit: ref,
+                    });
+                    verdict = attestation
+                      ? evidence.acceptance(attestation, "meta")
+                      : { accepted: false, reasons: ["the attempt has no exact-tree attestation"] };
+                  } catch (error) {
+                    verdict = { accepted: false, reasons: [`unreadable attestation: ${error.message}`] };
+                  }
+                }
+                verdicts.set(key, verdict);
+                core.info(`CI attempt ${run.run_attempt} (${run.html_url}) ${verdict.accepted ? "is" : "is not"} enough for Meta: ${verdict.reasons.join("; ")}`);
+              }
+              return verdicts.get(key);
+            }
+
             for (;;) {
               const runs = await exactMainRuns();
               if (runs.length > 0) {
@@ -231,13 +279,31 @@ jobs:
               } else {
                 core.info(`No exact-main CI run found yet for release commit ${ref}`);
               }
-              const success = runs.find((run) => run.status === "completed" && run.conclusion === "success");
+              let success = runs.find((run) => run.status === "completed" && run.conclusion === "success");
+              let scoped = null;
+              if (!success) {
+                for (const run of runs.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "failure")) {
+                  const verdict = await metaScopedVerdict(run);
+                  if (verdict.accepted) {
+                    success = run;
+                    scoped = verdict;
+                    break;
+                  }
+                }
+              }
               let meta = null;
               if (success) {
-                core.info(`Release commit ${ref} has green exact-main CI: ${success.html_url}`);
+                core.info(
+                  scoped
+                    ? `Release commit ${ref} has exact-main CI that failed only in rows Meta does not depend on: ${success.html_url}`
+                    : `Release commit ${ref} has green exact-main CI: ${success.html_url}`
+                );
                 meta = await metaEvidence();
                 if (meta.run) {
                   core.info(`Release commit ${ref} has green Meta CI with Meta's lanes: ${meta.run.html_url}`);
+                  if (scoped) {
+                    core.warning(`Exact-main CI at ${ref} failed (${success.html_url}), only in rows Meta does not depend on: ${scoped.reasons.join("; ")}`);
+                  }
                   core.setOutput("run_id", String(success.id));
                   core.setOutput("run_attempt", String(success.run_attempt));
                   return;

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Offline behavioral contracts for release protocol v1 and registry publication."""
 
+import base64
 import hashlib
 import importlib.util
+import io
 import itertools
 import json
 import os
@@ -12,6 +14,7 @@ import subprocess
 import sys
 import unittest
 import uuid
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -2289,6 +2292,19 @@ const github = {
       return { data: { total_count: 0, workflow_runs: at(timeline).map((run) => ({ ...run })) } };
     },
     listJobsForWorkflowRunAttempt,
+    // A ci.yml run's artifacts, each a zip (base64 in the scenario).
+    listWorkflowRunArtifacts: async (params) => {
+      result.calls.push({ poll: clock.sleeps, artifacts_of: params.run_id, name: params.name });
+      const artifacts = (scenario.artifacts || [])
+        .filter((artifact) => artifact.run_id === params.run_id && artifact.name === params.name)
+        .map(({ id, name, expired }) => ({ id, name, expired }));
+      return { data: { total_count: artifacts.length, artifacts } };
+    },
+    downloadArtifact: async (params) => {
+      const artifact = (scenario.artifacts || []).find((candidate) => candidate.id === params.artifact_id);
+      if (!artifact) throw new Error(`no artifact ${params.artifact_id}`);
+      return { data: Buffer.from(artifact.zip, "base64") };
+    },
   } },
   paginate: async (method, params) => {
     if (method !== listJobsForWorkflowRunAttempt) throw new Error("unexpected paginated method");
@@ -2318,16 +2334,31 @@ process.env.CI_BYPASS = scenario.bypass;
 """
 
 
-def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None, sha="deadbeef", bypass="false"):
+def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None, sha="deadbeef", bypass="false",
+                     attestations=(), reader=False):
+    """Run the gate in a scratch directory: `reader` copies the repository's
+    scripts/ci-product-evidence.mjs there (the job's sparse checkout), and
+    `attestations` are the (run id, attempt, record) exact-tree attestations
+    the ci.yml runs left."""
+    artifacts = []
+    for number, (run_id, attempt, record) in enumerate(attestations, start=1):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("attestation.json", json.dumps(record))
+        artifacts.append({"id": number, "run_id": run_id, "name": f"meerkat-ci-attestation-{sha}-{attempt}",
+                          "expired": False, "zip": base64.b64encode(archive.getvalue()).decode("ascii")})
     scenario = {"sha": sha, "bypass": bypass, "ci": ci,
                 "meta": {"push": meta_push or [[]], "workflow_dispatch": meta_dispatch or [[]]},
-                "jobs": jobs or {}}
+                "jobs": jobs or {}, "artifacts": artifacts}
     with fixture_directory() as tmp:
         for name, text in (("harness.js", POLLING_GATE_HARNESS), ("gate.js", body),
                            ("scenario.json", json.dumps(scenario))):
             (tmp / name).write_text(text)
+        if reader:
+            (tmp / "scripts").mkdir()
+            shutil.copy(ROOT.parent / "scripts" / "ci-product-evidence.mjs", tmp / "scripts" / "ci-product-evidence.mjs")
         subprocess.run(["node", str(tmp / "harness.js"), str(tmp / "gate.js"), str(tmp / "scenario.json"),
-                        str(tmp / "result.json")], check=True, capture_output=True, text=True)
+                        str(tmp / "result.json")], check=True, capture_output=True, text=True, cwd=tmp)
         return json.loads((tmp / "result.json").read_text())
 
 
@@ -2430,6 +2461,44 @@ class MetaCiGateTests(unittest.TestCase):
         for bypass in ("false", "", "TRUE", "1"):
             with self.subTest(bypass=bypass):
                 self.assertIsNotNone(self.gate([[]], bypass=bypass)["failed"])
+
+    @staticmethod
+    def scoped(failed):
+        """A failed run's attestation whose product evidence shows only the
+        `failed` jobs (name: product) red."""
+        jobs = [{"name": "Main unit tests (core)", "conclusion": "success", "product": "core", "downstream": False},
+                *({"name": name, "conclusion": "failure", "product": product, "downstream": False}
+                  for name, product in failed.items())]
+        return {"schema_version": 4, "validation_result": "failure", "plan": {"mode": "workspace"},
+                "product_evidence": {"version": 1, "plan_errors": 0, "failed_lanes": ["Main unit tests"], "jobs": jobs}}
+
+    def test_a_red_run_counts_only_when_its_failures_are_rows_meta_does_not_depend_on(self):
+        red = {**self.CI, "conclusion": "failure"}
+        connect = {"Main unit tests (connect[console])": "connect"}
+        result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True)
+        self.accepted(result)
+        self.assertEqual(result["sleeps"], 0)
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("only in rows Meta does not depend on", result["warnings"][0])
+        self.assertIn("connect[console]", result["warnings"][0])
+        # Meta CI is still required.
+        result = self.gate([[red]], meta_push=[[]], attestations=((42, 1, self.scoped(connect)),), reader=True)
+        self.assertIn("no green Meta CI run that ran Meta's lanes after 120 minutes", result["failed"])
+        for case, failed, reader in (("a Meta row", {"Main unit tests (meta)": "meta"}, True),
+                                     ("a Core row", {"Clippy (core)": "core"}, True),
+                                     ("no reader in the checkout", connect, False)):
+            with self.subTest(case=case):
+                result = self.gate([[red]], attestations=((42, 1, self.scoped(failed)),), reader=reader)
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertEqual(result["outputs"], {})
+        result = self.gate([[red]], reader=True)
+        self.assertIn("has no green exact-main CI after 120 minutes", result["failed"], "no attestation")
+        # The verdict is per attempt: a re-run whose only failure is a Connect
+        # row counts once it completes.
+        rerun = {**self.CI, "run_attempt": 2, "status": "in_progress", "conclusion": None}
+        result = self.gate([[red], [rerun], [{**red, "run_attempt": 2}]], reader=True,
+                           attestations=((42, 1, self.scoped({"Clippy (core)": "core"})), (42, 2, self.scoped(connect))))
+        self.accepted(result, attempt="2")
 
 
 def run_floor_wait(crates, index, *, version="0.8.31", appear_after=None):

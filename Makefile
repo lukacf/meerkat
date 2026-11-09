@@ -351,6 +351,8 @@ ci-lanes-selftest:
 	@node scripts/ci-release-projection-selftest.mjs
 	@echo "$(GREEN)Checking that the CI gate requires exactly the lanes the job conditions run...$(NC)"
 	@node scripts/ci-gate-consistency-selftest.mjs
+	@echo "$(GREEN)Self-testing the product-scoped CI evidence the release gates read...$(NC)"
+	@node scripts/ci-product-evidence-selftest.mjs
 	@echo "$(GREEN)Self-testing the main push's diff base (last green, attested main run)...$(NC)"
 	@node scripts/ci-push-base-selftest.mjs
 	@echo "$(GREEN)Checking the non-Rust reader inventory against the Rust sources...$(NC)"

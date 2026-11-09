@@ -4033,6 +4033,56 @@ for (const path of [
   }
 }
 
+// Every planned row names its product in row_products, the gate's product
+// evidence (scripts/ci-product-evidence.mjs): a Core change, each product's
+// own change and the whole workspace, on a push. A row without one would
+// keep every release on the whole-run requirement; the lists hold every row.
+{
+  for (const paths of [
+    ["crates/meerkat-core/src/lib.rs"],
+    ["meta/crates/meerkat-meta/src/lib.rs"],
+    ["connect/crates/meerkat-connect/src/lib.rs"],
+    ["Cargo.lock", "Makefile"],
+  ]) {
+    const plan = planFor(paths, ["--event", "push"]);
+    const lanes = plan.row_products;
+    assert.ok(lanes && typeof lanes === "object", `${paths}: the plan carries row_products`);
+    for (const [lane, rows] of Object.entries(lanes)) {
+      for (const row of rows) {
+        assert.ok(["core", "meta", "connect"].includes(row.product), `${paths}: ${lane} row ${row.name} has product ${row.product}`);
+      }
+    }
+    const sizes = {
+      clippy: plan.shards.length,
+      main_unit: plan.main_unit_shards.length + plan.main_feature_unit_shards.length,
+      integration: plan.integration_suites.length + plan.reader_rows.length,
+      closure_tests: plan.closure_test_rows.length,
+      feature_check: plan.feature_check_jobs.length,
+      main_archive_build: plan.main_archive_builds.length,
+      main_archive_run: plan.main_archive_runs.length,
+    };
+    for (const [lane, size] of Object.entries(sizes)) {
+      assert.equal(lanes[lane].length, size, `${paths}: row_products.${lane} lists every row`);
+    }
+  }
+  // A push runs no downstream Clippy row: the products' closure-check rows
+  // type-check them against a changed Core, so those are the downstream
+  // rows; without a Core change a product's own rows are just its own.
+  const core = planFor(["crates/meerkat-core/src/lib.rs"], ["--event", "push"]);
+  assert.deepEqual(core.row_products.clippy.filter((row) => row.downstream), [], "a push has no downstream Clippy row");
+  assert.deepEqual(
+    core.row_products.closure_check.filter((row) => row.downstream).map((row) => row.product).sort(),
+    ["connect", "meta"],
+    "a Core change's downstream type-check rows are the products' closure-check rows",
+  );
+  assert.ok(
+    core.row_products.closure_check.some((row) => row.product === "core" && !row.downstream),
+    "Core's own closure-check row is no downstream row",
+  );
+  const meta = planFor(["meta/crates/meerkat-meta/src/lib.rs"], ["--event", "push"]);
+  assert.deepEqual(meta.row_products.closure_check.filter((row) => row.downstream), [], "without a Core change no row is downstream");
+}
+
 // Bad arguments fail loudly.
 {
   const result = run(["--format", "yaml", "--", "crates/meerkat-core/src/lib.rs"]);

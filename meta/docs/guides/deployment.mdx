@@ -290,13 +290,15 @@ and the side effects that failed. Whether they survive a restart depends on
 that store:
 
 - `rpc_gateway` over a state directory, or a host store realm, keeps the
-  metadata store durable: a gateway killed between a step and its side
+  metadata store durable, and so does `meta_gateway` with
+  `persistent_sessions: true` (both in the state directory's
+  `meta_metadata.sqlite3`): a gateway killed between a step and its side
   effects runs them at its next start, and a graceful shutdown that ran out
   of its share of the drain window leaves the rest for the next start.
-- `meta_gateway` keeps its metadata in memory (its storage census reports
-  the `metadata` slot `declared_ephemeral`), so its side effects are run at
-  least once within the process only: a kill loses those still owed, and the
-  next start projects from the journal's head.
+- A launch without one keeps its metadata in memory (its storage census
+  reports the `metadata` slot `declared_ephemeral`), so its side effects are
+  run at least once within the process only: a kill loses those still owed,
+  and the next start projects from the journal's head.
 - The first start of a release that projects the journal begins at the
   journal's head: side effects an earlier release still owed when it stopped
   (it kept them in memory) are not run.

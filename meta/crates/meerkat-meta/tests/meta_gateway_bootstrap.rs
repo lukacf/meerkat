@@ -2177,7 +2177,7 @@ mod durable_console_state {
         .expect("sign the console token")
     }
 
-    /// Poll `condition` until it holds or `deadline` passes; `false` on
+    /// Poll `condition` until it holds or `deadline` runs out; `false` on
     /// timeout.
     fn eventually(deadline: Duration, mut condition: impl FnMut() -> bool) -> bool {
         let start = Instant::now();
@@ -2388,12 +2388,28 @@ mod durable_console_state {
             .unwrap_or_default()
     }
 
-    /// The frames of `kind` in `frames` that carry `text`.
-    fn frames_carrying(frames: &[Value], kind: &str, text: &str) -> usize {
-        frames
-            .iter()
-            .filter(|frame| frame["kind"] == kind && frame["payload"].to_string().contains(text))
-            .count()
+    /// How many console sends of [`QUESTION`] and how many answers to it
+    /// `frames` hold: the `user_input` frames a console send recorded
+    /// (`source.kind` `send`) that carry it, and the completed interactions
+    /// that carry [`ANSWER`]. A console started again also shows the
+    /// restored session's history (`source.kind` `session_history`), which
+    /// repeats the conversation and is no send of its own.
+    fn requests_and_answers(frames: &[Value]) -> (usize, usize) {
+        let carrying = |frame: &&Value, kind: &str, text: &str| {
+            frame["kind"] == kind && frame["payload"].to_string().contains(text)
+        };
+        (
+            frames
+                .iter()
+                .filter(|frame| {
+                    carrying(frame, "user_input", QUESTION) && frame["source"]["kind"] == "send"
+                })
+                .count(),
+            frames
+                .iter()
+                .filter(|frame| carrying(frame, "interaction_complete", ANSWER))
+                .count(),
+        )
     }
 
     /// The pending approvals' ids, as the console lists them.
@@ -2502,7 +2518,7 @@ mod durable_console_state {
         );
         assert!(
             eventually(SETTLE, || {
-                frames_carrying(&timeline(&first, &person), "interaction_complete", ANSWER) == 1
+                requests_and_answers(&timeline(&first, &person)) == (1, 1)
             }),
             "the request is answered before the restart: {:#?}",
             timeline(&first, &person)
@@ -2523,10 +2539,7 @@ mod durable_console_state {
         );
         let frames = timeline(&second, &person);
         assert_eq!(
-            (
-                frames_carrying(&frames, "user_input", QUESTION),
-                frames_carrying(&frames, "interaction_complete", ANSWER)
-            ),
+            requests_and_answers(&frames),
             (1, 1),
             "the timeline holds the request and its answer once after the restart: {frames:#?}"
         );
@@ -2543,10 +2556,7 @@ mod durable_console_state {
         );
         let frames = timeline(&second, &person);
         assert_eq!(
-            (
-                frames_carrying(&frames, "user_input", QUESTION),
-                frames_carrying(&frames, "interaction_complete", ANSWER)
-            ),
+            requests_and_answers(&frames),
             (1, 1),
             "the answer is delivered once: {frames:#?}"
         );

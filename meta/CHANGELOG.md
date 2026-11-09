@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `meta_gateway` launched with `persistent_sessions: true` keeps its
+  metadata and its console log in its state directory
+  (`meta_metadata.sqlite3` and `meta_console.sqlite3`, the stores
+  `rpc_gateway` keeps there with `persistent_state`), so a restart keeps
+  them. It kept both in memory, and a restart forgot them:
+  - a console request made before a restart stays known: its send settles,
+    a resend with the same idempotency key is answered from the first send
+    (the Console offers to send an uncertain request again), and its thread
+    stays recorded, so a private reply to it from a host's reply route
+    reaches its person once instead of being refused as an unknown thread;
+  - the attention list, the console audit log and the gating state (pending
+    approvals and the gating audit) survive a restart, and their reads
+    report `retention: durable`;
+  - the identity records and the lifecycle side effects an identity still
+    owes survive a restart, so a gateway stopped between a lifecycle step
+    and its side effects runs them at its next start;
+  - the mob event cursor survives a restart, so the events written while the
+    gateway was down are projected at its next start.
+  The storage census reports the `console` and `metadata` slots
+  persistent. A store that does not open refuses `meta/init` with `-32014`.
+  The first start after the upgrade begins with both stores empty, as every
+  start of an earlier release did. A launch without persistent sessions
+  keeps both in memory, as before.
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

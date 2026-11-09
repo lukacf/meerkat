@@ -18,10 +18,11 @@ name: Meta release
 #   - floor_check: Meta's published-floor check (the packaged Meta crates
 #     resolve and build, libraries and binaries, against crates.io Core at
 #     the versions they declare) gates every publication of a promotion and
-#     the crates of a registry retry; a candidate runs none (it may build
-#     before Core's crates exist). It replaces the old cold `cargo package`
-#     verify build (11.6 min of the 0.9.5 promote run), which built the same
-#     targets;
+#     the crates of a registry retry. A candidate's core tier runs it only
+#     when Core's crates are already published, and binds the record a
+#     promotion reuses while it still holds; otherwise the promotion builds.
+#     It replaces the old cold `cargo package` verify build (11.6 min of the
+#     0.9.5 promote run), which built the same targets;
 #   - artifacts build from the workspace at the candidate's commit, so the
 #     gateways embed its in-tree Core: the candidate manifest binds the tree
 #     of crates/ at that commit, and promotion refuses unless it equals the
@@ -315,10 +316,13 @@ jobs:
   # version and build. In a lockstep release Core publishes first: this job
   # waits (bounded) until every Core crate is in the sparse index at the
   # declared version, so no separate orchestration orders the two releases.
-  # A candidate runs
-  # none: it may build at the release merge, before Core's crates exist.
-  # Promotion publishes nothing (GitHub release, SDK packages, crates) until
-  # this job succeeded.
+  # A candidate may build at the release merge, before Core's crates exist:
+  # its core tier reads the index once, with no wait, and builds and binds a
+  # floor record (release-candidate.py floor-bind) only when every Core crate
+  # is already there; the trailing tier runs none. A promotion reuses the
+  # accepted candidate's record while everything it binds still holds
+  # (release-candidate.py floor-reuse) and builds otherwise. It publishes
+  # nothing (GitHub release, SDK packages, crates) until this job succeeded.
   floor_check:
     name: Meta published-floor check
     needs: [resolve_release, require_ci_green]
@@ -327,17 +331,30 @@ jobs:
       needs.resolve_release.result == 'success' &&
       needs.require_ci_green.result == 'success' &&
       needs.resolve_release.outputs.mode != 'tag' &&
-      needs.resolve_release.outputs.mode != 'candidate' &&
-      needs.resolve_release.outputs.mode != 'assets'
+      needs.resolve_release.outputs.mode != 'assets' &&
+      (needs.resolve_release.outputs.mode != 'candidate' ||
+       needs.resolve_release.outputs.tier == 'core')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
       core_version: ${{ steps.declared.outputs.core_version }}
+      record: ${{ steps.bind.outputs.record }}
+    env:
+      RELEASE_MODE: ${{ needs.resolve_release.outputs.mode }}
+      RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
+      RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve_release.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.resolve_release.outputs.sha }}
+
+      - name: Checkout immutable workflow tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
 
       - uses: ./.github/actions/setup-rust-ci
 
@@ -358,12 +375,72 @@ jobs:
           echo "core_version=${core_version}" >> "${GITHUB_OUTPUT}"
           echo "Meta declares Core ${core_version}"
 
+      # A candidate binds a floor record only when Core's crates are already
+      # published (a Meta-only release, or a candidate dispatched after Core's
+      # publication); before Core's tag it binds none, at once.
+      - name: Check once whether every Core crate is on crates.io
+        id: published
+        if: needs.resolve_release.outputs.mode == 'candidate'
+        run: python3 .release-tools/meta/scripts/release-candidate.py floor-index
+
+      # The record comes from the accepted candidate's attested manifest,
+      # verified as stage verifies it; it is `null` when the candidate bound
+      # none or the manifest cannot be read, and then the floor builds.
+      - name: Read the accepted candidate's floor record
+        id: record
+        if: needs.resolve_release.outputs.mode == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+        run: python3 .release-tools/meta/scripts/release-candidate.py floor-record --output "${RUNNER_TEMP}/floor-record.json"
+
+      # What a floor build would see now, without building: the declared
+      # versions re-resolved against crates.io (the resolved lock's digest),
+      # and the Meta crates packaged as publication will package them. A
+      # failure here only means no reuse.
+      - name: Re-resolve the packaged Meta crates against crates.io without building
+        if: steps.record.outputs.present == 'true'
+        continue-on-error: true
+        run: python3 scripts/published_crates_standalone.py floor --product meta --mode release --no-build --out "${RUNNER_TEMP}/meta-floor-resolve"
+
+      - name: Package the Meta crates without a patch
+        id: packaged
+        if: steps.record.outputs.present == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          set -euo pipefail
+          ./scripts/repo-cargo package -p meta-extension-state -p meerkat-meta --locked --no-verify
+          for pair in "extension_sha256:meta-extension-state" "meta_sha256:meerkat-meta"; do
+            output="${pair%%:*}"; crate="${pair##*:}"
+            echo "${output}=$(sha256sum "${CARGO_TARGET_DIR}/package/${crate}-${RELEASE_VERSION}.crate" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          done
+
+      - name: Reuse the candidate's floor record only if everything it binds still holds
+        id: reuse
+        if: steps.record.outputs.present == 'true'
+        env:
+          EXTENSION_SHA256: ${{ steps.packaged.outputs.extension_sha256 }}
+          META_SHA256: ${{ steps.packaged.outputs.meta_sha256 }}
+        run: >-
+          python3 .release-tools/meta/scripts/release-candidate.py floor-reuse
+          --record "${RUNNER_TEMP}/floor-record.json"
+          --resolution "${RUNNER_TEMP}/meta-floor-resolve"
+          --meta-crate-sha256 "meta-extension-state=${EXTENSION_SHA256}"
+          --meta-crate-sha256 "meerkat-meta=${META_SHA256}"
+
       # Core publishes its crates by dependency level, meerkat-core early;
       # the floor check resolves every Core crate Meta needs, so one that
       # started while Core was mid-publication would fail at resolution. It
       # waits until every crate scripts/release-rust-crates.sh lists is in
-      # the sparse index at the declared version.
+      # the sparse index at the declared version. (A candidate never waits,
+      # and a reused record needs no build.)
       - name: Wait until every Core crate is on crates.io at the declared version
+        if: >-
+          needs.resolve_release.outputs.mode != 'candidate' &&
+          steps.reuse.outputs.reuse != 'true'
         shell: bash
         env:
           CORE_VERSION: ${{ steps.declared.outputs.core_version }}
@@ -409,7 +486,21 @@ jobs:
           echo "every Core crate (${#crates[@]}) is on crates.io at ${CORE_VERSION}"
 
       - name: Build the packaged Meta crates against published Core
+        if: >-
+          (needs.resolve_release.outputs.mode == 'candidate' &&
+           steps.published.outputs.core_published == 'true') ||
+          (needs.resolve_release.outputs.mode != 'candidate' &&
+           steps.reuse.outputs.reuse != 'true')
         run: python3 scripts/published_crates_standalone.py floor --product meta --mode release --out "${RUNNER_TEMP}/meta-floor"
+
+      # The candidate's record of what that build proved; collection adds the
+      # Meta crate checksums verify_crate_packages records and binds it.
+      - name: Bind the floor record
+        id: bind
+        if: >-
+          needs.resolve_release.outputs.mode == 'candidate' &&
+          steps.published.outputs.core_published == 'true'
+        run: python3 .release-tools/meta/scripts/release-candidate.py floor-bind --floor-dir "${RUNNER_TEMP}/meta-floor"
 
   build_binaries:
     name: Build gateway binaries (${{ matrix.target }})
@@ -617,17 +708,25 @@ jobs:
           overwrite: false
           retention-days: 90
 
-  # Collection binds no floor check: the candidate may build before Core's
-  # crates exist, and promotion runs the floor check before any publication.
+  # Collection binds the core tier's floor record when its floor check bound
+  # one (Core's crates were already on crates.io), completed with the Meta
+  # crate checksums verify_crate_packages recorded; otherwise none, and the
+  # promotion runs the floor build. The trailing tier runs no floor check.
   collect_candidate:
     name: Bind immutable candidate artifacts
-    needs: [resolve_release, require_ci_green, release_validate, build_binaries]
+    needs: [resolve_release, require_ci_green, release_validate, floor_check, verify_crate_packages, build_binaries]
     if: >-
       !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
       needs.resolve_release.result == 'success' &&
       needs.require_ci_green.result == 'success' &&
       needs.release_validate.result == 'success' &&
+      (needs.floor_check.result == 'success' ||
+       (needs.resolve_release.outputs.tier == 'trailing' &&
+        needs.floor_check.result == 'skipped')) &&
+      (needs.verify_crate_packages.result == 'success' ||
+       (needs.verify_crate_packages.result == 'skipped' &&
+        needs.floor_check.outputs.record == '')) &&
       needs.build_binaries.result == 'success' &&
       needs.resolve_release.outputs.mode == 'candidate'
     runs-on: ubuntu-24.04
@@ -654,9 +753,18 @@ jobs:
         env:
           CI_RUN_ID: ${{ needs.require_ci_green.outputs.run_id }}
           CI_RUN_ATTEMPT: ${{ needs.require_ci_green.outputs.run_attempt }}
+          FLOOR_RECORD: ${{ needs.floor_check.outputs.record }}
+          EXTENSION_SHA256: ${{ needs.verify_crate_packages.outputs.extension_sha256 }}
+          META_SHA256: ${{ needs.verify_crate_packages.outputs.meta_sha256 }}
         run: |
+          floor=()
+          if [[ -n "$FLOOR_RECORD" ]]; then
+            floor=(--floor-record-json "$FLOOR_RECORD"
+                   --meta-crate-sha256 "meta-extension-state=$EXTENSION_SHA256"
+                   --meta-crate-sha256 "meerkat-meta=$META_SHA256")
+          fi
           python3 meta/scripts/release-candidate.py collect --output-dir candidate \
-            --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" --tier "$RELEASE_TIER"
+            --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" --tier "$RELEASE_TIER" "${floor[@]}"
 
       - name: Attest candidate manifest
         id: provenance
@@ -876,7 +984,10 @@ jobs:
   # Core. Its own archives differ from these in Cargo.lock only (it
   # packages with every in-repo crate patched to its path), so this job
   # packages without a patch (cargo package is byte-reproducible for a
-  # commit) and records the checksums publish_registries binds to.
+  # commit) and records the checksums publish_registries binds to. A
+  # candidate whose floor check bound a record runs it too: collection binds
+  # these checksums into the record, and a promotion reuses the record only
+  # while the crates still package to them.
   verify_crate_packages:
     name: Record the floor-checked Meta crate checksums
     needs: [resolve_release, release_validate, floor_check]
@@ -886,9 +997,11 @@ jobs:
       needs.resolve_release.result == 'success' &&
       needs.release_validate.result == 'success' &&
       needs.floor_check.result == 'success' &&
-      needs.resolve_release.outputs.publish_packages == 'true' &&
-      (needs.resolve_release.outputs.mode == 'existing' ||
-       needs.resolve_release.outputs.mode == 'promote')
+      ((needs.resolve_release.outputs.publish_packages == 'true' &&
+        (needs.resolve_release.outputs.mode == 'existing' ||
+         needs.resolve_release.outputs.mode == 'promote')) ||
+       (needs.resolve_release.outputs.mode == 'candidate' &&
+        needs.floor_check.outputs.record != ''))
     runs-on: ubuntu-24.04
     outputs:
       extension_sha256: ${{ steps.crates.outputs.extension_sha256 }}

@@ -39,6 +39,13 @@ CI = 99
 CORE = "0.8.31"
 CORE_TAG = f"refs/tags/v{CORE}"
 CRATES_TREE = "c" * 40
+# Core's crates as the checkout lists them, each one's checksum in the
+# crates.io index, the toolchain's rustc -vV, and Meta's publish order.
+CORE_CRATE_NAMES = ("meerkat-sqlite", "meerkat-core", "meerkat")
+INDEX_CKSUM = {name: hashlib.sha256(name.encode()).hexdigest() for name in CORE_CRATE_NAMES}
+TOOLCHAIN = "rustc 1.97.0 (fixture 2026-10-01)\nbinary: rustc\nhost: x86_64-unknown-linux-gnu"
+META_ORDER = ("meta-extension-state", "meerkat-meta")
+META_SHA256 = {"meta-extension-state": "e" * 64, "meerkat-meta": "f" * 64}
 
 
 FAKE_GH = r'''
@@ -243,6 +250,19 @@ class CandidateProtocolTests(unittest.TestCase):
         self.core_pin = f'"={CORE}"'
         self.core_tag_on_origin = True
         self.git_calls = []
+        # The crates.io sparse index by crate (a crate absent here reads as
+        # HTTP 404), crates whose read fails, and the toolchain.
+        self.index = {name: [{"name": name, "vers": "0.8.30", "cksum": "0" * 64, "yanked": False},
+                             {"name": name, "vers": CORE, "cksum": INDEX_CKSUM[name], "yanked": False}]
+                      for name in CORE_CRATE_NAMES}
+        self.unreadable = set()
+        self.toolchain = TOOLCHAIN
+        for name, effect in (("index_entries", self.index_response),
+                             ("core_crate_list", lambda: list(CORE_CRATE_NAMES)),
+                             ("rustc_version", lambda: self.toolchain)):
+            patch = mock.patch.object(helper, name, side_effect=effect)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.git_patch = mock.patch.object(helper, "git", side_effect=self.git_response)
         self.git_patch.start()
         self.addCleanup(self.env_patch.stop)
@@ -291,6 +311,9 @@ class CandidateProtocolTests(unittest.TestCase):
             return SHA
         if args == ("show", f"{SHA}:Cargo.toml"):
             return f'[workspace.dependencies]\nmeerkat-core = {{ version = {self.core_pin}, path = "crates/meerkat-core" }}\n'
+        if args == ("show", f"{SHA}:ci/products.json"):
+            return json.dumps({"products": [{"name": "core", "root": ""},
+                                            {"name": "meta", "root": "meta", "publish_order": list(META_ORDER)}]})
         if args[0] == "show":
             return f'[package]\nname = "meerkat-meta"\nversion = "{VERSION}"\n'
         if args[0] == "fetch":
@@ -301,6 +324,59 @@ class CandidateProtocolTests(unittest.TestCase):
         if args[0] == "ls-tree":
             return "meta/scripts/release-candidate.py\n" if self.protocol else "Cargo.toml\n"
         self.fail(f"unexpected git command: {args}")
+
+    def index_response(self, name):
+        if name in self.unreadable or name not in self.index:
+            raise helper.ProtocolError(f"crates.io index read for {name} failed: HTTP Error 404: Not Found")
+        return copy.deepcopy(self.index[name])
+
+    def fresh(self, label):
+        return self.root / f"{label}-{uuid.uuid4().hex[:8]}"
+
+    def step_files(self):
+        """Point GITHUB_OUTPUT and GITHUB_STEP_SUMMARY at new files."""
+        os.environ.update(GITHUB_OUTPUT=str(self.fresh("output")), GITHUB_STEP_SUMMARY=str(self.fresh("summary")))
+
+    def outputs(self):
+        path = Path(os.environ["GITHUB_OUTPUT"])
+        return dict(line.split("=", 1) for line in path.read_text().splitlines()) if path.exists() else {}
+
+    def summary(self):
+        path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+        return path.read_text() if path.exists() else ""
+
+    def floor_dir(self, *, stage="build", problems=(), dependencies=("meerkat 0.8.31", "meerkat-core 0.8.31"),
+                  lock=b"# resolved lock\n", lock_sha256=None, resolution=False):
+        """A floor check's --out directory: floor.json and the scratch
+        workspace's resolved lock (stage resolve for a --no-build run)."""
+        folder = self.fresh("floor")
+        (folder / "ws").mkdir(parents=True)
+        (folder / "ws" / "Cargo.lock").write_bytes(lock)
+        report = {"product": "meta", "mode": "release", "crates": list(META_ORDER),
+                  "stage": "resolve" if resolution else stage, "problems": list(problems),
+                  "registry_dependencies": sorted(dependencies),
+                  "lock_sha256": lock_sha256 or hashlib.sha256(lock).hexdigest()}
+        (folder / "floor.json").write_text(json.dumps(report))
+        return folder
+
+    def floor_bind(self, folder):
+        """floor-bind in candidate mode; returns the record it wrote (None
+        when it bound none)."""
+        os.environ["RELEASE_MODE"] = "candidate"
+        self.step_files()
+        self.command("floor-bind", "--floor-dir", str(folder))
+        record = self.outputs()["record"]
+        return json.loads(record) if record else None
+
+    def floor_args(self, record, checksums=META_SHA256):
+        args = ["--floor-record-json", json.dumps(record)]
+        for name, value in checksums.items():
+            args += ["--meta-crate-sha256", f"{name}={value}"]
+        return args
+
+    def bound_record(self):
+        """The record a core candidate binds once its floor build succeeded."""
+        return {**self.floor_bind(self.floor_dir()), "meta_crates": dict(META_SHA256)}
 
     def run_info(self, *, ci=False):
         return {"id": CI if ci else RUN, "run_attempt": 1 if ci else ATTEMPT,
@@ -387,15 +463,9 @@ class CandidateProtocolTests(unittest.TestCase):
             })
         self.save()
 
-    def tier_candidate(self, tier, run_id, manifest_aid, *, schema=None):
-        """A tiered candidate run that built and binds exactly one tier.
-
-        The run's artifact listing holds only that tier's targets, each
-        archive attested by that run; collection, the manifest artifact and
-        the emitted selection follow meta-release.yml's candidate jobs.
-        schema=2 rewrites the collected manifest as an earlier workflow wrote
-        it (no core_crates_tree), before it is attested and selected.
-        """
+    def tier_run(self, tier, run_id):
+        """A tiered candidate run in progress whose artifact listing holds
+        only that tier's targets, each archive attested by that run."""
         run = dict(self.run_info(), id=run_id)
         self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")] = run
         listing = []
@@ -416,21 +486,34 @@ class CandidateProtocolTests(unittest.TestCase):
         self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}/artifacts?per_page=100")] = [
             {"artifacts": listing, "total_count": len(listing)}]
         self.save()
-        directory = self.root / f"candidate-{tier}"
+
+    def tier_candidate(self, tier, run_id, manifest_aid, *, schema=None, collect_args=()):
+        """A tiered candidate run that built and binds exactly one tier.
+
+        The run's artifact listing holds only that tier's targets, each
+        archive attested by that run; collection, the manifest artifact and
+        the emitted selection follow meta-release.yml's candidate jobs.
+        schema=2 or 3 rewrites the collected manifest as an earlier workflow
+        wrote it, before it is attested and selected; collect_args are the
+        floor record arguments meta-release.yml hands collection.
+        """
+        self.tier_run(tier, run_id)
+        directory = self.root / f"candidate-{tier}-{run_id}"
         with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": str(run_id), "RELEASE_MODE": "candidate",
                                           "RELEASE_TIER": tier}):
             self.command("collect", "--output-dir", str(directory), "--ci-run-id", str(CI),
-                         "--ci-run-attempt", "1", "--tier", tier)
+                         "--ci-run-attempt", "1", "--tier", tier, *collect_args)
         _, manifest_name, _ = helper.tier_proof_names(tier)
         manifest = helper.read_json(directory / manifest_name)
-        if schema == 2:
-            manifest = {key: value for key, value in manifest.items() if key != "core_crates_tree"}
-            manifest["schema_version"] = 2
+        if schema in (2, 3):
+            dropped = ("floor_record",) if schema == 3 else ("floor_record", "core_crates_tree")
+            manifest = {key: value for key, value in manifest.items() if key not in dropped}
+            manifest["schema_version"] = schema
             (directory / manifest_name).write_bytes(helper.json_bytes(manifest))
         self.state["verification"][manifest_name] = verified_fixture(
             manifest_name, helper.assets.sha256(directory / manifest_name), run_id=run_id)
         (directory / helper.PROVENANCE).write_text(f'{{"manifest":{run_id}}}\n')
-        packed = self.root / f"candidate-{tier}.zip"
+        packed = self.root / f"candidate-{tier}-{run_id}.zip"
         self.pack(packed, directory, [manifest_name, helper.PROVENANCE, *helper.assets.metadata_names(tier)])
         metadata = self.add_artifact(manifest_aid, f"meta-candidate-manifest-{ATTEMPT}", packed, run_id)
         self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")].update(
@@ -863,7 +946,8 @@ class CandidateProtocolTests(unittest.TestCase):
             ({"schema_version": 2}, "schema 2 requires tier"),
             ({"schema_version": 2, "tier": "everything"}, "schema 2 requires tier"),
             ({"schema_version": 3}, "schema 3 requires tier"),
-            ({"schema_version": 4}, "unsupported schema version"),
+            ({"schema_version": 4}, "schema 4 requires tier"),
+            ({"schema_version": 5}, "unsupported schema version"),
         ):
             with self.subTest(change=change):
                 with self.assertRaisesRegex(helper.ProtocolError, message):
@@ -881,7 +965,8 @@ class CandidateProtocolTests(unittest.TestCase):
         tag, and binds the tree of crates/ at the source commit (the in-tree
         Core the gateways embed) in the attested schema 3 manifest."""
         core, manifest = self.tier_candidate("core", RUN, 300)
-        self.assertEqual((core["schema_version"], manifest["schema_version"]), (3, 3))
+        self.assertEqual((core["schema_version"], manifest["schema_version"]),
+                         (helper.TIERED_SCHEMA, helper.TIERED_SCHEMA))
         self.assertEqual(manifest["core_crates_tree"], CRATES_TREE)
         self.assertIn(("rev-parse", "--verify", f"{SHA}:crates"), self.git_calls)
         self.assertFalse([call for call in self.git_calls if call[0] == "fetch" or CORE_TAG in " ".join(call)])
@@ -891,8 +976,9 @@ class CandidateProtocolTests(unittest.TestCase):
         unbound = {key: value for key, value in manifest.items() if key != "core_crates_tree"}
         with self.assertRaisesRegex(helper.ProtocolError, "invalid candidate manifest fields"):
             helper.validate_manifest(unbound)
-        # Schema 2 manifests carry no tree, and accept none.
-        helper.validate_manifest(dict(unbound, schema_version=2))
+        # Schema 2 manifests carry no tree (nor a floor record), and accept none.
+        legacy = {key: value for key, value in unbound.items() if key != "floor_record"}
+        helper.validate_manifest(dict(legacy, schema_version=2))
         with self.assertRaisesRegex(helper.ProtocolError, "invalid candidate manifest fields"):
             helper.validate_manifest(dict(manifest, schema_version=2))
 
@@ -966,6 +1052,221 @@ class CandidateProtocolTests(unittest.TestCase):
         self.assertFalse([call for call in self.git_calls if call[0] == "fetch" or call[-1].endswith(":crates")])
         _, error = self.stage_core(dict(core, schema_version=3), "relabelled", success=False)
         self.assertIn("candidate schema/tier mismatch", error)
+
+    # The published-floor record (schema 4).
+
+    def floor_index(self):
+        os.environ["RELEASE_MODE"] = "candidate"
+        self.step_files()
+        self.command("floor-index")
+        return self.outputs(), self.summary()
+
+    def test_floor_index_lets_a_candidate_bind_a_record_only_with_every_core_crate_published(self):
+        outputs, summary = self.floor_index()
+        self.assertEqual(outputs, {"core_published": "true"})
+        self.assertIn(f"Every Core crate is on crates.io at {CORE}", summary)
+        pristine = copy.deepcopy(self.index)
+        for case, change, named in (
+            ("older version only", lambda: self.index["meerkat"].pop(), "meerkat"),
+            ("yanked", lambda: self.index["meerkat"][1].update(yanked=True), "meerkat (yanked)"),
+            ("absent", lambda: self.index.pop("meerkat-core"), "meerkat-core (index unreadable"),
+            ("unreadable", lambda: self.unreadable.add("meerkat-sqlite"), "meerkat-sqlite (index unreadable"),
+        ):
+            with self.subTest(case=case):
+                self.index, self.unreadable = copy.deepcopy(pristine), set()
+                change()
+                outputs, summary = self.floor_index()
+                self.assertEqual(outputs, {"core_published": "false"})
+                self.assertIn("binds no floor record", summary)
+                self.assertIn(named, summary)
+        os.environ["RELEASE_MODE"] = "promote"
+        self.command("floor-index", success=False)
+
+    def test_floor_bind_records_what_the_floor_build_proved(self):
+        lock = b"# the resolved lock\n"
+        record = self.floor_bind(self.floor_dir(lock=lock))
+        self.assertEqual(record, {
+            "core_version": CORE,
+            "core_crates": [{"name": "meerkat", "version": CORE, "checksum": INDEX_CKSUM["meerkat"]},
+                            {"name": "meerkat-core", "version": CORE, "checksum": INDEX_CKSUM["meerkat-core"]}],
+            "source_sha": SHA, "crates_tree": CRATES_TREE, "lock_sha256": hashlib.sha256(lock).hexdigest(),
+            "toolchain": TOOLCHAIN})
+        self.assertIn("Bound the floor record", self.summary())
+
+    def test_floor_bind_binds_nothing_it_cannot_prove(self):
+        pristine = copy.deepcopy(self.index)
+        for case, folder, change in (
+            ("resolution only", lambda: self.floor_dir(resolution=True), None),
+            ("build problems", lambda: self.floor_dir(problems=["error: x"]), None),
+            ("another lock", lambda: self.floor_dir(lock_sha256="9" * 64), None),
+            ("not a Core crate", lambda: self.floor_dir(dependencies=("serde 1.0.0", "meerkat 0.8.31")), None),
+            ("another version", lambda: self.floor_dir(dependencies=("meerkat 0.8.30",)), None),
+            ("no Core crate", lambda: self.floor_dir(dependencies=()), None),
+            ("yanked", self.floor_dir, lambda: self.index["meerkat"][1].update(yanked=True)),
+            ("unreadable index", self.floor_dir, lambda: self.unreadable.add("meerkat-core")),
+        ):
+            with self.subTest(case=case):
+                self.index, self.unreadable = copy.deepcopy(pristine), set()
+                if change:
+                    change()
+                self.assertIsNone(self.floor_bind(folder()))
+                self.assertIn("could not be bound", self.summary())
+
+    def test_collection_binds_the_core_floor_record_with_the_meta_crate_checksums(self):
+        record = self.bound_record()
+        bound = {key: value for key, value in record.items() if key != "meta_crates"}
+        core, manifest = self.tier_candidate("core", RUN, 300, collect_args=self.floor_args(bound))
+        self.assertEqual(manifest["floor_record"], record)
+        self.assertEqual(manifest["schema_version"], helper.TIERED_SCHEMA)
+        # Without one (Core not yet published) the manifest binds null.
+        _, plain = self.tier_candidate("core", 103, 302)
+        self.assertIsNone(plain["floor_record"])
+
+    def test_collection_refuses_a_floor_record_that_does_not_fit(self):
+        record = {key: value for key, value in self.bound_record().items() if key != "meta_crates"}
+        self.tier_run("core", 105)
+        self.tier_run("trailing", 106)
+
+        def collect(tier, run_id, args):
+            with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": str(run_id), "RELEASE_MODE": "candidate",
+                                              "RELEASE_TIER": tier}):
+                return self.command("collect", "--output-dir", str(self.fresh("refused")), "--ci-run-id", str(CI),
+                                    "--ci-run-attempt", "1", "--tier", tier, *args, success=False)[1]
+
+        for case, args, message in (
+            ("another commit", self.floor_args(dict(record, source_sha=OTHER_SHA)), "another source commit"),
+            ("another tree", self.floor_args(dict(record, crates_tree="d" * 40)), "another crates/ tree"),
+            ("a missing checksum", self.floor_args(record, {"meerkat-meta": "f" * 64}), "invalid floor record Meta crates"),
+            ("an unknown crate", self.floor_args(record, {**META_SHA256, "other": "1" * 64}), "unexpected Meta crate"),
+            ("checksums in the record", self.floor_args(dict(record, meta_crates=META_SHA256)), "without Meta crate"),
+            ("an unknown field", self.floor_args(dict(record, extra=1)), "invalid floor record fields"),
+            ("checksums alone", ["--meta-crate-sha256", "meerkat-meta=" + "f" * 64], "checksums without a floor record"),
+        ):
+            with self.subTest(case=case):
+                self.assertIn(message, collect("core", 105, args))
+        self.assertIn("only the core tier binds a floor record", collect("trailing", 106, self.floor_args(record)))
+        self.assertIn("release protocol error", collect("core", 105, ["--floor-record-json", "{not json"]))
+
+    def read_floor_record(self, selected):
+        os.environ.update(RELEASE_MODE="promote", SOURCE_SHA="", ARTIFACT_SELECTION=json.dumps(selected))
+        self.step_files()
+        output = self.fresh("floor-record")
+        self.command("floor-record", "--output", str(output))
+        return json.loads(output.read_text()), self.outputs()
+
+    def test_floor_record_reads_the_verified_core_candidates_record(self):
+        record = self.bound_record()
+        bound = {key: value for key, value in record.items() if key != "meta_crates"}
+        core, _ = self.tier_candidate("core", RUN, 300, collect_args=self.floor_args(bound))
+        self.assertEqual(self.read_floor_record(core), (record, {"present": "true"}))
+        # Read through the same verification stage applies: the attestation.
+        self.state["verify_failure"] = True
+        self.save()
+        self.assertEqual(self.read_floor_record(core), (None, {"present": "false"}))
+        self.state["verify_failure"] = False
+        self.save()
+        for schema, run_id, aid in ((3, 103, 302), (None, 104, 303)):
+            with self.subTest(schema=schema):
+                legacy, _ = self.tier_candidate("core", run_id, aid, schema=schema)
+                self.assertEqual(self.read_floor_record(legacy), (None, {"present": "false"}))
+        self.assertEqual(self.read_floor_record(dict(core, run_id=999)), (None, {"present": "false"}))
+
+    def reuse(self, *, record=None, resolution=None, checksums=META_SHA256):
+        """floor-reuse in promote mode: (reuse output, job summary)."""
+        record = self.bound_record() if record is None else record
+        record_file = self.fresh("record")
+        record_file.write_text(record if isinstance(record, str) else json.dumps(record))
+        if resolution is None:
+            resolution = self.floor_dir(resolution=True, dependencies=("meerkat 0.8.31", "meerkat-core 0.8.31"))
+        os.environ["RELEASE_MODE"] = "promote"
+        self.step_files()
+        args = ["floor-reuse", "--record", str(record_file), "--resolution", str(resolution)]
+        for name, value in checksums.items():
+            args += ["--meta-crate-sha256", f"{name}={value}"]
+        self.command(*args)
+        return self.outputs()["reuse"], self.summary()
+
+    def assert_full_build(self, reason, **kwargs):
+        reuse, summary = self.reuse(**kwargs)
+        self.assertEqual(reuse, "false", summary)
+        self.assertIn("The floor check builds", summary)
+        self.assertIn(reason, summary)
+
+    def test_floor_reuse_when_everything_the_record_binds_still_holds(self):
+        reuse, summary = self.reuse()
+        self.assertEqual(reuse, "true", summary)
+        self.assertIn("Reused the candidate's floor record", summary)
+
+    def test_floor_reuse_refuses_an_absent_record(self):
+        self.assert_full_build("the candidate bound no floor record", record="null")
+
+    def test_floor_reuse_refuses_an_unreadable_record(self):
+        self.assert_full_build("unreadable floor record", record="{not json")
+
+    def test_floor_reuse_refuses_a_record_with_an_unknown_field(self):
+        self.assert_full_build("invalid floor record", record=dict(self.bound_record(), extra=1))
+
+    def test_floor_reuse_refuses_a_record_of_another_commit_or_crates_tree(self):
+        self.assert_full_build("another source commit", record=dict(self.bound_record(), source_sha=OTHER_SHA))
+        self.assert_full_build("another crates/ tree", record=dict(self.bound_record(), crates_tree="d" * 40))
+
+    def test_floor_reuse_refuses_another_declared_core_version(self):
+        record = self.bound_record()
+        self.core_pin = '"=0.8.32"'
+        self.assert_full_build("now declares Core 0.8.32", record=record)
+
+    def test_floor_reuse_refuses_a_changed_index_checksum(self):
+        record = self.bound_record()
+        self.index["meerkat-core"][1]["cksum"] = "1" * 64
+        self.assert_full_build("meerkat-core 0.8.31 has another index checksum", record=record)
+
+    def test_floor_reuse_refuses_a_yanked_core_crate(self):
+        record = self.bound_record()
+        self.index["meerkat"][1]["yanked"] = True
+        self.assert_full_build("meerkat 0.8.31 is yanked", record=record)
+
+    def test_floor_reuse_refuses_a_core_crate_gone_from_the_index(self):
+        record = self.bound_record()
+        self.index["meerkat"].pop()
+        self.assert_full_build("meerkat 0.8.31 is not in the crates.io index", record=record)
+
+    def test_floor_reuse_refuses_an_unreadable_index(self):
+        record = self.bound_record()
+        self.unreadable.add("meerkat-core")
+        self.assert_full_build("crates.io index read for meerkat-core failed", record=record)
+
+    def test_floor_reuse_refuses_a_changed_lock(self):
+        self.assert_full_build("the re-resolved lock differs", resolution=self.floor_dir(
+            resolution=True, lock=b"# another resolution\n"))
+
+    def test_floor_reuse_refuses_a_failed_re_resolution(self):
+        self.assert_full_build("the re-resolution failed", resolution=self.floor_dir(
+            resolution=True, problems=["declared dependency versions do not resolve from crates.io: x"]))
+        self.assert_full_build("no re-resolution report", resolution=self.fresh("missing"))
+
+    def test_floor_reuse_refuses_other_resolved_core_crates(self):
+        self.assert_full_build("resolves other Core crates", resolution=self.floor_dir(
+            resolution=True, dependencies=("meerkat 0.8.31", "meerkat-core 0.8.31", "meerkat-sqlite 0.8.31")))
+
+    def test_floor_reuse_refuses_changed_meta_crate_bytes(self):
+        self.assert_full_build("meerkat-meta now packages to " + "0" * 64,
+                               checksums={**META_SHA256, "meerkat-meta": "0" * 64})
+        self.assert_full_build("meta-extension-state now packages to nothing",
+                               checksums={"meerkat-meta": META_SHA256["meerkat-meta"]})
+
+    def test_floor_reuse_refuses_another_toolchain(self):
+        record = self.bound_record()
+        self.toolchain = TOOLCHAIN.replace("1.97.0", "1.97.1")
+        self.assert_full_build("the toolchain differs", record=record)
+
+    def test_floor_reuse_is_promote_only_and_never_fails_the_job(self):
+        with mock.patch.object(helper, "floor_mismatches", side_effect=RuntimeError("boom")):
+            reuse, summary = self.reuse()
+        self.assertEqual(reuse, "false")
+        self.assertIn("the record check failed", summary)
+        os.environ["RELEASE_MODE"] = "candidate"
+        self.command("floor-reuse", "--record", str(self.fresh("x")), "--resolution", str(self.fresh("y")),
+                     success=False)
 
     def test_collection_refuses_rather_than_waits_while_main_ci_is_not_green(self):
         """Builds start right after the merge, so collection is where main CI

@@ -120,7 +120,7 @@ def evaluate_condition(expression: str, *, statuses=(), run_cancelled=False, **c
         "contains": lambda value, part: part in value,
     }
     tokens = re.findall(
-        r"\s+|'(?:[^']|'')*'|(?:github|needs|inputs)(?:\.[A-Za-z_][A-Za-z0-9_-]*)+"
+        r"\s+|'(?:[^']|'')*'|(?:github|needs|inputs|steps)(?:\.[A-Za-z_][A-Za-z0-9_-]*)+"
         r"|[A-Za-z_][A-Za-z0-9_]*|&&|\|\||==|!=|[!(),]", expression
     )
     if "".join(tokens) != expression:
@@ -129,7 +129,7 @@ def evaluate_condition(expression: str, *, statuses=(), run_cancelled=False, **c
     operators = {"&&": " and ", "||": " or ", "!": " not ",
                  "true": "True", "false": "False"}
     for token in tokens:
-        if token.startswith(("github.", "needs.", "inputs.")):
+        if token.startswith(("github.", "needs.", "inputs.", "steps.")):
             name = token.replace(".", "_").replace("-", "_")
             if name not in context:
                 raise AssertionError(f"condition references unsupplied name: {name}")
@@ -212,11 +212,12 @@ WORK_JOBS = (
     "publish_sdk_packages", "verify_crate_packages", "publish_registries",
 )
 # meta-release.yml's jobs in dependency order: the published-floor check
-# needs the CI gate, and the GitHub release and the crates need it.
+# needs the CI gate; collection needs the floor check and the crate
+# checksums; the GitHub release and the crates need the floor check.
 META_JOBS = (
     "resolve_release", "build_binaries", "require_ci_green", "release_validate", "floor_check",
-    "collect_candidate", "verify_release_assets", "publish_github_release",
-    "publish_sdk_packages", "verify_crate_packages", "publish_registries",
+    "verify_release_assets", "verify_crate_packages", "collect_candidate", "publish_github_release",
+    "publish_sdk_packages", "publish_registries",
 )
 # Its jobs that publish something (to GitHub or a registry).
 META_PUBLICATION_JOBS = (
@@ -256,9 +257,13 @@ def release_results(context, failures=None, *, workflow: Path | None = None, job
     return results
 
 
-def meta_context(mode="promote", publish=True, dry=False, *, event="workflow_dispatch"):
-    """protocol_context for meta-release.yml's jobs and its meta-v tags."""
-    return protocol_context(mode, publish, dry, event=event, tag="meta-v0.8.31", jobs=META_JOBS)
+def meta_context(mode="promote", publish=True, dry=False, *, event="workflow_dispatch", tier="core", record=""):
+    """protocol_context for meta-release.yml's jobs and its meta-v tags: a
+    candidate's tier, and the floor record its floor check bound ('' for
+    none)."""
+    context = protocol_context(mode, publish, dry, event=event, tag="meta-v0.8.31", jobs=META_JOBS)
+    context.update(needs_resolve_release_outputs_tier=tier, needs_floor_check_outputs_record=record)
+    return context
 
 
 def meta_results(context, failures=None):
@@ -2039,18 +2044,19 @@ class MetaReleaseJobGraphTests(unittest.TestCase):
         return job_condition(job, META_RELEASE_WORKFLOW)
 
     def test_every_event_and_mode_runs_exactly_its_jobs(self):
-        for event, mode, publish, dry in itertools.product(
+        for event, mode, publish, dry, tier in itertools.product(
             ("push", "workflow_dispatch"), ("tag", "candidate", "promote", "existing", "assets"),
-            (False, True), (False, True),
+            (False, True), (False, True), ("core", "trailing"),
         ):
-            with self.subTest(event=event, mode=mode, publish=publish, dry=dry):
-                results = meta_results(meta_context(mode, publish, dry, event=event))
+            with self.subTest(event=event, mode=mode, publish=publish, dry=dry, tier=tier):
+                results = meta_results(meta_context(mode, publish, dry, event=event, tier=tier))
                 expected = set()
+                floor = mode in ("promote", "existing") or (mode == "candidate" and tier == "core")
                 if event == "push":
-                    if mode in ("promote", "existing"):
+                    if floor:
                         expected = {"floor_check"}
                 elif mode == "candidate":
-                    expected = {"build_binaries", "collect_candidate"}
+                    expected = {"build_binaries", "collect_candidate"} | ({"floor_check"} if floor else set())
                 elif mode == "promote":
                     expected = {"floor_check", "verify_release_assets"}
                     if not dry:
@@ -2067,19 +2073,42 @@ class MetaReleaseJobGraphTests(unittest.TestCase):
                     expected = {"publish_github_release"}
                 self.assertEqual({job for job in self.TRACKED if results[job] == "success"}, expected)
 
-    def test_a_candidate_runs_no_floor_check_and_collects_without_one(self):
-        """A candidate may build at the release merge, before Core's tag or
-        crates exist."""
-        self.assertNotIn("floor_check", self.needs("collect_candidate"))
-        self.assertNotIn("floor_check", self.condition("collect_candidate"))
-        results = meta_results(meta_context("candidate", False, False))
-        self.assertEqual(results["floor_check"], "skipped")
-        self.assertEqual(results["collect_candidate"], "success")
-        for gate in ("require_ci_green", "release_validate", "build_binaries"):
+    def test_a_candidates_core_tier_checks_the_floor_and_its_trailing_tier_does_not(self):
+        """The core tier's floor check reads the index once (and builds only
+        when Core's crates are published); the trailing tier, whose record
+        nothing reads, runs none."""
+        core = meta_results(meta_context("candidate", False, False, tier="core"))
+        trailing = meta_results(meta_context("candidate", False, False, tier="trailing"))
+        self.assertEqual((core["floor_check"], core["collect_candidate"]), ("success", "success"))
+        self.assertEqual((trailing["floor_check"], trailing["collect_candidate"]), ("skipped", "success"))
+        self.assertIn("floor_check", self.needs("collect_candidate"))
+        for gate in ("require_ci_green", "release_validate", "build_binaries", "floor_check"):
             for status in ("failure", "cancelled", "skipped"):
                 with self.subTest(gate=gate, status=status):
                     refused = meta_results(meta_context("candidate", False, False), {gate: status})
                     self.assertEqual(refused["collect_candidate"], "skipped")
+
+    def test_collection_binds_a_record_only_with_the_crate_checksums(self):
+        """A bound record makes verify_crate_packages run in candidate mode,
+        and collection waits for its checksums; without a record it skips."""
+        plain = meta_results(meta_context("candidate", False, False))
+        self.assertEqual((plain["verify_crate_packages"], plain["collect_candidate"]), ("skipped", "success"))
+        bound = meta_results(meta_context("candidate", False, False, record='{"core_version":"0.8.31"}'))
+        self.assertEqual((bound["verify_crate_packages"], bound["collect_candidate"]), ("success", "success"))
+        for status in ("failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                refused = meta_results(meta_context("candidate", False, False, record="{}"),
+                                       {"verify_crate_packages": status})
+                self.assertEqual(refused["collect_candidate"], "skipped")
+        collect = step_script("Collect verified original artifacts", "collect_candidate", META_RELEASE_WORKFLOW)
+        self.assertIn('--floor-record-json "$FLOOR_RECORD"', collect)
+        for crate, variable in (("meta-extension-state", "EXTENSION_SHA256"), ("meerkat-meta", "META_SHA256")):
+            self.assertIn(f'--meta-crate-sha256 "{crate}=${variable}"', collect)
+        block = job_block("collect_candidate", META_RELEASE_WORKFLOW)
+        self.assertIn("FLOOR_RECORD: ${{ needs.floor_check.outputs.record }}", block)
+        self.assertIn("EXTENSION_SHA256: ${{ needs.verify_crate_packages.outputs.extension_sha256 }}", block)
+        self.assertIn("META_SHA256: ${{ needs.verify_crate_packages.outputs.meta_sha256 }}", block)
+        self.assertIn("record: ${{ steps.bind.outputs.record }}", job_block("floor_check", META_RELEASE_WORKFLOW))
 
     def test_the_build_legs_no_longer_read_cores_tag(self):
         """The comparison of crates/ with Core's tag moved to promotion
@@ -2105,6 +2134,75 @@ class MetaReleaseJobGraphTests(unittest.TestCase):
     def test_asset_recovery_adds_to_a_published_release_without_a_floor_check(self):
         results = meta_results(meta_context("assets", False, False))
         self.assertEqual((results["floor_check"], results["publish_github_release"]), ("skipped", "success"))
+
+    FLOOR_STEPS = (
+        "Check once whether every Core crate is on crates.io",
+        "Read the accepted candidate's floor record",
+        "Re-resolve the packaged Meta crates against crates.io without building",
+        "Package the Meta crates without a patch",
+        "Reuse the candidate's floor record only if everything it binds still holds",
+        "Wait until every Core crate is on crates.io at the declared version",
+        "Build the packaged Meta crates against published Core",
+        "Bind the floor record",
+    )
+
+    def floor_steps(self, mode, *, published="", present="", reuse=""):
+        """The floor_check steps that run, under GitHub's step semantics with
+        every earlier step successful, given the steps' outputs."""
+        context = {"needs_resolve_release_outputs_mode": mode,
+                   "steps_published_outputs_core_published": published,
+                   "steps_record_outputs_present": present, "steps_reuse_outputs_reuse": reuse}
+        ran = []
+        for step in self.FLOOR_STEPS:
+            block = step_block(step, "floor_check", META_RELEASE_WORKFLOW).splitlines()
+            conditions = [i for i, line in enumerate(block) if line.startswith("        if:")]
+            self.assertEqual(len(conditions), 1, step)
+            value = block[conditions[0]].split(":", 1)[1].strip()
+            if value == ">-":
+                folded = []
+                for line in block[conditions[0] + 1:]:
+                    if not line.startswith("          "):
+                        break
+                    folded.append(line.strip())
+                value = " ".join(folded)
+            if evaluate_condition(value, **context):
+                ran.append(step)
+        return ran
+
+    def test_a_candidate_builds_and_binds_only_when_cores_crates_are_published(self):
+        published = self.floor_steps("candidate", published="true")
+        self.assertEqual(published, ["Check once whether every Core crate is on crates.io",
+                                     "Build the packaged Meta crates against published Core", "Bind the floor record"])
+        self.assertEqual(self.floor_steps("candidate", published="false"),
+                         ["Check once whether every Core crate is on crates.io"])
+
+    def test_a_promotion_builds_unless_the_record_holds(self):
+        full = ["Read the accepted candidate's floor record",
+                "Wait until every Core crate is on crates.io at the declared version",
+                "Build the packaged Meta crates against published Core"]
+        checks = ["Re-resolve the packaged Meta crates against crates.io without building",
+                  "Package the Meta crates without a patch",
+                  "Reuse the candidate's floor record only if everything it binds still holds"]
+        self.assertEqual(self.floor_steps("promote", present="false"), full)
+        self.assertEqual(self.floor_steps("promote", present="true", reuse="false"),
+                         [full[0], *checks, *full[1:]])
+        self.assertEqual(self.floor_steps("promote", present="true", reuse="true"), [full[0], *checks])
+        # A registry retry builds as before.
+        self.assertEqual(self.floor_steps("existing"), full[1:])
+
+    def test_the_floor_record_steps_run_the_workflow_tools_and_only_one_holds_the_token(self):
+        block = job_block("floor_check", META_RELEASE_WORKFLOW)
+        for command in ("floor-index", "floor-record --output", "floor-reuse", "floor-bind --floor-dir"):
+            self.assertIn(f"python3 .release-tools/meta/scripts/release-candidate.py {command}", block)
+        self.assertEqual(block.count("GH_TOKEN"), 1)
+        self.assertIn("GH_TOKEN: ${{ github.token }}",
+                      step_block("Read the accepted candidate's floor record", "floor_check", META_RELEASE_WORKFLOW))
+        self.assertNotIn("secrets.", block)
+        for step in ("Re-resolve the packaged Meta crates against crates.io without building",
+                     "Package the Meta crates without a patch"):
+            self.assertIn("continue-on-error: true", step_block(step, "floor_check", META_RELEASE_WORKFLOW))
+        self.assertIn("--no-build", step_block("Re-resolve the packaged Meta crates against crates.io without building",
+                                               "floor_check", META_RELEASE_WORKFLOW))
 
     def test_the_ci_gate_needs_only_the_resolver_and_runs_in_every_mode(self):
         """A candidate's legs no longer precede the gate: it polls beside them."""

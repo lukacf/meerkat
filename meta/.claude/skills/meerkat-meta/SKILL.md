@@ -670,7 +670,9 @@ Promotion accepts only the core selection and verifies and publishes the
 original bytes without rebuilding or signing again. It refuses a candidate
 whose bound `crates/` tree differs from Core's tag of the version the
 workspace pins (candidates may build before that tag exists), and publishes
-nothing until Meta's published-floor check against crates.io Core succeeded.
+nothing until Meta's published-floor check against crates.io Core succeeded;
+it reuses the floor record of a core candidate built after Core's crates
+were published only while everything that record binds still holds.
 The trailing tier is added
 afterwards, add-only, with
 `make release-assets-recover RELEASE_TAG=meta-vX.Y.Z ARTIFACT_SELECTION=<trailing json-file>`. Assets precede the Python and TypeScript SDKs, then the crates

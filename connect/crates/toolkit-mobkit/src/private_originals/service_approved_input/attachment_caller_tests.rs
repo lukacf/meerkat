@@ -635,6 +635,74 @@ async fn observation_timeout_keeps_same_accepted_attempt_and_cannot_reattach() {
     }
 }
 
+// Every currentness fence here takes longer than the whole readiness budget,
+// as one does on a loaded host. The fences must not use up the budget of the
+// waits between them: each operation is still waited for, so the first sweep
+// observes the member ready and admits B, and later sweeps change nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slow_currentness_fences_leave_every_operation_its_readiness_wait() {
+    let fixture = ContinuationFixture::for_service_input().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let (b, stored, control) = approved_operations(&fixture, &["read", "search"]).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = calls.clone();
+        let observed = observer(McpAttachmentReadiness::Usable {
+            connection_generation: 7,
+        });
+        let answer = receipt(observed.clone());
+        let held = keep(
+            &fixture.source,
+            &b,
+            &stored,
+            control,
+            Box::pin(async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                Ok(answer)
+            }),
+        );
+        fixture
+            .source
+            .delay_attachment_fences_for_test(OBSERVATION_BUDGET + Duration::from_millis(50));
+        // The recovery task revisits the row on each sweep.
+        for _ in 0..3 {
+            let current = fixture.store.get(&stored.key).await.unwrap().unwrap();
+            fixture
+                .source
+                .step_service_input_with_attachment(&fixture.store, &current)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            *observed.operations.lock().unwrap(),
+            vec!["read", "search", "read", "search"],
+            "each operation is waited for once at attachment and once at the final recheck"
+        );
+        let saved = fixture.store.get(&stored.key).await.unwrap().unwrap();
+        let record = fixture.source.decode_record(&saved, &b).unwrap();
+        assert!(record.final_association.is_some() && record.service_admission.is_some());
+        assert_eq!(fixture.inputs().await, Ok(2));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "accepted work never reattaches"
+        );
+        assert!(
+            fixture
+                .source
+                .held_service_attachment(&b, &held.task)
+                .unwrap()
+                .is_none()
+        );
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 // These cases exercise the actual keeper and real mechanical login owner.
 // They do not authenticate a Human or prove the production B-to-A login join.
 fn login_owner() -> (

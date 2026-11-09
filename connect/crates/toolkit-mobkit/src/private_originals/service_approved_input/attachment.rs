@@ -315,6 +315,10 @@ impl PrivateOriginals {
         &self,
         held: &HeldServiceAttachment,
     ) -> Result<(), PrivateOriginalError> {
+        #[cfg(test)]
+        if let Some(delay) = self.attachment_fence_delay_for_test.get() {
+            tokio::time::sleep(*delay).await;
+        }
         self.observe_service_mcp_attachment(
             &held.reference,
             &held.control,
@@ -322,6 +326,12 @@ impl PrivateOriginals {
         )
         .await?;
         self.attachment_current(held)
+    }
+
+    /// Delays every currentness fence of an accepted attachment by `delay`.
+    #[cfg(test)]
+    fn delay_attachment_fences_for_test(&self, delay: Duration) {
+        assert!(self.attachment_fence_delay_for_test.set(delay).is_ok());
     }
 
     /// Preparation reads only the canonical reviewed installation and existing

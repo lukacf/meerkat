@@ -10,7 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `@rkat/toolkit` accepts its optional peers `@rkat/sdk` and `@rkat/meta-sdk`
   from 0.9.11 below 0.10.0 (`>=0.9.11 <0.10.0`; it accepted them from 0.9.10):
   the package is built and tested with the SDKs of its own release, and each
-  release moves the floor to its version. Its development dependencies link
+  release moves the floor to its version; a release that reaches the ceiling
+  also moves the ceiling, to the next minor release on the 0.x line (at
+  0.10.0 the peers become `>=0.10.0 <0.11.0`). Its development dependencies link
   `@rkat/sdk` and `@rkat/meta-sdk` from the same checkout instead of
   installing the published 0.9.10 packages, so source builds and tests run
   against the SDKs of the same commit; build the repository's

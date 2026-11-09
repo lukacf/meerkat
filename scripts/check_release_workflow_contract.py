@@ -1817,6 +1817,174 @@ def _check_ci_run_lookup(ci_block: list[str]) -> list[str]:
     return violations
 
 
+# The require_ci_green step that writes the judge of a failed CI run, and the
+# copies of the evidence reader its scratch history holds, by commit.
+PARENT_READER_STEP = "Read the CI evidence reader of the release commit's parent"
+PARENT_READER_COPIES = {
+    "first parent's": "// the release commit's first parent's reader\n",
+    "release commit's own": "// the release commit's own reader\n",
+    "second parent's": "// the release commit's second parent's reader\n",
+}
+_SCRATCH_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "parent-reader",
+    "GIT_AUTHOR_EMAIL": "parent-reader@example.invalid",
+    "GIT_COMMITTER_NAME": "parent-reader",
+    "GIT_COMMITTER_EMAIL": "parent-reader@example.invalid",
+    "GIT_CONFIG_NOSYSTEM": "1",
+}
+
+
+def _parent_reader_history(root: Path) -> dict[str, str]:
+    """A scratch history for the parent-reader step, as the job's checkout
+    has it; returns each commit by name. `base` has no reader and
+    `no-reader` is its child; `parent` adds the reader to `base`; `linear`
+    is a child of `parent` that edits the reader, the planner and a Core
+    file; `side`, another child of `parent`, edits the reader and the
+    planner, and `merge` merges it into `parent` (first parent `parent`)."""
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(root), **_SCRATCH_GIT_ENV}
+    commits: dict[str, str] = {}
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", *args], cwd=root, env=env, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def commit(name: str, files: dict[str, str]) -> None:
+        for path, text in files.items():
+            Path(root, path).parent.mkdir(parents=True, exist_ok=True)
+            Path(root, path).write_text(text, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", name)
+        commits[name] = git("rev-parse", "HEAD")
+
+    git("init", "-q", "-b", "main")
+    commit(
+        "base",
+        {"crates/core/src/lib.rs": "pub fn f() {}\n", "ci/products.json": "{}\n", "scripts/ci-cargo-lanes.mjs": "// 1\n"},
+    )
+    commit("no-reader", {"crates/core/src/lib.rs": "pub fn g() {}\n"})
+    git("checkout", "-q", "--detach", commits["base"])
+    commit("parent", {PRODUCT_EVIDENCE_READER: PARENT_READER_COPIES["first parent's"]})
+    commit(
+        "linear",
+        {
+            PRODUCT_EVIDENCE_READER: PARENT_READER_COPIES["release commit's own"],
+            "scripts/ci-cargo-lanes.mjs": "// 2\n",
+            "crates/core/src/lib.rs": "pub fn h() {}\n",
+        },
+    )
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit(
+        "side",
+        {PRODUCT_EVIDENCE_READER: PARENT_READER_COPIES["second parent's"], "scripts/ci-cargo-lanes.mjs": "// 3\n"},
+    )
+    git("checkout", "-q", "--detach", commits["parent"])
+    git("merge", "-q", "--no-ff", "-m", "merge", commits["side"])
+    commits["merge"] = git("rev-parse", "HEAD")
+    return commits
+
+
+def _run_parent_reader_step(
+    step: Step, checkout: Path, release_sha: str, runner_temp: Path
+) -> tuple[int, str, str | None, list[str] | None]:
+    """Run the parent-reader step in `checkout` for the release commit
+    `release_sha`. Returns its exit, its log, the judge it wrote (None:
+    none) and the paths of the changes it listed (None: no list)."""
+    context = replace(TAG_PUSH, step_outputs={"release_ref.sha": release_sha})
+    env = {key: render_strict(value, context) for key, value in step.env.items()}
+    runner_temp.mkdir()
+    result = subprocess.run(
+        ["bash", "-c", render_strict(step.raw_run, context)],
+        cwd=checkout,
+        env={
+            **_runner_env(context),
+            **_SCRATCH_GIT_ENV,
+            "HOME": str(checkout),
+            "RUNNER_TEMP": str(runner_temp),
+            **env,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    parent = Path(runner_temp, PARENT_EVIDENCE_DIR)
+    judge = Path(parent, Path(PRODUCT_EVIDENCE_READER).name)
+    changes = Path(parent, PARENT_EVIDENCE_CHANGES)
+    listed = None
+    if changes.exists():
+        # One path a line, or a status and a tab before it.
+        listed = [line.split("\t")[-1] for line in changes.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return (
+        result.returncode,
+        result.stdout + result.stderr,
+        judge.read_text(encoding="utf-8") if judge.exists() else None,
+        listed,
+    )
+
+
+def _check_parent_reader_step(ci_block: list[str]) -> list[str]:
+    """require_ci_green writes the judge of a failed CI run.
+
+    Its parent-reader step, run in a scratch history, must write the release
+    commit's FIRST PARENT's copy of scripts/ci-product-evidence.mjs (never
+    the commit's own copy, which it could edit, nor a merge's second
+    parent's) and list every path the commit changes against that parent,
+    the inputs that decide the evidence included, so the copy can refuse a
+    commit that changes them; for a commit whose parent has no reader it
+    writes no judge, which leaves only a green run counting.
+    """
+    steps = [step for step in job_steps(ci_block) if step.name == PARENT_READER_STEP]
+    if len(steps) != 1:
+        return [f"job `{CI_GREEN_JOB}` has {len(steps)} steps named `{PARENT_READER_STEP}`"]
+    step = steps[0]
+    violations: list[str] = []
+    if not step_runs(step, TAG_PUSH):
+        violations.append(f"step `{step.name}` does not run on {TAG_PUSH.label}")
+    copies = {text: name for name, text in PARENT_READER_COPIES.items()}
+    cases = (
+        (
+            "a release commit that edits the reader, the planner and a Core file",
+            "linear",
+            "first parent's",
+            {PRODUCT_EVIDENCE_READER, "scripts/ci-cargo-lanes.mjs", "crates/core/src/lib.rs"},
+        ),
+        (
+            "a merge commit whose second parent edits the reader and the planner",
+            "merge",
+            "first parent's",
+            {PRODUCT_EVIDENCE_READER, "scripts/ci-cargo-lanes.mjs"},
+        ),
+        ("a release commit whose first parent has no reader", "no-reader", None, None),
+    )
+    with tempfile.TemporaryDirectory(prefix="release-parent-reader-") as scratch:
+        checkout = Path(scratch, "checkout")
+        checkout.mkdir()
+        try:
+            commits = _parent_reader_history(checkout)
+        except subprocess.CalledProcessError as error:
+            raise ContractError(f"cannot build the parent-reader history: {error.stderr}") from None
+        for label, name, judge, changed in cases:
+            status, log, written, listed = _run_parent_reader_step(
+                step, checkout, commits[name], Path(scratch, f"runner-temp-{name}")
+            )
+            if status != 0:
+                violations.append(
+                    f"step `{step.name}` fails on {label}: "
+                    + " | ".join(line for line in log.splitlines() if line.strip())[:300]
+                )
+                continue
+            wrote = "no judge" if written is None else f"the {copies.get(written, 'unknown')} copy"
+            expected = "no judge" if judge is None else f"the {judge} copy"
+            if wrote != expected:
+                violations.append(f"step `{step.name}` writes {wrote} of the reader for {label}; expected {expected}")
+            if changed is not None and (listed is None or not changed <= set(listed)):
+                violations.append(
+                    f"step `{step.name}` lists {sorted(listed or [])} as the changes of {label}; "
+                    f"they must include {sorted(changed)}"
+                )
+    return violations
+
+
 def _run_evidence_step(
     step: Step, evidence: dict, run: dict, newer: tuple[dict, dict] | None = None
 ) -> tuple[int, str]:
@@ -2111,6 +2279,10 @@ def check_tag_validation(text: str) -> list[str]:
     # 1c. So does the CI run it is read from: the lookup that waits for a
     #     successful push run of ci.yml at exactly the release commit.
     violations.extend(_check_ci_run_lookup(ci_block))
+
+    # 1d. A failed run is judged by the release commit's first parent's
+    #     reader, told what the commit changed: the step that writes both.
+    violations.extend(_check_parent_reader_step(ci_block))
 
     # 2. The Cargo validation job is skipped exactly where the attestation
     #    stands in for it.

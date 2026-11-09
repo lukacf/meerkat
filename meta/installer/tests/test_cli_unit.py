@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from cli_support import GUIDE_ID, OTHER_ID, cli
-from launchkit.cli import build_parser, duration, global_value, requested_mode
+from launchkit.cli import build_parser, duration, global_value, requested_mode, usage_message, without_values
 from launchkit.cli.client import server_url
 from launchkit.cli.commands.host import child_environment, provider_variable
 from launchkit.cli.commands.setup import chat_answer, option_ids, turn_body
@@ -243,6 +243,19 @@ async def test_usage_errors_follow_the_requested_mode():
     assert run.code == 2 and run.document["error"]["code"] == "usage"
     run = await cli(["setup", "show"])
     assert run.code == 2 and "error:" in run.stderr and run.stdout == ""
+
+
+def test_parse_errors_in_another_wording_never_show_a_value():
+    # Another Python release may word argparse's messages differently; a typed value still never shows.
+    parser = build_parser()
+    argv = ["setup", "timeline", "last", "--limit", "sk-typed-in-the-wrong-place"]
+    future = "meta-forge setup timeline: argument --limit: not a number 'sk-typed-in-the-wrong-place'"
+    assert without_values(future, argv, parser) == "meta-forge setup timeline: invalid arguments (values not shown)"
+    known = "meta-forge setup timeline: argument --limit: use a number from 1 to 500"
+    assert without_values(known, argv, parser) == known
+    assert usage_message(parser, "a new kind of message 'sk-typed'") == "invalid arguments (values not shown)"
+    assert usage_message(parser, "argument --limit: a new reason 'sk-typed'") == (
+        "argument --limit: invalid value (not shown)")
 
 
 async def test_home_applies_only_to_serve_and_doctor():

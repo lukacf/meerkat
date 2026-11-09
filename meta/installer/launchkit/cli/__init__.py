@@ -26,6 +26,15 @@ FORGE_ROOT = Path(__file__).resolve().parents[2]
 GLOBAL_OPTIONS = ("server", "home", "output", "wait", "timeout", "no_input", "approve", "verbose", "quiet")
 DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)?")
 UNRECOGNIZED = "unrecognized arguments: "
+OPTION_NAME = re.compile(r"--?[A-Za-z][A-Za-z0-9-]{0,38}")
+ARGUMENT = re.compile(r"argument (?P<name>[^\s:]+): (?P<reason>.+)", re.S)
+AMBIGUOUS = re.compile(r"ambiguous option: (?P<option>.*) could match "
+                       r"(?P<matches>--?[A-Za-z0-9][-A-Za-z0-9]*(?:, --?[A-Za-z0-9][-A-Za-z0-9]*)*)", re.S)
+SAFE_REASON = re.compile(r"expected (?:one|at most one|at least one|[0-9]+) arguments?|not allowed with argument [^\s:]+")
+SAFE_MESSAGE = re.compile(r"the following arguments are required: [-A-Za-z0-9_/, ]+|"
+                          r"one of the arguments [-A-Za-z0-9_/ ]+ is required")
+# The refusals of this command's own argument types: fixed texts that name no value.
+TYPE_REFUSALS = set()
 
 DESCRIPTION = """\
 Meta Forge from a terminal. Run it on the computer that runs Forge: it drives
@@ -72,37 +81,115 @@ output rather than only the number.
 
 
 class Parser(argparse.ArgumentParser):
-    """Usage errors become typed outcomes instead of exiting the process."""
+    """Usage errors become typed outcomes instead of exiting the process.
+
+    They name arguments, options and choices, never a value typed on the
+    command line: a value may be a secret typed in the wrong place.
+    """
 
     def error(self, message):
-        if message.startswith(UNRECOGNIZED):
-            # Name stray options only: a stray value may be a secret typed in the wrong place.
-            names = [token.split("=", 1)[0] for token in message[len(UNRECOGNIZED):].split() if token.startswith("-")]
-            message = "unrecognized arguments" + (f" {' '.join(names)}" if names else "") + " (values not shown)"
-        raise CliError("usage", f"{self.prog}: {message}",
+        raise CliError("usage", f"{self.prog}: {usage_message(self, message)}",
                        next=[step(f"{self.prog} --help", "See this command's usage and options.")])
+
+
+def refusal(text):
+    """An argument type's refusal: a fixed text, shown as it is."""
+    TYPE_REFUSALS.add(text)
+    return argparse.ArgumentTypeError(text)
+
+
+def option_name(token):
+    """The option part of a typed token (--name of --name=value, -k of -kvalue), or None."""
+    name = token.split("=", 1)[0] if token.startswith("--") else token[:2] if token.startswith("-") else ""
+    return name if OPTION_NAME.fullmatch(name) else None
+
+
+def action_label(action):
+    """An argument's name as argparse's messages give it."""
+    if action.option_strings:
+        return "/".join(action.option_strings)
+    if action.metavar not in (None, argparse.SUPPRESS):
+        return str(action.metavar)
+    return action.dest
+
+
+def usage_message(parser, message):
+    """argparse's message, keeping argument names, options and choices only."""
+    if message.startswith(UNRECOGNIZED):
+        names = [name for name in map(option_name, message[len(UNRECOGNIZED):].split()) if name]
+        return "unrecognized arguments" + (f" {' '.join(names)}" if names else "") + " (values not shown)"
+    match = AMBIGUOUS.fullmatch(message)
+    if match:
+        name = option_name(match.group("option"))
+        return f"ambiguous option{' ' + name if name else ''} could match {match.group('matches')}"
+    match = ARGUMENT.fullmatch(message)
+    if match:
+        name, reason = match.group("name"), match.group("reason")
+        if SAFE_REASON.fullmatch(reason) or reason in TYPE_REFUSALS:
+            return message
+        if reason.startswith("invalid choice"):
+            action = next((item for item in parser._actions if action_label(item) == name), None)
+            choices = ", ".join(map(str, action.choices)) if action is not None and action.choices else ""
+            return f"argument {name}: invalid choice" + (f" (choose from {choices})" if choices else "")
+        if reason.startswith("ignored explicit argument"):
+            return f"argument {name}: takes no value"
+        return f"argument {name}: invalid value (not shown)"
+    if SAFE_MESSAGE.fullmatch(message):
+        return message
+    return "invalid arguments (values not shown)"
+
+
+def vocabulary(parser):
+    """Every word the command line defines: program names, options, commands, choices and metavars."""
+    words = set(parser.prog.split())
+    for action in parser._actions:
+        words.update(action.option_strings)
+        words.update(value for value in (action.metavar, action.dest) if isinstance(value, str))
+        if action.choices:
+            words.update(str(choice) for choice in action.choices)
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                words |= vocabulary(child)
+    return words
+
+
+def without_values(detail, argv, parser):
+    """A parse error's text if it repeats nothing typed on the command line apart from the command
+    line's own words; otherwise one that names nothing typed. It holds whatever wording another Python
+    release gives argparse's messages."""
+    words = vocabulary(parser)
+    for token in argv:
+        if option_name(token) == token:
+            continue  # an option's name alone, which messages may name
+        parts = [token, *([token.split("=", 1)[1]] if token.startswith("-") and "=" in token else []),
+                 *([token[2:]] if token.startswith("-") and not token.startswith("--") else [])]
+        if any(len(part) >= 4 and part not in words and part in detail for part in parts):
+            prefix = detail.split(": ", 1)[0]
+            command = prefix if prefix and all(word in words for word in prefix.split()) else "meta-forge"
+            return f"{command}: invalid arguments (values not shown)"
+    return detail
 
 
 def duration(value):
     match = DURATION.fullmatch(value.strip())
     if not match:
-        raise argparse.ArgumentTypeError("use a duration such as 90s, 15m or 1h")
+        raise refusal("use a duration such as 90s, 15m or 1h")
     number = float(match.group(1))
     seconds = number * {"ms": 0.001, "s": 1, "m": 60, "h": 3600, None: 1}[match.group(2)]
     if seconds <= 0:
-        raise argparse.ArgumentTypeError("use a positive duration")
+        raise refusal("use a positive duration")
     return seconds
 
 
 def port_number(value):
     if not re.fullmatch(r"[1-9][0-9]{0,4}", value) or int(value) > 65535:
-        raise argparse.ArgumentTypeError("use a port number from 1 to 65535")
+        raise refusal("use a port number from 1 to 65535")
     return int(value)
 
 
 def setup_version(value):
     if not re.fullmatch(r"[1-9][0-9]{0,15}", value):
-        raise argparse.ArgumentTypeError("use the setup's version number, as setup show reports it")
+        raise refusal("use the setup's version number, as setup show reports it")
     return int(value)
 
 
@@ -296,12 +383,14 @@ async def run_async(argv, *, stdin=None, stdout=None, stderr=None, environ=None,
     stderr = sys.stderr if stderr is None else stderr
     environ = dict(os.environ) if environ is None else environ
     argv = list(argv)
+    parser = build_parser()
     try:
         with contextlib.redirect_stdout(stdout):
-            namespace = build_parser().parse_args(argv)
+            namespace = parser.parse_args(argv)
     except SystemExit as exit_request:
         return exit_request.code if isinstance(exit_request.code, int) else 0
     except CliError as error:
+        error.detail = without_values(error.detail, argv, parser)
         Output(requested_mode(argv), stdout, stderr, environ=environ).failure("meta-forge", error)
         return error.exit_code
     mode = global_value(namespace, "output") or "text"

@@ -6,14 +6,13 @@ own record, and a repeated ID never repeats the action.
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import os
 import re
 import shlex
 import uuid
 
-from .. import setup_version
+from .. import refusal, setup_version
 from ..client import UUID, short
 from ..errors import CliError, step
 from ..render import ACTIVE, SETTLED, receipt_lines, review_lines
@@ -29,7 +28,7 @@ NO_INSTALLATION = "No local deployment has been started for this setup."
 
 def console_port(value):
     if not re.fullmatch(r"[1-9][0-9]{3,4}", value) or not 1024 <= int(value) <= 65535:
-        raise argparse.ArgumentTypeError("use a port number from 1024 to 65535")
+        raise refusal("use a port number from 1024 to 65535")
     return int(value)
 
 
@@ -163,7 +162,8 @@ def outcome(receipt, identity):
 
 
 def parse_settings(values):
-    """--set NAME=VALUE pairs. Errors never repeat the argument: it may be a secret given by mistake."""
+    """--set NAME=VALUE pairs. Errors never repeat the argument, its name included: it may be a secret
+    given by mistake. Only names the package declares are named, once the package's fields are known."""
     settings = {}
     for value in values:
         name, separator, setting = value.partition("=")
@@ -175,10 +175,10 @@ def parse_settings(values):
             raise CliError("usage", "Choose the Console port with --port.",
                            next=[step("meta-forge install --help", "See the install options.")])
         if not setting or "\x00" in setting or len(setting) > 32768:
-            raise CliError("usage", f"--set {name} needs a value of at most 32768 characters.",
-                           next=[step("meta-forge install --help", "See the install options.")])
+            raise CliError("usage", "--set takes a value of 1 to 32768 characters after NAME= (the argument is "
+                           "not shown).", next=[step("meta-forge install --help", "See the install options.")])
         if name in settings:
-            raise CliError("usage", f"--set {name} is given twice.",
+            raise CliError("usage", "--set names one setting more than once (the arguments are not shown).",
                            next=[step("meta-forge install --help", "See the install options.")])
         settings[name] = setting
     return settings
@@ -256,8 +256,8 @@ async def install_command(context):
     for name in provided:
         if name not in declared:
             plain = sorted(key for key, field in declared.items() if not field.get("secret"))
-            raise CliError("invalid_request", f"This package does not request {name}. Its non-secret settings: "
-                           + (", ".join(plain) or "none") + ".",
+            raise CliError("invalid_request", "This package does not request a setting given with --set (the "
+                           "argument is not shown). Its non-secret settings: " + (", ".join(plain) or "none") + ".",
                            next=[step(f"{base} --dry-run",
                                       "See every setting the package requests.")])
         if declared[name].get("secret"):

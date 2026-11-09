@@ -155,7 +155,10 @@ class ForgeClient:
         return setups
 
     async def resolve_setup(self, value):
-        """A full setup ID, a unique prefix of at least 8 hex digits, or last."""
+        """A full setup ID, a unique prefix of at least 8 hex digits, or last.
+
+        Errors never repeat the value given: a secret may have been typed in its place.
+        """
         if not isinstance(value, str):
             raise CliError("usage", "Name a setup: its ID, a unique ID prefix or last.",
                            next=[step("meta-forge setup list", "List your setups and their IDs.")])
@@ -170,16 +173,16 @@ class ForgeClient:
                                      step("meta-forge chat --new", "Start a new setup and talk to the guide.")])
             return setups[0]["id"]
         if not PREFIX.fullmatch(candidate):
-            raise CliError("usage", f"{value!r} is not a setup ID. Use a full ID, a unique prefix of at least "
+            raise CliError("usage", "The SETUP given is not a setup ID. Use a full ID, a unique prefix of at least "
                            "8 hex digits, or last.",
                            next=[step("meta-forge setup list", "List your setups and their IDs.")])
         matches = [item["id"] for item in await self.list_setups()
                    if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].startswith(candidate)]
         if not matches:
-            raise CliError("not_found", f"No saved setup ID starts with {candidate}.",
+            raise CliError("not_found", "No saved setup ID starts with the SETUP given.",
                            next=[step("meta-forge setup list", "List your setups and their IDs.")])
         if len(matches) > 1:
-            raise CliError("usage", f"{candidate} matches {len(matches)} setups: "
+            raise CliError("usage", f"The SETUP given matches {len(matches)} setups: "
                            + ", ".join(sorted(matches)) + ". Give more of the ID.",
                            next=[step("meta-forge setup list", "List your setups and their IDs.")])
         return matches[0]

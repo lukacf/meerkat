@@ -350,7 +350,8 @@ async def test_install_stops_for_secret_fields_and_refuses_secret_values(forge):
     assert (result.code, result.document["error"]["code"]) == (2, "invalid_request")
     assert "not-for-this-command" not in result.text
     result = await run(forge, *install_args("--set", "UNDECLARED=x", "--json"))
-    assert result.code == 2 and "does not request UNDECLARED" in result.document["error"]["detail"]
+    assert result.code == 2 and "UNDECLARED" not in result.text
+    assert "Its non-secret settings: CONSOLE_USER_ID, DIGEST_DAY." in result.document["error"]["detail"]
     result = await run(forge, *install_args("--reuse-forge-keys", "--json"))
     assert result.code == 2 and "CONSOLE_USER_ID" in result.document["error"]["detail"]
     forge.deployment.submit.assert_not_awaited()

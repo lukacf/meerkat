@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 
-from .. import setup_version
+from .. import refusal, setup_version
 from ..client import UUID, short
 from ..errors import CliError, step
 from ..render import (last_guide_message, plan_lines, plan_summary, question_lines, setup_lines, setup_name)
@@ -42,6 +42,12 @@ In this chat:
 
 def guide_path(identity, suffix=""):
     return f"/api/guide/{identity}{suffix}"
+
+
+def timeline_limit(value):
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", value) or int(value) > 500:
+        raise refusal("use a number from 1 to 500")
+    return int(value)
 
 
 def show_step(identity):
@@ -203,7 +209,7 @@ def option_ids(question, values):
         elif value.isdigit() and 1 <= int(value) <= len(ids):
             selected.append(ids[int(value) - 1])
         else:
-            raise CliError("usage", f"{value!r} is not an option of the current question. Options: "
+            raise CliError("usage", "An --answer value is not an option of the current question. Options: "
                            + (", ".join(f"{index}={option}" for index, option in enumerate(ids, start=1)) or "none")
                            + ".", next=[step("meta-forge setup show SETUP", "Read the current question.")])
     if len(set(selected)) != len(selected):
@@ -391,7 +397,7 @@ def register(commands, command_parser):
     parser = command_parser(actions, "timeline", "The guide's conversation frames.")
     parser.add_argument("setup", metavar="SETUP")
     parser.add_argument("--after", metavar="CURSOR", help="only frames after this cursor (console:N)")
-    parser.add_argument("--limit", type=int, default=500, metavar="N", help="frames per page, 1 to 500")
+    parser.add_argument("--limit", type=timeline_limit, default=500, metavar="N", help="frames per page, 1 to 500")
     parser.set_defaults(func=setup_timeline, name="setup timeline")
     parser = command_parser(actions, "organization", "Adopt this Forge's updated workplace guidance for the setup.")
     parser.add_argument("setup", metavar="SETUP")
@@ -565,9 +571,6 @@ async def setup_retry(context):
 
 async def setup_timeline(context):
     args = context.args
-    if not 1 <= args.limit <= 500:
-        raise CliError("usage", "--limit is from 1 to 500.", next=[step("meta-forge setup timeline --help",
-                                                                         "See the timeline options.")])
     client = await context.client()
     identity = await client.resolve_setup(args.setup)
     params = {"limit": args.limit, **({"after": args.after} if args.after else {})}
@@ -676,15 +679,16 @@ async def plan_accept(context):
 
 
 def write_new(path, content, what):
+    """Write a new file for --out; its errors name the option, never the value given."""
     target = Path(path).expanduser()
     try:
         with target.open("xb") as stream:
             stream.write(content)
     except FileExistsError:
-        raise CliError("usage", f"{path} already exists. Choose a new file name; nothing is overwritten.",
-                       next=[step(f"meta-forge {what} --help", "See the output options.")]) from None
+        raise CliError("usage", "The file given to --out already exists. Choose a new file name; nothing is "
+                       "overwritten.", next=[step(f"meta-forge {what} --help", "See the output options.")]) from None
     except OSError as error:
-        raise CliError("usage", f"{path} cannot be written ({type(error).__name__}).",
+        raise CliError("usage", f"The file given to --out cannot be written ({type(error).__name__}).",
                        next=[step(f"meta-forge {what} --help", "See the output options.")]) from None
     return str(target.resolve())
 
@@ -845,7 +849,7 @@ async def chat_command(context):
                     out.line(f"Plan already accepted (version {state.get('version')})." if already
                              else f"Plan accepted (version {state.get('version')}).")
                 else:
-                    out.line(f"Unknown command {command}. /help lists commands.")
+                    out.line("Unknown chat command. /help lists commands.")
                 continue
             state = await read_state(client, identity)
             require_idle(state)

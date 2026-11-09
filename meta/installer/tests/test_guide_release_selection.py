@@ -25,14 +25,19 @@ def neighbours(version):
     return [f"{major}.{minor}.{patch + step}" for step in (-1, 1) if patch + step >= 0]
 
 
-def client_wheel(version=None, *, name="meerkat-meta", tag="py3-none-any", purelib="true"):
-    """An inert meerkat-meta wheel of a Meta release: its metadata only, never installed."""
+def client_wheel(version=None, *, name="meerkat-meta", tag="py3-none-any", purelib="true", metadata_version=None):
+    """An inert meerkat-meta wheel of a Meta release: its metadata only, never installed.
+
+    metadata_version, when given, is the Version its METADATA declares in
+    place of the release's own, under the release's dist-info directory.
+    """
     version = SELECTED if version is None else version
     info = f"meerkat_meta-{version}.dist-info/"
+    declared = version if metadata_version is None else metadata_version
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("meerkat_meta/__init__.py", "# inert test fixture, never imported\n")
-        archive.writestr(info + "METADATA", f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n")
+        archive.writestr(info + "METADATA", f"Metadata-Version: 2.4\nName: {name}\nVersion: {declared}\n")
         archive.writestr(info + "WHEEL", f"Wheel-Version: 1.0\nRoot-Is-Purelib: {purelib}\nTag: {tag}\n")
     return buffer.getvalue()
 
@@ -97,6 +102,7 @@ def test_the_guide_client_is_the_published_wheel_of_its_release():
     assert guide_sdk.wheel_path() == f"vendor/guide/meerkat_meta-{SELECTED}-py3-none-any.whl"
     refused = {
         "another release": client_wheel(neighbours(SELECTED)[0]),
+        "another release's metadata": client_wheel(metadata_version=neighbours(SELECTED)[0]),
         "another distribution": client_wheel(name="meerkat-mobkit"),
         "a platform wheel": client_wheel(tag="cp312-cp312-linux_x86_64"),
         "not purelib": client_wheel(purelib="false"),

@@ -71,6 +71,7 @@ class ForgeClient:
         self.http = httpx.AsyncClient(base_url=base_url, transport=transport, trust_env=False,
                                       follow_redirects=False, timeout=httpx.Timeout(READ_SECONDS, connect=10.0))
         self.capabilities = None
+        self.resolved = None  # the setup this command resolved, for its next steps after an interruption
 
     async def close(self):
         await self.http.aclose()
@@ -159,6 +160,10 @@ class ForgeClient:
 
         Errors never repeat the value given: a secret may have been typed in its place.
         """
+        self.resolved = await self._resolve_setup(value)
+        return self.resolved
+
+    async def _resolve_setup(self, value):
         if not isinstance(value, str):
             raise CliError("usage", "Name a setup: its ID, a unique ID prefix or last.",
                            next=[step("meta-forge setup list", "List your setups and their IDs.")])

@@ -275,6 +275,9 @@ class Context:
         self.executor = executor
         self.command = getattr(namespace, "name", "meta-forge")
         self.resume = []
+        # The idempotency key this command sent or reads (a creation or action request ID), kept for the
+        # outcome of an interruption or a timeout.
+        self.request = None
         self._client = None
         timeout = self.option("timeout")
         self.deadline = time.monotonic() + timeout if timeout else None
@@ -321,9 +324,19 @@ class Context:
             return None
         return self.deadline - time.monotonic()
 
+    def next_steps(self):
+        """What to run after an interruption or a timeout: the command's own resume step, else a read of the
+        setup it was working on, else the setup list."""
+        if self.resume:
+            return list(self.resume)
+        identity = getattr(self._client, "resolved", None)
+        if identity:
+            return [step(f"meta-forge setup show {identity}", "Read the setup's current state.")]
+        return [step("meta-forge setup list", "Check the current state.")]
+
     def timed_out(self, what):
         return CliError("wait_timeout", f"--timeout elapsed while {what}. The work continues in Forge.",
-                        next=list(self.resume) or [step("meta-forge setup list", "Check the current state.")])
+                        next=self.next_steps(), request=self.request)
 
     async def sleep(self, seconds):
         delay = seconds * self.poll_scale
@@ -419,7 +432,7 @@ async def run_async(argv, *, stdin=None, stdout=None, stderr=None, environ=None,
 
 def interrupted(context):
     return CliError("interrupted", "Interrupted. Only waiting stopped; work already sent to Forge continues.",
-                    next=list(context.resume) or [step("meta-forge setup list", "Check the current state.")])
+                    next=context.next_steps(), request=context.request)
 
 
 def main(argv=None):

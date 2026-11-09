@@ -388,6 +388,7 @@ async def installation_action(context):
     context.output.note(f"Action request: {request_id}")
     context.output.event(context.command, "admitted", request=request_id, action=action, deployment_id=deployment_id)
     context.resume = [observe, status_step(identity)]
+    context.request = request_id
     body = {"deployment_id": deployment_id, "action": action, "action_request_id": request_id}
     try:
         _, result = await context.bounded(client.post(guide_path(identity, "/deployment/action"), json=body),
@@ -415,6 +416,7 @@ async def installation_request(context):
     identity = await client.resolve_setup(args.setup)
     deployment_id = args.deployment or (await read_receipt(client, identity)).get("deployment_id")
     path = guide_path(identity, f"/deployment/action/{deployment_id}/{args.request_id}")
+    context.request = args.request_id
     context.resume = [step(f"meta-forge installation request {identity} {args.request_id} --wait",
                            "Read the request's record again.")]
     while True:

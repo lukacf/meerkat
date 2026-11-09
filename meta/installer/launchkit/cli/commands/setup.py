@@ -188,6 +188,9 @@ async def send_turn(context, client, identity, body, *, wait):
         error = await classified(client, identity, body.get("version"), error)
         recovered = await recovered_turn(client, identity, body) if error.code == "outcome_unknown" else None
         if recovered is None:
+            if error.code == "outcome_unknown" and not error.next:
+                error.next = [step(f"meta-forge setup show {identity} --wait",
+                                   "Read whether the guide received the message; it is never sent again for you.")]
             raise error from None
         state = recovered
         status = 202 if (state.get("operation") or {}).get("status") == "running" else 200
@@ -494,6 +497,7 @@ async def create_setup(context, client, request=None):
     context.output.note(f"Creation request: {request}")
     context.output.event(context.command, "admitted", request=request)
     context.resume = [again]
+    context.request = request
     try:
         _, state = await client.post("/api/guide/start", json={"start_request_id": request})
     except CliError as error:
@@ -662,7 +666,12 @@ async def accept_plan(context, client, identity, expected_version=None):
     try:
         _, accepted = await client.post(guide_path(identity, "/apply"), json={"version": state["version"]})
     except CliError as error:
-        raise await classified(client, identity, state["version"], error)
+        error = await classified(client, identity, state["version"], error)
+        if error.code == "outcome_unknown" and not error.next:
+            error.next = [step(f"meta-forge setup show {identity}", "Read whether the plan is accepted now."),
+                          step(f"meta-forge plan accept {identity}",
+                               "Accept it if it is still only proposed; an accepted plan is not accepted twice.")]
+        raise error from None
     return accepted, digest, False
 
 

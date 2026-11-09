@@ -7,6 +7,7 @@ package in the caller's directory is never imported.
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,7 +82,8 @@ def test_it_runs_the_private_python_without_importing_from_the_caller(forge_fold
     (record,) = [json.loads(line) for line in entries(log)]
     assert record["argv"] == ["-B", "-P", "-m", "launchkit.cli", "setup", "list", "--json"]
     assert record["cwd"] == str(caller)
-    assert record["pythonpath"] == f"{root}:/caller/extra"
+    # The caller's PYTHONPATH is dropped: the command imports only from its own folder and environment.
+    assert record["pythonpath"] == str(root)
     # The command itself receives the caller's environment; it never forwards credentials (test_cli_secrets).
     assert record["credentials"] == sorted(CREDENTIALS)
 
@@ -123,3 +125,28 @@ def test_a_launchkit_in_the_callers_directory_is_never_imported(tmp_path):
                             env=environment, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert "planted" not in result.stdout + result.stderr and "meta-forge" in result.stdout
+
+
+@pytest.mark.parametrize("caller_path", [":/nonexistent", ".", "lib", "planted folder"])
+def test_the_launcher_never_imports_from_the_callers_directory_or_pythonpath(tmp_path, caller_path):
+    """The real launcher and interpreter; a module shadowing the standard library waits in the caller's
+    directory, in a folder relative to it and in an absolute folder on the caller's PYTHONPATH."""
+    forge = tmp_path / "forge"
+    (forge / ".venv" / "bin").mkdir(parents=True)
+    shutil.copyfile(LAUNCHER, forge / "meta-forge")
+    (forge / "meta-forge").chmod(0o755)
+    (forge / "launchkit").symlink_to(INSTALLER / "launchkit")
+    python = forge / ".venv" / "bin" / "python"
+    python.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
+    python.chmod(0o755)
+    caller, planted = tmp_path / "caller", tmp_path / "planted folder"
+    for folder in (caller, caller / "lib", planted):
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "argparse.py").write_text("import sys\nsys.stderr.write('planted module imported\\n')\n"
+                                            "raise SystemExit(99)\n")
+    value = str(planted) if caller_path == "planted folder" else caller_path
+    result = subprocess.run([str(forge / "meta-forge"), "--help"], cwd=caller, capture_output=True, text=True,
+                            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
+                                 "PYTHONPATH": value}, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "planted" not in result.stdout + result.stderr and "usage: meta-forge" in result.stdout

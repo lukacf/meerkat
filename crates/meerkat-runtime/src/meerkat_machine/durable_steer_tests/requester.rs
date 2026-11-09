@@ -512,11 +512,33 @@ async fn host_requester_survives_restart() {
     restarted
         .wait_for_phase(&queued, InputLifecycleState::Consumed)
         .await;
-    let consumed = store
-        .load_input_state(&runtime_id, &queued)
-        .await
-        .expect("load consumed row")
-        .expect("consumed row persisted");
+    // Consumed lands with the run's commit; the payload retires in the
+    // receipt's finalization, a later commit. Wait for the final receipt.
+    let consumed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row = store
+                .load_input_state(&runtime_id, &queued)
+                .await
+                .expect("load consumed row")
+                .expect("consumed row persisted");
+            if row
+                .state
+                .terminal_completion
+                .as_ref()
+                .is_some_and(|completion| {
+                    matches!(
+                        completion.phase,
+                        crate::input_state::InputTerminalCompletionPhase::Finalized { .. }
+                    )
+                })
+            {
+                return row;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the completed input's receipt is finalized");
     assert!(
         consumed.state.persisted_input.is_none(),
         "the completed input's payload retired"

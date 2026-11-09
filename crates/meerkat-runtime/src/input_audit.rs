@@ -278,4 +278,4 @@ fn malformed() -> OperationRefused {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

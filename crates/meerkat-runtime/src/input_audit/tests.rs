@@ -63,6 +63,72 @@ fn count(audit: &InputAuthorizationAudit) -> usize {
         .len()
 }
 
+/// Stage one refusal on an actual input row's live audit, as an operation of
+/// `run_id` does after the row's last durable write: through the sink
+/// [`InputAuthorizationAudit::bind`] derives for the row under a governed
+/// original for it, with no row write of its own. Returns the observation's
+/// operation id.
+pub(crate) fn stage_refusal_after_row_write(
+    audit: &InputAuthorizationAudit,
+    row_input_id: &InputId,
+    owner_session_id: &SessionId,
+    run_id: &RunId,
+) -> OperationId {
+    let mut governed = crate::input_authority::tests::input("late-observation-requester");
+    governed.header_mut().id = row_input_id.clone();
+    let original = RetainedInputAuthority::from_input(&governed)
+        .unwrap()
+        .expect("the governed fixture input carries its authority association");
+    let execution_scope = OperationExecutionScope::RuntimeInput {
+        owner_session_id: owner_session_id.clone(),
+        runtime_epoch_id: meerkat_core::RuntimeEpochId::from_uuid(uuid::Uuid::from_u128(7)),
+        submitted_input_id: row_input_id.clone(),
+        canonical_input_id: row_input_id.clone(),
+    };
+    let sink = audit
+        .bind(
+            row_input_id,
+            execution_scope.clone(),
+            run_id.clone(),
+            std::slice::from_ref(&original),
+            false,
+        )
+        .expect("the actual row binds its sink under its governed original");
+    let operation_id = OperationId::new();
+    sink.append(AuthorizationAuditObservation {
+        operation_id: operation_id.clone(),
+        execution_scope,
+        run_id: Some(run_id.clone()),
+        context_revision: None,
+        review_attribution: None,
+        delegate_attribution: None,
+        observation: AuditObservation::Refused {
+            target: Arc::new(meerkat_authorization_contracts::audit::AuditTarget::Tool {
+                call_id: "call-after-row-write".into(),
+                tool_name: "late_tool".into(),
+                arguments_digest:
+                    meerkat_authorization_contracts::evidence::EvidenceDigest::from_array([5; 32]),
+                owners: Vec::new(),
+            }),
+            reason: OperationRefusalKind::MalformedFacts,
+            read: None,
+        },
+    })
+    .expect("the bound sink stages the refusal on the live row");
+    operation_id
+}
+
+/// The operation ids of a stored row's audit, in order.
+pub(crate) fn audit_operation_ids(audit: &InputAuthorizationAudit) -> Vec<OperationId> {
+    serde_json::from_value::<Vec<StoredAuthorizationAuditObservation>>(
+        serde_json::to_value(audit).unwrap(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|record| record.observation.operation_id)
+    .collect()
+}
+
 #[test]
 fn frozen_prefix_rollback_clone_and_concurrent_suffix_do_not_drain_or_alias() {
     let (audit, sink) = fixture();

@@ -384,8 +384,31 @@ async def test_a_secret_typed_in_the_wrong_place_is_never_repeated(forge, stray,
     assert result.code == 2, result.text
     assert CANARY not in result.stdout + result.stderr
     if stray[0].startswith("--") and stray[0] != "--set":
-        assert stray[0].split("=")[0] in result.stdout + result.stderr
+        # An unknown option is reported as such, without its name: the name may be a value typed after "--".
+        assert "unknown option" in result.stdout + result.stderr
+        assert stray[0].split("=")[0] not in result.stdout + result.stderr
     assert not forge.transport.requests, "a usage error contacts no server"
+
+
+# The shape of a Gemini API key: 39 letters, digits and hyphens, so "--" before it reads like an option's name.
+OPTION_SHAPED_CANARY = "AIzaSyCanary6f1d0c2a7b3e9d5c4a1f8e2b0d6"
+
+
+@pytest.mark.parametrize("argv", [
+    ["provider", "status", f"--{OPTION_SHAPED_CANARY}"], ["setup", "list", f"--{OPTION_SHAPED_CANARY}"],
+    [f"--{OPTION_SHAPED_CANARY}", "setup", "list"], ["provider", "status", f"-{OPTION_SHAPED_CANARY}"],
+    ["provider", "status", f"--{OPTION_SHAPED_CANARY}=x"], ["setup", "list", "--all", f"--{OPTION_SHAPED_CANARY}"],
+])
+@pytest.mark.parametrize("mode", ["text", "json"])
+async def test_an_unknown_option_is_never_named(argv, mode):
+    assert len(OPTION_SHAPED_CANARY) == 39
+    result = await cli([*argv, *(["--json"] if mode == "json" else [])], transport=None,
+                       environ={"META_FORGE_PORT": "8787", "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    assert result.code == 2, result.text
+    shown = result.stderr if mode == "text" else json.loads(result.stdout)["error"]["detail"]
+    assert "unknown option" in shown, shown
+    for part in (OPTION_SHAPED_CANARY, OPTION_SHAPED_CANARY[:12], OPTION_SHAPED_CANARY[-12:]):
+        assert part not in result.stdout + result.stderr, shown
 
 
 UPPER_CANARY = "CANARY_6F1D0C2A_SECRET_VALUE"
@@ -423,8 +446,9 @@ def argument_rows(tmp_path):
         ([*install, "--mode", CANARY], "--mode"), (["setup", "list", f"--no={CANARY}"], "--no"),
         ([*install, f"--reuse-forge-keys={CANARY}"], "--reuse-forge-keys"),
         (["install", OTHER_ID, f"--team={CANARY}", "--folder", str(tmp_path / "team")], "--team"),
-        (["setup", "list", f"--all={CANARY}"], "--all"), (["provider", "status", f"-k{CANARY}"], "-k"),
-        (["provider", "status", CANARY], "unrecognized"), (["provider", "status", f"--api-key={CANARY}"], "--api-key"),
+        (["setup", "list", f"--all={CANARY}"], "--all"), (["provider", "status", f"-k{CANARY}"], "unknown option"),
+        (["provider", "status", CANARY], "unrecognized"),
+        (["provider", "status", f"--api-key={CANARY}"], "unknown option"),
         (["setup", "show", CANARY], "SETUP"), (["setup", "show", HEX_CANARY], "SETUP"),
         (["setup", "send", GUIDE_ID, "--answer", CANARY], "--answer"),
         (["plan", "export", GUIDE_ID, "--out", str(taken)], "--out"),

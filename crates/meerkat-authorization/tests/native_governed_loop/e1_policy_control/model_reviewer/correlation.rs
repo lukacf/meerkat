@@ -547,6 +547,7 @@ async fn exercise(
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -559,6 +560,7 @@ async fn exercise(
     bounds.resource_domains = DomainRestriction::exact([domain(), input_domain()]);
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("reviewable-operations"),
             principal("executor"),
@@ -587,6 +589,7 @@ async fn exercise(
     });
     let authorization = |original: &InputId| NativeGrantWorkConfiguration {
         retained_resume: None,
+        kept_original: None,
         require_scoped_destination: false,
         grants: grants.clone(),
         ingress: ingress.clone(),

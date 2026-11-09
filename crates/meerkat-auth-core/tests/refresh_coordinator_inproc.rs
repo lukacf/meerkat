@@ -36,7 +36,7 @@ async fn concurrent_resolves_for_same_key_trigger_one_refresh() {
             coord
                 .with_refresh(
                     key,
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         async move {
                             counter.fetch_add(1, Ordering::SeqCst);
                             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -74,7 +74,7 @@ async fn sequential_refreshes_are_not_short_circuited() {
         coord
             .with_refresh(
                 key.clone(),
-                Box::new(move || {
+                Box::new(move |_fence| {
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
                         Ok::<_, RefreshError>(fresh_tokens())
@@ -104,7 +104,7 @@ async fn refresh_error_is_observed_by_all_waiters() {
             coord
                 .with_refresh(
                     key,
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         async move {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                             Err::<PersistedTokens, _>(RefreshError::Refresh("upstream 401".into()))
@@ -136,7 +136,7 @@ async fn refreshes_for_distinct_keys_run_in_parallel() {
     let (res_a, res_b) = tokio::join!(
         coord.with_refresh(
             TokenKey::parse("dev", "a").expect("valid slugs"),
-            Box::new(move || {
+            Box::new(move |_fence| {
                 async move {
                     ca.fetch_add(1, Ordering::SeqCst);
                     Ok::<_, RefreshError>(fresh_tokens())
@@ -146,7 +146,7 @@ async fn refreshes_for_distinct_keys_run_in_parallel() {
         ),
         coord.with_refresh(
             TokenKey::parse("dev", "b").expect("valid slugs"),
-            Box::new(move || {
+            Box::new(move |_fence| {
                 async move {
                     cb.fetch_add(1, Ordering::SeqCst);
                     Ok::<_, RefreshError>(fresh_tokens())
@@ -180,7 +180,7 @@ async fn exclusive_mutations_serialize_without_coalescing() {
             coord
                 .with_exclusive_mutation(
                     key,
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         async move {
                             calls.fetch_add(1, Ordering::SeqCst);
                             let active = in_flight.fetch_add(1, Ordering::SeqCst) + 1;

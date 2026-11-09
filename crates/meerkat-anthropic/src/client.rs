@@ -161,8 +161,21 @@ impl AnthropicClientBuilder {
     /// whose system prompt, tools or earlier messages changed: beside
     /// `adaptive` or `enabled` thinking, and beside the model's own default
     /// (adaptive) when thinking is omitted; never beside `between_tools` or
-    /// `disabled`. A direct builder user targeting another backend that does
-    /// not document the beta sets `false`.
+    /// `disabled`. A model id with no catalog row (a dated snapshot, a proxy
+    /// alias, a custom model entry) asks it beside configured `adaptive` or
+    /// `enabled` thinking only: no row names its default, so with thinking
+    /// omitted it sends no control. A direct builder user targeting another
+    /// backend that does not document the beta sets `false`.
+    ///
+    /// A request that carries no control (every request when this is
+    /// `false`) to a model that may check replayed thinking blocks (its
+    /// catalog row lists the beta, or it has no catalog row) replays the
+    /// thinking of the turn in progress only, never that of completed turns,
+    /// and one that is refused with a 400 while it replays thinking is sent
+    /// once more without any thinking block (and without manual `enabled`
+    /// thinking); if that fails too, the first error is returned, or the
+    /// resend's own error when it is one the caller retries (a rate limit, an
+    /// overload, a server or network error).
     /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
     pub fn thinking_binding_controls_supported(mut self, supported: bool) -> Self {
         self.thinking_binding_controls_supported = supported;
@@ -242,6 +255,40 @@ fn catalog_beta_value(
         .map(|header| header.header_value)
 }
 
+/// The thinking-binding beta header value for `request`: the model's catalog
+/// row decides when it has one (a row without the beta, such as an older
+/// model, gets none). An id with no catalog row at all (a proxy alias, a
+/// dated snapshot, a custom `[models.<id>]` entry) may serve a prefix-checked
+/// model, so it gets the beta when the request configures `adaptive` or
+/// `enabled` thinking itself (a legacy budget lowers to `enabled`): on every
+/// such request, from a session's first, as a catalogued row that lists the
+/// beta does, so the request shape stays the same across the session. With
+/// thinking omitted an uncatalogued id gets nothing: no catalog row says what
+/// its default is (the alias may serve an `enabled`-only model that refuses
+/// `adaptive`).
+///
+/// Sending the control to an uncatalogued id that serves a model without
+/// the prefix check is safe: the control is documented to work across
+/// models ("Models that don't run the prefix check accept the object and
+/// report only blocks dropped because the model can't read them, so one
+/// request body works across models"). The documented refusals are the
+/// object without its beta header, and the object beside `between_tools` on
+/// Claude Sonnet 5.5 or `disabled` on Claude Haiku 5.5, which
+/// [`thinking_block_binding`] never places it beside.
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+fn thinking_binding_beta_value(request: &LlmRequest) -> Option<&'static str> {
+    use meerkat_core::model_profile::capabilities::BetaFeature;
+    if meerkat_models::capabilities_for(Provider::Anthropic, &request.model).is_some() {
+        return catalog_beta_value(request, BetaFeature::ThinkingBindingControls);
+    }
+    let configures_thinking = thinking_block_binding(
+        anthropic_tag(request),
+        request.tool_choice.forces_a_tool_call(),
+    ) == ThinkingBlockBinding::BesideConfiguredThinking;
+    configures_thinking
+        .then_some(meerkat_models::ANTHROPIC_THINKING_BINDING_CONTROLS_BETA.header_value)
+}
+
 fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
     let header = meerkat_models::capabilities_for(Provider::Anthropic, &request.model)?
         .context_window_beta?
@@ -249,9 +296,66 @@ fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
     header.strip_prefix("anthropic-beta: ")
 }
 
+/// The `anthropic-beta` values `body`, lowered from `request`, needs. Owned
+/// strings, because authorizer-injected betas are split from a temporary
+/// string and need owned storage.
+fn request_betas(request: &LlmRequest, body: &Value) -> Vec<String> {
+    use meerkat_core::model_profile::capabilities::BetaFeature;
+    let mut betas: Vec<String> = Vec::new();
+
+    // Legacy thinking (type: "enabled") requires interleaved-thinking header
+    // Adaptive thinking does NOT need this header.
+    let thinking_type = body
+        .get("thinking")
+        .and_then(|t| t.get("type"))
+        .and_then(|t| t.as_str());
+    if thinking_type == Some("enabled")
+        && let Some(beta) = catalog_beta_value(request, BetaFeature::InterleavedThinking)
+    {
+        betas.push(beta.to_string());
+    }
+
+    // Structured output format requires beta header
+    if body
+        .get("output_config")
+        .and_then(|c| c.get("format"))
+        .is_some()
+        && let Some(beta) = catalog_beta_value(request, BetaFeature::StructuredOutput)
+    {
+        betas.push(beta.to_string());
+    }
+
+    // 1M context window (opt-in via typed AnthropicProviderTag.context)
+    if anthropic_tag(request).and_then(|t| t.context) == Some(AnthropicContextWindow::OneMegabyte)
+        && let Some(beta) = catalog_context_beta_value(request)
+    {
+        betas.push(beta.to_string());
+    }
+
+    // Compaction API (beta)
+    if body.get("context_management").is_some()
+        && let Some(beta) = catalog_beta_value(request, BetaFeature::Compaction)
+    {
+        betas.push(beta.to_string());
+    }
+
+    // Thinking-block binding controls (beta), exactly when the body
+    // carries the control (`apply_thinking_block_binding`).
+    if body
+        .get("thinking")
+        .and_then(|thinking| thinking.get("block_binding"))
+        .is_some()
+        && let Some(beta) = thinking_binding_beta_value(request)
+    {
+        betas.push(beta.to_string());
+    }
+    betas
+}
+
 /// Where Anthropic's thinking-block binding control goes in a request to a
-/// model whose catalog row lists the binding beta, on a backend that
-/// documents it.
+/// model whose catalog row lists the binding beta, or to an uncatalogued id
+/// whose request configures thinking ([`thinking_binding_beta_value`]), on a
+/// backend that documents it.
 ///
 /// The control (`thinking.block_binding.prefix_mismatch_behavior:
 /// "drop_block"`) is accepted beside `adaptive` and `enabled` thinking only;
@@ -263,9 +367,11 @@ enum ThinkingBlockBinding {
     /// Beside the configured `adaptive` or `enabled` thinking (a legacy
     /// budget lowers to `enabled`).
     BesideConfiguredThinking,
-    /// Thinking omitted: beside the model's own default, adaptive. Every row
-    /// that lists the beta is documented thinking-on by default, so naming
-    /// the default turns nothing on.
+    /// Thinking omitted, catalogued rows only: beside the model's own
+    /// default, adaptive. Every row that lists the beta is documented
+    /// thinking-on by default, so naming the default turns nothing on. An
+    /// uncatalogued id never names a default ([`thinking_binding_beta_value`]
+    /// sends it no control with thinking omitted).
     BesideModelDefault,
     /// No control: `between_tools` and `disabled` refuse it, and a request
     /// that forces a tool call with thinking omitted keeps today's shape
@@ -290,6 +396,198 @@ fn thinking_block_binding(
         None if forces_a_tool_call => ThinkingBlockBinding::NotSent,
         None => ThinkingBlockBinding::BesideModelDefault,
     }
+}
+
+/// Which replayed thinking blocks a request sends.
+///
+/// Claude Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 check
+/// every replayed thinking block against the system prompt, the tools and the
+/// earlier messages it was produced under, and an account created on or after
+/// 2026-08-31 refuses the request once any of them changed. A request that
+/// carries the binding control has the API drop such blocks instead. A request
+/// that cannot carry it (the backend does not document it, as Amazon Bedrock
+/// and the Copilot route do not, or [`thinking_block_binding`] does not place
+/// it) replays the thinking of the turn in progress only. Anthropic allows
+/// that ("Allowed: outside tool use, omit prior turns' thinking"), and
+/// removing the oldest blocks leaves the later ones valid.
+/// <https://platform.claude.com/docs/en/build-with-claude/thinking>
+/// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingReplay {
+    /// Every replayed block: the request carries the binding control, or its
+    /// model does not check replayed blocks.
+    Whole,
+    /// The thinking of the turn in progress only: the request carries no
+    /// binding control and its model may check replayed blocks.
+    TurnInProgress,
+}
+
+/// Whether `model` may check replayed thinking blocks against their prefix:
+/// its catalog row lists the binding beta (the prefix-checked models), or the
+/// id has no catalog row (a dated snapshot, a proxy alias, a Copilot account
+/// model, a `[models.<id>]` entry) and may serve one.
+fn model_may_check_thinking_prefix(model: &str) -> bool {
+    use meerkat_core::model_profile::capabilities::BetaFeature;
+    meerkat_models::capabilities_for(Provider::Anthropic, model).is_none_or(|capabilities| {
+        capabilities
+            .beta_headers
+            .iter()
+            .any(|header| header.feature == BetaFeature::ThinkingBindingControls)
+    })
+}
+
+/// A run of consecutive non-assistant messages.
+struct MessageRun {
+    first: usize,
+    /// Holds a user turn: a `User` or `SystemNotice` row.
+    opens_a_turn: bool,
+    /// Holds tool results, which continue the assistant turn before the run.
+    carries_tool_results: bool,
+}
+
+impl MessageRun {
+    fn starts_a_turn(&self) -> bool {
+        self.opens_a_turn && !self.carries_tool_results
+    }
+}
+
+/// The index of the first message of the turn in progress: the start of the
+/// last run of non-assistant messages that holds a user turn and no tool
+/// results. A run that carries tool results continues the assistant turn
+/// before it, a steer or a notice written after them included (the API joins
+/// consecutive user messages), and System rows open no turn. Assistant
+/// messages before the index belong to completed turns. `None` when no run
+/// starts a turn.
+fn turn_in_progress_start<'m>(messages: impl IntoIterator<Item = &'m Message>) -> Option<usize> {
+    let mut start = None;
+    let mut run: Option<MessageRun> = None;
+    for (index, message) in messages.into_iter().enumerate() {
+        if matches!(message, Message::BlockAssistant(_)) {
+            if let Some(ended) = run.take()
+                && ended.starts_a_turn()
+            {
+                start = Some(ended.first);
+            }
+            continue;
+        }
+        let current = run.get_or_insert(MessageRun {
+            first: index,
+            opens_a_turn: false,
+            carries_tool_results: false,
+        });
+        match message {
+            Message::User(_) | Message::SystemNotice(_) => current.opens_a_turn = true,
+            Message::ToolResults { .. } => current.carries_tool_results = true,
+            Message::System(_) | Message::BlockAssistant(_) => {}
+        }
+    }
+    if let Some(last) = run
+        && last.starts_a_turn()
+    {
+        start = Some(last.first);
+    }
+    start
+}
+
+/// Whether `block` replays as a `thinking` or `redacted_thinking` block.
+fn is_replayed_thinking(block: &AssistantBlock) -> bool {
+    matches!(
+        block,
+        AssistantBlock::Reasoning { meta: Some(meta), .. }
+            if matches!(
+                meta.as_ref(),
+                meerkat_core::ProviderMeta::Anthropic { .. }
+                    | meerkat_core::ProviderMeta::AnthropicRedacted { .. }
+            )
+    )
+}
+
+/// Whether `block` lowers to content of the request (see
+/// `build_request_body`), thinking aside.
+fn lowers_to_content(block: &AssistantBlock) -> bool {
+    match block {
+        AssistantBlock::Text { text, .. } => !text.is_empty(),
+        AssistantBlock::Reasoning {
+            meta: Some(meta), ..
+        } => matches!(
+            meta.as_ref(),
+            meerkat_core::ProviderMeta::AnthropicCompaction { .. }
+        ),
+        AssistantBlock::ToolUse { .. } | AssistantBlock::ServerToolContent { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether `message` is an assistant message whose replayed thinking is all
+/// it would send.
+fn sends_only_replayed_thinking(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::BlockAssistant(assistant)
+            if assistant.blocks.iter().any(is_replayed_thinking)
+                && !assistant.blocks.iter().any(lowers_to_content)
+    )
+}
+
+/// `message` without its replayed thinking blocks, or `None` when nothing
+/// else of it would be sent (the API refuses an assistant message without
+/// content).
+fn without_replayed_thinking(message: &Message) -> Option<Message> {
+    let Message::BlockAssistant(assistant) = message else {
+        return Some(message.clone());
+    };
+    if !assistant.blocks.iter().any(is_replayed_thinking) {
+        return Some(message.clone());
+    }
+    let blocks: Vec<AssistantBlock> = assistant
+        .blocks
+        .iter()
+        .filter(|block| !is_replayed_thinking(block))
+        .cloned()
+        .collect();
+    blocks.iter().any(lowers_to_content).then(|| {
+        Message::BlockAssistant(BlockAssistantMessage {
+            blocks,
+            stop_reason: assistant.stop_reason,
+            identity: assistant.identity.clone(),
+            assistant_message_id: assistant.assistant_message_id,
+            created_at: assistant.created_at,
+        })
+    })
+}
+
+/// Remove every `thinking` and `redacted_thinking` block from the assistant
+/// messages of `body`, leave out a message this empties, and return how many
+/// blocks it removed.
+fn remove_replayed_thinking(body: &mut Value) -> usize {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut removed = 0;
+    let mut emptied = Vec::with_capacity(messages.len());
+    for message in messages.iter_mut() {
+        let is_assistant = message.get("role").and_then(Value::as_str) == Some("assistant");
+        let content = message
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .filter(|_| is_assistant);
+        let Some(content) = content else {
+            emptied.push(false);
+            continue;
+        };
+        let before = content.len();
+        content.retain(|block| {
+            !matches!(
+                block.get("type").and_then(Value::as_str),
+                Some("thinking" | "redacted_thinking")
+            )
+        });
+        removed += before - content.len();
+        emptied.push(before > 0 && content.is_empty());
+    }
+    let mut emptied = emptied.into_iter();
+    messages.retain(|_| !emptied.next().unwrap_or(false));
+    removed
 }
 
 /// One entry of the `input_transformations` report that Anthropic returns
@@ -952,6 +1250,8 @@ impl AnthropicClient {
 
     /// Build request body for Anthropic API
     pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        let request = self.thinking_replay_view(request);
+        let request = request.as_ref();
         // Refuse request-shaping knobs the cataloged model rejects before
         // anything is lowered, so they fail typed here and never as a
         // provider 400. Uncatalogued models keep the pass-through.
@@ -1407,38 +1707,155 @@ impl AnthropicClient {
     ///
     /// Only where it is valid: the backend documents the beta, the model's
     /// catalog row lists it (the prefix-checked models, each thinking by
-    /// default), and [`thinking_block_binding`] places it. Thinking omitted
-    /// is named as the model's own default, adaptive, so the control has a
-    /// type to sit beside; no thinking is turned on. The stream path sends
-    /// the beta header exactly when the body carries the control.
+    /// default) or the id has no catalog row and the request configures
+    /// `adaptive` or `enabled` thinking ([`thinking_binding_beta_value`]: a
+    /// proxy alias or a custom entry may serve a prefix-checked model), and
+    /// [`thinking_block_binding`] places it. On a catalogued row, thinking
+    /// omitted is named as the model's own default, adaptive, so the control
+    /// has a type to sit beside; no thinking is turned on. An uncatalogued id
+    /// with thinking omitted keeps today's shape. The stream path sends the
+    /// beta header exactly when the body carries the control.
     fn apply_thinking_block_binding(&self, request: &LlmRequest, body: &mut Value) {
-        if !self.thinking_binding_controls_supported
-            || catalog_beta_value(
-                request,
-                meerkat_core::model_profile::capabilities::BetaFeature::ThinkingBindingControls,
-            )
-            .is_none()
-        {
-            return;
-        }
         let control = serde_json::json!({"prefix_mismatch_behavior": "drop_block"});
-        match thinking_block_binding(
-            anthropic_tag(request),
-            request.tool_choice.forces_a_tool_call(),
-        ) {
-            ThinkingBlockBinding::BesideConfiguredThinking => {
+        match self.binding_control_placement(request) {
+            Some(ThinkingBlockBinding::BesideConfiguredThinking) => {
                 if let Some(thinking) = body.get_mut("thinking").and_then(Value::as_object_mut) {
                     thinking.insert("block_binding".to_string(), control);
                 }
             }
-            ThinkingBlockBinding::BesideModelDefault => {
+            Some(ThinkingBlockBinding::BesideModelDefault) => {
                 body["thinking"] = serde_json::json!({
                     "type": "adaptive",
                     "block_binding": control,
                 });
             }
-            ThinkingBlockBinding::NotSent => {}
+            Some(ThinkingBlockBinding::NotSent) | None => {}
         }
+    }
+
+    /// Where `request` carries the binding control, or `None` when it carries
+    /// none: the backend does not document the control, the model's catalog
+    /// row does not list the beta or an uncatalogued id configures no thinking
+    /// ([`thinking_binding_beta_value`]), or [`thinking_block_binding`] does
+    /// not place it.
+    fn binding_control_placement(&self, request: &LlmRequest) -> Option<ThinkingBlockBinding> {
+        if !self.thinking_binding_controls_supported
+            || thinking_binding_beta_value(request).is_none()
+        {
+            return None;
+        }
+        match thinking_block_binding(
+            anthropic_tag(request),
+            request.tool_choice.forces_a_tool_call(),
+        ) {
+            ThinkingBlockBinding::NotSent => None,
+            placement => Some(placement),
+        }
+    }
+
+    /// Which replayed thinking blocks `request` sends ([`ThinkingReplay`]).
+    fn thinking_replay(&self, request: &LlmRequest) -> ThinkingReplay {
+        if self.binding_control_placement(request).is_none()
+            && model_may_check_thinking_prefix(&request.model)
+        {
+            ThinkingReplay::TurnInProgress
+        } else {
+            ThinkingReplay::Whole
+        }
+    }
+
+    /// `request` as this client sends it: under
+    /// [`ThinkingReplay::TurnInProgress`] the assistant messages of completed
+    /// turns ([`turn_in_progress_start`]) lose their thinking and redacted
+    /// thinking blocks (a server compaction block stays).
+    ///
+    /// A completed message that would send nothing else is left out first,
+    /// and the turn in progress is then that of the messages as sent. Leaving
+    /// a message out joins the user messages around it, which can make an
+    /// earlier tool call the assistant message the request continues, and
+    /// that one keeps its thinking (manual `enabled` thinking requires it
+    /// there). Leaving messages out only joins runs, so the turn in progress
+    /// can only start earlier, and every message before it still has
+    /// something to send.
+    fn thinking_replay_view<'r>(&self, request: &'r LlmRequest) -> Cow<'r, LlmRequest> {
+        if self.thinking_replay(request) == ThinkingReplay::Whole {
+            return Cow::Borrowed(request);
+        }
+        let Some(start) = turn_in_progress_start(&request.messages) else {
+            return Cow::Borrowed(request);
+        };
+        let replays_completed_thinking = request.messages[..start].iter().any(|message| {
+            matches!(
+                message,
+                Message::BlockAssistant(assistant)
+                    if assistant.blocks.iter().any(is_replayed_thinking)
+            )
+        });
+        if !replays_completed_thinking {
+            return Cow::Borrowed(request);
+        }
+        let kept: Vec<&Message> = request
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| *index >= start || !sends_only_replayed_thinking(message))
+            .map(|(_, message)| message)
+            .collect();
+        let boundary = turn_in_progress_start(kept.iter().copied()).unwrap_or(0);
+        let mut view = request.clone();
+        view.messages = kept
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                if index < boundary {
+                    without_replayed_thinking(message)
+                } else {
+                    Some((*message).clone())
+                }
+            })
+            .collect();
+        Cow::Owned(view)
+    }
+
+    /// The body to send once more after `status` answered `body`, lowered
+    /// from `request`, with the number of thinking blocks it removed.
+    ///
+    /// Under [`ThinkingReplay::TurnInProgress`] the thinking of the turn in
+    /// progress is still checked, and a change within the turn (a tool loaded
+    /// or a server connected while it runs) gets the request refused on an
+    /// account that enforces thinking-block binding. The API names no typed
+    /// reason for that refusal, so a 400 to a body that replays thinking is
+    /// answered by the same body without any thinking or redacted thinking
+    /// block, which Anthropic allows ("or all of them"). Manual `enabled`
+    /// thinking requires the continued assistant message to start with a
+    /// thinking block and the model's own default does not, so that body
+    /// names the default instead (thinking omitted). `None` for any other
+    /// answer: the caller gets the first error.
+    /// <https://platform.claude.com/docs/en/build-with-claude/preserved-thinking>
+    fn thinking_resend(
+        &self,
+        request: &LlmRequest,
+        body: &Value,
+        status: u16,
+    ) -> Option<(Value, usize)> {
+        if status != 400 || self.thinking_replay(request) != ThinkingReplay::TurnInProgress {
+            return None;
+        }
+        let mut resend = body.clone();
+        let removed = remove_replayed_thinking(&mut resend);
+        if removed == 0 {
+            return None;
+        }
+        if resend
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str)
+            == Some("enabled")
+            && let Some(fields) = resend.as_object_mut()
+        {
+            fields.remove("thinking");
+        }
+        Some((resend, removed))
     }
 
     fn anthropic_ordered_system_value(
@@ -1691,7 +2108,7 @@ impl AnthropicClient {
         &self,
         mut request: reqwest::RequestBuilder,
         url: &str,
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         request_betas: &mut Vec<String>,
     ) -> Result<
         (
@@ -1708,10 +2125,7 @@ impl AnthropicClient {
         };
         let mut extra = Vec::new();
         authorizer
-            .append_content_headers(
-                meerkat_core::HttpAuthorizationContent { has_images },
-                &mut extra,
-            )
+            .append_content_headers(content, &mut extra)
             .map_err(|error| LlmError::AuthenticationFailed {
                 message: error.to_string(),
             })?;
@@ -1746,7 +2160,7 @@ impl AnthropicClient {
         url: &str,
         body: &Value,
         betas: &[String],
-        has_images: bool,
+        content: meerkat_core::HttpAuthorizationContent,
         prepared: Option<&meerkat_llm_core::PreparedLlmRequest>,
         diagnostics: &mut Vec<LlmEvent>,
     ) -> Result<(reqwest::Response, meerkat_core::HttpAuthorizationReceipt), LlmError> {
@@ -1814,7 +2228,7 @@ impl AnthropicClient {
         #[cfg(target_arch = "wasm32")]
         let http = self.http()?;
         #[cfg(target_arch = "wasm32")]
-        let _ = has_images;
+        let _ = content;
         #[cfg(not(target_arch = "wasm32"))]
         let mut request_betas = betas.to_vec();
         #[cfg(target_arch = "wasm32")]
@@ -1825,7 +2239,7 @@ impl AnthropicClient {
             .header("Content-Type", "application/json");
         #[cfg(not(target_arch = "wasm32"))]
         let (mut request, receipt) = self
-            .apply_authorization(request, url, has_images, &mut request_betas)
+            .apply_authorization(request, url, content, &mut request_betas)
             .await?;
         #[cfg(target_arch = "wasm32")]
         let mut request = request
@@ -2025,71 +2439,19 @@ impl AnthropicClient {
             }
 
             // Collect beta headers based on request features.
-            // Uses String (not &str) because authorizer-injected betas
-            // are split from a temporary String and need owned storage.
-            let mut betas: Vec<String> = Vec::new();
-
-            // Legacy thinking (type: "enabled") requires interleaved-thinking header
-            // Adaptive thinking does NOT need this header.
-            let thinking_type = body.get("thinking")
-                .and_then(|t| t.get("type"))
-                .and_then(|t| t.as_str());
-            if thinking_type == Some("enabled")
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::InterleavedThinking,
-                )
-            {
-                betas.push(beta.to_string());
-            }
-
-            // Structured output format requires beta header
-            if body.get("output_config").and_then(|c| c.get("format")).is_some()
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::StructuredOutput,
-                )
-            {
-                betas.push(beta.to_string());
-            }
-
-            // 1M context window (opt-in via typed AnthropicProviderTag.context)
-            if anthropic_tag(request).and_then(|t| t.context)
-                == Some(AnthropicContextWindow::OneMegabyte)
-                && let Some(beta) = catalog_context_beta_value(request)
-            {
-                betas.push(beta.to_string());
-            }
-
-            // Compaction API (beta)
-            if body.get("context_management").is_some()
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::Compaction,
-                )
-            {
-                betas.push(beta.to_string());
-            }
-
-            // Thinking-block binding controls (beta), exactly when the body
-            // carries the control (`apply_thinking_block_binding`).
-            if body
-                .get("thinking")
-                .and_then(|thinking| thinking.get("block_binding"))
-                .is_some()
-                && let Some(beta) = catalog_beta_value(
-                    request,
-                    meerkat_core::model_profile::capabilities::BetaFeature::ThinkingBindingControls,
-                )
-            {
-                betas.push(beta.to_string());
-            }
+            let betas = request_betas(request, &body);
 
             let url = self.messages_endpoint();
-            let has_images = request.has_images();
+            let content = meerkat_core::HttpAuthorizationContent {
+                has_images: request.has_images(),
+                initiator: prepared.map_or_else(
+                    || request.initiator(),
+                    meerkat_llm_core::PreparedLlmRequest::initiator,
+                ),
+            };
             let mut diagnostics = Vec::new();
             let response_with_receipt =
-                self.send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics).await;
+                self.send_messages_request(&url, &body, &betas, content, prepared, &mut diagnostics).await;
             for diagnostic in diagnostics.drain(..) { yield diagnostic; }
             let response_with_receipt = response_with_receipt?;
             #[cfg(not(target_arch = "wasm32"))]
@@ -2119,7 +2481,7 @@ impl AnthropicClient {
                     == meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
             {
                 let retried = self
-                    .send_messages_request(&url, &body, &betas, has_images, prepared, &mut diagnostics)
+                    .send_messages_request(&url, &body, &betas, content, prepared, &mut diagnostics)
                     .await;
                 for diagnostic in diagnostics.drain(..) { yield diagnostic; }
                 let retried = retried?;
@@ -2146,14 +2508,88 @@ impl AnthropicClient {
                 let headers = response.headers().clone();
                 let mut text = response.text().await.unwrap_or_default();
                 self.redact_diagnostic(&mut text);
-                Err(self.redacted_error(
+                let refusal = self.redacted_error(
                     crate::request_support::provider_forced_tool_choice_rejection(
                         request,
                         status_code,
                         &text,
                     )
                     .unwrap_or_else(|| LlmError::from_http_response(status_code, text, &headers)),
-                ))
+                );
+                // A request that replays thinking without the binding control
+                // is sent once more without it (`thinking_resend`). If that
+                // fails too, the caller gets the first error, or the resend's
+                // own error when it is one the caller retries (a rate limit,
+                // an overload, a server or network error): the retried call
+                // meets the refusal again and resends.
+                match self.thinking_resend(request, &body, status_code) {
+                    None => Err(refusal),
+                    Some((resend_body, removed)) => {
+                        tracing::warn!(
+                            model = %request.model,
+                            thinking_blocks_removed = removed,
+                            "a request that replayed thinking without the thinking-block binding \
+                             control was refused; sending it once more without its thinking \
+                             blocks, so the model answers without that reasoning"
+                        );
+                        let resend_betas = request_betas(request, &resend_body);
+                        let resent = self
+                            .send_messages_request(
+                                &url,
+                                &resend_body,
+                                &resend_betas,
+                                content,
+                                prepared,
+                                &mut diagnostics,
+                            )
+                            .await;
+                        for diagnostic in diagnostics.drain(..) { yield diagnostic; }
+                        match resent {
+                            Ok((resent_response, _)) if resent_response.status().is_success() => {
+                                Ok(resent_response.bytes_stream())
+                            }
+                            Ok((resent_response, resent_receipt)) => {
+                                let resent_status = resent_response.status().as_u16();
+                                #[cfg(not(target_arch = "wasm32"))]
+                                if let Some(authorizer) = &self.authorizer {
+                                    authorizer
+                                        .observe_response_with_receipt(
+                                            resent_receipt,
+                                            &meerkat_core::HttpAuthorizationResponse {
+                                                method: "POST",
+                                                url: &url,
+                                                status: resent_status,
+                                            },
+                                        )
+                                        .await
+                                        .map_err(|error| LlmError::AuthenticationFailed {
+                                            message: error.to_string(),
+                                        })?;
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                let _ = resent_receipt;
+                                let resent_headers = resent_response.headers().clone();
+                                let mut resent_text =
+                                    resent_response.text().await.unwrap_or_default();
+                                self.redact_diagnostic(&mut resent_text);
+                                let resent_error = self.redacted_error(
+                                    LlmError::from_http_response(
+                                        resent_status,
+                                        resent_text,
+                                        &resent_headers,
+                                    ),
+                                );
+                                if resent_error.is_retryable() {
+                                    Err(resent_error)
+                                } else {
+                                    Err(refusal)
+                                }
+                            }
+                            Err(resent_error) if resent_error.is_retryable() => Err(resent_error),
+                            Err(_) => Err(refusal),
+                        }
+                    }
+                }
             };
             let mut stream = stream_result?;
             let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(SSE_BUFFER_CAPACITY);
@@ -2741,6 +3177,11 @@ impl LlmClient for AnthropicClient {
         request: &LlmRequest,
         canonical_messages: &[Message],
     ) -> Result<Vec<meerkat_core::ProviderCacheBreakpointClaim>, LlmError> {
+        // The messages as sent: a completed turn whose thinking left nothing
+        // to send is left out, and then no boundary maps back to the
+        // canonical message count.
+        let request = self.thinking_replay_view(request);
+        let request = request.as_ref();
         if request.messages.len() != canonical_messages.len() {
             return Ok(Vec::new());
         }
@@ -5556,6 +5997,130 @@ mod tests {
         server.abort();
     }
 
+    /// Records the initiator every request hands it and answers a 401 with a
+    /// retry.
+    #[derive(Default)]
+    struct InitiatorRecordingAuthorizer {
+        initiators: Mutex<Vec<meerkat_core::HttpRequestInitiator>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::HttpAuthorizer for InitiatorRecordingAuthorizer {
+        async fn authorize(
+            &self,
+            request: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            request
+                .headers
+                .push(("Authorization".to_string(), "Bearer recorded".to_string()));
+            Ok(())
+        }
+
+        async fn observe_response(
+            &self,
+            response: &meerkat_core::HttpAuthorizationResponse<'_>,
+        ) -> Result<meerkat_core::HttpAuthorizationResponseAction, meerkat_core::AuthError>
+        {
+            Ok(if response.status == 401 {
+                meerkat_core::HttpAuthorizationResponseAction::RetryWithFreshAuthorization
+            } else {
+                meerkat_core::HttpAuthorizationResponseAction::Propagate
+            })
+        }
+
+        fn label(&self) -> &'static str {
+            "initiator-recording"
+        }
+
+        fn append_content_headers(
+            &self,
+            content: meerkat_core::HttpAuthorizationContent,
+            _headers: &mut Vec<(String, String)>,
+        ) -> Result<(), meerkat_core::AuthError> {
+            self.initiators
+                .lock()
+                .expect("initiator record lock")
+                .push(content.initiator);
+            Ok(())
+        }
+    }
+
+    /// A Messages request tells its authorizer who initiated it, from its
+    /// last input: the agent after a tool result, the user after a user
+    /// message; a 401 retry tells the same.
+    #[tokio::test]
+    async fn messages_requests_name_who_initiated_them_on_every_attempt() {
+        use meerkat_core::HttpRequestInitiator::{Agent, User};
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":1},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n");
+        let tool_turn = vec![
+            Message::User(UserMessage::text("look it up")),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "lookup".to_string(),
+                    args: serde_json::value::RawValue::from_string("{}".to_string())
+                        .expect("raw args"),
+                    meta: None,
+                }],
+                meerkat_core::StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![meerkat_core::ToolResult::new(
+                "toolu_1".to_string(),
+                "found".to_string(),
+                false,
+            )]),
+        ];
+        let cases = [
+            (
+                "a user message",
+                vec![Message::User(UserMessage::text("hello"))],
+                User,
+            ),
+            ("a tool result", tool_turn, Agent),
+        ];
+        for (case, messages, initiator) in cases {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let app = Router::new()
+                .route("/v1/messages", post(anthropic_auth_retry))
+                .with_state(AnthropicAuthRetryState {
+                    calls: Arc::clone(&calls),
+                    payload: payload.clone(),
+                });
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("serve test server");
+            });
+            let authorizer = Arc::new(InitiatorRecordingAuthorizer::default());
+            let client = AnthropicClient::builder(String::new())
+                .base_url(format!("http://{addr}"))
+                .authorizer(authorizer.clone())
+                .build()
+                .expect("client");
+            let request = LlmRequest::new("claude-sonnet-4-5", messages);
+            let _ = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "{case}: the 401 is retried once"
+            );
+            assert_eq!(
+                *authorizer.initiators.lock().expect("initiator record lock"),
+                vec![initiator; 2],
+                "{case}: both attempts name the same initiator"
+            );
+        }
+    }
+
     /// Every Authorization value the canary authorizer signs with carries
     /// this canary.
     const AUTHORIZATION_CANARY: &str = "c4n4ryProviderBearer";
@@ -5600,7 +6165,12 @@ mod tests {
         let url = client.messages_endpoint();
         let mut betas = Vec::new();
         let (builder, _) = client
-            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .apply_authorization(
+                reqwest::Client::new().post(&url),
+                &url,
+                meerkat_core::HttpAuthorizationContent::default(),
+                &mut betas,
+            )
             .await
             .expect("the authorizer signs the request");
         let request = builder.build().expect("the request builds");
@@ -5634,7 +6204,12 @@ mod tests {
         let url = client.messages_endpoint();
         let mut betas = Vec::new();
         let (builder, _) = client
-            .apply_authorization(reqwest::Client::new().post(&url), &url, false, &mut betas)
+            .apply_authorization(
+                reqwest::Client::new().post(&url),
+                &url,
+                meerkat_core::HttpAuthorizationContent::default(),
+                &mut betas,
+            )
             .await
             .expect("the key signs the request");
         let request = builder.build().expect("the request builds");
@@ -8107,6 +8682,193 @@ mod thinking_binding_unit_tests {
                 "{model}"
             );
         }
+    }
+
+    const UNCATALOGUED: &str = "custom-claude-alias";
+    const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+    fn drop_block() -> Value {
+        serde_json::json!({"prefix_mismatch_behavior": "drop_block"})
+    }
+
+    /// A resumed history: the first turn's signed thinking block (or its
+    /// redacted form) is replayed ahead of the next question.
+    fn replaying(model: &str, meta: meerkat_core::ProviderMeta) -> LlmRequest {
+        LlmRequest::new(
+            model,
+            vec![
+                Message::User(UserMessage::text("hello")),
+                Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                    vec![
+                        meerkat_core::AssistantBlock::Reasoning {
+                            text: "thinking it over".to_string(),
+                            meta: Some(Box::new(meta)),
+                        },
+                        meerkat_core::AssistantBlock::Text {
+                            text: "hi".to_string(),
+                            meta: None,
+                        },
+                    ],
+                    meerkat_core::StopReason::EndTurn,
+                )),
+                Message::User(UserMessage::text("and now?")),
+            ],
+        )
+    }
+
+    fn signed() -> meerkat_core::ProviderMeta {
+        meerkat_core::ProviderMeta::Anthropic {
+            signature: "sig".to_string(),
+        }
+    }
+
+    fn redacted() -> meerkat_core::ProviderMeta {
+        meerkat_core::ProviderMeta::AnthropicRedacted {
+            data: "opaque".to_string(),
+        }
+    }
+
+    /// The body and the beta the stream path would send beside it.
+    fn wire(client: &AnthropicClient, request: &LlmRequest) -> (Value, Option<&'static str>) {
+        let body = client.build_request_body(request).unwrap();
+        let beta = body
+            .get("thinking")
+            .and_then(|thinking| thinking.get("block_binding"))
+            .and_then(|_| thinking_binding_beta_value(request));
+        (body, beta)
+    }
+
+    /// An uncatalogued id (a proxy alias) with thinking omitted names no
+    /// default, on a session's first request and when its history replays a
+    /// signed or redacted thinking block: the alias may serve an
+    /// `enabled`-only model (Sonnet 4.5 refuses `adaptive`) or a thinking-off
+    /// default, and a block from an earlier turn is not evidence of either.
+    /// The request keeps today's shape: no `thinking` object and no beta.
+    #[test]
+    fn an_uncatalogued_id_with_thinking_omitted_names_no_default() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        for request in [
+            hello(UNCATALOGUED),
+            replaying(UNCATALOGUED, signed()),
+            replaying(UNCATALOGUED, redacted()),
+        ] {
+            let (body, beta) = wire(&client, &request);
+            assert!(body.get("thinking").is_none(), "{body}");
+            assert_eq!(beta, None, "{body}");
+            assert_eq!(thinking_binding_beta_value(&request), None, "{body}");
+        }
+    }
+
+    /// Configured `adaptive` or `enabled` thinking (or a legacy budget, which
+    /// lowers to `enabled`) on an uncatalogued id carries the control and the
+    /// beta on every request of a session, from the first one on, whether or
+    /// not its history replays a signed or redacted thinking block: the
+    /// request shape stays the same across the session, as on a catalogued
+    /// row that lists the beta.
+    #[test]
+    fn an_uncatalogued_id_carries_the_control_beside_configured_thinking_from_the_first_request() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let enabled = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": 2048,
+            "block_binding": drop_block(),
+        });
+        for (thinking, budget, expected) in [
+            (
+                Some(AnthropicThinkingConfig::Adaptive),
+                None,
+                serde_json::json!({"type": "adaptive", "block_binding": drop_block()}),
+            ),
+            (
+                Some(AnthropicThinkingConfig::Enabled {
+                    budget_tokens: 2048,
+                }),
+                None,
+                enabled.clone(),
+            ),
+            (None, Some(2048), enabled),
+        ] {
+            for request in [
+                hello(UNCATALOGUED),
+                replaying(UNCATALOGUED, signed()),
+                replaying(UNCATALOGUED, redacted()),
+            ] {
+                let request = request.with_anthropic_tag_merge(|tag| {
+                    tag.thinking = thinking.clone();
+                    tag.thinking_budget_tokens = budget;
+                });
+                let (body, beta) = wire(&client, &request);
+                assert_eq!(
+                    body["thinking"], expected,
+                    "{thinking:?} budget {budget:?}: {body}"
+                );
+                assert_eq!(beta, Some(BINDING_BETA), "{thinking:?} budget {budget:?}");
+            }
+        }
+    }
+
+    /// `between_tools` takes no other field and Claude Haiku 5.5 refuses the
+    /// control beside `disabled`, so an uncatalogued id configuring either
+    /// gets neither the control nor the beta, even with a replayed block.
+    #[test]
+    fn an_uncatalogued_id_never_carries_the_control_beside_between_tools_or_disabled() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        for (thinking, expected) in [
+            (
+                AnthropicThinkingConfig::BetweenTools,
+                serde_json::json!({"type": "between_tools"}),
+            ),
+            (
+                AnthropicThinkingConfig::Disabled,
+                serde_json::json!({"type": "disabled"}),
+            ),
+        ] {
+            let request = replaying(UNCATALOGUED, signed())
+                .with_anthropic_tag_merge(|tag| tag.thinking = Some(thinking.clone()));
+            let (body, beta) = wire(&client, &request);
+            assert_eq!(body["thinking"], expected, "{thinking:?}: {body}");
+            assert_eq!(beta, None, "{thinking:?}");
+            assert_eq!(thinking_binding_beta_value(&request), None, "{thinking:?}");
+        }
+    }
+
+    /// A catalogued row that does not list the beta keeps the catalog's word:
+    /// no control, even when it replays a signed block.
+    #[test]
+    fn a_catalogued_row_without_the_beta_gets_nothing_on_replay() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let model = "claude-opus-4-8";
+        assert!(meerkat_models::capabilities_for(Provider::Anthropic, model).is_some());
+        let omitted = replaying(model, signed());
+        let (body, beta) = wire(&client, &omitted);
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(beta, None);
+        assert_eq!(thinking_binding_beta_value(&omitted), None);
+        let (body, beta) = wire(
+            &client,
+            &replaying(model, signed()).with_anthropic_tag_merge(|tag| {
+                tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+            }),
+        );
+        assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(beta, None);
+    }
+
+    /// A backend without the controls sends none to an uncatalogued id either.
+    #[test]
+    fn a_backend_without_the_controls_sends_none_to_an_uncatalogued_id() {
+        let client = AnthropicClient::builder("test-key".to_string())
+            .thinking_binding_controls_supported(false)
+            .build()
+            .unwrap();
+        let (body, beta) = wire(
+            &client,
+            &replaying(UNCATALOGUED, signed()).with_anthropic_tag_merge(|tag| {
+                tag.thinking = Some(AnthropicThinkingConfig::Adaptive);
+            }),
+        );
+        assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert_eq!(beta, None);
     }
 
     #[test]

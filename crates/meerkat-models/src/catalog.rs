@@ -13,8 +13,7 @@ use meerkat_core::Provider;
 use meerkat_core::model_profile::ModelCatalog;
 use meerkat_core::model_profile::catalog::{
     CatalogEntry, ImageGenerationModelProfile, ImageGenerationModelRoute,
-    ImageGenerationProviderDefaults, ImageGenerationSizeParameter, ModelTier,
-    OpenAiImageGenerationRequestShape, ProviderDefaults,
+    ImageGenerationProviderDefaults, ImageGenerationSizeParameter, ModelTier, ProviderDefaults,
 };
 use std::sync::OnceLock;
 
@@ -44,8 +43,12 @@ const DEFAULT_MODELS: &[(Provider, &str)] = &[
 ];
 
 /// Image-generation default model ID per provider.
-const IMAGE_DEFAULT_OPENAI: &str = "gpt-image-2";
+const IMAGE_DEFAULT_OPENAI: &str = "gpt-image-2.6-sunburst";
 const IMAGE_DEFAULT_GEMINI: &str = "gemini-nano-banana-2.1";
+
+/// Other cataloged OpenAI image models, selectable by model.
+const OPENAI_IMAGE_GPT_IMAGE_26_FLARE: &str = "gpt-image-2.6-flare";
+const OPENAI_IMAGE_GPT_IMAGE_2: &str = "gpt-image-2";
 
 /// Image-generation default table consumed by
 /// [`ModelCatalog::default_image_generation_model`].
@@ -66,10 +69,17 @@ const OPENAI_HOSTED_IMAGE_PROVIDER_CALL_MODEL: &str = "gpt-5.4";
 /// Image-generation-only model rows. OpenAI text catalog models are admitted
 /// by `image_generation_model()` and route through the same hosted tool.
 const IMAGE_GENERATION_MODELS: &[ImageGenerationModelProfile] = &[
+    // GPT Image 2.6 (released 2026-11-04) is two models: Sunburst, the base
+    // model for detailed work and precise edits, and Flare, the smaller model
+    // for fast iteration. The Responses API image_generation tool accepts both
+    // as its `model`.
+    // Sources: https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst
+    // https://developers.openai.com/api/docs/models/gpt-image-2.6-flare
+    // https://developers.openai.com/api/reference/resources/responses/methods/create
     ImageGenerationModelProfile {
         provider: Provider::OpenAI,
         model_id: IMAGE_DEFAULT_OPENAI,
-        display_name: "GPT Image 2",
+        display_name: "GPT Image 2.6 Sunburst",
         tier: ModelTier::Recommended,
         route: ImageGenerationModelRoute::OpenAiHostedResponsesTool {
             provider_call_model_id: Some(OPENAI_HOSTED_IMAGE_PROVIDER_CALL_MODEL),
@@ -78,29 +88,23 @@ const IMAGE_GENERATION_MODELS: &[ImageGenerationModelProfile] = &[
     },
     ImageGenerationModelProfile {
         provider: Provider::OpenAI,
-        model_id: "gpt-image-1",
-        display_name: "GPT Image 1",
+        model_id: OPENAI_IMAGE_GPT_IMAGE_26_FLARE,
+        display_name: "GPT Image 2.6 Flare",
         tier: ModelTier::Supported,
-        route: ImageGenerationModelRoute::OpenAiImagesApi {
-            request_shape: OpenAiImageGenerationRequestShape::GptImage,
+        route: ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+            provider_call_model_id: Some(OPENAI_HOSTED_IMAGE_PROVIDER_CALL_MODEL),
+            tool_model_id: OPENAI_IMAGE_GPT_IMAGE_26_FLARE,
         },
     },
+    // OpenAI image default until 0.9.11.
     ImageGenerationModelProfile {
         provider: Provider::OpenAI,
-        model_id: "dall-e-3",
-        display_name: "DALL-E 3",
+        model_id: OPENAI_IMAGE_GPT_IMAGE_2,
+        display_name: "GPT Image 2",
         tier: ModelTier::Supported,
-        route: ImageGenerationModelRoute::OpenAiImagesApi {
-            request_shape: OpenAiImageGenerationRequestShape::DallE,
-        },
-    },
-    ImageGenerationModelProfile {
-        provider: Provider::OpenAI,
-        model_id: "dall-e-2",
-        display_name: "DALL-E 2",
-        tier: ModelTier::Supported,
-        route: ImageGenerationModelRoute::OpenAiImagesApi {
-            request_shape: OpenAiImageGenerationRequestShape::DallE,
+        route: ImageGenerationModelRoute::OpenAiHostedResponsesTool {
+            provider_call_model_id: Some(OPENAI_HOSTED_IMAGE_PROVIDER_CALL_MODEL),
+            tool_model_id: OPENAI_IMAGE_GPT_IMAGE_2,
         },
     },
     // Gemini Nano Banana 2.1 (GA 2026-10-06), the successor of Nano Banana 2

@@ -432,6 +432,7 @@ export type {
   ConsoleUploadResult,
   MetaConsoleController,
   MetaConsoleTransport,
+  ConsoleWhoami,
 } from "./headless";
 export {
   CONSOLE_COMMAND_NAMES,
@@ -439,6 +440,7 @@ export {
   consoleCommandMethod,
   createHttpConsoleTransport,
   createMetaConsoleController,
+  normalizeWhoami,
 } from "./headless";
 
 export type {
@@ -485,6 +487,7 @@ export type {
 
 export * from "./pending-approvals";
 export * from "./host-attention";
+export * from "./console-attention";
 
 export * from "./send-attempt";
 

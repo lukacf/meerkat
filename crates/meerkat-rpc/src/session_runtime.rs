@@ -13,6 +13,9 @@
 #[path = "session_runtime/schedule_host.rs"]
 mod schedule_host;
 
+#[path = "session_runtime/tool_grant_requests.rs"]
+mod tool_grant_requests;
+
 #[cfg(feature = "local-authorization")]
 #[path = "session_runtime/governed.rs"]
 mod governed;
@@ -247,32 +250,53 @@ struct RuntimePreAdmissionEntry {
     admission: RpcRuntimePreAdmission,
 }
 
-/// Per session, the inputs whose admitting request opted out of its turn's
-/// `session/event` copies.
-type TurnSessionEventOptOuts = Arc<StdMutex<HashMap<SessionId, HashSet<InputId>>>>;
+/// Where the turn that applies one admitted input writes its `session/event`
+/// copies, as the request that admitted the input asked: to that request's
+/// connection, or nowhere (the request opted out of them).
+#[derive(Clone)]
+enum TurnSessionEventsRoute {
+    Connection(crate::router::NotificationSink),
+    OptedOut,
+}
 
-/// A request's opt-out of its turn's `session/event` copies, held while the
+/// Per session, the inputs whose admitting request is still waiting, with
+/// where the turn applying each one writes its `session/event` copies.
+type TurnSessionEventRoutes =
+    Arc<StdMutex<HashMap<SessionId, HashMap<InputId, TurnSessionEventsRoute>>>>;
+
+/// A request's route for its turn's `session/event` copies, held while the
 /// request runs. Dropping it forgets the input, whether or not its turn ran:
 /// a turn no request waits on (a resumed run, a requeued input) writes its
-/// events as usual.
-pub(crate) struct TurnSessionEventsOptOut {
-    opt_outs: TurnSessionEventOptOuts,
+/// events to the connection that holds its session (see
+/// [`SessionRuntime::turn_session_event_sinks`]).
+pub(crate) struct TurnSessionEventsRequest {
+    routes: TurnSessionEventRoutes,
     session_id: SessionId,
     input_id: InputId,
 }
 
-impl Drop for TurnSessionEventsOptOut {
+impl Drop for TurnSessionEventsRequest {
     fn drop(&mut self) {
-        let mut opt_outs = self
-            .opt_outs
+        let mut routes = self
+            .routes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(inputs) = opt_outs.get_mut(&self.session_id) {
+        if let Some(inputs) = routes.get_mut(&self.session_id) {
             inputs.remove(&self.input_id);
             if inputs.is_empty() {
-                opt_outs.remove(&self.session_id);
+                routes.remove(&self.session_id);
             }
         }
+    }
+}
+
+/// Add `sink` to `sinks` unless its connection is gone or already there.
+fn push_session_event_sink(
+    sinks: &mut Vec<crate::router::NotificationSink>,
+    sink: &crate::router::NotificationSink,
+) {
+    if !sink.is_closed() && !sinks.iter().any(|known| known.same_connection(sink)) {
+        sinks.push(sink.clone());
     }
 }
 
@@ -1783,6 +1807,17 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         .await
     }
 
+    async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat::OwedCompactionSettlement, SessionError> {
+        <PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_owed_compaction_projections(
+            &self.service,
+            session_id,
+        )
+        .await
+    }
+
     async fn publish_boundary_appends_discarded_for_actor(
         &self,
         actor_witness: &meerkat::LiveSessionActorWitness,
@@ -3053,7 +3088,6 @@ enum RpcExecutorActorAuthority {
     Mob {
         session_service: Arc<dyn meerkat_mob::MobSessionService>,
         actor_witness: meerkat::LiveSessionActorWitness,
-        notification_sink: crate::router::NotificationSink,
     },
 }
 
@@ -3119,10 +3153,16 @@ pub struct SessionRuntime {
     /// materialized into live session handles.
     staged_capacity_admissions: StagedCapacityAdmissions,
     runtime_pre_admissions: Arc<StdMutex<HashMap<SessionId, Vec<RuntimePreAdmissionEntry>>>>,
-    /// The inputs whose admitting request asked that its turn's events not
-    /// be written as `session/event` notifications, while that request runs
-    /// (see [`TurnSessionEventsOptOut`]).
-    turn_session_event_opt_outs: TurnSessionEventOptOuts,
+    /// The inputs whose admitting request is still waiting, with where the
+    /// turn applying each one writes its `session/event` copies (see
+    /// [`TurnSessionEventsRequest`]).
+    turn_session_event_routes: TurnSessionEventRoutes,
+    /// The connection that holds each session's `session/event` route: the
+    /// connection that created or forked the session or, once that connection
+    /// is gone, the next connection that started a turn on it. A turn no
+    /// waiting request routes writes its copies there (see
+    /// [`Self::turn_session_event_sinks`]).
+    session_event_holders: StdRwLock<HashMap<SessionId, crate::router::NotificationSink>>,
     /// The `keep_alive` create waiting for each staged session's first
     /// build, while that create waits (see [`FirstBuildWait`]).
     first_build_waiters: FirstBuildWaiters,
@@ -3186,9 +3226,11 @@ pub struct SessionRuntime {
     /// auth-resolution read path. Same `Arc` the live builder reads.
     builder_realm_inheritance: Arc<StdRwLock<Option<meerkat::RealmInheritance>>>,
     runtime_adapter: Arc<MeerkatMachine>,
-    /// Notification sink for event forwarding to the RPC transport.
-    /// Wrapped in `RwLock` so it can be updated when a new TCP client
-    /// connects (each connection has its own transport sink).
+    /// The process-default `session/event` route: a turn of a session no
+    /// connection holds, with no waiting request to route it, writes its
+    /// copies here. A single-client server installs its one connection
+    /// ([`crate::router::MethodRouter::new`]); a connection of a server that
+    /// serves several on this runtime never replaces it.
     notification_sink: StdRwLock<crate::router::NotificationSink>,
     skill_identity_registry: Arc<StdRwLock<SkillIdentityRegistryState>>,
     skill_identity_context_root: Arc<StdRwLock<Option<PathBuf>>>,
@@ -3280,6 +3322,9 @@ pub struct SessionRuntime {
     approval_service: meerkat_core::ApprovalService,
     /// The persistence's durable decision owner, beside its approval issuer.
     decision_service: meerkat_runtime::decision::DurableDecisionService,
+    /// The executor of the decision store's `tool_grant.issue` decisions:
+    /// its nudge, and its task while it runs (see `tool_grant_requests`).
+    tool_grant_executor: tool_grant_requests::ToolGrantExecutorSlot,
     /// P1#5: live adapter host, attached when the surface wires
     /// `with_live_ws`. Held as an interior-mutable slot so it can be set
     /// after the runtime is wrapped in `Arc` (matches the
@@ -3460,6 +3505,21 @@ impl meerkat::RuntimeDeliveryHost for SessionRuntimeDeliveryHost {
     ) -> Result<meerkat::AddressObservation, String> {
         match self.runtime.upgrade() {
             Some(runtime) => runtime.continuation_bindings.observe_address(address).await,
+            None => Err("the session runtime is gone".into()),
+        }
+    }
+
+    async fn external_work_refusal(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<Option<meerkat_runtime::RuntimeDeliveryRefusalReason>, String> {
+        match self.runtime.upgrade() {
+            Some(runtime) => {
+                runtime
+                    .continuation_bindings
+                    .external_work_refusal(address)
+                    .await
+            }
             None => Err("the session runtime is gone".into()),
         }
     }
@@ -3849,6 +3909,7 @@ impl SessionRuntime {
             transient_turn_context: overrides
                 .and_then(|overrides| overrides.transient_turn_context.clone()),
             transient_turn_context_appends: Vec::new(),
+            request_only_context: Vec::new(),
             model: overrides
                 .and_then(|ov| ov.model.clone())
                 .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
@@ -4299,7 +4360,8 @@ impl SessionRuntime {
             pending_session_event_streams,
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
-            turn_session_event_opt_outs: TurnSessionEventOptOuts::default(),
+            turn_session_event_routes: TurnSessionEventRoutes::default(),
+            session_event_holders: StdRwLock::new(HashMap::new()),
             first_build_waiters: FirstBuildWaiters::default(),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             commissioned_config_store: None,
@@ -4364,6 +4426,7 @@ impl SessionRuntime {
             builder_agent_llm_client_decorator_slot,
             approval_service,
             decision_service,
+            tool_grant_executor: tool_grant_requests::ToolGrantExecutorSlot::default(),
             live_adapter_host,
             inner,
         })
@@ -4479,7 +4542,8 @@ impl SessionRuntime {
             pending_session_event_streams,
             staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
-            turn_session_event_opt_outs: TurnSessionEventOptOuts::default(),
+            turn_session_event_routes: TurnSessionEventRoutes::default(),
+            session_event_holders: StdRwLock::new(HashMap::new()),
             first_build_waiters: FirstBuildWaiters::default(),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             commissioned_config_store: None,
@@ -4544,6 +4608,7 @@ impl SessionRuntime {
             builder_agent_llm_client_decorator_slot,
             approval_service,
             decision_service,
+            tool_grant_executor: tool_grant_requests::ToolGrantExecutorSlot::default(),
             live_adapter_host,
             inner,
         })
@@ -4874,25 +4939,67 @@ impl SessionRuntime {
         admission_discard_staged_capacity(&self.staged_capacity_admissions, session_id);
     }
 
-    /// Record, before `input_id` is admitted, that its request asked for its
-    /// turn's events not to be written as `session/event` notifications. The
-    /// record lasts as long as the returned guard.
-    fn record_turn_session_events_opt_out(
+    /// Record, before `input_id` is admitted, where its request wants its
+    /// turn's `session/event` copies: on the request's connection, or
+    /// nowhere. The record lasts as long as the returned guard.
+    fn record_turn_session_events_route(
         &self,
         session_id: &SessionId,
         input_id: &InputId,
-    ) -> TurnSessionEventsOptOut {
-        self.turn_session_event_opt_outs
+        route: TurnSessionEventsRoute,
+    ) -> TurnSessionEventsRequest {
+        self.turn_session_event_routes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(session_id.clone())
             .or_default()
-            .insert(input_id.clone());
-        TurnSessionEventsOptOut {
-            opt_outs: Arc::clone(&self.turn_session_event_opt_outs),
+            .insert(input_id.clone(), route);
+        TurnSessionEventsRequest {
+            routes: Arc::clone(&self.turn_session_event_routes),
             session_id: session_id.clone(),
             input_id: input_id.clone(),
         }
+    }
+
+    /// `sink`'s connection created `session_id`, or forked it from another
+    /// session: it holds the session's `session/event` route (see
+    /// [`Self::turn_session_event_sinks`]).
+    pub(crate) fn hold_session_event_route(
+        &self,
+        session_id: SessionId,
+        sink: crate::router::NotificationSink,
+    ) {
+        self.session_event_holders
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id, sink);
+    }
+
+    /// `sink`'s connection started a turn on `session_id`: it takes the
+    /// session's `session/event` route when no connection holds it or its
+    /// holder is gone. A holder that is still open keeps it.
+    fn take_free_session_event_route(
+        &self,
+        session_id: &SessionId,
+        sink: &crate::router::NotificationSink,
+    ) {
+        let mut holders = self
+            .session_event_holders
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if holders
+            .get(session_id)
+            .is_none_or(crate::router::NotificationSink::is_closed)
+        {
+            holders.insert(session_id.clone(), sink.clone());
+        }
+    }
+
+    fn release_session_event_route(&self, session_id: &SessionId) {
+        self.session_event_holders
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
     }
 
     /// Wait for `session_id`'s first build. The wait resolves once a turn
@@ -4913,29 +5020,51 @@ impl SessionRuntime {
         }
     }
 
-    /// Whether the turn applying `input_ids` writes its events as
-    /// `session/event` notifications: yes unless every one of its inputs was
-    /// admitted by a request that opted out. A turn whose inputs no request
-    /// started (queued work, comms, schedules, a resumed run), or that also
-    /// carries the input of a request that wants the events, writes them.
-    pub(crate) fn turn_writes_session_events(
+    /// The connections the turn applying `input_ids` writes its
+    /// `session/event` copies to. An input whose admitting request is still
+    /// waiting adds that request's connection, or nothing when the request
+    /// opted out. An input no waiting request admitted (queued work, comms,
+    /// schedules, a resumed or requeued run) adds the connection that holds
+    /// the session: the one that created or forked it or, once that one is
+    /// gone, the next one that started a turn on it. While that holder is
+    /// closed the copies go nowhere. Only a session no connection ever held
+    /// falls back to the runtime's process-default route
+    /// ([`Self::set_notification_sink`]). No other connection receives them;
+    /// a connection that is gone receives nothing.
+    pub(crate) fn turn_session_event_sinks(
         &self,
         session_id: &SessionId,
         input_ids: &[InputId],
-    ) -> bool {
-        if input_ids.is_empty() {
-            return true;
+    ) -> Vec<crate::router::NotificationSink> {
+        let mut sinks = Vec::new();
+        let mut unrouted = input_ids.is_empty();
+        {
+            let routes = self
+                .turn_session_event_routes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let session_routes = routes.get(session_id);
+            for input_id in input_ids {
+                match session_routes.and_then(|routes| routes.get(input_id)) {
+                    Some(TurnSessionEventsRoute::Connection(sink)) => {
+                        push_session_event_sink(&mut sinks, sink);
+                    }
+                    Some(TurnSessionEventsRoute::OptedOut) => {}
+                    None => unrouted = true,
+                }
+            }
         }
-        let opt_outs = self
-            .turn_session_event_opt_outs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match opt_outs.get(session_id) {
-            Some(opted_out) => !input_ids
-                .iter()
-                .all(|input_id| opted_out.contains(input_id)),
-            None => true,
+        if unrouted {
+            let holder = self
+                .session_event_holders
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(session_id)
+                .cloned();
+            let sink = holder.unwrap_or_else(|| self.current_notification_sink());
+            push_session_event_sink(&mut sinks, &sink);
         }
+        sinks
     }
 
     pub(crate) fn take_runtime_pre_admission(
@@ -8363,12 +8492,9 @@ impl SessionRuntime {
         self.mob_state.read().ok().and_then(|slot| slot.clone())
     }
 
-    /// Replace the notification sink used by lazily-created session executors.
-    ///
-    /// Called by `serve_tcp_connection` when a new TCP client connects — each
-    /// connection has its own transport writer so the sink must be updated to
-    /// route events to the currently-connected client.
-    /// Read the current notification sink (for use by executors at apply time).
+    /// The process-default `session/event` route: the sink a turn of a
+    /// session no connection holds writes its copies to when no waiting
+    /// request routes the turn (see `turn_session_event_sinks`).
     pub fn current_notification_sink(&self) -> crate::router::NotificationSink {
         self.notification_sink
             .read()
@@ -8376,6 +8502,16 @@ impl SessionRuntime {
             .clone()
     }
 
+    /// Replace the process-default `session/event` route.
+    ///
+    /// A single-client server installs its one connection here
+    /// ([`crate::router::MethodRouter::new`]). A turn writes its copies to
+    /// the connections of the requests that admitted its inputs, and a turn
+    /// no request waits on to the connection holding its session; this
+    /// default receives only the turns of a session no connection holds. A
+    /// server that serves several connections on one runtime
+    /// ([`crate::serve_tcp_connection`]) never replaces it, so one
+    /// connection's turns never reach another.
     pub fn set_notification_sink(&self, sink: crate::router::NotificationSink) {
         if let Ok(mut slot) = self.notification_sink.write() {
             *slot = sink;
@@ -8401,8 +8537,8 @@ impl SessionRuntime {
         comms_runtime: Arc<dyn meerkat_core::agent::CommsRuntime>,
     ) -> Result<(), RpcError> {
         // Only store the comms context — don't create an executor yet.
-        // The executor is created lazily on first turn/start, and it needs
-        // the per-connection notification sink (not the startup noop sink).
+        // The executor is created lazily on first turn/start; each turn it
+        // applies resolves where its session/event copies go.
         self.runtime_adapter
             .update_peer_ingress_context(session_id, true, Some(comms_runtime))
             .await
@@ -8969,16 +9105,11 @@ impl SessionRuntime {
                     || mob_state.owns_persisted_bridge_session(session_id).await)
             {
                 let actor_witness = self.mob_actor_witness(session_id)?;
-                let sink = self
-                    .notification_sink
-                    .read()
-                    .ok()
-                    .map(|slot| slot.clone())
-                    .unwrap_or_else(crate::router::NotificationSink::noop);
+                // The member's executor resolves each turn's session/event
+                // routes when it applies the turn, as a session's does.
                 return Ok(RpcExecutorActorAuthority::Mob {
                     session_service: mob_state.session_service(),
                     actor_witness,
-                    notification_sink: sink,
                 });
             }
         }
@@ -9040,13 +9171,12 @@ impl SessionRuntime {
             RpcExecutorActorAuthority::Mob {
                 session_service,
                 actor_witness,
-                notification_sink,
             } => {
                 let executor = crate::session_executor::MobRpcRuntimeExecutor::new(
                     Arc::clone(&session_service),
                     Some(Arc::clone(self)),
                     actor_witness,
-                    notification_sink,
+                    crate::router::NotificationSink::noop(),
                 );
                 self.record_runtime_publication_handle(
                     attachment_witness,
@@ -9391,8 +9521,10 @@ impl SessionRuntime {
     /// `session_events: false` is the request's opt-out of its turn's
     /// `session/event` copies: the turn applying this request's input writes
     /// none, unless another input of the same turn wants them (see
-    /// `Self::turn_writes_session_events`).
-    #[allow(clippy::too_many_arguments, unused_variables)]
+    /// `Self::turn_session_event_sinks`). The request names no connection, so
+    /// a turn that writes them writes them where a turn no request waits on
+    /// would.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_turn_via_runtime_with_request_context(
         self: &Arc<Self>,
         session_id: &SessionId,
@@ -9404,6 +9536,43 @@ impl SessionRuntime {
         additional_instructions: Option<Vec<String>>,
         overrides: Option<crate::handlers::turn::TurnOverrides>,
         request_context: Option<RequestContext>,
+        session_events: bool,
+    ) -> Result<RunResult, RpcError> {
+        self.start_turn_via_runtime_on_connection(
+            session_id,
+            prompt,
+            injected_context,
+            mcp_event_tx,
+            skill_references,
+            turn_tool_overlay,
+            additional_instructions,
+            overrides,
+            request_context,
+            None,
+            session_events,
+        )
+        .await
+    }
+
+    /// [`Self::start_turn_via_runtime_with_request_context`] for a request
+    /// that arrived on `connection`: the turn applying the request's input
+    /// writes its `session/event` copies to that connection (unless
+    /// `session_events` is false), and once the input is admitted the
+    /// connection takes the session's route when no open connection holds it
+    /// (see `Self::turn_session_event_sinks`).
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    pub(crate) async fn start_turn_via_runtime_on_connection(
+        self: &Arc<Self>,
+        session_id: &SessionId,
+        prompt: ContentInput,
+        injected_context: Vec<ContentInput>,
+        mcp_event_tx: mpsc::Sender<EventEnvelope<AgentEvent>>,
+        skill_references: Option<Vec<meerkat_core::skills::SkillKey>>,
+        turn_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+        additional_instructions: Option<Vec<String>>,
+        overrides: Option<crate::handlers::turn::TurnOverrides>,
+        request_context: Option<RequestContext>,
+        connection: Option<crate::router::NotificationSink>,
         session_events: bool,
     ) -> Result<RunResult, RpcError> {
         use meerkat_runtime::accept::AcceptOutcome;
@@ -9520,9 +9689,15 @@ impl SessionRuntime {
         );
         let input_id = input.id().clone();
         // Recorded before the input is admitted, so the executor that applies
-        // it already sees the opt-out; held until this request returns.
-        let _session_events_opt_out = (!session_events)
-            .then(|| self.record_turn_session_events_opt_out(session_id, &input_id));
+        // it already sees where this request wants the turn's session/event
+        // copies; held until this request returns.
+        let session_events_route = if session_events {
+            connection.clone().map(TurnSessionEventsRoute::Connection)
+        } else {
+            Some(TurnSessionEventsRoute::OptedOut)
+        };
+        let _session_events_request = session_events_route
+            .map(|route| self.record_turn_session_events_route(session_id, &input_id, route));
 
         if let Err(primary) = self.ensure_runtime_executor(session_id).await {
             return Err(self
@@ -9748,6 +9923,12 @@ impl SessionRuntime {
                     .await);
             }
         };
+        // The admitting connection takes the session's route when no open
+        // connection holds it, so the turns no request waits on reach it.
+        if let (AcceptOutcome::Accepted { .. }, Some(connection)) = (&outcome, connection.as_ref())
+        {
+            self.take_free_session_event_route(session_id, connection);
+        }
         if let AcceptOutcome::Accepted {
             input_id: accepted_input_id,
             ..
@@ -9927,6 +10108,7 @@ impl SessionRuntime {
                 idempotency_key: context.idempotency_key,
                 supersession_key: None,
                 correlation_id: context.correlation_id,
+                requester: None,
             },
             event_type,
             payload,
@@ -12329,6 +12511,55 @@ impl SessionRuntime {
             .map_err(runtime_driver_error_to_rpc)
     }
 
+    /// Ask the session's next compaction check to compact, without a
+    /// rebuild ([`meerkat_runtime::MeerkatMachine::request_compaction`]).
+    ///
+    /// The request needs the session's live runtime registration in this
+    /// process, and is never a reason to load or wake one: a session that
+    /// has none (dormant, a member's session its mob has not woken, or one
+    /// this process has not opened since it started) is refused as not
+    /// running. An unknown or archived session is not found; a retired or
+    /// stopped registration keeps the runtime's refusal.
+    pub async fn request_compaction(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, RpcError> {
+        let staged = self
+            .staged_sessions
+            .info(session_id)
+            .await
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("staged session lifecycle error: {err}"),
+                data: None,
+            })?
+            .is_some();
+        if !staged {
+            match committed_source_archived(&self.service, session_id)
+                .await
+                .map_err(session_error_to_rpc)?
+            {
+                None => return Err(Self::session_not_found_rpc(session_id)),
+                Some(true) => return Err(Self::archived_session_not_found_rpc(session_id)),
+                Some(false) => {}
+            }
+        }
+        if !self.runtime_adapter.contains_session(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_NOT_RUNNING,
+                message: format!(
+                    "session {session_id} has no live runtime in this process; a compaction \
+                     request never loads or wakes a session"
+                ),
+                data: None,
+            });
+        }
+        self.runtime_adapter
+            .request_compaction(session_id)
+            .await
+            .map_err(runtime_driver_error_to_rpc)
+    }
+
     /// Interrupt a running turn on the given session.
     ///
     /// If the session is idle, this is a no-op.
@@ -13062,8 +13293,10 @@ impl SessionRuntime {
     pub async fn archive_session(&self, session_id: &SessionId) -> Result<(), RpcError> {
         let archived = self.archive_session_inner(session_id).await;
         if archived.is_ok() {
-            // An archived session has no live callback owner left to route to.
+            // An archived session has no live callback owner left to route to,
+            // and no turn left to write session/event copies for.
             self.unbind_session_callback_route(session_id);
+            self.release_session_event_route(session_id);
         }
         archived
     }
@@ -13766,6 +13999,54 @@ impl SessionRuntime {
             .map_err(instruction_activation_host_error_to_rpc)
     }
 
+    /// Record one session-owned operator-instruction write
+    /// (`session/set_instruction`, `session/revoke_instruction`) through the
+    /// session service's instruction extension: durable in the session
+    /// document when this answers, applied at the session's next fresh run
+    /// start. A staged session is not materialized yet and takes none.
+    pub async fn set_session_instruction(
+        &self,
+        session_id: &SessionId,
+        write: meerkat_core::SessionInstructionWrite,
+    ) -> Result<meerkat_core::SessionInstructionReceipt, RpcError> {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+        self.refuse_staged_operator_instructions(session_id).await?;
+        Arc::clone(&self.service)
+            .set_session_instruction(session_id, write)
+            .await
+            .map_err(session_instruction_error_to_rpc)
+    }
+
+    /// Read a session's committed operator-instruction state
+    /// (`session/instruction_status`) without materializing it.
+    pub async fn read_session_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_core::service::SessionInstructionRead, RpcError> {
+        use meerkat_core::service::SessionServiceInstructionExt as _;
+        self.refuse_staged_operator_instructions(session_id).await?;
+        self.service
+            .read_session_instructions(session_id)
+            .await
+            .map_err(session_instruction_error_to_rpc)
+    }
+
+    async fn refuse_staged_operator_instructions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; operator instructions are available only for materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
     /// Restore a retained transcript revision through typed service authority.
     pub async fn restore_session_transcript_revision(
         &self,
@@ -14016,6 +14297,10 @@ impl SessionRuntime {
         self.pending_session_event_streams.lock().await.clear();
 
         self.shutdown_schedule_host().await;
+
+        // Stop the tool grant request executor before the registration
+        // teardown: its passes deliver notices into sessions.
+        self.shutdown_tool_grant_request_executor().await;
 
         // Retire the delivery owner and join its task before registration
         // teardown takes its final snapshot, so no delivery pass admits work
@@ -15996,6 +16281,28 @@ fn instruction_activation_host_error_to_rpc(
     }
 }
 
+/// The JSON-RPC error of an operator-instruction failure: a typed refusal
+/// carries its closed code in `data.instruction_set_code`
+/// ([`crate::handlers::instruction_set_rpc_error`]); a session that cannot be
+/// found, read or written maps as every session error does.
+pub(crate) fn session_instruction_error_to_rpc(
+    failure: meerkat_core::service::SessionInstructionError,
+) -> RpcError {
+    match failure {
+        meerkat_core::service::SessionInstructionError::Session(session) => {
+            session_error_to_rpc(session)
+        }
+        refused => match refused.code() {
+            Some(code) => crate::handlers::instruction_set_rpc_error(code, refused.to_string()),
+            None => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: refused.to_string(),
+                data: None,
+            },
+        },
+    }
+}
+
 pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
     if let SessionError::RuntimeUnavailable { .. } | SessionError::HostingUnavailable { .. } =
         err.primary_error()
@@ -17111,27 +17418,156 @@ mod tests {
     async fn a_turn_writes_session_events_unless_every_input_opted_out() {
         let temp = tempfile::tempdir().expect("tempdir");
         let runtime = make_runtime(temp_factory(&temp), 4);
+        let (default_tx, _default_rx) = mpsc::channel(1);
+        runtime.set_notification_sink(crate::router::NotificationSink::new(default_tx));
+        let writes = |session: &SessionId, input_ids: &[InputId]| {
+            !runtime
+                .turn_session_event_sinks(session, input_ids)
+                .is_empty()
+        };
         let session = SessionId::new();
         let opted_out = InputId::new();
         let wants = InputId::new();
-        let request = runtime.record_turn_session_events_opt_out(&session, &opted_out);
+        let request = runtime.record_turn_session_events_route(
+            &session,
+            &opted_out,
+            TurnSessionEventsRoute::OptedOut,
+        );
 
-        assert!(!runtime.turn_writes_session_events(&session, std::slice::from_ref(&opted_out)));
+        assert!(!writes(&session, std::slice::from_ref(&opted_out)));
         assert!(
-            runtime.turn_writes_session_events(&session, &[opted_out.clone(), wants.clone()]),
+            writes(&session, &[opted_out.clone(), wants.clone()]),
             "another input of the same turn wants the events"
         );
-        assert!(runtime.turn_writes_session_events(&session, std::slice::from_ref(&wants)));
+        assert!(writes(&session, std::slice::from_ref(&wants)));
         assert!(
-            runtime.turn_writes_session_events(&SessionId::new(), std::slice::from_ref(&opted_out)),
+            writes(&SessionId::new(), std::slice::from_ref(&opted_out)),
             "the opt-out is per session"
         );
-        assert!(runtime.turn_writes_session_events(&session, &[]));
+        assert!(writes(&session, &[]));
 
         drop(request);
         assert!(
-            runtime.turn_writes_session_events(&session, std::slice::from_ref(&opted_out)),
+            writes(&session, std::slice::from_ref(&opted_out)),
             "the opt-out ends with its request"
+        );
+    }
+
+    /// A turn's `session/event` copies go to the connections of the requests
+    /// still waiting on its inputs, and an input no waiting request routes
+    /// adds the connection that holds the session: the one that created it
+    /// or, once that one is gone, the next one that starts a turn on it. A
+    /// closed holder's copies go nowhere; only a session no connection holds
+    /// falls back to the process default.
+    #[tokio::test]
+    async fn a_turn_writes_session_events_to_its_requests_and_its_holder_only() {
+        use crate::router::NotificationSink;
+
+        fn routed_to(sinks: &[NotificationSink], expected: &[&NotificationSink]) -> bool {
+            sinks.len() == expected.len()
+                && expected
+                    .iter()
+                    .all(|sink| sinks.iter().any(|routed| routed.same_connection(sink)))
+        }
+        fn connection() -> (
+            NotificationSink,
+            mpsc::Receiver<crate::protocol::RpcNotification>,
+        ) {
+            let (tx, rx) = mpsc::channel(1);
+            (NotificationSink::new(tx), rx)
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        let (default, _default_rx) = connection();
+        let (a, a_rx) = connection();
+        let (b, _b_rx) = connection();
+        runtime.set_notification_sink(default.clone());
+        let session = SessionId::new();
+        let from_a = InputId::new();
+        let from_b = InputId::new();
+        let opted_out = InputId::new();
+        let queued = InputId::new();
+        let request_a = runtime.record_turn_session_events_route(
+            &session,
+            &from_a,
+            TurnSessionEventsRoute::Connection(a.clone()),
+        );
+        let _request_b = runtime.record_turn_session_events_route(
+            &session,
+            &from_b,
+            TurnSessionEventsRoute::Connection(b.clone()),
+        );
+        let _request_opted_out = runtime.record_turn_session_events_route(
+            &session,
+            &opted_out,
+            TurnSessionEventsRoute::OptedOut,
+        );
+        let sinks = |input_ids: &[InputId]| runtime.turn_session_event_sinks(&session, input_ids);
+
+        assert!(
+            routed_to(&sinks(std::slice::from_ref(&from_a)), &[&a]),
+            "a request's turn goes to its connection"
+        );
+        assert!(
+            routed_to(&sinks(&[from_a.clone(), from_b.clone()]), &[&a, &b]),
+            "a turn carrying two requests' inputs goes to both connections"
+        );
+        assert!(
+            routed_to(&sinks(&[opted_out, from_b.clone()]), &[&b]),
+            "an opted-out request adds no connection"
+        );
+        assert!(
+            routed_to(&sinks(std::slice::from_ref(&queued)), &[&default]),
+            "a session no connection holds falls back to the process default"
+        );
+
+        runtime.hold_session_event_route(session.clone(), a.clone());
+        assert!(
+            routed_to(&sinks(std::slice::from_ref(&queued)), &[&a]),
+            "a turn no request waits on goes to the holder, not the default"
+        );
+        assert!(routed_to(
+            &sinks(&[queued.clone(), from_b.clone()]),
+            &[&a, &b]
+        ));
+        runtime.take_free_session_event_route(&session, &b);
+        assert!(
+            routed_to(&sinks(std::slice::from_ref(&queued)), &[&a]),
+            "an open holder keeps the route"
+        );
+
+        drop(a_rx);
+        assert!(
+            sinks(std::slice::from_ref(&queued)).is_empty(),
+            "a closed holder's copies go to no other connection"
+        );
+        assert!(
+            sinks(std::slice::from_ref(&from_a)).is_empty(),
+            "nor do those of a request whose connection is gone"
+        );
+        runtime.take_free_session_event_route(&session, &b);
+        assert!(
+            routed_to(&sinks(std::slice::from_ref(&queued)), &[&b]),
+            "the next connection that starts a turn takes a closed holder's route"
+        );
+
+        drop(request_a);
+        assert!(
+            routed_to(&sinks(std::slice::from_ref(&from_a)), &[&b]),
+            "a request's route ends with the request"
+        );
+        assert!(
+            routed_to(
+                &runtime.turn_session_event_sinks(&SessionId::new(), std::slice::from_ref(&from_b)),
+                &[&default]
+            ),
+            "routes and holders are per session"
+        );
+        runtime.release_session_event_route(&session);
+        assert!(
+            routed_to(&sinks(std::slice::from_ref(&queued)), &[&default]),
+            "an archived session's holder is released"
         );
     }
 
@@ -21210,6 +21646,102 @@ mod tests {
         )
     }
 
+    /// The executor contract for the RPC session executor: a boundary cancel
+    /// the runtime loop applies while no run is active is a no-op, so the
+    /// session keeps serving input.
+    #[tokio::test]
+    async fn rpc_session_executor_idle_boundary_cancel_conformance() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let session_id = runtime
+            .create_or_resume_session_without_turn(
+                mock_build_config(),
+                None,
+                None,
+                Default::default(),
+            )
+            .await
+            .expect("create the session without a turn");
+        runtime
+            .ensure_runtime_executor(&session_id)
+            .await
+            .expect("attach the RPC runtime executor");
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime.runtime_adapter(),
+            &session_id,
+        )
+        .await;
+    }
+
+    /// The same executor contract for the RPC crate's other executor, the
+    /// one mob-owned bridge sessions get: attached with its runtime, as the
+    /// RPC session runtime attaches it, a boundary cancel the runtime loop
+    /// applies while no run is active is a no-op.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_rpc_runtime_executor_idle_boundary_cancel_conformance() {
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = make_runtime(temp_factory(&temp), 4);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let service = runtime.session_service();
+        let session_id = service
+            .create_session(service_create_request(
+                mock_build_config(),
+                InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create a mob-capable session without a turn")
+            .session_id;
+        service
+            .start_turn(
+                &session_id,
+                service_start_turn_request("materialize the session"),
+            )
+            .await
+            .expect("materialize the session");
+        let actor_witness = runtime
+            .mob_actor_witness(&session_id)
+            .expect("the session's live actor authority");
+        let runtime_for_factory = Arc::clone(&runtime);
+        let _attachment = match runtime
+            .runtime_adapter
+            .ensure_session_with_executor_factory(session_id.clone(), move |witness| {
+                let executor = crate::session_executor::MobRpcRuntimeExecutor::new(
+                    Arc::clone(&service),
+                    Some(Arc::clone(&runtime_for_factory)),
+                    actor_witness,
+                    crate::router::NotificationSink::noop(),
+                );
+                runtime_for_factory.record_runtime_publication_handle(
+                    witness,
+                    executor.replaceable_publication_handle(),
+                    RpcPublicationOwner::Mob {
+                        session_service: service,
+                    },
+                );
+                Box::new(executor) as Box<dyn CoreExecutor>
+            })
+            .await
+            .expect("prepare the mob RPC executor attachment")
+        {
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Pending(pending) => pending
+                .commit()
+                .await
+                .expect("commit the mob RPC executor attachment"),
+            meerkat_runtime::EnsureRuntimeExecutorAttachment::Existing(_) => {
+                panic!("the session must begin without an executor attachment")
+            }
+        };
+        meerkat_runtime::assert_idle_boundary_cancel_keeps_the_session_serving(
+            &runtime.runtime_adapter(),
+            &session_id,
+        )
+        .await;
+    }
+
     fn mock_build_config() -> AgentBuildConfig {
         AgentBuildConfig {
             llm_client_override: Some(Arc::new(MockLlmClient)),
@@ -21594,6 +22126,22 @@ mod tests {
                 delta: meerkat_core::config::ConfigDelta,
             ) -> Result<Config, meerkat_core::config::ConfigError> {
                 self.inner.patch(delta).await
+            }
+
+            async fn set_held(
+                &self,
+                guard: &meerkat_core::AdmissionGuard,
+                config: Config,
+            ) -> Result<(), meerkat_core::config::ConfigError> {
+                self.inner.set_held(guard, config).await
+            }
+
+            async fn patch_held(
+                &self,
+                guard: &meerkat_core::AdmissionGuard,
+                delta: meerkat_core::config::ConfigDelta,
+            ) -> Result<Config, meerkat_core::config::ConfigError> {
+                self.inner.patch_held(guard, delta).await
             }
         }
 
@@ -24595,6 +25143,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -24793,6 +25342,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -24915,6 +25465,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -25093,6 +25644,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -25217,6 +25769,7 @@ mod tests {
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     convention: Some(meerkat_runtime::PeerConvention::ResponseTerminal {
                         request_id: "018f6f79-7a82-7c4e-a552-a3b86f9630f1".to_string(),
@@ -26702,10 +27255,10 @@ mod tests {
         use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
 
         const RESPONSES_SSE: &str = concat!(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",",
-            "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n",
-            "data: [DONE]\n",
+            "\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n",
+            "data: [DONE]\n\n",
         );
         async fn capture(
             State(bodies): State<Arc<std::sync::Mutex<Vec<serde_json::Value>>>>,
@@ -26924,7 +27477,10 @@ mod tests {
             &transition,
         )
         .expect("the login's tokens are marked");
-        token_store.save(&key, &marked).await.unwrap();
+        token_store
+            .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+            .await
+            .unwrap();
         // What the scenario relies on: the ChatGPT binding resolves, so a
         // target naming no binding can be served by it.
         runtime
@@ -27452,6 +28008,7 @@ mod tests {
         let tokens = meerkat_providers::auth_store::PersistedTokens::api_key("sk-hot-swap");
         token_store
             .save(
+                &meerkat_core::AdmissionGuard::none(),
                 &meerkat_providers::auth_store::TokenKey::from_auth_binding(&auth_binding),
                 &tokens,
             )
@@ -30974,6 +31531,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             convention: Some(meerkat_runtime::PeerConvention::ResponseProgress {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -31049,6 +31607,7 @@ mod tests {
                 idempotency_key: None,
                 supersession_key: None,
                 correlation_id: None,
+                requester: None,
             },
             operation_id: operation_id.clone(),
             event: meerkat_core::OpEvent::Cancelled { id: operation_id },
@@ -31889,6 +32448,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -32962,6 +33522,127 @@ mod tests {
             .create_session(mock_build_config(), None, None, Vec::new())
             .await
             .expect("completed mob runtime executor apply should release active admission");
+    }
+
+    /// A mob member's runtime executor resolves where each turn writes its
+    /// `session/event` copies when it applies the turn, as a session's
+    /// executor does: to the connection of the request waiting on the turn's
+    /// input, and for a turn no request routes, to the runtime's default at
+    /// that time. The default current when the executor was created gets
+    /// neither.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn mob_runtime_executor_resolves_session_event_routes_per_turn() {
+        use crate::router::NotificationSink;
+        use meerkat_core::lifecycle::core_executor::CoreExecutor;
+
+        /// Drains `rx` and counts the `session/event` notifications it held.
+        fn session_events(rx: &mut mpsc::Receiver<crate::protocol::RpcNotification>) -> usize {
+            let mut count = 0;
+            while let Ok(notification) = rx.try_recv() {
+                if notification.method == "session/event" {
+                    count += 1;
+                }
+            }
+            count
+        }
+
+        async fn admit(runtime: &Arc<SessionRuntime>, session_id: &SessionId) -> RunPrimitive {
+            let primitive = runtime_content_turn_primitive();
+            let input_id = primitive
+                .contributing_input_ids()
+                .first()
+                .cloned()
+                .expect("runtime primitive should carry input id");
+            let admission = runtime
+                .reserve_active_turn(session_id)
+                .await
+                .expect("reserve runtime pre-admission");
+            runtime
+                .insert_runtime_pre_admission(session_id.clone(), input_id, admission)
+                .expect("insert runtime pre-admission");
+            primitive
+        }
+
+        /// A materialized session the mob session service created, and the
+        /// member executor of its exact live actor.
+        async fn member(
+            runtime: &Arc<SessionRuntime>,
+        ) -> (SessionId, crate::session_executor::MobRpcRuntimeExecutor) {
+            let service = runtime.session_service();
+            let direct = service
+                .create_session(service_create_request(
+                    mock_build_config(),
+                    InitialTurnPolicy::Defer,
+                ))
+                .await
+                .expect("mob/direct deferred create must capture actor authority");
+            service
+                .start_turn(
+                    &direct.session_id,
+                    service_start_turn_request("materialize before the member executor applies"),
+                )
+                .await
+                .expect("materialize session");
+            let executor = crate::session_executor::MobRpcRuntimeExecutor::new(
+                runtime.session_service(),
+                Some(Arc::clone(runtime)),
+                runtime
+                    .mob_actor_witness(&direct.session_id)
+                    .expect("materialization must capture exact live actor authority"),
+                NotificationSink::noop(),
+            );
+            (direct.session_id, executor)
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 2);
+        // Both executors are created while `at_creation` is the default.
+        let (at_creation_tx, mut at_creation) = mpsc::channel(256);
+        runtime.set_notification_sink(NotificationSink::new(at_creation_tx));
+        let (requested, mut requested_executor) = member(&runtime).await;
+        let (unrouted, mut unrouted_executor) = member(&runtime).await;
+        // Only the turns the executors apply below count.
+        session_events(&mut at_creation);
+
+        // A turn whose request waits on another connection writes there.
+        let (requester_tx, mut requester) = mpsc::channel(256);
+        let primitive = admit(&runtime, &requested).await;
+        let input_id = primitive.contributing_input_ids()[0].clone();
+        let _request = runtime.record_turn_session_events_route(
+            &requested,
+            &input_id,
+            TurnSessionEventsRoute::Connection(NotificationSink::new(requester_tx)),
+        );
+        requested_executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("the requested member turn applies");
+        assert!(
+            session_events(&mut requester) > 0,
+            "the requester's connection did not receive the member turn"
+        );
+        assert_eq!(
+            session_events(&mut at_creation),
+            0,
+            "the default current at the executor's creation received the requested turn"
+        );
+
+        // A turn no request routes writes to the default current when the
+        // turn is applied.
+        let (later_tx, mut later) = mpsc::channel(256);
+        runtime.set_notification_sink(NotificationSink::new(later_tx));
+        let primitive = admit(&runtime, &unrouted).await;
+        unrouted_executor
+            .apply(RunId::new(), primitive)
+            .await
+            .expect("the unrouted member turn applies");
+        assert!(
+            session_events(&mut later) > 0,
+            "the default current at apply did not receive the unrouted member turn"
+        );
+        assert_eq!(session_events(&mut at_creation), 0);
+        assert_eq!(session_events(&mut requester), 0);
     }
 
     #[cfg(feature = "mob")]
@@ -37345,6 +38026,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -37446,6 +38128,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -43717,6 +44400,7 @@ mod governed_host_original_tests {
         );
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("controller"),
                 principal("executor"),
@@ -43726,6 +44410,7 @@ mod governed_host_original_tests {
             .expect("controller lineage");
         let operation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("read-only"),
                 principal("executor"),
@@ -43735,6 +44420,7 @@ mod governed_host_original_tests {
             .expect("operation grant");
         let configuration = NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             grants,
             ingress: Arc::new(move |_, _, ingress: &NativeIngressContext, _| {
@@ -44410,3 +45096,39 @@ mod governed_host_original_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #[path = "session_runtime/resumed_run_tests.rs"]
 mod resumed_run_tests;
+
+/// The RPC `MobSessionService` wrapper forwards the cold settle of a member
+/// session's owed compaction projections to the persistent service it
+/// wraps. The trait default refuses it for a service that keeps durable
+/// sessions, so a wrapper without the forward compiles and leaves a dormant
+/// member's owed compaction unsettled when its mob rotates it.
+#[cfg(test)]
+mod owed_compaction_forward_guard {
+    /// The `MobSessionService` impl block of `wrapper` in `source`, up to
+    /// its closing brace, whatever form its header takes (the trait's path
+    /// with or without a leading `::`, or an imported name). Only the source
+    /// before this module is read, so the guard's own text never stands for
+    /// a wrapper's.
+    fn wrapper_impl<'a>(source: &'a str, wrapper: &str) -> Option<&'a str> {
+        let source = &source[..source
+            .find("mod owed_compaction_forward_guard")
+            .unwrap_or(source.len())];
+        let at = source.find(&format!("MobSessionService for {wrapper} {{"))?;
+        let line = source[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        if !source[line..at].trim_start().starts_with("impl") {
+            return None;
+        }
+        let body = &source[at..];
+        Some(&body[..body.find("\n}\n")?])
+    }
+
+    #[test]
+    fn the_rpc_wrapper_forwards_the_owed_compaction_settle() {
+        let block = wrapper_impl(include_str!("session_runtime.rs"), "RpcMobSessionService");
+        assert!(block.is_some(), "the RPC wrapper is in the source");
+        assert!(
+            block.is_some_and(|block| block.contains("::settle_owed_compaction_projections(")),
+            "the RPC wrapper forwards the owed compaction settle to the service it wraps"
+        );
+    }
+}

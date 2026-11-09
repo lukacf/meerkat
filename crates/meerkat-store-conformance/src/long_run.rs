@@ -324,7 +324,8 @@ pub enum ResumeGate {
     /// The gate answers superseded: the work item moved.
     Superseded,
     /// The gate answers unavailable every time, through all of Core's
-    /// bounded retries.
+    /// bounded retries: the run is neither resumed nor ended, and stays for
+    /// the next start.
     Unavailable,
     /// The gate answers unavailable once, then continue.
     UnavailableOnce,
@@ -368,7 +369,10 @@ pub trait DurableWorkerHarness: Send + Sync {
     async fn spawn_and_kill(&self, plan: &LongRunPlan) -> Result<KilledWorker, ConformanceFailure>;
 
     /// Restart over the same store with `gate` as the durable resume gate,
-    /// and run until the mob is idle.
+    /// and run until the mob is idle. After a restart whose gate could not
+    /// decide ([`ResumeGate::Unavailable`]) the run stays open in the store,
+    /// and the chapter restarts again over the same store, as the next start
+    /// of the process does.
     async fn restart(
         &self,
         plan: &LongRunPlan,

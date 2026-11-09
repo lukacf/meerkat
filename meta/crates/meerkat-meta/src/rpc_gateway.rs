@@ -125,6 +125,13 @@ struct GatewayRuntimeOptions {
     console_read_only: Option<bool>,
     console_fetch_timeout_ms: Option<u64>,
     access: Option<crate::AccessController>,
+    /// `runtime_options.decisions`: the decision ingresses whose attested
+    /// people decide durable decisions on this stdio host.
+    decision_ingresses: Option<crate::durable_decisions::DecisionIngressDeclarations>,
+    /// `runtime_options.mcp_accounts`: the account modes of MCP servers
+    /// ([`crate::McpAccountsConfig`]); absent, every server's account is the
+    /// system's.
+    mcp_accounts: Option<crate::McpAccountsConfig>,
     demo_llm: bool,
     /// Bind each locally hosted member to a signed loopback TCP endpoint so
     /// peer-only external members in another process can return traffic.
@@ -424,21 +431,6 @@ impl AgentMemoryStoreMigration {
     }
 }
 
-/// §7.2: `operator_scope = "provisional"` composes operator-scope recall
-/// only when an `OperatorResolver` is installed. The shipped SDK gateway
-/// installs the console-principal resolver when provisional scope is enabled;
-/// this predicate remains a fail-loud guard for any composition path that
-/// omits it.
-fn operator_scope_recall_inert(
-    agent_memory: Option<&GatewayAgentMemoryOptions>,
-    resolver_installed: bool,
-) -> bool {
-    !resolver_installed
-        && agent_memory.is_some_and(|memory| {
-            memory.config.operator_scope == crate::AgentMemoryOperatorScope::Provisional
-        })
-}
-
 impl GatewayRuntimeOptions {
     /// True when a strict GPT Live stdio registration (public `openai_live`
     /// or deprecated `experimental_live`) was configured. Either one needs the
@@ -488,6 +480,8 @@ impl Default for GatewayRuntimeOptions {
             console_read_only: None,
             console_fetch_timeout_ms: None,
             access: None,
+            decision_ingresses: None,
+            mcp_accounts: None,
             demo_llm: false,
             member_comms_address: None,
             contacts: None,
@@ -4229,10 +4223,20 @@ default_binding = "local"
         dispatcher: &Arc<CallbackToolDispatcher>,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_contracts::JobReceipt, ToolError> {
-        let context = detached_callback_test_context();
-        let plan = resolve_detached_callback_test_plan(dispatcher, call, &context);
+        submit_detached_callback_test_call_in(dispatcher, call, &detached_callback_test_context())
+            .await
+    }
+
+    /// [`submit_detached_callback_test_call`] as the run whose dispatch
+    /// context is `context` submits it.
+    async fn submit_detached_callback_test_call_in(
+        dispatcher: &Arc<CallbackToolDispatcher>,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_contracts::JobReceipt, ToolError> {
+        let plan = resolve_detached_callback_test_plan(dispatcher, call, context);
         let outcome =
-            meerkat_core::dispatch_tool_execution_plan_fenced(dispatcher, call, &context, &plan)
+            meerkat_core::dispatch_tool_execution_plan_fenced(dispatcher, call, context, &plan)
                 .await?;
         Ok(serde_json::from_str(&outcome.result.text_content()).expect("job receipt"))
     }
@@ -4538,6 +4542,205 @@ default_binding = "local"
         assert_eq!(sent[0]["method"], "callback/job/start");
         assert_eq!(sent[0]["params"]["authority"]["job_id"], job_id);
         assert_eq!(sent[0]["params"]["arguments"], json!({"target": "build-8"}));
+    }
+
+    /// A person in an OIDC issuer's trust domain, as the console names a
+    /// signed-in person.
+    fn callback_test_person(subject: &str) -> meerkat_core::PrincipalRef {
+        meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            subject,
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("person")
+    }
+
+    /// A detached callback job records the original requester of the run
+    /// that submitted it, and every `callback/job/start` the gateway sends
+    /// for the job names it: the attempt the submission starts, and the
+    /// attempt a gateway restarted on the same stores starts for a queued
+    /// job.
+    #[tokio::test]
+    async fn detached_job_callback_carries_requester() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let requester = meerkat_core::TurnRequester::direct(callback_test_person("alice"));
+        let expected = json!({
+            "principal": serde_json::to_value(callback_test_person("alice")).expect("principal"),
+        });
+
+        let args = serde_json::value::RawValue::from_string(r#"{"target":"build-9"}"#.to_string())
+            .expect("raw arguments");
+        let call = ToolCallView {
+            id: "tc-person",
+            name: "security_scan",
+            args: &args,
+        };
+        let job_id = {
+            let (store, _binary, blobs) = open_detached_callback_test_stores(root.path());
+            let (dispatcher, bridge, mut stdout_rx) =
+                detached_callback_test_dispatcher(store, blobs);
+            let receipt = submit_detached_callback_test_call_in(
+                &dispatcher,
+                call,
+                &detached_callback_test_context().with_requester(Some(requester.clone())),
+            )
+            .await
+            .expect("detached submit");
+            let start = accept_detached_callback_start(&bridge, &mut stdout_rx).await;
+            assert_eq!(
+                start["requester"], expected,
+                "the first attempt names the submitting run's requester: {start}"
+            );
+            receipt.job_id
+        };
+        let (store, _binary, _blobs) = open_detached_callback_test_stores(root.path());
+        assert_eq!(
+            store
+                .get(&meerkat::JobId::new(&job_id).expect("job id"))
+                .await
+                .expect("read the job")
+                .expect("the job is stored")
+                .spec
+                .requester,
+            Some(requester.clone()),
+            "the job records the requester durably"
+        );
+        drop(store);
+
+        let queued_root = tempfile::tempdir().expect("temp dir");
+        let queued = {
+            use base64::Engine as _;
+            let (store, _binary, blobs) = open_detached_callback_test_stores(queued_root.path());
+            let specification = blobs
+                .put_artifact(
+                    CALLBACK_ARGUMENTS_MEDIA_TYPE,
+                    &base64::engine::general_purpose::STANDARD.encode(br#"{"target":"build-8"}"#),
+                )
+                .await
+                .expect("callback arguments");
+            let spec = meerkat::JobSpec::new(
+                crate::storage_provider::DEFAULT_MEERKAT_LEVEL_REALM_ID,
+                meerkat_core::SessionId::parse("019f74fb-1907-7b21-932d-ab22c4d1f532")
+                    .expect("session id"),
+                meerkat::ExecutionIntentId::from_string("intent:person").expect("intent"),
+                meerkat::InteractionLineageId::from_string("lineage:person").expect("lineage"),
+                meerkat::ToolIdentity::new("security_scan", "1").expect("tool"),
+                meerkat::RunnerIdentity::new("example.security_scan", "1").expect("runner"),
+                meerkat::RestartClass::Adoptable,
+                meerkat::CanonicalArgumentsHash::new(format!("sha256:{}", "c".repeat(64)))
+                    .expect("arguments hash"),
+                meerkat::JobSubmissionKey::new("callback:person").expect("submission key"),
+            )
+            .with_runner_specification_ref(
+                meerkat::RunnerSpecificationRef::new(specification.blob_id.to_string())
+                    .expect("specification ref"),
+            )
+            .with_requester(Some(requester));
+            meerkat::DetachedJobService::new(store)
+                .submit(spec)
+                .await
+                .expect("submit")
+                .job_id
+                .to_string()
+        };
+        let start = first_callback_after_restart(
+            queued_root.path(),
+            detached_security_scan("1"),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("a restarted gateway starts its queued job");
+        assert_eq!(start["method"], "callback/job/start");
+        assert_eq!(start["params"]["authority"]["job_id"], queued);
+        assert_eq!(
+            start["params"]["requester"], expected,
+            "an attempt started from the store names the job's requester: {start}"
+        );
+    }
+
+    /// A fast callback tool's `callback/call_tool` names the run's
+    /// requester; tool arguments that name one reach the host as arguments
+    /// only, and a run without a requester sends none.
+    #[tokio::test]
+    async fn forged_arguments_cannot_set_origin() {
+        let forged = r#"{"requester":{"principal":{"kind":"human","id":"mallory"}}}"#;
+        for (context, expected) in [
+            (
+                meerkat_core::ToolDispatchContext::default().with_requester(Some(
+                    meerkat_core::TurnRequester::direct(callback_test_person("alice")),
+                )),
+                json!({
+                    "principal": serde_json::to_value(callback_test_person("alice"))
+                        .expect("principal"),
+                }),
+            ),
+            (meerkat_core::ToolDispatchContext::default(), Value::Null),
+        ] {
+            let (stdout_tx, mut stdout_rx) = mpsc::channel::<GatewayStdoutLine>(4);
+            let bridge = StdioCallbackBridge::new(stdout_tx);
+            let dispatcher: Arc<dyn AgentToolDispatcher> = Arc::new(CallbackToolDispatcher::new(
+                bridge.clone(),
+                "build-1".to_string(),
+                vec![CallbackToolSpec::parse(&json!({"name": "lookup"})).expect("tool spec")],
+                None,
+            ));
+            let args = serde_json::value::RawValue::from_string(forged.to_string())
+                .expect("raw arguments");
+            let call = ToolCallView {
+                id: "tc-forged",
+                name: "lookup",
+                args: &args,
+            };
+            let plan = meerkat_core::resolve_tool_execution_plan_fenced(
+                &dispatcher,
+                call,
+                &context,
+                &meerkat_core::ToolExecutionResolutionContext::new(
+                    meerkat_core::ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
+                        ToolDeadlineOwner::CoreToolDispatch,
+                        Duration::from_secs(30),
+                    )])
+                    .expect("deadline chain"),
+                ),
+            )
+            .expect("execution plan");
+            let host = async {
+                let line = tokio::time::timeout(Duration::from_secs(5), stdout_rx.recv())
+                    .await
+                    .expect("the call reaches the host")
+                    .expect("callback line");
+                let request: Value = serde_json::from_str(&line).expect("callback json");
+                bridge
+                    .route_callback_response(json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"].clone(),
+                        "result": {"content": "ok"}
+                    }))
+                    .await;
+                request
+            };
+            let (outcome, request) = tokio::join!(
+                meerkat_core::dispatch_tool_execution_plan_fenced(
+                    &dispatcher,
+                    call,
+                    &context,
+                    &plan
+                ),
+                host
+            );
+            outcome.expect("the call completes");
+            assert_eq!(request["method"], "callback/call_tool");
+            assert_eq!(
+                request["params"]["requester"], expected,
+                "the run's requester, never the arguments': {request}"
+            );
+            assert_eq!(
+                request["params"]["arguments"],
+                serde_json::from_str::<Value>(forged).expect("arguments json"),
+                "the arguments reach the host unchanged"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5000,6 +5203,43 @@ actions = ["agent.view"]
             Err(err) => err,
         };
         assert!(err.contains("access_config_path"), "{err}");
+    }
+
+    #[test]
+    fn gateway_runtime_options_parse_mcp_accounts() {
+        let params = json!({
+            "runtime_options": {
+                "mcp_accounts": { "servers": { "notes": { "accounts": "personal" } } }
+            }
+        });
+        let options = parse_gateway_runtime_options(&params, None).expect("runtime options");
+        assert!(
+            options
+                .mcp_accounts
+                .expect("account modes")
+                .is_personal("notes")
+        );
+
+        for invalid in [
+            json!({ "servers": { "notes": { "accounts": "team" } } }),
+            json!({ "servers": { "notes": { "accounts": "personal", "owner": "someone" } } }),
+            json!({ "personal": ["notes"] }),
+            json!("personal"),
+        ] {
+            let params = json!({ "runtime_options": { "mcp_accounts": invalid.clone() } });
+            let err = match parse_gateway_runtime_options(&params, None) {
+                Ok(_) => panic!("refused: {invalid}"),
+                Err(err) => err,
+            };
+            assert!(err.contains("runtime_options.mcp_accounts"), "{err}");
+        }
+
+        let params = json!({ "runtime_options": { "mcp_accounts": null } });
+        let options = parse_gateway_runtime_options(&params, None).expect("runtime options");
+        assert!(
+            options.mcp_accounts.is_none(),
+            "null keeps every account the system's"
+        );
     }
 
     #[test]
@@ -6409,31 +6649,6 @@ comms = true
         });
         parse_gateway_runtime_options(&params, Some(tmp.path()))
             .expect("markdown + off should parse");
-    }
-
-    #[test]
-    fn operator_scope_warning_fires_exactly_when_provisional_without_resolver() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let parse = |scope: &str| {
-            let params = json!({
-                "runtime_options": {
-                    "agent_memory": { "operator_scope": scope }
-                }
-            });
-            parse_gateway_runtime_options(&params, Some(tmp.path()))
-                .expect("parse")
-                .agent_memory
-                .expect("agent memory options")
-        };
-        let provisional = parse("provisional");
-        let off = parse("off");
-
-        assert!(operator_scope_recall_inert(Some(&provisional), false));
-        assert!(!operator_scope_recall_inert(Some(&provisional), true));
-        assert!(!operator_scope_recall_inert(Some(&off), false));
-        assert!(!operator_scope_recall_inert(Some(&off), true));
-        assert!(!operator_scope_recall_inert(None, false));
-        assert!(!operator_scope_recall_inert(None, true));
     }
 
     #[test]
@@ -8097,6 +8312,91 @@ comms = true
         assert!(bridge.state.lock().await.pending.is_empty());
     }
 
+    /// The host's error answer to `callback/build_agent` refuses the build
+    /// typed, on both build paths: structured data of Meta's own kind with
+    /// the host's reason, beside the message operators read. A callback that
+    /// never completed (its transport closed) stays the retryable tool
+    /// failure it was.
+    ///
+    /// RED before the builder typed the answer: the host's refusal was a
+    /// tool failure whose text carried it.
+    #[tokio::test(start_paused = true)]
+    async fn the_hosts_build_refusal_is_typed_on_both_build_paths() {
+        for taking_tools in [false, true] {
+            let tmp = tempfile::tempdir().expect("temp dir");
+            let (stdout_tx, mut stdout_rx) = mpsc::channel(1);
+            let builder = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let mut build = Box::pin(async {
+                if taking_tools {
+                    builder.build_agent_taking_tools(&mut req, event_tx).await
+                } else {
+                    builder.build_agent(&req, event_tx).await
+                }
+            });
+            assert!(futures::poll!(&mut build).is_pending());
+            let request: Value =
+                serde_json::from_str(&stdout_rx.recv().await.expect("callback request"))
+                    .expect("callback JSON");
+            builder
+                .bridge
+                .route_callback_response(json!({
+                    "id": request["id"], "error": {"message": "the host's gate refused the member"},
+                }))
+                .await;
+            let Err(error) = build.await else {
+                panic!("taking_tools={taking_tools}: the host's refusal fails the build");
+            };
+            let SessionError::FailedWithData { message, data } = &error else {
+                panic!("taking_tools={taking_tools}: the refusal is typed: {error:?}");
+            };
+            assert_eq!(data["kind"], "meta_host_rejected_build", "{data}");
+            assert_eq!(
+                data["reason"], "the host's gate refused the member",
+                "{data}"
+            );
+            assert!(
+                message.contains("the host's gate refused the member"),
+                "{message}"
+            );
+
+            let (stdout_tx, _stdout_rx) = mpsc::channel(1);
+            let closed = StdioCallbackAgentBuilder {
+                inner: FactoryAgentBuilder::new(AgentFactory::new(tmp.path()), Config::default()),
+                bridge: StdioCallbackBridge::new(stdout_tx),
+                has_session_builder: true,
+                session_store: None,
+                detached_jobs: None,
+                installed_artifacts: None,
+                member_build_guard: None,
+            };
+            closed.bridge.close().await;
+            let mut req = callback_test_request(None);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let failed = if taking_tools {
+                closed.build_agent_taking_tools(&mut req, event_tx).await
+            } else {
+                closed.build_agent(&req, event_tx).await
+            };
+            let Err(error) = failed else {
+                panic!("taking_tools={taking_tools}: a closed transport fails the build");
+            };
+            assert!(
+                matches!(error, SessionError::Agent(_)),
+                "taking_tools={taking_tools}: a transport failure stays the tool failure: {error:?}"
+            );
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn callback_reliable_notification_reports_blocked_and_closed_stdout() {
         let (stdout_tx, mut stdout_rx) = mpsc::channel(1);
@@ -9385,6 +9685,15 @@ fn gateway_experimental_live_operator(
     Ok(operator)
 }
 
+/// The init refusal of `runtime_options.mcp_accounts` naming personal servers
+/// on a launch whose member factory keeps no provider credentials.
+fn personal_accounts_unavailable(error: &meerkat::HostAuthError) -> String {
+    format!(
+        "runtime_options.mcp_accounts names personal servers, and this launch has no provider \
+         credential store to keep personal accounts in: {error}"
+    )
+}
+
 fn parse_gateway_runtime_options(
     params: &Value,
     persistent_state: Option<&std::path::Path>,
@@ -9403,6 +9712,7 @@ fn parse_gateway_runtime_options(
         "gating_config_path",
         "auth_config",
         "access_config_path",
+        "mcp_accounts",
         "console_config_path",
         "console_require_app_auth",
         "console_read_only",
@@ -9439,6 +9749,8 @@ fn parse_gateway_runtime_options(
         // parse runs (see `run_persistent_inner`).
         "native_realm",
         "member_auth_binding",
+        // Parsed typed by `crate::tool_grant_options` before this parse runs.
+        "tool_grants",
         "http_listen",
         "http_public_base_url",
         "allow_remote",
@@ -9446,6 +9758,7 @@ fn parse_gateway_runtime_options(
         "identity_creation",
         "control_request_window_ms",
         "serve_keyed_inject",
+        "decisions",
     ];
     let unsupported = runtime_options
         .keys()
@@ -9592,6 +9905,17 @@ fn parse_gateway_runtime_options(
         parsed.console_ui = load_console_ui_config_from_path_for_realm(path, None)
             .map_err(|err| format!("runtime_options.console_config_path is invalid: {err}"))?;
     }
+    // The decision ingresses a declared host channel attests people
+    // through; absent or null declares none.
+    match runtime_options.get("decisions") {
+        None | Some(Value::Null) => {}
+        Some(value) => {
+            parsed.decision_ingresses = Some(
+                serde_json::from_value(value.clone())
+                    .map_err(|err| format!("runtime_options.decisions is invalid: {err}"))?,
+            );
+        }
+    }
     // An explicit access path must be a path string; absent or null keeps
     // access control off.
     match runtime_options.get("access_config_path") {
@@ -9605,6 +9929,24 @@ fn parse_gateway_runtime_options(
         }
         Some(_) => {
             return Err("runtime_options.access_config_path must be a string".to_string());
+        }
+    }
+    // The approver map may list only the declared ingresses and the
+    // built-in operator.
+    crate::durable_decisions::check_approver_ingresses(
+        parsed.access.as_ref(),
+        &parsed.decision_ingresses.clone().unwrap_or_default(),
+    )
+    .map_err(|err| format!("runtime_options.access_config_path is invalid: {err}"))?;
+    // The account modes of MCP servers; absent or null keeps every server's
+    // account the system's.
+    match runtime_options.get("mcp_accounts") {
+        None | Some(Value::Null) => {}
+        Some(value) => {
+            parsed.mcp_accounts = Some(
+                crate::McpAccountsConfig::from_json_value(value.clone())
+                    .map_err(|error| format!("runtime_options.mcp_accounts: {error}"))?,
+            );
         }
     }
     if let Some(value) = runtime_options.get("console_require_app_auth") {
@@ -10685,9 +11027,9 @@ fn parse_gateway_agent_memory_config(
         Some(value) => crate::ContentTrustConfig::from_json_value(value)
             .map_err(|err| format!("runtime_options.agent_memory.{err}"))?,
     };
-    // §7.2 operator-scope activation. PROVISIONAL keying (§16 Q1): the
-    // value name says so on purpose — deployments opting in accept that the
-    // keying (console auth principal) may change when the question closes.
+    // §7.2 operator-scope activation: `provisional` gives each console
+    // person an operator scope keyed by their caller scope; the value keeps
+    // its name for configuration compatibility.
     let operator_scope = match object.get("operator_scope") {
         None => crate::AgentMemoryOperatorScope::Off,
         Some(value) => match value.as_str().map(str::trim) {
@@ -11183,6 +11525,9 @@ fn run_single_shot(args: &[String]) {
 
 struct GatewayStdoutLine {
     response: crate::SerializedRpcResponseDelivery,
+    /// Told, once the writer settles this line, whether it reached the pipe
+    /// (written and flushed); `false` when it is dropped unwritten.
+    acknowledgement: Option<oneshot::Sender<bool>>,
     #[cfg(feature = "openai-live")]
     public_observation_delivery: Option<oneshot::Sender<bool>>,
     #[cfg(feature = "openai-live")]
@@ -11199,6 +11544,7 @@ impl GatewayStdoutLine {
     fn plain(line: String) -> Self {
         Self {
             response: crate::SerializedRpcResponseDelivery::plain(line),
+            acknowledgement: None,
             #[cfg(feature = "openai-live")]
             public_observation_delivery: None,
             #[cfg(feature = "openai-live")]
@@ -11206,9 +11552,26 @@ impl GatewayStdoutLine {
         }
     }
 
+    /// A line whose sender learns whether it reached the pipe.
+    fn acknowledged(line: String) -> (Self, oneshot::Receiver<bool>) {
+        let (acknowledgement, written) = oneshot::channel();
+        (
+            Self {
+                response: crate::SerializedRpcResponseDelivery::plain(line),
+                acknowledgement: Some(acknowledgement),
+                #[cfg(feature = "openai-live")]
+                public_observation_delivery: None,
+                #[cfg(feature = "openai-live")]
+                public_observation_binding: None,
+            },
+            written,
+        )
+    }
+
     fn delivery(response: crate::SerializedRpcResponseDelivery) -> Self {
         Self {
             response,
+            acknowledgement: None,
             #[cfg(feature = "openai-live")]
             public_observation_delivery: None,
             #[cfg(feature = "openai-live")]
@@ -11226,6 +11589,7 @@ impl GatewayStdoutLine {
         (
             Self {
                 response: crate::SerializedRpcResponseDelivery::plain(line),
+                acknowledgement: None,
                 public_observation_delivery: Some(delivery),
                 public_observation_binding: Some(LivePublicObservationBinding { machine, binding }),
             },
@@ -11255,6 +11619,9 @@ impl GatewayStdoutLine {
 
     async fn settle_delivery(&mut self, delivered: bool) {
         let _ = self.response.settle_delivery(delivered).await;
+        if let Some(acknowledgement) = self.acknowledgement.take() {
+            let _ = acknowledgement.send(delivered);
+        }
         #[cfg(feature = "openai-live")]
         if let Some(public_observation_delivery) = self.public_observation_delivery.take() {
             let _ = public_observation_delivery.send(delivered);
@@ -11264,10 +11631,30 @@ impl GatewayStdoutLine {
 
 impl Drop for GatewayStdoutLine {
     fn drop(&mut self) {
+        if let Some(acknowledgement) = self.acknowledgement.take() {
+            let _ = acknowledgement.send(false);
+        }
         #[cfg(feature = "openai-live")]
         if let Some(public_observation_delivery) = self.public_observation_delivery.take() {
             let _ = public_observation_delivery.send(false);
         }
+    }
+}
+
+/// The stdio host's decision notices: each written as a stdout line of its
+/// own, answered once the writer has written and flushed it.
+struct GatewayDecisionNotices {
+    stdout_tx: mpsc::Sender<GatewayStdoutLine>,
+}
+
+#[async_trait::async_trait]
+impl crate::durable_decisions::DecisionNoticeSink for GatewayDecisionNotices {
+    async fn deliver(&self, line: String) -> bool {
+        let (line, written) = GatewayStdoutLine::acknowledged(line);
+        if self.stdout_tx.send(line).await.is_err() {
+            return false;
+        }
+        written.await.unwrap_or(false)
     }
 }
 
@@ -11283,9 +11670,34 @@ impl std::ops::Deref for GatewayStdoutLine {
 struct GatewayExperimentalLiveSessionBindingAuthority {
     handle: meerkat_mob::MobHandle,
     machine: Arc<meerkat_runtime::MeerkatMachine>,
-    access: crate::AccessController,
+    /// The gateway's access controller, when one is configured: its rules
+    /// and the private-owner rule decide each binding use. Without one the
+    /// stdio gateway is the trusted host plane and decides no access.
+    access: Option<crate::AccessController>,
     principal: String,
     allowed_binding: meerkat_core::AuthBindingRef,
+}
+
+/// The strict live binding authority the gateway composes for `principal`
+/// and its configured `binding`: it decides with the access controller
+/// `runtime` holds (the gateway's configured one, which the gateway's
+/// initialization hands to the runtime before its options move on), and
+/// without one the stdio gateway is the trusted host plane.
+#[cfg(feature = "openai-live")]
+fn gateway_strict_live_binding_authority(
+    runtime: &UnifiedRuntime,
+    machine: Arc<meerkat_runtime::MeerkatMachine>,
+    principal: &str,
+    binding: &meerkat_core::AuthBindingRef,
+) -> Arc<GatewayExperimentalLiveSessionBindingAuthority> {
+    let access = runtime.access_controller().cloned();
+    Arc::new(GatewayExperimentalLiveSessionBindingAuthority {
+        handle: runtime.mob_handle(),
+        machine,
+        access,
+        principal: principal.to_string(),
+        allowed_binding: binding.clone(),
+    })
 }
 
 #[cfg(feature = "openai-live")]
@@ -11378,9 +11790,14 @@ impl meerkat::experimental_gpt_live::ExperimentalLiveSessionBindingAuthority
         }
         let owner = self.resolve_exact_member(canonical_session_id).await?;
         let durable_identity = owner.identity().as_str().to_string();
-        let access = self.access.view_for_subject(Some(&self.principal));
-        if !access.allows_agent(crate::access::ACTION_AGENT_SEND, &durable_identity) {
-            return Err(ExperimentalLiveOpenAuthorityError::AccessDenied);
+        // The configured access decides with the live roster's attributes,
+        // read first, so its rules and the private-owner rule both apply.
+        if let Some(controller) = self.access.as_ref() {
+            crate::http_console::prime_access_cache_from_handle(&self.handle, controller).await;
+            let access = controller.view_for_subject(Some(&self.principal));
+            if !access.allows_agent(crate::access::ACTION_AGENT_SEND, &durable_identity) {
+                return Err(ExperimentalLiveOpenAuthorityError::AccessDenied);
+            }
         }
 
         let principal = crate::http_console::console_human_principal_ref(&self.principal)
@@ -12239,6 +12656,26 @@ fn gateway_shutdown_response_at_exit(
     })
 }
 
+/// How a callback round trip failed: the host answered it with an error, or
+/// it never completed (its transport closed, its response channel dropped,
+/// it timed out).
+#[derive(Debug)]
+enum CallbackFailure {
+    /// The host's own error answer, with its message.
+    HostAnswered(String),
+    /// The round trip did not complete.
+    Transport(String),
+}
+
+impl std::fmt::Display for CallbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HostAnswered(message) => write!(f, "callback error: {message}"),
+            Self::Transport(detail) => f.write_str(detail),
+        }
+    }
+}
+
 impl StdioCallbackBridge {
     fn new(stdout_tx: mpsc::Sender<GatewayStdoutLine>) -> Self {
         Self {
@@ -12306,6 +12743,14 @@ impl StdioCallbackBridge {
 
     /// Send a callback request to Python and wait for the response.
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.call_typed(method, params)
+            .await
+            .map_err(|failure| failure.to_string())
+    }
+
+    /// [`Self::call`], telling the host's own error answer apart from a
+    /// callback that never completed.
+    async fn call_typed(&self, method: &str, params: Value) -> Result<Value, CallbackFailure> {
         // Admission and response share the existing provider callback window.
         let deadline = tokio::time::Instant::now() + PROVIDER_CALLBACK_TIMEOUT;
         let id = self
@@ -12317,7 +12762,9 @@ impl StdioCallbackBridge {
         {
             let mut state = self.state.lock().await;
             if state.closed {
-                return Err("callback transport closed".to_string());
+                return Err(CallbackFailure::Transport(
+                    "callback transport closed".to_string(),
+                ));
             }
             state.pending.insert(id_str.clone(), tx);
         }
@@ -12332,7 +12779,7 @@ impl StdioCallbackBridge {
             Ok(l) => l,
             Err(e) => {
                 self.state.lock().await.pending.remove(&id_str);
-                return Err(e.to_string());
+                return Err(CallbackFailure::Transport(e.to_string()));
             }
         };
         if let Err(error) = self
@@ -12340,31 +12787,33 @@ impl StdioCallbackBridge {
             .await
         {
             self.state.lock().await.pending.remove(&id_str);
-            return Err(error);
+            return Err(CallbackFailure::Transport(error));
         }
 
         // Wait for Python to respond (routed by the stdin multiplexer)
         match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(value)) => {
                 if let Some(error) = value.get("error") {
-                    Err(format!(
-                        "callback error: {}",
+                    Err(CallbackFailure::HostAnswered(
                         error
                             .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown")
+                            .to_string(),
                     ))
                 } else {
                     Ok(value.get("result").cloned().unwrap_or(Value::Null))
                 }
             }
-            Ok(Err(_)) => Err("callback response channel dropped".to_string()),
+            Ok(Err(_)) => Err(CallbackFailure::Transport(
+                "callback response channel dropped".to_string(),
+            )),
             Err(_) => {
                 self.state.lock().await.pending.remove(&id_str);
-                Err(format!(
+                Err(CallbackFailure::Transport(format!(
                     "callback timed out after {}s; execution outcome unknown",
                     PROVIDER_CALLBACK_TIMEOUT.as_secs()
-                ))
+                )))
             }
         }
     }
@@ -13292,6 +13741,43 @@ impl CallbackToolDispatcher {
         }
     }
 
+    /// Send one `callback/call_tool` request for `call`, naming `requester`
+    /// when the run it serves has one, and turn the SDK host's answer into
+    /// the call's result.
+    async fn call_tool(
+        &self,
+        call: ToolCallView<'_>,
+        requester: Option<&meerkat_core::TurnRequester>,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        let params = crate::identity_first::gateway_bridges::callback_call_tool_params(
+            &self.scope_id,
+            call,
+            requester,
+        )?;
+        match self.bridge.call("callback/call_tool", params).await {
+            Ok(result) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: crate::identity_first::gateway_bridges::callback_result_to_content(
+                    &result,
+                ),
+                is_error: false,
+                settlement_failures: Vec::new(),
+            }
+            .into()),
+            Err(err) => Ok(ToolResult {
+                host_metadata: Default::default(),
+                tool_use_id: call.id.to_string(),
+                content: vec![ContentBlock::Text {
+                    text: format!("Tool execution failed: {err}"),
+                }],
+                is_error: true,
+                settlement_failures: Vec::new(),
+            }
+            .into()),
+        }
+    }
+
     async fn submit_detached(
         &self,
         call: ToolCallView<'_>,
@@ -13792,38 +14278,17 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value =
-            serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
-                name: call.name.to_string(),
-                reason: e.to_string(),
-            })?;
-        let params = json!({
-            "scope_id": self.scope_id,
-            "tool": call.name,
-            "arguments": args,
-        });
-        match self.bridge.call("callback/call_tool", params).await {
-            Ok(result) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: crate::identity_first::gateway_bridges::callback_result_to_content(
-                    &result,
-                ),
-                is_error: false,
-                settlement_failures: Vec::new(),
-            }
-            .into()),
-            Err(err) => Ok(ToolResult {
-                host_metadata: Default::default(),
-                tool_use_id: call.id.to_string(),
-                content: vec![ContentBlock::Text {
-                    text: format!("Tool execution failed: {err}"),
-                }],
-                is_error: true,
-                settlement_failures: Vec::new(),
-            }
-            .into()),
-        }
+        self.call_tool(call, None).await
+    }
+
+    /// A `callback/call_tool` request that names the original requester of
+    /// the run the call serves, from its dispatch context.
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        self.call_tool(call, context.requester()).await
     }
 
     async fn dispatch_resolved_with_context(
@@ -13833,7 +14298,7 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         plan: &meerkat_core::ResolvedToolExecutionPlan,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         match plan.mode() {
-            ToolExecutionMode::Fast => self.dispatch(call).await,
+            ToolExecutionMode::Fast => self.dispatch_with_context(call, context).await,
             ToolExecutionMode::Detached => self.submit_detached(call, context, plan).await,
             ToolExecutionMode::Streaming => Err(ToolError::unavailable(
                 call.name,
@@ -13923,7 +14388,10 @@ fn detached_callback_job_spec(
     .with_credential_context_refs(match plan.credential_context_refs() {
         meerkat_core::ToolExecutionApplicability::Applicable(references) => references.clone(),
         meerkat_core::ToolExecutionApplicability::NotApplicable => Vec::new(),
-    });
+    })
+    // The submitting run's requester, from its dispatch context: every
+    // attempt of the job names it to the SDK host.
+    .with_requester(context.requester().cloned());
     Ok((spec, arguments))
 }
 
@@ -14172,6 +14640,7 @@ async fn start_detached_callback_attempt(
         arguments,
         credential_scopes,
         resume_checkpoint: claim.resume_checkpoint.as_ref().map(ToString::to_string),
+        requester: stored.spec.requester.clone(),
     };
     spawn_callback_lease_tracker(runtime.clone(), bridge.clone(), params.authority.clone());
     let result: meerkat_contracts::CallbackJobStartResult = serde_json::from_value(
@@ -15292,6 +15761,19 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
             .await
     }
 
+    async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        // Forwarded for the same reason: the inner factory owns the
+        // canonical durable-memory backend a cold settle of a session's
+        // owed compaction projections finalizes into.
+        self.inner
+            .finalize_absent_session_compaction_stages(session_id, projections)
+            .await
+    }
+
     async fn build_agent(
         &self,
         req: &CreateSessionRequest,
@@ -15326,7 +15808,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
         // app_context flows from SpawnMemberSpec.context → build.app_context.
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        let callback_result = self.bridge.call("callback/build_agent", params).await;
+        let callback_result = self.bridge.call_typed("callback/build_agent", params).await;
 
         match callback_result {
             Ok(result) => {
@@ -15339,13 +15821,11 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .await?;
                 self.inner.build_agent(&modified_req, event_tx).await
             }
-            Err(err) => {
+            Err(failure) => {
                 // Propagate the error — before_create failure aborts session creation.
                 // This is an intentional breaking change from v0.5.x where failures
                 // were silently swallowed with a fallback to default build.
-                Err(SessionError::Agent(agent_tool_error(format!(
-                    "callback/build_agent failed: {err}"
-                ))))
+                Err(build_callback_failure(failure))
             }
         }
     }
@@ -15383,7 +15863,7 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
             .and_then(|build| build.external_tools.take());
         let options = callback_build_agent_options(req, &scope_id);
         let params = json!({ "options": options });
-        match self.bridge.call("callback/build_agent", params).await {
+        match self.bridge.call_typed("callback/build_agent", params).await {
             Ok(result) => {
                 let mut modified_req = self
                     .answered_build_request(req, owned_tools, &result, &scope_id)
@@ -15392,10 +15872,30 @@ impl SessionAgentBuilder for StdioCallbackAgentBuilder {
                     .build_agent_taking_tools(&mut modified_req, event_tx)
                     .await
             }
-            Err(err) => Err(SessionError::Agent(agent_tool_error(format!(
-                "callback/build_agent failed: {err}"
-            )))),
+            Err(failure) => Err(build_callback_failure(failure)),
         }
+    }
+}
+
+/// The session error a failed `callback/build_agent` round trip refuses the
+/// build with. The host's own error answer is its typed refusal of the
+/// build: structured data of Meta's kind
+/// ([`crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND`]) with the
+/// host's reason, beside the message operators read, which every surface
+/// classifies by the kind. A round trip that never completed stays the
+/// retryable tool failure.
+fn build_callback_failure(failure: CallbackFailure) -> SessionError {
+    match failure {
+        CallbackFailure::HostAnswered(reason) => SessionError::FailedWithData {
+            message: format!("callback/build_agent failed: callback error: {reason}"),
+            data: json!({
+                "kind": crate::identity_first::bridge::HOST_REJECTED_BUILD_KIND,
+                "reason": reason,
+            }),
+        },
+        transport @ CallbackFailure::Transport(_) => SessionError::Agent(agent_tool_error(
+            format!("callback/build_agent failed: {transport}"),
+        )),
     }
 }
 
@@ -16240,6 +16740,65 @@ impl GatewayStdioClose {
 }
 
 type GatewayStdioObservation = watch::Receiver<Option<GatewayStdioClose>>;
+
+/// The administration entry of the gateway's stdio connection, for the realm
+/// MCP methods (`meta/realm_mcp/*`). The SDK host on that connection is the
+/// gateway's operator, so a write it sent is admitted while the connection is
+/// open and refused `not_authenticated` once it closed. The write's owner
+/// runs it after the document's locks and the credential owner's exclusion,
+/// immediately before it writes; it reads the stdio close observation and
+/// never waits.
+struct StdioConnectionEntry {
+    closed: GatewayStdioObservation,
+}
+
+impl meerkat_core::AdministrationEntry for StdioConnectionEntry {
+    fn enter(
+        &self,
+    ) -> Result<meerkat_core::EnteredAdministration, meerkat_core::AdministrationEntryRefusal> {
+        if self.closed.borrow().is_some() {
+            return Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated);
+        }
+        Ok(meerkat_core::EnteredAdministration::admitted())
+    }
+}
+
+/// The realm MCP administration the gateway serves: `installation`, entered
+/// through the stdio connection `closed` observes.
+fn stdio_realm_mcp_administration(
+    installation: crate::gateway_mcp_composition::GatewayRealmMcpInstallation,
+    closed: GatewayStdioObservation,
+) -> crate::rpc::realm_mcp_methods::RealmMcpAdministration {
+    crate::rpc::realm_mcp_methods::RealmMcpAdministration::new(
+        installation,
+        Arc::new(StdioConnectionEntry { closed }),
+    )
+}
+
+/// The stdio gateway's own realm MCP installation of `storage`'s realm, over
+/// `factory`'s credential store (the one the launch names, else the default
+/// store). A store that did not open holds no secret value here: the secret
+/// methods answer `realm_mcp_unavailable`.
+fn gateway_realm_mcp_installation(
+    factory: &AgentFactory,
+    storage: &meerkat_core::storage_layout::ResolvedStorage,
+) -> crate::gateway_mcp_composition::GatewayRealmMcpInstallation {
+    let persistence = match factory.resolution_provider_auth_persistence() {
+        Ok(persistence) => persistence,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "the launch's provider credential store did not open: the realm MCP secret \
+                 methods answer realm_mcp_unavailable"
+            );
+            None
+        }
+    };
+    crate::gateway_mcp_composition::GatewayRealmMcpInstallation::for_gateway(
+        storage.clone(),
+        persistence,
+    )
+}
 
 #[derive(Clone)]
 struct GatewayStdioOwner {
@@ -17468,6 +18027,9 @@ external_addressable = true
 
     // 3. Both physical stdio owners notify the same retained gateway driver.
     let (stdio, stdio_observation) = GatewayStdioOwner::new(host.cloned());
+    // The realm MCP administration's entry reads the same observation: a
+    // write the SDK host sent is admitted while its connection is open.
+    let realm_mcp_entry_observation = stdio_observation.clone();
     let shutdown_waits_for_drain = stdio.shutdown_waits_for_drain();
     // Raw keeps its established queue ordering and I/O behavior. Only an
     // explicitly composed native owner consumes immediate close observations.
@@ -17540,6 +18102,16 @@ external_addressable = true
     // before that file is read.
     let member_route = crate::native_realm::MemberRoute::from_init_params(&params)
         .map_err(|refusal| fail_member_route(&request_id, &refusal))?;
+    // The scoped tool grants' maximum lifetime, parsed typed so its refusal
+    // names its kind in `error.data`. The runtime takes it as its grant
+    // policy once the runtime exists, before any session.
+    let tool_grant_options = crate::tool_grant_options::ToolGrantLaunchOptions::parse(
+        params
+            .get("runtime_options")
+            .and_then(|options| options.get("tool_grants")),
+        "runtime_options.tool_grants",
+    )
+    .map_err(|error| fail_init_with_data(&request_id, -32602, error.to_string(), error.data()))?;
     let mut gateway_options = parse_gateway_runtime_options(&params, persistent_state.as_deref())
         .map_err(|e| fail_init(&request_id, -32602, e))?;
     gateway_options.native_realm = member_route.native_realm;
@@ -17564,6 +18136,25 @@ external_addressable = true
         persistent_state.is_some(),
     )
     .map_err(|message| fail_init(&request_id, -32602, message))?;
+    // Personal accounts on MCP servers, checked against the MCP servers the
+    // definition's profiles declare before anything durable is touched.
+    let personal_accounts = match gateway_options.mcp_accounts.take() {
+        Some(config) => {
+            config
+                .check_mob_definition(&definition)
+                .map_err(|refusal| {
+                    fail_init(
+                        &request_id,
+                        -32602,
+                        format!("runtime_options.mcp_accounts: {refusal}"),
+                    )
+                })?;
+            config
+                .has_personal_servers()
+                .then(|| crate::PersonalMcpAccounts::new(config).owner_check())
+        }
+        None => None,
+    };
     // The members' configuration from the native realm, read once with
     // Core's native reader and nothing written, then the members' binding
     // checked against that configuration and the definition. Both run before
@@ -18008,6 +18599,11 @@ external_addressable = true
                 format!("runtime_options.mob_announcements: {error}"),
             )
         })?;
+    // The installation realm's own MCP servers and their secrets, served to
+    // this gateway's SDK host (`meta/realm_mcp/*`): composed with the member
+    // factory, over the factory's own credential store when the launch keeps
+    // one.
+    let realm_mcp_installation;
     let (
         mob_spec,
         _temp_dir,
@@ -18155,6 +18751,9 @@ external_addressable = true
                 )
             })?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         // Match the ephemeral path's capability mask — only comms is enabled
         // by default. Apps control additional capabilities via their mob
         // definition profiles, not the gateway factory.
@@ -18187,6 +18786,7 @@ external_addressable = true
         let crate::gateway_mcp_composition::ComposedGatewayMemberFactory {
             factory,
             consent_notice_issuer,
+            host_composer,
         } = crate::gateway_mcp_composition::compose_gateway_member_factory(
             host,
             crate::gateway_mcp_composition::GatewayFactoryKind::Persistent,
@@ -18196,6 +18796,22 @@ external_addressable = true
             &member_mcp_custody,
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
+        realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
+        // Personal accounts on MCP servers: the owner check over the host's
+        // composer, and the people's accounts in this factory's store.
+        let factory = match personal_accounts.as_ref() {
+            Some(check) => crate::gateway_mcp_composition::compose_personal_accounts(
+                check,
+                factory,
+                host_composer,
+                &adapter,
+                &composition_storage,
+            )
+            .map_err(|error| {
+                fail_init(&request_id, -32602, personal_accounts_unavailable(&error))
+            })?,
+            None => factory,
+        };
         // Live (realtime) needs the SAME factory shape for its per-open
         // credential-resolving realtime session factory; clone before
         // the builder consumes it.
@@ -18603,6 +19219,9 @@ external_addressable = true
                 )
             })?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         let process_local_session_store: Arc<dyn meerkat::SessionStore> =
             Arc::new(meerkat::MemoryStore::new());
         let job_store: Arc<dyn meerkat::DetachedJobStore> =
@@ -18638,6 +19257,7 @@ external_addressable = true
         let crate::gateway_mcp_composition::ComposedGatewayMemberFactory {
             factory,
             consent_notice_issuer,
+            host_composer,
         } = crate::gateway_mcp_composition::compose_gateway_member_factory(
             host,
             crate::gateway_mcp_composition::GatewayFactoryKind::ProcessLocal,
@@ -18647,6 +19267,21 @@ external_addressable = true
             &member_mcp_custody,
         )
         .map_err(|error| fail_init(&request_id, -32603, error.to_string()))?;
+        realm_mcp_installation = gateway_realm_mcp_installation(&factory, &composition_storage);
+        // As in the persistent arm: personal accounts on MCP servers.
+        let factory = match personal_accounts.as_ref() {
+            Some(check) => crate::gateway_mcp_composition::compose_personal_accounts(
+                check,
+                factory,
+                host_composer,
+                &adapter,
+                &composition_storage,
+            )
+            .map_err(|error| {
+                fail_init(&request_id, -32602, personal_accounts_unavailable(&error))
+            })?,
+            None => factory,
+        };
         let runtime_delivery = runtime_delivery.with_consent_notice_issuer(consent_notice_issuer);
         let member_agent_config = gateway_agent_config(&gateway_options);
         let mut inner_builder = crate::gateway_mcp_composition::gateway_member_builder(
@@ -18894,6 +19529,12 @@ external_addressable = true
         has_roster_provider,
     );
     let mob_spec = member_build_wiring.install(mob_spec);
+    // Every member build classifies the personal servers it carries, with
+    // the owner check installed on the member factory above.
+    let mob_spec = match personal_accounts.as_ref() {
+        Some(check) => mob_spec.with_personal_mcp_accounts(check.clone()),
+        None => mob_spec,
+    };
     // Core records a member's binding under the realm that owns it, so the
     // binding's checks accept that form too: declared first, as the checks
     // below are built with it.
@@ -18952,6 +19593,9 @@ external_addressable = true
     // memory-stack region below can bind the tracker into every member build
     // (bootstrap members included - their decorators read the slot per call).
     let dispatch_taint_slot = mob_spec.dispatch_taint_slot();
+    // The memory-stack region below also fills the slot a console side
+    // chat's `memory` tool is bound to its own identity with.
+    let side_chat_memory_slot = mob_spec.side_chat_memory_slot();
 
     let timeout = GATEWAY_RUNTIME_EVENT_DRAIN_TIMEOUT;
     let persistent_metadata: Arc<dyn PersistentMetadataStore> = if persistent_state.is_some() {
@@ -19089,23 +19733,20 @@ external_addressable = true
     } else {
         None
     };
-    // Each identity with a pending first-boot row or a rotation a crash
-    // interrupted waits for the roster pass's seat step: the mob
-    // materializes none of them at start, and refuses their wakes retryable
-    // until the seat step for each ends the mark.
-    let mut host_pending_seeded = Vec::new();
+    // Each identity with a pending first-boot row waits for the roster
+    // pass's declaration of it: the mob materializes none of them at start,
+    // and refuses their wakes retryable until the declaration that carries
+    // the row out ends the mark.
     let mob_spec = match (boot_roster.as_deref(), launch_mob_id.as_deref()) {
-        (Some(roster), Some(launch_mob_id)) => {
+        (Some(roster), Some(_)) => {
             let first_boot = persistent_state
                 .clone()
                 .map(crate::identity_first::first_boot_manifest::FirstBootLocation::StateDir);
             let host_pending = crate::identity_first::runtime::host_pending_members_before_build(
                 first_boot.as_ref(),
-                Some((persistent_metadata.as_ref(), launch_mob_id)),
                 roster,
             )
             .await;
-            host_pending_seeded.clone_from(&host_pending);
             mob_spec.with_host_pending_members(host_pending)
         }
         _ => mob_spec,
@@ -19113,6 +19754,8 @@ external_addressable = true
     // The identity runtime keeps its identity records (each build's tool
     // record, each rotation's intent) in the composition's metadata store.
     let identity_record_store = Arc::clone(&persistent_metadata);
+    // The durable decisions record their attested decide events there.
+    let decision_event_store = Arc::clone(&persistent_metadata);
     let bootstrap_plan = crate::gateway_composition::GatewayRuntimeBootstrapPlan::stdio_rpc(
         mob_spec,
         module_config,
@@ -19145,6 +19788,29 @@ external_addressable = true
         .as_mut()
         .expect("bootstrap installed");
     let runtime = composition.runtime_mut();
+    // The durable decisions of the launch's persistent state directory; a
+    // launch without one keeps none.
+    if let Some(state_dir) = persistent_state.as_ref()
+        && !storage_layout.is_declared_ephemeral()
+    {
+        let realm = storage_layout
+            .meerkat_level_realm()
+            .map_err(|error| fail_init(&request_id, STORAGE_RESOLUTION_CODE, error.to_string()))?
+            .clone();
+        let mob_id = runtime.mob_id();
+        let speaks_for_composition = runtime.speaks_for_composition();
+        runtime.set_durable_decisions(crate::durable_decisions::RuntimeDecisions::in_state_dir(
+            state_dir,
+            realm,
+            gateway_options
+                .decision_ingresses
+                .clone()
+                .unwrap_or_default(),
+            decision_event_store,
+            mob_id,
+            speaks_for_composition,
+        ));
+    }
     runtime.set_bootstrap_phase_observer(Arc::new(move |phase| {
         init_progress.enter(InitPhase::from(phase));
     }));
@@ -19441,6 +20107,7 @@ external_addressable = true
                                 mob: mob_definition.id.to_string(),
                                 roster: steward_roster_slot.clone(),
                             })),
+                            private_members: Some(runtime.mob_runtime().private_member_source()),
                             steward_gating: Some(Arc::new(GatewayMemoryGatingBridge {
                                 runtime: steward_late_runtime.clone(),
                             })),
@@ -19454,6 +20121,14 @@ external_addressable = true
                         Ok(stack) => stack,
                         Err(e) => return Err(fail_init(&request_id, -32602, e)),
                     };
+                    // The retirements the memory store recorded as private
+                    // are part of the private-owner record's durable reads.
+                    if let Some(store) = stack.steward_store.clone() {
+                        runtime
+                            .mob_runtime()
+                            .private_owners()
+                            .bind_private_retirements(store, agent_memory.config.realm.clone());
+                    }
                     let panel = stack.panel.clone();
                     let tracker = stack.taint;
                     let mut sinks = stack.sinks;
@@ -19566,45 +20241,24 @@ external_addressable = true
             } else {
                 None
             };
-        // §7.2 / §16 Q1 operator-resolver seam. The PROVISIONAL keying is
-        // the console auth principal; that resolver lives with the console
-        // auth wiring and plugs in here as one line of glue. Until it is
-        // installed, `operator_scope = "provisional"` composes nothing
-        // (inert by design) while steward routing (proposal-keyed) is
-        // already active.
-        // §16 Q1 provisional keying (decided 2026-07-04): OperatorId = the
-        // console auth principal. When the scope is provisional, install the
-        // console-principal resolver and share it with the runtime so the
-        // console send path can note authenticated interactions; recall
-        // composition activates for identities an authenticated principal
-        // has addressed (config AND resolver AND a real principal).
-        let agent_memory_operator_resolver: Option<
-            Arc<dyn crate::memory::coordinator::OperatorResolver>,
-        > = if gateway_options.agent_memory.as_ref().is_some_and(|memory| {
+        // A console side chat inherits its source's tool overlay, recorder
+        // included: every member build binds a side chat's `memory` tool to
+        // the side chat's own identity with this provider.
+        if let (Some(agent_memory), Some(provider)) = (
+            gateway_options.agent_memory.as_ref(),
+            agent_memory_provider.as_ref(),
+        ) {
+            side_chat_memory_slot.fill(provider.clone(), agent_memory.config.clone());
+        }
+        // §7.2 operator scope: each console person's own, keyed by their
+        // caller scope. A turn recalls its direct requester's operator memory
+        // request-only; no build composes it, so nothing is wired here.
+        if gateway_options.agent_memory.as_ref().is_some_and(|memory| {
             memory.config.operator_scope == crate::AgentMemoryOperatorScope::Provisional
         }) {
-            let resolver = Arc::new(crate::ConsolePrincipalOperatorResolver::new());
-            runtime.set_console_operator_resolver(resolver.clone());
             tracing::info!(
-                "agent memory operator scope active (provisional keying: console auth principal)"
-            );
-            Some(resolver)
-        } else {
-            None
-        };
-        // Degrade LOUD, not silent: recall composition of the Operator scope
-        // needs BOTH the knob and a resolver (coordinator.rs scope_set), so a
-        // resolver-less provisional deployment gets steward proposal-routing
-        // only. Without this warning that half-activation is invisible.
-        if operator_scope_recall_inert(
-            gateway_options.agent_memory.as_ref(),
-            agent_memory_operator_resolver.is_some(),
-        ) {
-            tracing::warn!(
-                "agent_memory.operator_scope=\"provisional\" is configured but this gateway \
-                 installs no operator resolver: operator-scope recall composition is INERT \
-                 (records routed to the operator scope will not be recalled or injected); \
-                 steward routing of operator-scope proposals remains active"
+                "agent memory operator scope active (each console person's own, keyed by their \
+                 caller scope)"
             );
         }
         // §7.2 mob-scope binding: every identity this gateway hosts runs
@@ -19629,7 +20283,6 @@ external_addressable = true
                         provider,
                         agent_memory.config.clone(),
                     )
-                    .with_operator_resolver(agent_memory_operator_resolver.clone())
                     .with_mob_resolver(agent_memory_mob_resolver.clone()),
                 ))
             } else {
@@ -19655,7 +20308,6 @@ external_addressable = true
             if let Some(steward) = agent_memory_steward.clone() {
                 injector = injector.with_steward(steward);
             }
-            injector = injector.with_operator_resolver(agent_memory_operator_resolver.clone());
             injector = injector.with_mob_resolver(agent_memory_mob_resolver.clone());
             // Arm the always-on compaction reset sink (state is Arc-shared
             // across injector clones, so resetting through this clone
@@ -19678,9 +20330,6 @@ external_addressable = true
         member_build_wiring
             .bind(&irt, runtime.mob_runtime().session_service().cloned())
             .await;
-        // Every seat step ends the host-pending mark of each identity seeded
-        // before the mob build.
-        irt.seed_host_pending(std::mem::take(&mut host_pending_seeded));
 
         init_progress.enter(InitPhase::Roster);
         if shutdown_requested.load(Ordering::Acquire) {
@@ -20034,6 +20683,13 @@ external_addressable = true
         }
         detached_jobs.arm_delivery_driver(Arc::clone(&runtime));
     }
+    // The realm MCP administration the SDK host on this gateway's stdio
+    // serves through (`meta/realm_mcp/*`), admitted while that connection
+    // is open.
+    runtime.serve_realm_mcp(stdio_realm_mcp_administration(
+        realm_mcp_installation,
+        realm_mcp_entry_observation,
+    ));
     // Bind the steward's late runtime seams and wire gating decisions back
     // to staged promotion commits (§10.2).
     steward_late_runtime.bind(runtime.clone());
@@ -20246,18 +20902,16 @@ external_addressable = true
                             ),
                         )
                     })?;
-                        let access = gateway_options
-                            .access
-                            .clone()
-                            .unwrap_or_else(crate::AccessController::disabled);
-                        let binding_authority =
-                            Arc::new(GatewayExperimentalLiveSessionBindingAuthority {
-                                handle: runtime.mob_handle(),
-                                machine: Arc::clone(&live_machine),
-                                access,
-                                principal: principal.to_string(),
-                                allowed_binding: binding.clone(),
-                            });
+                        // The access controller the runtime holds (the
+                        // gateway's configured one, kept there before its
+                        // options moved on): without one the stdio gateway
+                        // is the trusted host plane.
+                        let binding_authority = gateway_strict_live_binding_authority(
+                            &runtime,
+                            Arc::clone(&live_machine),
+                            principal,
+                            binding,
+                        );
                         let transport = Arc::new(
                             meerkat::experimental_gpt_live::ExperimentalGptLiveWebrtcTransport::new(
                             ),
@@ -20555,6 +21209,13 @@ external_addressable = true
     // the same methods concurrently, so completion order is free.
     let identity_ctx = identity_ctx.map(Arc::new);
     let http_base_url_shared: Arc<str> = http_base_url.clone().into();
+    // The connection's `meta/decisions/*` verbs and their notices.
+    let decision_connection = Arc::new(crate::durable_decisions::StdioDecisionConnection::new(
+        runtime.durable_decisions().realm(),
+        Arc::new(GatewayDecisionNotices {
+            stdout_tx: stdout_tx.clone(),
+        }),
+    ));
     let mut gateway_shutdown = None;
     let dispatch_end = {
         let mut inflight = tokio::task::JoinSet::new();
@@ -20595,7 +21256,15 @@ external_addressable = true
             let live_rpc = live_rpc.clone();
             let gateway_detached_jobs = gateway_detached_jobs.clone();
             let callback_bridge = bridge.clone();
+            let decision_connection = Arc::clone(&decision_connection);
             inflight.spawn(async move {
+                if let Some(answer) = decision_connection
+                    .handle_line(&runtime, &request_line)
+                    .await
+                {
+                    let _ = stdout_tx.send(GatewayStdoutLine::plain(answer)).await;
+                    return;
+                }
                 let response = match handle_callback_job_rpc(
                     &request_line,
                     gateway_detached_jobs.as_ref(),
@@ -20624,6 +21293,9 @@ external_addressable = true
             // Reap completed handlers so the set does not grow unbounded.
             while inflight.try_join_next().is_some() {}
         };
+        // The connection ended: no operator decide on it is eligible any
+        // more, one in flight included when it commits.
+        decision_connection.close();
         // Name the branch that ended admission BEFORE the drain and the
         // shutdown sequence, so a wedge in either still leaves the reason in
         // the log. `reason=` is one of `DispatchLoopEnd`'s tokens; `signal=`
@@ -24377,10 +25049,22 @@ mob = true
         calls: Vec<Value>,
     }
 
-    /// One delegator turn through the gateway composition: the delegator
-    /// starts the helper `call` names, and the helper's first request shows
-    /// which tools reached it.
-    async fn run_helper(call: HelperCall) -> Delegation {
+    /// The gateway's own composition over a temporary state root: a
+    /// `StdioCallbackAgentBuilder` inside a persistent session service, the
+    /// agent mob tools installed the way the gateway installs them, the
+    /// scripted SDK host, and `model` as every member's model, for the mob
+    /// `definition` declares.
+    struct Composition {
+        runtime: crate::MobRuntime,
+        sdk_host: Arc<SdkHostLog>,
+        responder: tokio::task::JoinHandle<()>,
+        _state: tempfile::TempDir,
+    }
+
+    async fn compose(
+        model: Arc<dyn meerkat_client::LlmClient>,
+        definition: MobDefinition,
+    ) -> Composition {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = temp.path();
         let blob_store: Arc<dyn meerkat_core::BlobStore> =
@@ -24434,13 +25118,7 @@ mob = true
         let (mob_storage, provenance) =
             crate::mob_composition_manifest::persistent_mob_storage(state.join("mob.sqlite3"))
                 .expect("mob storage");
-        let model = DelegatingModel {
-            call,
-            helper_tools: Arc::default(),
-            helper_seen: Arc::default(),
-            delegated: Arc::default(),
-        };
-        let spec = MobBootstrapSpec::new(definition(), mob_storage, service)
+        let spec = MobBootstrapSpec::new(definition, mob_storage, service)
             .with_mob_storage_provenance(provenance)
             // The helpers' implicit child mobs live with this process.
             .with_child_mob_storage(crate::ChildMobStorage::ProcessBound)
@@ -24459,12 +25137,32 @@ mob = true
             .with_options(MobBootstrapOptions {
                 allow_ephemeral_sessions: true,
                 notify_orchestrator_on_resume: true,
-                default_llm_client: Some(Arc::new(model.clone())),
+                default_llm_client: Some(model),
             });
         let runtime = crate::MobRuntime::bootstrap(spec)
             .await
             .expect("bootstrap the mob runtime");
-        let handle = runtime.handle();
+        Composition {
+            runtime,
+            sdk_host,
+            responder,
+            _state: temp,
+        }
+    }
+
+    /// One delegator turn through the gateway composition: the delegator
+    /// starts the helper `call` names, and the helper's first request shows
+    /// which tools reached it.
+    async fn run_helper(call: HelperCall) -> Delegation {
+        let model = DelegatingModel {
+            call,
+            helper_tools: Arc::default(),
+            helper_seen: Arc::default(),
+            delegated: Arc::default(),
+        };
+        let composition = compose(Arc::new(model.clone()), definition()).await;
+        let sdk_host = Arc::clone(&composition.sdk_host);
+        let handle = composition.runtime.handle();
         let delegator = meerkat_mob::AgentIdentity::from(DELEGATOR);
         handle
             .ensure_member(meerkat_mob::SpawnMemberSpec::new(
@@ -24515,7 +25213,7 @@ mob = true
         let builds = sdk_host.builds.lock().expect("build log").clone();
         let calls = sdk_host.calls.lock().expect("call log").clone();
         let _ = tokio::time::timeout(BOUND, handle.shutdown()).await;
-        responder.abort();
+        composition.responder.abort();
         Delegation {
             helper_tools,
             delegated: serde_json::from_str(&delegated).expect("json delegate result"),
@@ -24710,6 +25408,161 @@ mob = true
             delegation.helper_tools
         );
         assert_host_tool_call_routed_to_the_helpers_build(&delegation);
+    }
+
+    /// The person's input of the requester row.
+    const HOST_TOOL_PROMPT: &str = "use the host tool";
+
+    /// The scripted model of a requester's run: the first turn that holds the
+    /// person's input and is offered the host tool calls it once, and every
+    /// other turn answers. A turn the member runs before that input (a run of
+    /// its own, with no requester) never calls it.
+    #[derive(Clone)]
+    struct HostToolModel;
+
+    #[async_trait]
+    impl meerkat_client::LlmClient for HostToolModel {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> meerkat_client::types::LlmStream<'a> {
+            let called = request.messages.iter().any(|message| match message {
+                meerkat_core::Message::ToolResults { results, .. } => results
+                    .iter()
+                    .any(|result| result.tool_use_id == HOST_TOOL_CALL_ID),
+                _ => false,
+            });
+            let asked = request.messages.iter().any(|message| {
+                matches!(message, meerkat_core::Message::User(user)
+                    if user.text_content() == HOST_TOOL_PROMPT)
+            });
+            let call = asked && !called && request.tools.iter().any(|tool| tool.name == HOST_TOOL);
+            let [usage, done] = crate::mob_handle_runtime::test_llm_usage::usage_then_done(
+                request,
+                meerkat_core::Provider::OpenAI,
+                if call {
+                    meerkat_core::StopReason::ToolUse
+                } else {
+                    meerkat_core::StopReason::EndTurn
+                },
+            );
+            let lead = if call {
+                meerkat_client::LlmEvent::ToolCallComplete {
+                    id: HOST_TOOL_CALL_ID.to_string(),
+                    name: HOST_TOOL.to_string(),
+                    args: json!({"requester": {"principal": {"kind": "human", "id": "mallory"}}}),
+                    meta: None,
+                }
+            } else {
+                meerkat_client::LlmEvent::TextDelta {
+                    delta: "done".to_string(),
+                    meta: None,
+                }
+            };
+            Box::pin(futures::stream::iter(vec![Ok(lead), Ok(usage), Ok(done)]))
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::OpenAI
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+            Ok(())
+        }
+    }
+
+    /// A person's run calls an SDK host tool, and the `callback/call_tool`
+    /// the SDK host receives names that person, typed, as the requester the
+    /// host authenticated for the run's input (a console send's person),
+    /// through the gateway's own composition. The model's arguments name
+    /// someone else: they reach the host as arguments and never as the
+    /// requester.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn console_run_callback_carries_requester() {
+        // A console member: addressable from outside the mob, serving its
+        // inbox, as the console's members are.
+        let definition = MobDefinition::from_toml(&format!(
+            r#"
+[mob]
+id = "callback-requester-{}-{}"
+
+[profiles.assistant]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+
+[profiles.assistant.tools]
+comms = true
+"#,
+            std::process::id(),
+            NEXT_MOB.fetch_add(1, Ordering::SeqCst)
+        ))
+        .expect("mob definition");
+        let composition = compose(Arc::new(HostToolModel), definition).await;
+        let handle = composition.runtime.handle();
+        let member = meerkat_mob::AgentIdentity::from("person-assistant");
+        handle
+            .ensure_member(meerkat_mob::SpawnMemberSpec::new(
+                meerkat_mob::ProfileName::from("assistant"),
+                member.clone(),
+            ))
+            .await
+            .expect("seat the member");
+        let entry = handle
+            .get_member(&member)
+            .await
+            .expect("roster read")
+            .expect("member entry");
+        let person = meerkat_core::PrincipalRef::in_domain(
+            meerkat_core::PrincipalKind::Human,
+            "alice",
+            meerkat_core::TrustDomainId::new("oidc-issuer:https://issuer.example")
+                .expect("trust domain"),
+        )
+        .expect("person");
+        let interaction = uuid::Uuid::new_v4();
+        let turn = handle
+            .start_host_human_input_bounded(
+                entry.agent_runtime_id.clone(),
+                entry.fence_token,
+                meerkat_mob::WorkSpec::new(
+                    meerkat_core::types::ContentInput::Text(HOST_TOOL_PROMPT.to_string()),
+                    meerkat_mob::WorkOrigin::External,
+                )
+                .with_interaction_id(meerkat_core::interaction::InteractionId(interaction))
+                .with_requester(person.clone()),
+                meerkat_core::types::HandlingMode::Queue,
+                meerkat_mob::MobDeliveryIdentity::new("console-send", interaction.to_string())
+                    .expect("delivery identity"),
+                std::time::Instant::now() + BOUND,
+            )
+            .await
+            .expect("the person's input is admitted");
+        tokio::time::timeout(BOUND, turn.wait())
+            .await
+            .expect("the person's turn completes within the bound")
+            .expect("the person's turn commits");
+        let calls = composition.sdk_host.calls.lock().expect("call log").clone();
+        let _ = tokio::time::timeout(BOUND, handle.shutdown()).await;
+        composition.responder.abort();
+        assert_eq!(calls.len(), 1, "one host tool call: {calls:?}");
+        assert_eq!(
+            calls[0]["requester"],
+            json!({"principal": serde_json::to_value(&person).expect("principal json")}),
+            "the callback names the run's requester: {calls:?}"
+        );
+        assert_eq!(
+            calls[0]["arguments"],
+            json!({"requester": {"principal": {"kind": "human", "id": "mallory"}}}),
+            "the model's arguments reach the host as arguments"
+        );
     }
 
     /// Two builds for one SDK host keep their own routing scopes and stamp
@@ -26581,6 +27434,230 @@ mod identity_creation_launch_tests {
                 .unwrap_or_default()
                 .starts_with("identity_creation: identity records are durable"),
             "{response}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stdio_connection_entry_tests {
+    //! The realm MCP administration's entry: the stdio connection admits a
+    //! write while it is open, and refuses `not_authenticated` once it
+    //! closed, however it closed.
+
+    use super::*;
+    use meerkat_core::AdministrationEntry as _;
+
+    #[test]
+    fn the_stdio_entry_admits_while_the_connection_is_open_and_refuses_once_it_closed() {
+        for kind in [
+            GatewayStdioCloseKind::InputLost,
+            GatewayStdioCloseKind::OutputLost,
+            GatewayStdioCloseKind::ShutdownRequested,
+        ] {
+            let (stdio, observation) = GatewayStdioOwner::new(None);
+            let entry = StdioConnectionEntry {
+                closed: observation,
+            };
+            assert!(entry.enter().is_ok(), "{kind:?}: admitted while open");
+            stdio.close(kind, None);
+            assert!(
+                matches!(
+                    entry.enter(),
+                    Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated)
+                ),
+                "{kind:?}: refused once closed"
+            );
+        }
+    }
+
+    /// The administration the gateway serves enters through the stdio
+    /// connection the helper is given: it admits while that connection is
+    /// open and refuses once it closed.
+    #[test]
+    fn the_served_administration_enters_through_the_given_stdio_connection() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let realm = meerkat_core::RealmId::parse("stdio-entry").expect("realm");
+        let installation = crate::gateway_mcp_composition::GatewayRealmMcpInstallation::for_gateway(
+            crate::gateway_mcp_composition::meerkat_level_realm_storage(temp.path(), &realm),
+            None,
+        );
+        let (stdio, observation) = GatewayStdioOwner::new(None);
+        let administration = stdio_realm_mcp_administration(installation, observation);
+        assert!(
+            administration.entry().enter().is_ok(),
+            "admitted while open"
+        );
+        stdio.close(GatewayStdioCloseKind::InputLost, None);
+        assert!(
+            matches!(
+                administration.entry().enter(),
+                Err(meerkat_core::AdministrationEntryRefusal::NotAuthenticated)
+            ),
+            "refused once the given connection closed"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "openai-live"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod strict_live_private_owner_tests {
+    //! The SDK gateway's strict live binding authority decides with the
+    //! configured access controller, primed from the roster first, so its
+    //! access rules and the private-owner rule both apply.
+
+    use std::sync::Arc;
+
+    use meerkat::experimental_gpt_live::{
+        ExperimentalLiveOpenAuthorityError, ExperimentalLiveSessionBindingAuthority as _,
+    };
+
+    /// A principal other than a private member's owner may not use a live
+    /// binding on it, even under an access configuration that lets everyone
+    /// drive every agent; a shared member stays open to them.
+    #[tokio::test]
+    async fn the_strict_live_authority_applies_the_private_owner_rule() {
+        let runtime = crate::UnifiedRuntime::builder()
+            .definition(
+                meerkat_mob::MobDefinition::from_toml(
+                    "[mob]\nid = 'strict-live-private'\n[profiles.worker]\nmodel = 'gpt-5.5'\n\
+                     [profiles.worker.tools]\ncomms = true\n",
+                )
+                .expect("definition"),
+            )
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let handle = runtime.mob_handle();
+        handle
+            .spawn_spec(
+                meerkat_mob::SpawnMemberSpec::new(
+                    "worker",
+                    meerkat_mob::AgentIdentity::from("alpha-side"),
+                )
+                .with_labels(std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:aa".to_string(),
+                )])),
+            )
+            .await
+            .expect("seat the private member");
+        let side = meerkat_mob::AgentIdentity::from("alpha-side");
+        handle.ensure_member_live(&side).await.expect("live");
+        let session = handle
+            .resolve_bridge_session_id(&side)
+            .await
+            .expect("the private member's session");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("b").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let access = crate::AccessController::new(crate::access::AccessControlConfig {
+            enabled: true,
+            admins: vec!["root@example.test".to_string()],
+            rules: vec![crate::access::AccessRule {
+                id: "everyone-drives-every-agent".to_string(),
+                subjects: vec!["*".to_string()],
+                actions: vec!["agent.*".to_string()],
+                agents: vec!["*".to_string()],
+                ..crate::access::AccessRule::default()
+            }],
+            ..crate::access::AccessControlConfig::default()
+        })
+        .expect("access controller");
+        let authority = super::GatewayExperimentalLiveSessionBindingAuthority {
+            handle: handle.clone(),
+            machine: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+            access: Some(access),
+            principal: "bob@example.test".to_string(),
+            allowed_binding: binding.clone(),
+        };
+        let decided = authority.authorize_binding_use(&session, &binding).await;
+        assert!(
+            matches!(
+                decided,
+                Err(ExperimentalLiveOpenAuthorityError::AccessDenied)
+            ),
+            "another principal may not use a live binding on a private member"
+        );
+    }
+
+    /// The gateway composes its strict live authority with the access
+    /// controller it installs on the runtime: through the gateway's own
+    /// composition, another principal is refused a live binding on a private
+    /// member, as the configured controller and the private-owner rule
+    /// decide.
+    #[tokio::test]
+    async fn the_gateway_composes_the_strict_live_authority_with_its_access_controller() {
+        let mut runtime = crate::UnifiedRuntime::builder()
+            .definition(
+                meerkat_mob::MobDefinition::from_toml(
+                    "[mob]\nid = 'strict-live-composed'\n[profiles.worker]\nmodel = 'gpt-5.5'\n\
+                     [profiles.worker.tools]\ncomms = true\n",
+                )
+                .expect("definition"),
+            )
+            .default_llm_client(Arc::new(meerkat_client::TestClient::default()))
+            .build()
+            .await
+            .expect("runtime");
+        let handle = runtime.mob_handle();
+        handle
+            .spawn_spec(
+                meerkat_mob::SpawnMemberSpec::new(
+                    "worker",
+                    meerkat_mob::AgentIdentity::from("alpha-side"),
+                )
+                .with_labels(std::collections::BTreeMap::from([(
+                    crate::access::PRIVATE_TO_LABEL.to_string(),
+                    "console-caller:v1:aa".to_string(),
+                )])),
+            )
+            .await
+            .expect("seat the private member");
+        let side = meerkat_mob::AgentIdentity::from("alpha-side");
+        handle.ensure_member_live(&side).await.expect("live");
+        let session = handle
+            .resolve_bridge_session_id(&side)
+            .await
+            .expect("the private member's session");
+        let binding = meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("native-team").expect("realm id"),
+            binding: meerkat_core::BindingId::parse("b").expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        // As the gateway's initialization installs its configured controller.
+        runtime.set_access_controller(
+            crate::AccessController::new(crate::access::AccessControlConfig {
+                enabled: true,
+                admins: vec!["root@example.test".to_string()],
+                rules: vec![crate::access::AccessRule {
+                    id: "everyone-drives-every-agent".to_string(),
+                    subjects: vec!["*".to_string()],
+                    actions: vec!["agent.*".to_string()],
+                    agents: vec!["*".to_string()],
+                    ..crate::access::AccessRule::default()
+                }],
+                ..crate::access::AccessControlConfig::default()
+            })
+            .expect("access controller"),
+        );
+        let authority = super::gateway_strict_live_binding_authority(
+            &runtime,
+            Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+            "bob@example.test",
+            &binding,
+        );
+        let decided = authority.authorize_binding_use(&session, &binding).await;
+        assert!(
+            matches!(
+                decided,
+                Err(ExperimentalLiveOpenAuthorityError::AccessDenied)
+            ),
+            "the gateway's composition decides with its access controller"
         );
     }
 }

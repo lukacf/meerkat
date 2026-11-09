@@ -131,6 +131,16 @@ impl SessionBridge for CountingInspectBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -189,6 +199,16 @@ impl SessionBridge for CountingInspectBridge {
             peer_reachable_count: 0,
         })
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }
 
 fn make_runtime(bridge: Arc<CountingInspectBridge>) -> Arc<IdentityRuntime> {
@@ -236,7 +256,8 @@ async fn register_active(
             binding: None,
             placement: None,
         })
-        .await;
+        .await
+        .expect("the identity registers");
     identity
 }
 

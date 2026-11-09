@@ -94,6 +94,7 @@ impl Fixture {
         let base = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("base"),
                 principal("admin"),
@@ -634,6 +635,7 @@ async fn ordinary_custody_input_survives_owner_reopen_without_selecting_service_
         ToolkitOriginalOwner::restore(
             Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                 directory.path().join("grants"),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
             association.candidate().ingress_namespace.ingress.clone(),
@@ -1048,6 +1050,7 @@ async fn legacy_bound_row_does_not_recreate_first_write_provenance_on_owner_rest
         ToolkitOriginalOwner::restore(
             Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                 directory.path().join("grants"),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
             domain,
@@ -1343,6 +1346,7 @@ async fn withdrawn_custody_reopens_as_terminal_absence_without_reenrollment() {
             ToolkitOriginalOwner::restore(
                 Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                     directory.path().join("grants"),
+                    meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
                 )),
                 Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
                 association.candidate().ingress_namespace.ingress.clone(),
@@ -1539,6 +1543,7 @@ async fn enrolled_cold_binding_stays_unknown_until_restoration_or_terminal_sourc
                 ToolkitOriginalOwner::restore(
                     Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                         directory.path().join("grants"),
+                        meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
                     )),
                     Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
                     claims.ingress_namespace.ingress.clone(),
@@ -1811,6 +1816,7 @@ async fn withdrawn_cold_binding_is_terminal_without_census_or_reenrollment() {
         ToolkitOriginalOwner::restore(
             Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                 directory.path().join("grants"),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
             claims.ingress_namespace.ingress.clone(),

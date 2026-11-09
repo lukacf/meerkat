@@ -159,6 +159,9 @@ impl LocalAuthorizationPublication {
     pub(crate) fn reserve_owner_change(
         &self,
     ) -> Result<LocalPublicationGuard<'_>, PublicationError> {
+        // The writer is held across another owner's durable commit: taking it
+        // can wait, which no protected section may do.
+        meerkat_core::protected_section::assert_may_wait("publication.writer");
         let writer = self
             .inner
             .writer

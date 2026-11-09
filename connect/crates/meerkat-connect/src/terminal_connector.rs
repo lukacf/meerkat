@@ -335,6 +335,12 @@ fn configured_grant_message_ref(
             "{saved}, but native grant issuance was refused ({}). No new grant was issued or selected.",
             grant_refusal_tag(reason),
         ))),
+        Err(StockGrantError::AdmissionInProgress) => Err(unavailable(&format!(
+            "{saved}, but native grant issuance was refused (AdmissionInProgress). No new grant was issued or selected.",
+        ))),
+        Err(StockGrantError::AdmissionFenceUnavailable(_)) => Err(unavailable(&format!(
+            "{saved}, but native grant issuance was refused (AdmissionFenceUnavailable). No new grant was issued or selected.",
+        ))),
         Err(StockGrantError::IssuanceUncertain { id }) => Err(unavailable(&format!(
             "{saved}, but issuance of grant {} is uncertain. The selection is unchanged. Do not repeat this finalization automatically.",
             id.as_str()
@@ -700,6 +706,8 @@ fn grant_refusal_tag(error: &meerkat::governed_realm::stock::StockGovernanceErro
         Error::InstallationChanged(_) => "InstallationChanged",
         Error::CommandUncertain => "CommandUncertain",
         Error::Review(_) => "Review",
+        Error::AdmissionInProgress => "AdmissionInProgress",
+        Error::AdmissionFenceUnavailable(_) => "AdmissionFenceUnavailable",
         Error::Store(_) => "Store",
         Error::Persistence(_) => "Persistence",
         Error::Io(_) => "Io",
@@ -726,6 +734,8 @@ fn public_persistence_details(error: &meerkat_core::mcp_config::McpRealmPersistE
             Config::Io(_) => json!({"kind":"Io"}),
             Config::Json(_) => json!({"kind":"Json"}),
             Config::Config(_) => json!({"kind":"Config"}),
+            Config::AdmissionInProgress => json!({"kind":"AdmissionInProgress"}),
+            Config::AdmissionFenceUnavailable(_) => json!({"kind":"AdmissionFenceUnavailable"}),
         }}),
     }
 }
@@ -982,7 +992,12 @@ impl FinalizedInstallation {
                     issued, previous, ..
                 }) => json!({"issued":reference(issued),
                     "previous":previous.as_ref().map(&reference)}),
-                Err(StockGrantError::Refused(_) | StockGrantError::CommandUncertain) => Value::Null,
+                Err(
+                    StockGrantError::Refused(_)
+                    | StockGrantError::AdmissionInProgress
+                    | StockGrantError::AdmissionFenceUnavailable(_)
+                    | StockGrantError::CommandUncertain,
+                ) => Value::Null,
             }
         };
         let native_references = match &self.outcome {
@@ -1014,6 +1029,12 @@ impl FinalizedInstallation {
                 }
                 Err(StockGrantError::Refused(reason)) => {
                     json!({"state":"refused", "reason_kind":grant_refusal_tag(reason), "issued":false, "selection_changed":false})
+                }
+                Err(StockGrantError::AdmissionInProgress) => {
+                    json!({"state":"refused", "reason_kind":"AdmissionInProgress", "issued":false, "selection_changed":false})
+                }
+                Err(StockGrantError::AdmissionFenceUnavailable(_)) => {
+                    json!({"state":"refused", "reason_kind":"AdmissionFenceUnavailable", "issued":false, "selection_changed":false})
                 }
                 Err(StockGrantError::IssuanceUncertain { .. }) => {
                     json!({"state":"issuance_uncertain", "selection_changed":false})
@@ -2221,8 +2242,10 @@ mod tests {
             let owner_path = meerkat_store::grant_owner_store_path(&paths.root);
             let before_owner = std::fs::read(&owner_path).unwrap();
             let before_config = std::fs::read(&config_path).unwrap();
+            // The seeding write above published its own generation; the
+            // finalizer must publish none.
+            let before_state = std::fs::read(&state_path).ok();
             assert!(!before_owner.is_empty());
-            assert!(!state_path.exists());
 
             let root = directory.path().join("installed");
             std::fs::create_dir_all(root.join("ready")).unwrap();
@@ -2338,7 +2361,7 @@ mod tests {
                 .with_provider_auth_persistence(ProviderAuthPersistence::new(
                     Arc::new(FileTokenStore::new(directory.path().join("credentials"))),
                     Arc::new(FileLockCoordinator::new(
-                        directory.path().join("credential-locks"),
+                        directory.path().join("credentials").join("refresh-locks"),
                     )),
                 ));
             let reviewed = ReviewedConnector {
@@ -2422,8 +2445,9 @@ mod tests {
             assert!(output.is_empty());
             assert_eq!(std::fs::read(&config_path).unwrap(), before_config);
             assert_eq!(std::fs::read(&owner_path).unwrap(), before_owner);
-            assert!(
-                !state_path.exists(),
+            assert_eq!(
+                std::fs::read(&state_path).ok(),
+                before_state,
                 "no service configuration generation was published"
             );
             assert_eq!(

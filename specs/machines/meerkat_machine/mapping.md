@@ -2657,6 +2657,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `BindInputAuthorityStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `BindInputRequesterBatchKeyStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `BindScopedContextIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3225,6 +3240,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SurfaceStageAddRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SurfaceStageGatedAddRunning`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `SurfaceStageRemoveIdle`
@@ -4922,6 +4946,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `CancelQueuedLiveDelegationStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CloseLiveDelegationIntakeStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeLiveDelegationNarrationIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -6381,6 +6420,36 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ReplaceToolGrantGateStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateChangedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExtendToolGrantGateUnchangedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ApplyToolGrantOpenSetChangedIdle`
@@ -8285,6 +8354,174 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ReleaseInputControllerStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SettleRetainedRunAcceptedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunAcceptedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyRunCurrentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyDrainingIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyDrainingAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyStaleRunIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyStaleRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunBusyNotServingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunNotRetainedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleRetainedRunInertDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `HoldResumedRunForAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumedRunAdmissionStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionRecordedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionRecordedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionAlreadyRecordedIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionAlreadyRecordedAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionAlreadyRecordedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RequestCompactionNotServingDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestTakenRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestTakenRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestNoneRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestNoneRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestStaleRunRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestStaleRunRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestOutsideCheckRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestOutsideCheckRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ConsumeCompactionRequestInertDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -9073,6 +9310,18 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `InputControllerReleased`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `RetainedRunSettleResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ExactRunBoundaryCancel`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompactionRequestResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `CompactionRequestConsumed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
@@ -9243,6 +9492,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `input_controller_holds_are_kept_unstaged_governed_inputs`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `resumed_run_admission_hold_names_the_marked_run`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `live_boundary_delivery_only_for_queued_steer`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -9304,6 +9556,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `tool_grant_open_names_are_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_not_mounted_are_not_gated`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `tool_grant_ungated_servers_are_not_gated`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

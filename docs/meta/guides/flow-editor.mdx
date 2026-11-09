@@ -4,7 +4,7 @@ description: "Embedded visual mobpack authoring studio with Basic and Graph edit
 icon: "sitemap"
 ---
 
-*Mirrored from Meerkat Meta main at [cd9c2ea5f07b](https://github.com/lukacf/meerkat/commit/cd9c2ea5f07b5056f580427033a3b07198a1b2b5) on 2026-11-07; Meta version 0.9.10 at that commit.*
+*Mirrored from Meerkat Meta main at [bec52593fbdc](https://github.com/lukacf/meerkat/commit/bec52593fbdc5cf3544033d124dd136e00ba1e48) on 2026-11-07; Meta version 0.9.10 at that commit.*
 
 Meta ships a web-based Flow Editor for authoring mobpacks — flows, member definitions, tools, skills, and structured-output schemas — embedded directly in the Rust binaries via `include_str!`. The editor is a thin client: every edit round-trips through the mobpack-authoring JSON-RPC surface, and the server-rendered document is what you see.
 
@@ -99,7 +99,7 @@ The Flow Editor route plane deliberately serves only the editor shell and the mo
 | `/flow-editor/assets/flow-editor.css` | GET | Stylesheet (CSS) |
 | `/flow-editor/rpc` | POST | JSON-RPC 2.0 endpoint |
 
-`meta/capabilities` describes the surface: the method list, the auth mode, and `authoring_capabilities` with `host_mutation_allowed`, `deploy_execute_allowed`, and `runtime_backed_catalogs`. The editor reads these to decide which deploy affordances to render.
+`meta/capabilities` describes the surface: the method list, the auth mode, and `authoring_capabilities` with `host_mutation_allowed`, `deploy_execute_allowed`, and `runtime_backed_catalogs`. The editor reads these to decide which deploy affordances to render. On a runtime's listener its `auth` also names the caller the request resolved to, `caller_scope` (see [Caller checks](#caller-checks)).
 
 The mobpack-authoring methods:
 
@@ -296,6 +296,34 @@ Callers with host access, and the SDKs' stdio and in-process RPC, which are
 the host's own channels, may name such paths. A Rust host that calls the
 `meerkat_meta::mobpack` functions directly gets the same catalog-only reads
 unless it runs them under `meerkat_meta::with_host_path_skill_reads`.
+
+### Caller checks
+
+On a runtime's listener the Flow Editor RPC resolves its caller as the
+console does, and its changes are console changes: the draft writes
+(`meta/mobpacks/create`, `save`, `delete`, `undo` and `redo`), a deploy with
+`execute` and a validation with `rkat_validate`. These are the methods and
+arms a candidate launch refuses too, read from one list. A validation without
+`rkat_validate` checks the document in process only and is no change.
+
+- `meta/capabilities` reports the caller's scope as `auth.caller_scope`, the
+  value `meta/console/whoami` reports to the same caller. The editor sends it
+  back with every request as `expected_caller_scope`. A change whose token is
+  another caller's (someone else signed in to this browser since the editor
+  loaded) is refused with `-32056` `caller_changed` before anything is read or
+  written. A read ignores the field, and no method sees it as a param.
+- After a 401, or a `-32056` refusal of its caller, the stock editor reads
+  `meta/capabilities` again before it sends anything else, so its next change
+  names the caller the surface names now. It does not send the refused change
+  again.
+- A change checks its caller again right before it is made: a draft write
+  after the draft store's reads, and a deploy or a validation before it
+  writes its archive and runs `rkat`. Once the caller's token expired, its
+  sessions were revoked or its login signed out, the change is refused with
+  `-32056` `caller_not_current`, and nothing is written or run.
+
+The standalone binary has no caller: it reports no `caller_scope`, and
+ignores the field.
 
 ## Embedding
 

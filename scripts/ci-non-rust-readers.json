@@ -10,6 +10,19 @@
     "./": [
       {
         "package": "meerkat",
+        "target": "test:admission_fence_sites",
+        "scope": "target",
+        "tests": [
+          "bound_store_write_primitives_all_take_an_admission_guard",
+          "fence_acquisition_sites_are_exactly_the_listed_outermost_entries",
+          "raw_held_writes_are_called_only_from_config_runtime"
+        ],
+        "sources": [
+          "crates/meerkat/tests/admission_fence_sites.rs"
+        ]
+      },
+      {
+        "package": "meerkat",
         "target": "test:host_launch_sites",
         "scope": "target",
         "tests": [
@@ -2988,6 +3001,16 @@
       "source": "crates/xtask/src/protocol_codegen.rs",
       "literal": "write_protocol_files(emitted)",
       "why": "Writes the generated protocol files; the drift check that reads them is listed under their paths."
+    },
+    {
+      "source": "crates/xtask/tests/ci_gate_requires_rmat.rs",
+      "literal": "./.github/workflows/buildbuddy.yml",
+      "why": "Compared with the `uses:` value of a nightly.yml job; the test reads nightly.yml, not the called workflow."
+    },
+    {
+      "source": "crates/xtask/tests/ci_gate_requires_rmat.rs",
+      "literal": "./.github/workflows/mob-dense-topology.yml",
+      "why": "Compared with the `uses:` value of a nightly.yml job; the test reads nightly.yml, not the called workflow."
     }
   ]
 }

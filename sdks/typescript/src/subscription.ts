@@ -5,6 +5,8 @@ import { MeerkatError } from "./generated/errors.js";
 export interface SubscriptionEvent {
   event: Record<string, unknown>;
   rpcSequence: number | undefined;
+  /** The sequence space of a member stream event's envelope `seq`. */
+  epoch?: string;
 }
 
 /** @internal A received terminal retains custody until the queue drains. */
@@ -47,6 +49,7 @@ export class EventSubscription<T> implements AsyncIterable<T> {
   private closeInFlight: Promise<void> | null = null;
   private deliveredRpcSequence: number | undefined;
   private deliveredEventSeq: number | undefined;
+  private deliveredEventEpoch: string | undefined;
   private receivedTerminalOutcome: Record<string, unknown> | undefined;
 
   /** @internal */
@@ -81,11 +84,20 @@ export class EventSubscription<T> implements AsyncIterable<T> {
     return this.deliveredRpcSequence;
   }
 
-  /** Last delivered canonical event seq, not a replay cursor.
-   * Gap markers do not replace it.
+  /** Last delivered canonical event seq. Gap markers do not replace it.
+   * On a mob member stream it is, with `lastEventEpoch`, the position to
+   * resume the stream from (`{ cursor: { epoch, seq } }`); elsewhere it is
+   * not a replay cursor.
    */
   get lastEventSeq(): number | undefined {
     return this.deliveredEventSeq;
+  }
+
+  /** Sequence space of the last delivered canonical event's seq. Only a mob
+   * member stream names one; gap markers do not replace it.
+   */
+  get lastEventEpoch(): string | undefined {
+    return this.deliveredEventEpoch;
   }
 
   async close(): Promise<void> {
@@ -132,6 +144,7 @@ export class EventSubscription<T> implements AsyncIterable<T> {
       const payload = envelope?.payload as Record<string, unknown> | undefined;
       if (payload?.type !== "stream_truncated") {
         this.deliveredEventSeq = typeof envelope?.seq === "number" ? envelope.seq : undefined;
+        this.deliveredEventEpoch = delivery.epoch;
       }
       yield event;
     }

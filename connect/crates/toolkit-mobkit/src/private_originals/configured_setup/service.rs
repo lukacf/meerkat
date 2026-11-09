@@ -302,37 +302,20 @@ impl PrivateOriginals {
                 let observation = facts
                     .lifetime
                     .with_current_setup(|| {
-                        let grants = self.owner.grants();
-                        let parent = grants
-                            .resolve_lineage(
-                                std::slice::from_ref(&child.parent),
-                                &facts.application,
-                                facts.route.represented_subject.as_ref(),
-                            )
-                            .map_err(|_| HostLifetimeError::Denied)?;
-                        if parent.restrictions() != &child.parent_bounds {
+                        let leaf = self.service_setup_child_grant(&facts, child)?;
+                        #[cfg(any(test, feature = "test-support"))]
+                        if crate::source_hold_probe::observe(
+                            crate::source_hold_probe::Site::ServiceSetupObservation,
+                            "",
+                        )
+                        .is_some()
+                        {
+                            // A control refuses this observation, as a refused
+                            // observation below does.
                             return Err(HostLifetimeError::Denied);
                         }
-                        parent
-                            .check_current()
-                            .map_err(|_| HostLifetimeError::Unavailable)?;
-                        let leaf = match grants
-                            .issued_reference(&child.id)
-                            .map_err(|_| HostLifetimeError::Unavailable)?
-                        {
-                            Some(leaf) => leaf,
-                            None => grants
-                                .issue_child(
-                                    &facts.application,
-                                    &child.parent,
-                                    child.id.clone(),
-                                    facts.route.logical_executor.clone(),
-                                    child.requested.clone(),
-                                )
-                                .map_err(|_| HostLifetimeError::Unavailable)?,
-                        };
                         child
-                            .observe(&grants, &facts, leaf)
+                            .observe(&self.owner.grants(), &facts, leaf)
                             .map_err(|_| HostLifetimeError::Denied)
                     })
                     .map_err(|_| PrivateOriginalError::Unavailable)?;
@@ -346,6 +329,14 @@ impl PrivateOriginals {
                     }
                 } else {
                     record.service_setup_children.push(observation);
+                    // A bind attempt's durable effect: no "not now" may
+                    // follow it. It is the attempt's first write when an
+                    // earlier attempt issued the child and ended before
+                    // recording it (its observation refused, or the process
+                    // stopped): this attempt found the grant.
+                    meerkat_core::protected_section::note_effect(
+                        "original.service_setup_observation",
+                    );
                     stored = self
                         .retain_service_setup_observations(&stored, &record)
                         .await?;
@@ -360,6 +351,76 @@ impl PrivateOriginals {
             reservation.settled();
         }
         result
+    }
+
+    /// One service setup child's grant, inside the current setup: the issued
+    /// one, or issued now, the bind attempt's durable effect (marked before
+    /// the issuance).
+    fn service_setup_child_grant(
+        &self,
+        facts: &ConfiguredSetup,
+        child: &ServiceSetupChild,
+    ) -> Result<GrantLineageRef, HostLifetimeError> {
+        let grants = self.owner.grants();
+        let parent = grants
+            .resolve_lineage(
+                std::slice::from_ref(&child.parent),
+                &facts.application,
+                facts.route.represented_subject.as_ref(),
+            )
+            .map_err(|_| HostLifetimeError::Denied)?;
+        if parent.restrictions() != &child.parent_bounds {
+            return Err(HostLifetimeError::Denied);
+        }
+        parent
+            .check_current()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        match grants
+            .issued_reference(&child.id)
+            .map_err(|_| HostLifetimeError::Unavailable)?
+        {
+            Some(leaf) => Ok(leaf),
+            None => {
+                // A bind attempt's durable effect: no "not now" may follow
+                // it.
+                meerkat_core::protected_section::note_effect("original.service_setup_grant");
+                crate::no_wait::wait_at("service_setup.issue_child", || {
+                    grants.issue_child(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &facts.application,
+                        &child.parent,
+                        child.id.clone(),
+                        facts.route.logical_executor.clone(),
+                        child.requested.clone(),
+                    )
+                })
+                .map_err(|_| HostLifetimeError::Unavailable)
+            }
+        }
+    }
+
+    /// Test seam: the state a bind attempt leaves when it issued its service
+    /// setup children's grants and the process stopped before the attempt
+    /// recorded them: each child's grant issued through the attempt's own
+    /// issuance, under the source writer, and nothing recorded.
+    #[cfg(test)]
+    pub(in crate::private_originals) fn issue_service_setup_grants_for_test(
+        &self,
+        reference: &PrivateOriginalRef,
+        selected: &ServiceSetupSelection,
+    ) -> Result<(), PrivateOriginalError> {
+        let _writer = self
+            .owner
+            .try_source_writer()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        let (facts, children) = self.service_setup_children(reference, selected)?;
+        for child in &children {
+            facts
+                .lifetime
+                .with_current_setup(|| self.service_setup_child_grant(&facts, child))
+                .map_err(|_| PrivateOriginalError::Unavailable)?;
+        }
+        Ok(())
     }
 
     async fn retain_service_setup_observations(
@@ -668,7 +729,12 @@ impl ServiceSetupCleanup {
                                 source
                                     .owner
                                     .grants()
-                                    .revoke(&issuer, &current, &mut custody)
+                                    .revoke(
+                                        &meerkat_core::AdmissionGuard::none(),
+                                        &issuer,
+                                        &current,
+                                        &mut custody,
+                                    )
                                     .map_err(|_| PrivateOriginalError::Unavailable)
                             });
                         unresolved |= result.is_err();

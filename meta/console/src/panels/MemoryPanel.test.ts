@@ -178,6 +178,7 @@ test("author lines describe every author variant", () => {
   assert.equal(authorLine({ author: "steward", run_id: "run-1" }), "steward run run-1");
   assert.equal(authorLine({ author: "distiller", run_id: "run-2" }), "distiller run run-2");
   assert.equal(authorLine({ author: "operator" }), "operator");
+  assert.equal(authorLine({ author: "operator", principal: "bob@example.test" }), "operator bob@example.test");
   assert.equal(authorLine({ author: "application" }), "application");
   assert.equal(authorLine(undefined), "unknown author");
 });
@@ -1678,6 +1679,7 @@ test("authors, evidence and injections name people, not keys", () => {
   assert.equal(authorDisplay({ author: "steward", run_id: "run-1" }), "The memory steward");
   assert.equal(authorDisplay({ author: "distiller", run_id: "run-2" }), "The memory distiller");
   assert.equal(authorDisplay({ author: "operator" }), "An operator");
+  assert.equal(authorDisplay({ author: "operator", principal: "bob@example.test" }), "bob@example.test (operator)");
   assert.equal(authorDisplay({ author: "application" }), "The application");
   assert.equal(authorDisplay(undefined), "Unknown");
 
@@ -1806,10 +1808,20 @@ test("a missing grant reads as a sentence; the grant's name is only the tooltip"
     "You need permission to review quarantined memory",
   );
   assert.equal(needsGrantText("mob.memory.read"), "You need permission to read team memory");
-  assert.equal(needsGrantText("operator.memory.read"), "You need permission to read operator memory");
+  assert.equal(needsGrantText("operator.memory.read"), "You need permission to read own operator memory");
+  assert.equal(
+    needsGrantText("operator.memory.read_any"),
+    "You need permission to read anyone's operator memory",
+  );
   // A grant this console has no words for never puts its key in the sentence.
   assert.equal(needsGrantText("custom.unknown.grant"), "You need a permission you do not have");
-  for (const grant of ["memory.quarantine.review", "mob.memory.read", "operator.memory.read", "custom.unknown.grant"]) {
+  for (const grant of [
+    "memory.quarantine.review",
+    "mob.memory.read",
+    "operator.memory.read",
+    "operator.memory.read_any",
+    "custom.unknown.grant",
+  ]) {
     assert.doesNotMatch(needsGrantText(grant), /\.|grant/, grant);
     assert.equal(grantTitle(grant), `Grant: ${grant}`);
   }

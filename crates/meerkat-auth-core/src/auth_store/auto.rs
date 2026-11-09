@@ -31,6 +31,11 @@
 //! keychain failure keep their original error and their backend: no file
 //! write or delete happens in their place.
 //!
+//! Every write is fenced by one fence whichever backend owns the key: the
+//! credential fence C(r) of its realm under this store's root. A guard that
+//! does not cover it is refused before any keychain call or file write
+//! ([`TokenStoreError::AdmissionFence`]).
+//!
 //! A status observation never reads the keychain, and a file copy alone never
 //! proves the file store owns a key. A file-only key answers from its file;
 //! so does any key once a call proved this host has no usable keychain.
@@ -41,6 +46,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use meerkat_core::AdmissionGuard;
 use meerkat_core::auth::token_store::{TokenStoreAccess, TokenStoreObservation, TokenStoreRefusal};
 
 use super::file::FileTokenStore;
@@ -126,13 +132,19 @@ impl TokenStore for AutoTokenStore {
         self.load_for(key, TokenStoreAccess::Unattended).await
     }
 
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        self.save_for(key, tokens, TokenStoreAccess::Unattended)
+    async fn save(
+        &self,
+        guard: &AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        self.save_for(guard, key, tokens, TokenStoreAccess::Unattended)
             .await
     }
 
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        self.clear_for(key, TokenStoreAccess::Unattended).await
+    async fn clear(&self, guard: &AdmissionGuard, key: &TokenKey) -> Result<(), TokenStoreError> {
+        self.clear_for(guard, key, TokenStoreAccess::Unattended)
+            .await
     }
 
     async fn load_for(
@@ -168,6 +180,7 @@ impl TokenStore for AutoTokenStore {
 
     async fn save_for(
         &self,
+        guard: &AdmissionGuard,
         key: &TokenKey,
         tokens: &PersistedTokens,
         access: TokenStoreAccess,
@@ -175,8 +188,11 @@ impl TokenStore for AutoTokenStore {
         if access == TokenStoreAccess::Status {
             return Err(refused_status_write(access));
         }
+        // One fence covers the key in either backend: C of its realm under
+        // this store's root. Refused before any keychain call or file write.
+        self.file.require_fence(guard, key)?;
         if file_only(key) {
-            return self.file.save(key, tokens).await;
+            return self.file.write(key, tokens).await;
         }
         #[cfg(feature = "keyring")]
         match self.keyring_holds(key, access).await? {
@@ -210,19 +226,21 @@ impl TokenStore for AutoTokenStore {
             // No usable keychain on this host: the file store owns every key.
             None => {}
         }
-        self.file.save(key, tokens).await
+        self.file.write(key, tokens).await
     }
 
     async fn clear_for(
         &self,
+        guard: &AdmissionGuard,
         key: &TokenKey,
         access: TokenStoreAccess,
     ) -> Result<(), TokenStoreError> {
         if access == TokenStoreAccess::Status {
             return Err(refused_status_write(access));
         }
+        self.file.require_fence(guard, key)?;
         if file_only(key) {
-            return self.file.clear(key).await;
+            return self.file.remove(key).await;
         }
         // Clear from BOTH backends so no cached copy lingers regardless of
         // which backend currently owns the key. The file copy is removed after
@@ -238,7 +256,7 @@ impl TokenStore for AutoTokenStore {
             Err(TokenStoreError::KeyringUnavailable(_)) => {}
             Err(error) => return Err(error),
         }
-        self.file.clear(key).await
+        self.file.remove(key).await
     }
 
     /// Status never reads the keychain. A file-only key answers from its
@@ -329,12 +347,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rkat-auto-{}", uuid::Uuid::new_v4()));
         let store = AutoTokenStore::new(&dir, "rkat-test-auto");
         let key = TokenKey::parse("dev", "default_openai").unwrap();
+        let guard = crate::auth_store::covering_guard(&dir, &key);
 
-        store.save(&key, &sample_tokens("first")).await.unwrap();
+        store
+            .save(&guard, &key, &sample_tokens("first"))
+            .await
+            .unwrap();
         let loaded = store.load(&key).await.unwrap().unwrap();
         assert_eq!(loaded.primary_secret.as_deref(), Some("first"));
 
-        store.save(&key, &sample_tokens("second")).await.unwrap();
+        store
+            .save(&guard, &key, &sample_tokens("second"))
+            .await
+            .unwrap();
         let reloaded = store.load(&key).await.unwrap().unwrap();
         assert_eq!(reloaded.primary_secret.as_deref(), Some("second"));
 
@@ -347,7 +372,7 @@ mod tests {
             "key must not have divergent copies across backends after re-save"
         );
 
-        store.clear(&key).await.unwrap();
+        store.clear(&guard, &key).await.unwrap();
         assert!(store.load(&key).await.unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -430,7 +455,12 @@ mod tests {
             let keychain = FakeKeychain::open();
             let store = auto(temp.path(), &keychain);
             let key = credential_key("no_fallback");
-            store.file.save(&key, &tokens("file-copy")).await.unwrap();
+            let guard = crate::auth_store::covering_guard(temp.path(), &key);
+            store
+                .file
+                .save(&guard, &key, &tokens("file-copy"))
+                .await
+                .unwrap();
             let before = file_bytes(temp.path(), &key);
             let original = match &failure {
                 KeychainFailure::Denied(detail)
@@ -447,10 +477,14 @@ mod tests {
                         .map(|_| ()),
                     "save" => {
                         store
-                            .save_for(&key, &tokens("new"), TokenStoreAccess::Interactive)
+                            .save_for(&guard, &key, &tokens("new"), TokenStoreAccess::Interactive)
                             .await
                     }
-                    _ => store.clear_for(&key, TokenStoreAccess::Interactive).await,
+                    _ => {
+                        store
+                            .clear_for(&guard, &key, TokenStoreAccess::Interactive)
+                            .await
+                    }
                 };
                 match result {
                     Err(TokenStoreError::AccessRefused {
@@ -493,7 +527,15 @@ mod tests {
             &key.keyring_account(),
             &serde_json::to_string(&tokens("fresh")).unwrap(),
         );
-        store.file.save(&key, &tokens("stale-file")).await.unwrap();
+        store
+            .file
+            .save(
+                &crate::auth_store::covering_guard(temp.path(), &key),
+                &key,
+                &tokens("stale-file"),
+            )
+            .await
+            .unwrap();
         assert_eq!(
             store.observe_status(&key).await.unwrap(),
             TokenStoreObservation::NotObserved,
@@ -519,7 +561,11 @@ mod tests {
             TokenKey::mcp_attachment_identity_key(meerkat_core::RealmId::parse("status").unwrap());
         store
             .file
-            .save(&identity, &tokens("file-only"))
+            .save(
+                &crate::auth_store::covering_guard(temp.path(), &identity),
+                &identity,
+                &tokens("file-only"),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -531,7 +577,11 @@ mod tests {
         let owned = credential_key("status_no_keychain");
         store
             .file
-            .save(&owned, &tokens("file-owned"))
+            .save(
+                &crate::auth_store::covering_guard(temp.path(), &owned),
+                &owned,
+                &tokens("file-owned"),
+            )
             .await
             .unwrap();
         keychain.fail_next(KeychainFailure::Failed("platform failure".into()));
@@ -561,6 +611,47 @@ mod tests {
         assert_eq!(keychain.calls(), 3, "status made no keychain call");
     }
 
+    /// A save or clear whose guard does not cover the credential fence of
+    /// the key's realm under the store's root is refused before any keychain
+    /// call or file write, whichever backend would own the key.
+    #[tokio::test]
+    async fn an_auto_write_without_a_covering_guard_is_refused_before_either_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let keychain = FakeKeychain::open();
+        let store = auto(temp.path(), &keychain);
+        let credential = credential_key("auto_fenced");
+        let identity = TokenKey::mcp_attachment_identity_key(
+            meerkat_core::RealmId::parse("auto-fenced").unwrap(),
+        );
+        for key in [&credential, &identity] {
+            let saved = store
+                .save_for(
+                    &meerkat_core::AdmissionGuard::none(),
+                    key,
+                    &tokens("new"),
+                    TokenStoreAccess::Interactive,
+                )
+                .await;
+            assert!(
+                matches!(saved, Err(TokenStoreError::AdmissionFence(_))),
+                "{saved:?}"
+            );
+            let cleared = store
+                .clear_for(
+                    &meerkat_core::AdmissionGuard::none(),
+                    key,
+                    TokenStoreAccess::Interactive,
+                )
+                .await;
+            assert!(
+                matches!(cleared, Err(TokenStoreError::AdmissionFence(_))),
+                "{cleared:?}"
+            );
+            assert_eq!(file_bytes(temp.path(), key), None, "no file write");
+        }
+        assert_eq!(keychain.calls(), 0, "no keychain call");
+    }
+
     /// A status access never saves or clears, not even a file-only key whose
     /// operations otherwise go straight to the file store.
     #[tokio::test]
@@ -571,16 +662,24 @@ mod tests {
         let identity = TokenKey::mcp_attachment_identity_key(
             meerkat_core::RealmId::parse("status-write").unwrap(),
         );
+        let guard = crate::auth_store::covering_guard(temp.path(), &identity);
         store
             .file
-            .save(&identity, &tokens("file-only"))
+            .save(&guard, &identity, &tokens("file-only"))
             .await
             .unwrap();
         let before = file_bytes(temp.path(), &identity);
         let saved = store
-            .save_for(&identity, &tokens("replaced"), TokenStoreAccess::Status)
+            .save_for(
+                &guard,
+                &identity,
+                &tokens("replaced"),
+                TokenStoreAccess::Status,
+            )
             .await;
-        let cleared = store.clear_for(&identity, TokenStoreAccess::Status).await;
+        let cleared = store
+            .clear_for(&guard, &identity, TokenStoreAccess::Status)
+            .await;
         for (op, result) in [("save", saved), ("clear", cleared)] {
             assert!(
                 matches!(
@@ -625,7 +724,12 @@ mod tests {
             let keychain = FakeKeychain::open();
             let store = Arc::new(auto(temp.path(), &keychain));
             let key = credential_key(binding);
-            store.file.save(&key, &tokens("file-owned")).await.unwrap();
+            let guard = crate::auth_store::covering_guard(temp.path(), &key);
+            store
+                .file
+                .save(&guard, &key, &tokens("file-owned"))
+                .await
+                .unwrap();
             keychain.fail_next(KeychainFailure::NoStorage("no logon session".into()));
             assert_eq!(
                 store
@@ -666,7 +770,7 @@ mod tests {
                 store.file.load(&key).await.unwrap(),
                 Some(tokens("file-owned"))
             );
-            store.file.clear(&key).await.unwrap();
+            store.file.clear(&guard, &key).await.unwrap();
             let missing_file = store.observe_status(&key).await.unwrap();
             assert_eq!(keychain.calls(), 2, "status never starts another call");
             actual.push((
@@ -716,10 +820,15 @@ mod tests {
         let clearing = Arc::clone(&store);
         let clearing_key = key.clone();
         let clearing_lease = lease_key.clone();
+        let clearing_guard = crate::auth_store::covering_guard(&root, &key);
         runtime.spawn(async move {
             let _guard = meerkat_core::acquire_auth_login_lifecycle_guard(&clearing_lease).await;
             clearing
-                .clear_for(&clearing_key, TokenStoreAccess::Interactive)
+                .clear_for(
+                    &clearing_guard,
+                    &clearing_key,
+                    TokenStoreAccess::Interactive,
+                )
                 .await
         });
         keychain.wait_for_calls(1);
@@ -744,10 +853,13 @@ mod tests {
             .build()
             .unwrap();
         other.block_on(async {
+            // The dropped runtime dropped the first clear's caller and its
+            // guard; the keychain call keeps its own owner.
+            let guard = crate::auth_store::covering_guard(&root, &key);
             // Bounded, so a second call blocked behind the first fails, not hangs.
             let cleared = tokio::time::timeout(
                 Duration::from_secs(2),
-                store.clear_for(&key, TokenStoreAccess::Interactive),
+                store.clear_for(&guard, &key, TokenStoreAccess::Interactive),
             )
             .await
             .expect("another mutation answers at once");
@@ -787,15 +899,20 @@ mod tests {
         assert_eq!(keychain.entry(&key.keyring_account()), None);
     }
 
+    #[cfg(feature = "file-lock")]
     #[tokio::test]
     async fn the_mcp_attachment_identity_key_never_contacts_the_keyring() {
         let temp = tempfile::tempdir().unwrap();
         let keychain = FakeKeychain::open();
         let store = std::sync::Arc::new(auto(temp.path(), &keychain));
         let realm = meerkat_core::RealmId::parse("home").unwrap();
+        // The pair a persisted Auto backend opens: its coordinator takes the
+        // credential fences of the store's root.
         let persistence = meerkat_core::auth::ProviderAuthPersistence::new(
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn TokenStore>,
-            std::sync::Arc::new(super::super::InMemoryCoordinator::new()),
+            std::sync::Arc::new(super::super::FileLockCoordinator::retaining_custody(
+                temp.path().join("refresh-locks"),
+            )),
         );
         // The real helper creates the realm's key through an Auto store.
         let created =
@@ -813,8 +930,9 @@ mod tests {
             .expect("the same key loads");
         assert_eq!(loaded.id(), created.id());
         let tokens = store.load(&key).await.unwrap().unwrap();
-        store.save(&key, &tokens).await.unwrap();
-        store.clear(&key).await.unwrap();
+        let guard = crate::auth_store::covering_guard(temp.path(), &key);
+        store.save(&guard, &key, &tokens).await.unwrap();
+        store.clear(&guard, &key).await.unwrap();
         assert!(store.file.load(&key).await.unwrap().is_none());
         assert_eq!(
             keychain.calls(),

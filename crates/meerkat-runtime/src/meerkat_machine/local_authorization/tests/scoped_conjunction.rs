@@ -290,6 +290,7 @@ async fn conjunction_refuses_after_revoking(revoke_first: bool) {
     let issue = |label: &str| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new(label).expect("id"),
                 claims.logical_executor.clone(),
@@ -369,7 +370,12 @@ async fn conjunction_refuses_after_revoking(revoke_first: bool) {
         &second_grant
     };
     grants
-        .revoke(&root, revoked, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &root,
+            revoked,
+            &mut AnyCustody,
+        )
         .expect("one contributor's grant is revoked");
     assert!(
         complete
@@ -449,6 +455,7 @@ async fn named_contributor(case: NamedContributor) {
     let issue = |label: &str, restrictions: ExecutionRestrictions| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new(label).expect("id"),
                 claims.logical_executor.clone(),
@@ -505,6 +512,7 @@ async fn named_contributor(case: NamedContributor) {
             },
         }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     // This fixture binds no scoped session document; destination currency
@@ -647,7 +655,12 @@ async fn named_contributor(case: NamedContributor) {
                 .check_current(&bound)
                 .expect("the prepared read is current before the revocation");
             grants
-                .revoke(&root, &b_grant, &mut AnyCustody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &root,
+                    &b_grant,
+                    &mut AnyCustody,
+                )
                 .expect("B's grant is revoked after A's admission");
             assert!(
                 prepared.check_current(&bound).is_err(),
@@ -722,6 +735,7 @@ async fn contributors_to_an_installed_member_destination_are_conjuncts() {
     let issue = |label: &str| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new(label).expect("id"),
                 claims.logical_executor.clone(),
@@ -833,7 +847,12 @@ async fn contributors_to_an_installed_member_destination_are_conjuncts() {
         .prepare(&binding(&complete, &run, &domain))
         .expect("every contributor's grant allows the read");
     grants
-        .revoke(&root, &second_grant, &mut AnyCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &root,
+            &second_grant,
+            &mut AnyCustody,
+        )
         .expect("one contributor's grant is revoked");
     assert!(
         matches!(
@@ -869,6 +888,7 @@ async fn a_cancelled_original_refuses_its_own_operations_and_readmission() {
     let root = claims.controller_grant_lineage[0].root_authority.clone();
     let standing = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &root,
             EvidenceId::new("standing-grant").expect("id"),
             claims.logical_executor.clone(),
@@ -897,6 +917,7 @@ async fn a_cancelled_original_refuses_its_own_operations_and_readmission() {
             },
         }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     composed.require_scoped_destination = false;
@@ -1030,6 +1051,7 @@ async fn scoped_admission_resolves_no_lineage_of_a_targeted_selection() {
     let revoked = |label: &str| {
         let grant = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new(label).expect("id"),
                 claims.logical_executor.clone(),
@@ -1038,7 +1060,12 @@ async fn scoped_admission_resolves_no_lineage_of_a_targeted_selection() {
             )
             .expect("independently issued grant");
         grants
-            .revoke(&root, &grant, &mut AnyCustody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &root,
+                &grant,
+                &mut AnyCustody,
+            )
             .expect("revoked before admission");
         grant
     };
@@ -1270,6 +1297,7 @@ async fn delegated_contributor(case: DelegatedContributor) {
     let issue = |label: &str, restrictions: ExecutionRestrictions| {
         grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &root,
                 EvidenceId::new(label).expect("id"),
                 claims.logical_executor.clone(),
@@ -1381,6 +1409,7 @@ async fn delegated_contributor(case: DelegatedContributor) {
             helper_expires_ms: owner_ms,
         }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration();
     // This fixture binds no scoped session document; destination currency
@@ -1508,7 +1537,12 @@ async fn delegated_contributor(case: DelegatedContributor) {
                 .prepare(helper.clone())
                 .expect("permitted before B's revocation");
             grants
-                .revoke(&root, &b_search, &mut AnyCustody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &root,
+                    &b_search,
+                    &mut AnyCustody,
+                )
                 .expect("B's delegate grant is revoked");
             assert_eq!(
                 denied_kind(prepared.current().map(|_| ())),

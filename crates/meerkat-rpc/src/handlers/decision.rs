@@ -8,9 +8,10 @@
 //! adapter decides through its authenticated event
 //! ([`crate::router::MethodRouter::dispatch_with_decision_event`]). A stdio
 //! connection whose operator decides durable decisions (a Unix build with
-//! local authorization) routes it to that operator, and presents the
-//! decisions of each `decision/list` page the operator acts for before it
-//! answers (the `operator` module).
+//! local authorization) routes it to that operator, and presents to the
+//! operator each decision it acts for when the decision opens and before it
+//! answers a `decision/list` page that holds it (the `operator` module). No
+//! other connection is told that a decision opened.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -122,7 +123,7 @@ fn invalid(id: Option<RpcId>, error_value: &DecisionContractError) -> RpcRespons
 /// The runtime's decision owner, or the capability-unavailable answer of a
 /// runtime that keeps no durable decisions.
 #[allow(clippy::result_large_err)]
-fn decision_owner(
+pub(crate) fn decision_owner(
     id: Option<RpcId>,
     runtime: &SessionRuntime,
 ) -> Result<DurableDecisionService, RpcResponse> {
@@ -367,12 +368,16 @@ pub async fn handle_withdraw(
         Err(response) => return response,
     };
     match owner.withdraw(&decision_id, &DecisionWithdrawer::Host) {
-        Ok(row) => RpcResponse::success(
-            id,
-            DecisionResult {
-                decision: wire_decision(&row, false),
-            },
-        ),
+        Ok(row) => {
+            // A withdrawn tool grant request owes its notice.
+            runtime.nudge_tool_grant_request_executor_for(&row);
+            RpcResponse::success(
+                id,
+                DecisionResult {
+                    decision: wire_decision(&row, false),
+                },
+            )
+        }
         Err(error_value) => decision_error_to_response(id, error_value),
     }
 }
@@ -409,12 +414,17 @@ pub fn handle_decide_event(
         Err(response) => return response,
     };
     match owner.decide(event.decision_id(), decision, event.eligibility()) {
-        Ok(row) => RpcResponse::success(
-            id,
-            DecisionResult {
-                decision: wire_decision(&row, false),
-            },
-        ),
+        Ok(row) => {
+            // An approved tool grant request is executed by the runtime's
+            // executor of its kind; a rejected one owes its notice.
+            runtime.nudge_tool_grant_request_executor_for(&row);
+            RpcResponse::success(
+                id,
+                DecisionResult {
+                    decision: wire_decision(&row, false),
+                },
+            )
+        }
         Err(error_value) => decision_error_to_response(id, error_value),
     }
 }

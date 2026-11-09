@@ -394,3 +394,75 @@ async fn stale_binding_status_failure_preserves_same_token_route_convergence() {
     parked.release().await;
     fixture.host.shutdown();
 }
+
+/// A placed member whose revival its host refuses because the rebuild's
+/// provider authentication failed (`MaterializeBuildRejected` with the
+/// typed provider-auth cause): the member is recorded Broken with that
+/// failure's structured data, and the refusal Core mints from its record
+/// keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_revival_its_host_refuses_for_provider_auth_keeps_the_failures_data() {
+    let label = "placed-revival-refused";
+    let host = support::spawn_scripted_host_peer(label).await;
+    let receiver =
+        Arc::new(support::spawn_peer_comms_endpoint(&format!("{label}-remote"), true, None).await);
+    host.script_member_identity("remote", support::member_identity_of(&receiver));
+    host.bind_member_endpoint("remote", Arc::clone(&receiver));
+    let controlling = support::create_controlling_mob(label).await;
+    let report = controlling.bind_scripted(&host).await;
+    controlling
+        .spawn_placed("worker", "remote", &report.host_id)
+        .await
+        .expect("placed member");
+    let failure = provider_auth_build_refusal_failure();
+    host.reject_next_materialize(
+        BridgeRejectionCause::MaterializeBuildRejected {
+            cause:
+                meerkat_contracts::wire::supervisor_bridge::MemberBuildRejection::from_provider_auth_failure(
+                    &failure,
+                ),
+        },
+        "the host's rebuild of the member was refused by provider authentication",
+    );
+    let remote = AgentIdentity::from("remote");
+    controlling
+        .handle
+        .command_tx
+        .send(RoutedMobCommand::internal(MobCommand::RevivePlacedMember {
+            agent_identity: remote.clone(),
+            reason: "the row lost the member's live materialization".to_string(),
+        }))
+        .await
+        .expect("queue the placed revival");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let broken = controlling
+                .handle
+                .member_status(&remote)
+                .await
+                .is_ok_and(|snapshot| {
+                    snapshot.status == crate::runtime::handle::MobMemberStatus::Broken
+                });
+            if broken {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the refused revival records the member Broken");
+    let refused = match controlling.handle.member(&remote).await {
+        Err(error) => error,
+        Ok(_) => panic!("Core mints no member handle for a Broken member"),
+    };
+    assert!(
+        matches!(refused, MobError::MemberRestoreFailed { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        restore_failure_cause_data(&refused),
+        Some(failure.structured_data()),
+        "the member's record keeps the provider-auth failure's data"
+    );
+    host.shutdown();
+}

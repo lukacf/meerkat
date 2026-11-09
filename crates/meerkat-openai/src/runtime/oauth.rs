@@ -189,7 +189,7 @@ impl OpenAiOAuthRuntime {
         let token_store = self.token_store();
         let key = self.key.clone();
         let preparation_for_refresh = preparation.clone();
-        let refresh_fn: RefreshFn = Box::new(move || {
+        let refresh_fn: RefreshFn = Box::new(move |fence| {
             let http = http.clone();
             let endpoints = endpoints.clone();
             let token_store = Arc::clone(&token_store);
@@ -205,7 +205,10 @@ impl OpenAiOAuthRuntime {
                             "persisted tokens disappeared before OAuth refresh".into(),
                         )
                     })?;
-                match preparation.claim_refresh_owner(current.clone()).await? {
+                match preparation
+                    .claim_refresh_owner(fence, current.clone())
+                    .await?
+                {
                     LockedManagedStoreOAuthRefresh::UseCached(cached) => Ok(cached),
                     LockedManagedStoreOAuthRefresh::Refresh(transaction) => {
                         let refresh_token = match current.refresh_token.clone() {
@@ -600,6 +603,8 @@ mod tests {
             Success,
             Transient,
             InvalidGrant,
+            /// A 200 whose `expires_in` the host cannot represent.
+            ExpiryOutOfRange,
         }
         struct Endpoint {
             arrived: Notify,
@@ -618,6 +623,7 @@ mod tests {
                 Reply::Success => Json(serde_json::json!({"access_token":"ce-access-b", "refresh_token":"ce-refresh-b", "expires_in":3600})).into_response(),
                 Reply::Transient => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"temporarily_unavailable"}))).into_response(),
                 Reply::InvalidGrant => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"invalid_grant"}))).into_response(),
+                Reply::ExpiryOutOfRange => Json(serde_json::json!({"access_token":"ce-access-b", "refresh_token":"ce-refresh-b", "expires_in":u64::MAX})).into_response(),
             }
         }
         const REFUSED_REREAD: &str = "failure-path reread needs credential interaction";
@@ -644,6 +650,7 @@ mod tests {
             }
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
@@ -652,13 +659,14 @@ mod tests {
                         "injected first save failure".into(),
                     ));
                 }
-                self.inner.save(key, tokens).await
+                self.inner.save(fence, key, tokens).await
             }
             async fn clear(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
             ) -> Result<(), meerkat_core::auth::TokenStoreError> {
-                self.inner.clear(key).await
+                self.inner.clear(fence, key).await
             }
             async fn list(&self) -> Result<Vec<TokenKey>, meerkat_core::auth::TokenStoreError> {
                 self.inner.list().await
@@ -787,7 +795,32 @@ mod tests {
                     &transition,
                 )
                 .unwrap();
-                store.save(&key, &original).await.unwrap();
+                // The seed write goes through the pair's coordinator, which
+                // hands it the guard its store's writes require.
+                let seeded_store = Arc::clone(&store);
+                let seeded_key = key.clone();
+                let seeded = original.clone();
+                persistence
+                    .refresh_coordinator()
+                    .with_exclusive_mutation_for(
+                        key.clone(),
+                        meerkat_core::auth::TokenStoreAccess::Unattended,
+                        Box::new(move |fence| {
+                            Box::pin(async move {
+                                seeded_store
+                                    .save(&fence, &seeded_key, &seeded)
+                                    .await
+                                    .map_err(
+                                    meerkat_core::auth::CredentialMutationError::from_token_store,
+                                )?;
+                                Ok(meerkat_core::auth::CredentialMutationOutcome::Persisted(
+                                    seeded,
+                                ))
+                            })
+                        }),
+                    )
+                    .await
+                    .unwrap();
                 let env = ResolverEnvironment::testing()
                     .with_provider_auth_persistence(persistence.clone())
                     .with_auth_lease_handle(auth.clone())
@@ -798,9 +831,10 @@ mod tests {
                 // Preserve the production pre-coordinator release and exact re-admission.
                 previous.release_prelock_lifecycle_guard();
                 let prepare_binding = binding.clone();
-                let prepare: TokenPrepareFn = Box::new(move |locked, mode| {
+                let prepare: TokenPrepareFn = Box::new(move |fence, locked, mode| {
                     Box::pin(async move {
                         prepare_managed_store_oauth_refresh_under_lock(
+                            fence,
                             &env,
                             &prepare_binding,
                             previous,
@@ -865,10 +899,10 @@ mod tests {
                     .unwrap();
                 previous.release_prelock_lifecycle_guard();
                 let binding = self.binding.clone();
-                let prepare: TokenPrepareFn = Box::new(move |locked, mode| {
+                let prepare: TokenPrepareFn = Box::new(move |fence, locked, mode| {
                     Box::pin(async move {
                         prepare_managed_store_oauth_refresh_under_lock(
-                            &env, &binding, previous, locked, mode,
+                            fence, &env, &binding, previous, locked, mode,
                         )
                         .await
                         .map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
@@ -1001,7 +1035,11 @@ mod tests {
                 .unwrap();
                 fixture
                     .store
-                    .save(&fixture.key, &replacement)
+                    .save(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &fixture.key,
+                        &replacement,
+                    )
                     .await
                     .unwrap();
                 fixture.auth.begin_refresh(&fixture.lease).unwrap();
@@ -1082,6 +1120,163 @@ mod tests {
                     "the unverified predecessor stays exact"
                 );
             }
+        }
+
+        /// The refresh's failure carries the verdict AuthMachine issued on
+        /// it, read from the refreshing lease before the failure closes it:
+        /// a transient answer closes the lease to Expiring and the
+        /// resolution answers `source_unavailable`, which clears on its own;
+        /// an `invalid_grant` closes it to ReauthRequired and the resolution
+        /// answers `user_reauth_required`. Neither reads the provider's
+        /// answer outside the machine.
+        #[tokio::test]
+        async fn ce_provider_refresh_failure_carries_the_machine_verdict() {
+            use meerkat_core::auth::RefreshFailureDisposition;
+            for (reply, phase, verdict) in [
+                (
+                    Reply::Transient,
+                    AuthLeasePhase::Expiring,
+                    RefreshFailureDisposition::Transient,
+                ),
+                (
+                    Reply::InvalidGrant,
+                    AuthLeasePhase::ReauthRequired,
+                    RefreshFailureDisposition::ReauthRequired,
+                ),
+            ] {
+                let mut fixture = Fixture::start(reply).await;
+                let result = fixture.finish().await;
+                fixture.assert_one_original_exchange();
+                assert_eq!(fixture.auth.snapshot(&fixture.lease).phase, Some(phase));
+                let Err(error) = result else {
+                    panic!("{verdict:?}: the refresh fails");
+                };
+                assert!(
+                    matches!(
+                        &error,
+                        OpenAiOAuthError::Refresh(refresh)
+                            if refresh.refresh_failure_disposition() == Some(verdict)
+                    ),
+                    "{verdict:?}: {error:?}"
+                );
+                let resolution = crate::runtime::openai_oauth_refresh_error(error, String::new());
+                let expected = match verdict {
+                    RefreshFailureDisposition::Transient => matches!(
+                        &resolution,
+                        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                            meerkat_core::AuthError::SourceUnavailable { .. }
+                        )
+                    ),
+                    RefreshFailureDisposition::ReauthRequired => matches!(
+                        &resolution,
+                        meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                            meerkat_core::AuthError::UserReauthRequired
+                        )
+                    ),
+                };
+                assert!(expected, "{verdict:?}: {resolution:?}");
+            }
+        }
+
+        /// A refresh the host refuses on its own side says nothing about the
+        /// credential. Here the token endpoint answers with a redirect, which
+        /// credential requests never follow. AuthMachine's verdict is
+        /// transient, the lease closes to Expiring, the stored record stays,
+        /// and the resolution answers `source_unavailable`, a kind that
+        /// clears with no change to the credential: a mob member whose first
+        /// wake meets it stays dormant instead of breaking, and only a change
+        /// of the host's configuration or the endpoint's answer lets a later
+        /// refresh succeed.
+        #[tokio::test]
+        async fn ce_provider_host_refused_refresh_answers_source_unavailable() {
+            let mut fixture = Fixture::start(Reply::Success).await;
+            fixture.finish().await.unwrap();
+            let prior = fixture.store.load(&fixture.key).await.unwrap();
+            let (url, target_hits) = super::redirect_fixture::spawn_redirecting_endpoint().await;
+            fixture.endpoint_url = url;
+            fixture.spawn_again(None).await;
+            let refused = tokio::time::timeout(BOUND, fixture.refresh.take().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            let Err(error) = refused else {
+                panic!("a redirect answer must not refresh the credential");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    OpenAiOAuthError::Refresh(RefreshError::Classified {
+                        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+                        ..
+                    })
+                ),
+                "a refused redirect carries AuthMachine's transient verdict: {error:?}"
+            );
+            assert_eq!(
+                fixture.auth.snapshot(&fixture.lease).phase,
+                Some(AuthLeasePhase::Expiring)
+            );
+            assert_eq!(fixture.store.load(&fixture.key).await.unwrap(), prior);
+            assert_eq!(
+                target_hits.load(Ordering::SeqCst),
+                0,
+                "the redirect is never followed"
+            );
+            let resolution = crate::runtime::openai_oauth_refresh_error(error, String::new());
+            assert!(
+                matches!(
+                    &resolution,
+                    meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                        meerkat_core::AuthError::SourceUnavailable { .. }
+                    )
+                ),
+                "a host-refused refresh answers source_unavailable: {resolution:?}"
+            );
+        }
+
+        /// A refresh whose token answer the host cannot use (here a 200
+        /// whose `expires_in` is out of range) fails without an observation
+        /// of its own: the managed-store refresh still records AuthMachine's
+        /// verdict on it (transient, as for any failure on the host's side),
+        /// the lease closes to Expiring, the stored record stays, and the
+        /// resolution answers `source_unavailable` instead of
+        /// `refresh_failed`.
+        #[tokio::test]
+        async fn ce_provider_unusable_token_answer_answers_source_unavailable() {
+            let mut fixture = Fixture::start(Reply::ExpiryOutOfRange).await;
+            let result = fixture.finish().await;
+            fixture.assert_one_original_exchange();
+            let Err(error) = result else {
+                panic!("a token whose expiry is out of range is never stored");
+            };
+            assert!(
+                matches!(
+                    &error,
+                    OpenAiOAuthError::Refresh(RefreshError::Classified {
+                        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+                        ..
+                    })
+                ),
+                "an unusable token answer carries AuthMachine's transient verdict: {error:?}"
+            );
+            assert_eq!(
+                fixture.auth.snapshot(&fixture.lease).phase,
+                Some(AuthLeasePhase::Expiring)
+            );
+            assert_eq!(
+                fixture.store.load(&fixture.key).await.unwrap(),
+                Some(fixture.original.clone())
+            );
+            let resolution = crate::runtime::openai_oauth_refresh_error(error, String::new());
+            assert!(
+                matches!(
+                    &resolution,
+                    meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                        meerkat_core::AuthError::SourceUnavailable { .. }
+                    )
+                ),
+                "an unusable token answer answers source_unavailable: {resolution:?}"
+            );
         }
         #[tokio::test]
         async fn ce_provider_compensated_marker_cannot_revive_released_attempt() {
@@ -1184,7 +1379,11 @@ mod tests {
                     .phase,
                 Some(AuthLeasePhase::Refreshing)
             );
-            fixture.store.save(&fixture.key, &legacy).await.unwrap();
+            fixture
+                .store
+                .save(&meerkat_core::AdmissionGuard::none(), &fixture.key, &legacy)
+                .await
+                .unwrap();
             fixture
                 .auth
                 .refresh_failed(
@@ -1275,10 +1474,16 @@ mod tests {
                 .unwrap()
                 .unwrap();
             fixture.endpoint.release.add_permits(1);
-            assert!(matches!(
-                timeout,
-                Err(OpenAiOAuthError::Refresh(RefreshError::Observed { .. }))
-            ));
+            assert!(
+                matches!(
+                    timeout,
+                    Err(OpenAiOAuthError::Refresh(RefreshError::Classified {
+                        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+                        ..
+                    }))
+                ),
+                "a timeout carries AuthMachine's transient verdict: {timeout:?}"
+            );
             assert_eq!(
                 fixture.auth.snapshot(&fixture.lease).phase,
                 Some(AuthLeasePhase::Expiring)
@@ -1292,10 +1497,16 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(matches!(
-                network,
-                Err(OpenAiOAuthError::Refresh(RefreshError::Observed { .. }))
-            ));
+            assert!(
+                matches!(
+                    network,
+                    Err(OpenAiOAuthError::Refresh(RefreshError::Classified {
+                        disposition: meerkat_core::auth::RefreshFailureDisposition::Transient,
+                        ..
+                    }))
+                ),
+                "a connect error carries AuthMachine's transient verdict: {network:?}"
+            );
             assert_eq!(
                 fixture.auth.snapshot(&fixture.lease).phase,
                 Some(AuthLeasePhase::Expiring)
@@ -1326,8 +1537,8 @@ mod tests {
             let binding = fixture.binding.clone();
             let locked = legacy.clone();
             let result = fixture.persistence.refresh_coordinator().with_forced_refresh(fixture.key.clone(),
-                Box::new(move || Box::pin(async move {
-                    match prepare_managed_store_oauth_refresh_under_lock(&env, &binding, previous, locked,
+                Box::new(move |fence| Box::pin(async move {
+                    match prepare_managed_store_oauth_refresh_under_lock(fence, &env, &binding, previous, locked,
                         meerkat_auth_core::resolver::ManagedStoreOAuthRefreshPreparationMode::RefreshOwner).await {
                         Err(error) => Err(meerkat_auth_core::resolver::refresh_error_from_provider(error)),
                         Ok(_) => panic!("a current reauth verdict cannot be replaced by a legacy marker"),
@@ -1352,7 +1563,9 @@ mod tests {
 
             let directory = tempfile::tempdir().unwrap();
             let token_root = directory.path().join("tokens");
-            let lock_root = directory.path().join("locks");
+            // The coordinator fences the store's writes from its lock
+            // directory's parent: the store's own root.
+            let lock_root = token_root.join("refresh-locks");
             let persistence = ProviderAuthPersistence::new(
                 Arc::new(FileTokenStore::new(&token_root)),
                 Arc::new(FileLockCoordinator::new(&lock_root)),
@@ -1398,7 +1611,7 @@ mod tests {
                 BOUND,
                 fence_coordinator.with_exclusive_mutation(
                     fixture.key.clone(),
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         Box::pin(async move {
                             Ok(meerkat_core::auth::CredentialMutationOutcome::Persisted(
                                 fresh_store
@@ -1470,7 +1683,7 @@ mod tests {
                         .refresh_coordinator()
                         .with_exclusive_mutation(
                             fixture.key.clone(),
-                            Box::new(move || {
+                            Box::new(move |_fence| {
                                 Box::pin(async move {
                                     Ok(meerkat_core::auth::CredentialMutationOutcome::Persisted(
                                         store.load(&key).await.unwrap().unwrap(),
@@ -1495,7 +1708,7 @@ mod tests {
                         assert_eq!(stored, fixture.original);
                         assert_eq!(snapshot.phase, Some(AuthLeasePhase::Expiring));
                     }
-                    Reply::InvalidGrant => unreachable!(),
+                    Reply::InvalidGrant | Reply::ExpiryOutOfRange => unreachable!(),
                 }
                 fixture.assert_one_original_exchange();
             }

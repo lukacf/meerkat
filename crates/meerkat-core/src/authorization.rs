@@ -41,7 +41,8 @@ pub use audit::{
 };
 mod owner_change_wait;
 pub use owner_change_wait::{
-    OWNER_CHANGE_FREE_REBUILDS, OWNER_CHANGE_WAIT_BOUND, OwnerChangeChurn, OwnerChangeWait,
+    NotNowWait, OWNER_CHANGE_FREE_REBUILDS, OWNER_CHANGE_WAIT_BOUND, OwnerChangeChurn,
+    OwnerChangeWait,
 };
 mod refusal_observer;
 pub use refusal_observer::{
@@ -94,6 +95,42 @@ pub enum ControllerReadinessFailure {
     /// verdict; asking again after the boundary is released may succeed.
     #[error("the session's turn boundary is held")]
     TurnBoundaryHeld,
+    /// The input's source is held now by another of its owner's writers
+    /// (its collection, its publication or its source writer), and the host
+    /// does not wait for it inside a protected section: it answers this
+    /// instead. Not a verdict; asking again once the writer released it may
+    /// succeed.
+    #[error("the input's source is held by another of its owner's writers")]
+    SourceHeld,
+    /// What the host prepared outside protection names another session or
+    /// incarnation than the one bound now: it prepares again and the caller
+    /// asks again. Not a verdict.
+    #[error("the host's preparation names another session or incarnation")]
+    PreparationStale,
+}
+
+impl ControllerReadinessFailure {
+    /// The cause's stable snake_case name, for structured data on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PolicyUnavailable => "policy_unavailable",
+            Self::ExecutorUnavailable => "executor_unavailable",
+            Self::FactsUnavailable => "facts_unavailable",
+            Self::Busy => "busy",
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::AuthorityChanged => "authority_changed",
+            Self::UnsupportedScope => "unsupported_scope",
+            Self::CredentialUnusable { .. } => "credential_unusable",
+            Self::CredentialPreparationFailed { .. } => "credential_preparation_failed",
+            Self::PolicyChanged => "policy_changed",
+            Self::ReplacementNotEmpty => "replacement_not_empty",
+            Self::OriginalAdmissionPending => "original_admission_pending",
+            Self::TurnBoundaryHeld => "turn_boundary_held",
+            Self::SourceHeld => "source_held",
+            Self::PreparationStale => "preparation_stale",
+        }
+    }
 }
 
 /// A domain owner's external resource or physical destination coordinates.
@@ -663,7 +700,10 @@ pub trait WorkAuthorization: Send + Sync {
     /// The typed outcome is returned boxed. Wrappers check their own custody
     /// and forward; the default is unavailable and issues nothing. A held
     /// exclusion refuses as for `run_if_current_within`, before anything is
-    /// decided or appended.
+    /// decided or appended. An admission fence of the grant owner's store
+    /// that another holder holds (`realm_admission`) is answered, also
+    /// before anything is decided or appended, with a boxed
+    /// [`ChildIssuanceAdmissionInProgress`] in place of the outcome.
     fn issue_child_if_current_within(
         &self,
         _binding: &PreparedAuthorizationBinding,
@@ -1007,6 +1047,18 @@ pub trait PreparedOperationAuthorization: Send + Sync {
         binding: &PreparedAuthorizationBinding,
     ) -> Result<(), crate::OperationAuthorizationError>;
 
+    /// Spend what this exact decision's entry spends, once, at the effect
+    /// entry: [`crate::ToolDispatchContext::enter_reviewed_effect_held`]
+    /// calls it after the staging that passed and the review it spends,
+    /// before the effect. For an operation whose grant serves a counted
+    /// number of uses, it spends one, acknowledged by the grant's owner
+    /// before it returns. A refusal refuses the entry: the effect does not
+    /// run. A decision that spends nothing answers `Ok(())`.
+    ///
+    /// It has no default: a wrapper of a prepared decision must forward it,
+    /// so no wrapper can let an operation enter without its spend.
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError>;
+
     /// Stage a protected native observation at an actual boundary. This is
     /// separate from the allocation-free currentness check. Governed native
     /// contexts install a real input-row sink; this compatibility default is
@@ -1138,6 +1190,17 @@ impl fmt::Debug for OperationRefused {
 }
 
 impl std::error::Error for OperationRefused {}
+
+/// A work owner's answer to a child issuance it did not attempt
+/// ([`WorkAuthorization::issue_child_if_current_within`], boxed in place of
+/// the grant owner's outcome): an admission, or another fenced write, holds
+/// the admission fence of the grant owner's store (`realm_admission`).
+/// Nothing was decided or appended. A waiting issuance (the
+/// `_after_owner_change` forms) waits it out like a refusal to rebuild,
+/// within the same bounds; still held after them, it is the issuance's
+/// answer, and the hold may last until the holding process restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildIssuanceAdmissionInProgress;
 
 /// An operation refusal, unavailable authority, or failed observation.
 /// None of these variants authorizes retry or bypassing the actual owner.
@@ -1399,6 +1462,10 @@ mod tests {
                 } else {
                     Ok(())
                 }
+            }
+
+            fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+                Ok(())
             }
         }
         struct Work(Arc<Check>);

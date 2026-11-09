@@ -581,7 +581,7 @@ async fn reload(
     let mut image = BTreeMap::new();
     for cell in cells {
         let mut state = cell.lock().await;
-        image.extend(realm.pinned_values(&state).await.unwrap());
+        image.extend(realm.pinned_values(&mut state).await.unwrap());
         image.extend(realm.load_body(&mut state).await.unwrap());
         // The test is the adapter here: it holds the loaded values.
         state.mark_loaded();
@@ -2817,10 +2817,10 @@ async fn boot_obligation_scan_spi_store_fails_closed_on_a_head_pinned_before_the
     let id = ScopeId::new(super::RUNTIME_FAMILY, quiet.0.clone());
     let folded = {
         let cell = opened.0.cell(&id);
-        let state = cell.lock().await;
+        let mut state = cell.lock().await;
         let pinned = opened
             .0
-            .pinned_values(&state)
+            .pinned_values(&mut state)
             .await
             .expect("the pinned head");
         Arc::clone(pinned.get("boot").expect("the boot facts are pinned"))
@@ -2919,10 +2919,10 @@ async fn boot_obligation_scan_spi_store_does_not_fail_closed_on_a_retired_runtim
     let id = ScopeId::new(super::RUNTIME_FAMILY, retired.0.clone());
     let folded = {
         let cell = opened.0.cell(&id);
-        let state = cell.lock().await;
+        let mut state = cell.lock().await;
         let pinned = opened
             .0
-            .pinned_values(&state)
+            .pinned_values(&mut state)
             .await
             .expect("the pinned head");
         Arc::clone(pinned.get("boot").expect("the boot facts are pinned"))
@@ -2967,8 +2967,11 @@ async fn boot_obligation_scan_spi_store_agrees_with_the_open_on_each_pinned_head
         .collect();
     for runtime in fixture.runtimes() {
         let cell = realm.cell(&ScopeId::new(super::RUNTIME_FAMILY, runtime.0.clone()));
-        let state = cell.lock().await;
-        let pinned = realm.pinned_values(&state).await.expect("the pinned head");
+        let mut state = cell.lock().await;
+        let pinned = realm
+            .pinned_values(&mut state)
+            .await
+            .expect("the pinned head");
         assert_eq!(
             super::runtime::needs_body_at_boot(&pinned).expect("the pinned head decodes"),
             listed.contains(runtime),
@@ -3927,5 +3930,92 @@ fn a_read_error_keeps_unavailable_and_corrupt_typed() {
     ));
 }
 
+/// A batch left unsettled when its fence window closed, or when its retry
+/// budget ran out, stays typed through the runtime store, for a write and
+/// for a read that committed, with its account; a host error that is no
+/// such stop keeps answering a write failure.
+#[test]
+fn a_batch_unsettled_at_its_fence_window_stays_typed() {
+    use meerkat_core::host_store::{FenceToken, HostStoreError};
+
+    let unsettled = SpiError::UnsettledAtFenceWindow {
+        token: FenceToken::new(3),
+        attempts: 5,
+        last: Some(HostStoreError::Indeterminate("lost".to_string())),
+    };
+    let account = unsettled.to_string();
+    assert_eq!(
+        account,
+        "host store batch is unsettled: the self-fence window of fence token 3 closed \
+         (attempts sent: 5; last answer: outcome unknown: lost)"
+    );
+    for typed in [unsettled.clone().into_write(), unsettled.into_read()] {
+        assert!(
+            matches!(
+                &typed,
+                RuntimeStoreError::UnsettledAtFenceWindow { cause } if *cause == account
+            ),
+            "{typed:?}"
+        );
+        assert!(!typed.is_refused_until_reopen());
+    }
+    let never_sent = SpiError::UnsettledAtFenceWindow {
+        token: FenceToken::new(3),
+        attempts: 0,
+        last: None,
+    };
+    assert!(
+        never_sent.to_string().ends_with("(attempts sent: 0)"),
+        "{never_sent}"
+    );
+    let past_budget = SpiError::UnsettledPastRetryBudget {
+        attempts: 12,
+        last: HostStoreError::Unavailable("down".to_string()),
+    };
+    let account = past_budget.to_string();
+    assert_eq!(
+        account,
+        "host store batch is unsettled: its retry budget ran out (attempts sent: 12; \
+         last answer: unavailable: down)"
+    );
+    for typed in [past_budget.clone().into_write(), past_budget.into_read()] {
+        assert!(
+            matches!(
+                &typed,
+                RuntimeStoreError::UnsettledPastRetryBudget { cause } if *cause == account
+            ),
+            "{typed:?}"
+        );
+        assert!(!typed.is_refused_until_reopen());
+    }
+    assert!(matches!(
+        SpiError::Host(HostStoreError::Indeterminate("lost".to_string())).into_write(),
+        RuntimeStoreError::WriteFailed(_)
+    ));
+}
+
 /// What one poisoned scope refuses, and what it leaves serving.
 mod poison_radius;
+
+/// An acquire the realm gave up on, which the store grants anyway (H0).
+mod abandoned_acquire;
+
+/// A commit sends nothing past its token's self-fence deadline (#1550).
+mod settle_deadline;
+
+/// A grant at or below the token the writer holds breaks the store's token
+/// order.
+mod token_order;
+
+/// A batch unsettled past its retry budget is judged by the reopen alone.
+mod unsettled_budget;
+
+/// A re-acquire compares a listing only with a baseline the open installed.
+mod open_listing;
+
+/// A listing waits for its slowest scope kind, not for the sum of the kinds.
+mod concurrent_listing;
+
+/// One conflicted scope is contained: quarantined, refused typed, never
+/// left out of a listing, and kept through a re-acquire.
+mod containment;

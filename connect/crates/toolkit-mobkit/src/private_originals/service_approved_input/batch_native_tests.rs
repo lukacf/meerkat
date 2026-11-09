@@ -279,7 +279,12 @@ async fn revoke_alpha(
         .source
         .owner
         .grants()
-        .revoke(&route.grant_caller, lineage.last().unwrap(), &mut custody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &route.grant_caller,
+            lineage.last().unwrap(),
+            &mut custody,
+        )
         .unwrap();
 }
 

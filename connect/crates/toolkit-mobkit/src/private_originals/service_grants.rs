@@ -665,7 +665,14 @@ impl PrivateOriginals {
                     progress.entering();
                 }
                 grants
-                    .issue_child(&caller, leaf, grant_id, grantee, bounds)
+                    .issue_child(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &caller,
+                        leaf,
+                        grant_id,
+                        grantee,
+                        bounds,
+                    )
                     .map_err(ServiceIssueError::Native)
             };
             match mcp_lifetime {
@@ -1139,6 +1146,7 @@ pub(crate) mod tests {
         let parent = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &route.grant_caller,
                 EvidenceId::new("application-parent").unwrap(),
                 app(),
@@ -1263,6 +1271,7 @@ pub(crate) mod tests {
             ToolkitOriginalOwner::restore(
                 Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                     path.clone(),
+                    meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
                 )),
                 Arc::new(meerkat_authorization::clock::HostAuthorizationClock),
                 // Same actual source domain retained by the existing fixture.
@@ -1441,6 +1450,7 @@ pub(crate) mod tests {
         owner
             .grants()
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &route.grant_caller,
                 route.application_parent.as_ref().unwrap().last().unwrap(),
                 EvidenceId::new(format!("access-{}", key.id)).unwrap(),
@@ -1522,6 +1532,7 @@ pub(crate) mod tests {
         let replacement = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &operator,
                 EvidenceId::new("replacement-parent").unwrap(),
                 app(),
@@ -1677,6 +1688,7 @@ pub(crate) mod tests {
         owner
             .grants()
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &crate::original_ingress::tests::principal("admin"),
                 &adapter.routes.get().unwrap()[0]
                     .application_parent

@@ -166,6 +166,7 @@ async fn prepare_with_waiter_options(f: &FirstFixture, lifecycle: Option<(u64, b
     .unwrap();
     let root = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &root_authority,
             EvidenceId::new("planning-operation-parent").unwrap(),
             native.grant_administrator.clone(),
@@ -181,6 +182,7 @@ async fn prepare_with_waiter_options(f: &FirstFixture, lifecycle: Option<(u64, b
         .unwrap();
     let leaf = grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &native.grant_administrator,
             &root,
             EvidenceId::new("planning-operation-leaf").unwrap(),
@@ -517,21 +519,22 @@ struct DepartAfterBind {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for DepartAfterBind {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
-        let bound = self.inner.bind(context, input).await?;
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        use meerkat_mobkit::identity_first::GovernedBindRefusal;
+        let bound = self.inner.try_bind(context, input).await?;
         let source = self
             .planning
             .source
             .upgrade()
-            .ok_or("fixture source unavailable")?;
+            .ok_or_else(|| GovernedBindRefusal::unavailable("fixture source unavailable"))?;
         let pending = source
             .retained
             .lock()
-            .map_err(|_| "fixture owner unavailable")?
+            .map_err(|_| GovernedBindRefusal::unavailable("fixture owner unavailable"))?
             .iter()
             .find(|held| held.reference == self.planning.submission.original)
             .cloned()
@@ -540,10 +543,15 @@ impl GovernedInputBinder for DepartAfterBind {
                 !workflow.accepted.load(Ordering::Acquire) && workflow.current_source().is_err()
             });
         self.pending_seen.store(pending, Ordering::Release);
-        self.planning
-            .depart_waiter(&self.membership)
+        // The waiter departs as the other actor it stands for (production
+        // departs a waiter from its coordinator or its close, never inside
+        // a bind): on a task of its own, outside the bind's section.
+        let planning = Arc::clone(&self.planning);
+        let membership = self.membership.clone();
+        tokio::spawn(async move { planning.depart_waiter(&membership).await })
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| GovernedBindRefusal::unavailable(error.to_string()))?
+            .map_err(|error| GovernedBindRefusal::unavailable(error.to_string()))?;
         // Return the actual bound input, source guard and production fence.
         // Native still makes its real final admission decision.
         Ok(bound)
@@ -1598,6 +1606,7 @@ async fn planning_binding_refuses_distinct_issued_root_without_source_or_native_
             .clone();
         let other_root = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &c.planning.lineage[0].root_authority,
                 EvidenceId::new("different-planning-root").unwrap(),
                 native.grant_administrator.clone(),
@@ -1813,7 +1822,12 @@ async fn planning_binding_preserves_native_unavailability_and_denial() {
         *c.planning.binding_observed_for_test.lock().unwrap() = Some(Box::new(move || {
             let mut custody = machine.try_controller_grant_mutation().unwrap();
             revoke_grants
-                .revoke(&administrator, &lineage, &mut custody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &administrator,
+                    &lineage,
+                    &mut custody,
+                )
                 .unwrap();
         }));
         assert!(matches!(
@@ -1962,6 +1976,9 @@ mod lifecycle_tests;
 
 #[path = "bind_tests.rs"]
 mod bind_tests;
+
+#[path = "first_send_not_now_tests.rs"]
+mod first_send_not_now_tests;
 
 #[path = "replay_tests.rs"]
 mod replay_tests;

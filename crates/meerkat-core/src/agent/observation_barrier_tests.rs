@@ -110,6 +110,10 @@ impl PreparedOperationAuthorization for Decision {
         push(&self.events, event);
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 /// A barrier that records each wait and what it made durable (everything

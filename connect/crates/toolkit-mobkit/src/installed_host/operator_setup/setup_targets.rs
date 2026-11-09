@@ -407,6 +407,7 @@ impl OperatorSetup {
                                     .source
                                     .grants()
                                     .issue_root(
+                                        &meerkat_core::AdmissionGuard::none(),
                                         &record.operator,
                                         id.clone(),
                                         record.application.clone(),

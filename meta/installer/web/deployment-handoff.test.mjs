@@ -24,6 +24,16 @@ test("manual native Console access remains optional and only renders the supplie
   const older = renderToStaticMarkup(React.createElement(DeploymentRuntimeDetails, { ...props, scope: null }));
   assert.match(older, /Open native MobKit Console directly/);
   assert.doesNotMatch(older, /Chat and a custom UI|declares one local Console account/);
+  // Named accounts: each person signs in with their own account.
+  const named = renderToStaticMarkup(React.createElement(DeploymentRuntimeDetails,
+    { ...props, scope: { ...props.scope, authentication: "local-accounts" } }));
+  assert.match(named, /Sign in with your own account name and password/);
+  assert.doesNotMatch(named, /loopback-only native Console/);
+  // OIDC: people sign in at the identity provider.
+  const oidc = renderToStaticMarkup(React.createElement(DeploymentRuntimeDetails,
+    { ...props, scope: { ...props.scope, authentication: "oidc" } }));
+  assert.match(oidc, /Sign in with your account at the identity provider/);
+  assert.doesNotMatch(oidc, /loopback-only native Console|Console password/);
 });
 
 test("production Run instructions distinguish installation, local tunnel and optional service actions", () => {

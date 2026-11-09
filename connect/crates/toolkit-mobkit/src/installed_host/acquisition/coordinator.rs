@@ -894,11 +894,15 @@ fn aa1_private_failure(stage: &'static str, error: PrivateOriginalError) {
     );
 }
 
+/// A source owner's answer as a step's: its own refusal denies; a conflict
+/// in the source's facts is contention (another writer's change in
+/// flight), unavailable like an owner that cannot answer now, retryable.
 fn source_error(error: PrivateOriginalError) -> SetupError {
     match error {
         PrivateOriginalError::Denied => SetupError::Denied,
-        PrivateOriginalError::Conflict => SetupError::InvalidRecord,
-        _ => SetupError::NativeExecutionUnavailable,
+        PrivateOriginalError::Conflict | PrivateOriginalError::Unavailable => {
+            SetupError::NativeExecutionUnavailable
+        }
     }
 }
 
@@ -1095,10 +1099,10 @@ impl SetupWorkObservationAuthorizer<NativeWorkPreparation> for InstalledAcquisit
                 disclose,
             )
             .map_err(|error| match error {
-                PrivateOriginalError::Unavailable => {
+                PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => {
                     SetupWorkAdmissionError::NativeExecutionUnavailable
                 }
-                _ => SetupWorkAdmissionError::Denied,
+                PrivateOriginalError::Denied => SetupWorkAdmissionError::Denied,
             })
     }
 }
@@ -1122,6 +1126,32 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+
+    // The source owner's answer at a Find's advance and work step: a
+    // conflict in the source's facts is contention (another writer's change
+    // in flight), so the step answers it unavailable, retryable, not an
+    // inconsistent record; only the owner's own refusal denies.
+    //
+    // RED before the fix: a conflict answers `InvalidRecord`.
+    #[test]
+    fn a_source_conflict_in_a_step_is_unavailable_not_an_invalid_record() {
+        use super::{PrivateOriginalError, SetupError, source_error};
+        assert!(
+            matches!(
+                source_error(PrivateOriginalError::Conflict),
+                SetupError::NativeExecutionUnavailable
+            ),
+            "a conflict is contention"
+        );
+        assert!(matches!(
+            source_error(PrivateOriginalError::Unavailable),
+            SetupError::NativeExecutionUnavailable
+        ));
+        assert!(matches!(
+            source_error(PrivateOriginalError::Denied),
+            SetupError::Denied
+        ));
+    }
 
     // Real selected-artifact and activation custody. The value is already a
     // private immutable projection when close/replacement occurs. No provider,

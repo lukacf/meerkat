@@ -345,8 +345,9 @@ pub async fn start_turn_with_params(
         transient_turn_context: params.transient_turn_context,
     };
 
+    // The turn's session/event copies go to this request's connection.
     let result = match runtime
-        .start_turn_via_runtime_with_request_context(
+        .start_turn_via_runtime_on_connection(
             &session_id,
             params.prompt,
             params.injected_context.unwrap_or_default(),
@@ -360,6 +361,7 @@ pub async fn start_turn_with_params(
                 Some(overrides)
             },
             request_context,
+            Some(notification_sink.clone()),
             params.session_events.unwrap_or(true),
         )
         .await

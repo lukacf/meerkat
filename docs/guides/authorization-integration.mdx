@@ -793,10 +793,29 @@ The stock governed composition's controller pins do not outlive their
 registration, so a kept notice there cannot run after a registration change:
 it ends refused at once, and its consent is withdrawn.
 
-A governed prompt that a requeue stop kept, or that a restart found, cannot
-run again: only a fresh authentication of its caller could supply its client.
-Each attachment ends such an input as a refused resume, with its
-runtime-termination receipt, before it serves; submit the prompt again.
+A governed prompt (any input admitted under its own authority association)
+that a requeue stop kept, or that a restart found, comes back without its
+client too. The runtime asks the host for it again through
+`NativeWorkAuthorizationHost::authenticate_kept_original`, with the stored
+input and the association stored with it, under the same locks as a kept
+resume. There is no new authentication of the caller: on a scoped
+composition the check (`ScopedRetainedResume::check_kept_original`) asks the
+adapter that authenticated the prompt whether it still holds that original
+with the stored basis, asks the invocation policy again, resolves the basis
+under the current grants, checks every contributor the prompt names, and
+asks the controller owner (`RetainedControllerOwner::reacquire_controller`)
+for a client of the stored selection; the local-grant host then validates
+the controller admission again. It is asked when the registration recovers
+it and at the runtime loop's next pass. While you cannot say now, the
+machine holds it with no time bound: the loop asks again at each wake and
+the session's next registration asks again, never on a timer, a run left
+open that it is bound to stays marked, and it causes none of the refusals
+above. Supplied, it runs, and a run left open whose first input it is
+resumes. A definite answer, or a host without the method, ends it as a
+refused resume with its runtime-termination receipt before the attachment
+serves; submit the prompt again then. The stock governed composition's
+controller pins do not outlive their registration, so there a kept prompt
+ends refused at once, as a kept notice does.
 
 Reusable consent applies only to a requirement that owner policy explicitly
 makes reusable, with a defined scope, use limits where bounded, expiry or an

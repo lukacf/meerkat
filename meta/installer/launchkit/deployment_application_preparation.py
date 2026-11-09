@@ -24,7 +24,7 @@ from .deployment_application_bootstrap import (_fresh_paths, _observe_inputs,
     require_bootstrap_history_settled)
 from .deployment_supervisor import pending_custody
 from .deployment_updates import checked_package, require_replacement_history_settled
-from .forge_application_host import ForgeApplicationHost
+from .forge_application_host import ForgeApplicationHost, protected_source_matches
 from .projects import DraftConflict
 
 
@@ -287,7 +287,8 @@ async def prepare_application(service, guide_id, deployment_id, *, application_h
                 raise CustodyError("The original host differs from the installed selected product.")
             if (not _same_json_value(_json(package["blueprint.json"][0]), application_host._blueprint)
                     or package["config/mob.toml"][0] != application_host._definition.encode("utf-8")
-                    or any(pin.read() != package[name][0] for name, pin in application_host._protected)):
+                    or not all(protected_source_matches(application_host, name, package[name][0], pin.read())
+                               for name, pin in application_host._protected)):
                 raise CustodyError("The installed package differs from the original host's exact selected source.")
             gateway_path = destination / ".bin" / artifacts.prefix / "bin/toolkit_gateway"
             gateway = ProductGatewayFile.observe(ExactFile(gateway_path,

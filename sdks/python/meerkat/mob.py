@@ -16,13 +16,16 @@ from .generated.types import (
     LiveOpenResult,
     LiveStatusResult,
     MobBindHostResult,
+    MobForkMemberResult,
     MobHostStatus,
     MobMemberHistoryResult,
     MobStopMemberRunResult,
+    MobCompactMemberResult,
     MobAdoptMemberIdentityDeclarationParams,
     MobRevokeHostResult,
     MobRouteInstallsResult,
     MobSpawnManyResult,
+    MobStreamCursor,
     MobWireMembersBatchEdge,
     MobWireMembersBatchResult,
     RealtimeTurningMode,
@@ -48,6 +51,11 @@ from .generated.types import (
     WireMemberProgressSnapshot,
 )
 from .streaming import EventSubscription
+from .instructions import (
+    InstructionTarget,
+    MobInstructionStatus,
+    MobInstructionWriteResult,
+)
 from .types import (
     MobControlScope,
     MobGrantRecord,
@@ -203,6 +211,12 @@ MobMemberLifecycleCapabilities = TypedDict(
 # refused.
 MobMemberCustodyUnknown = TypedDict("MobMemberCustodyUnknown", {"unknown": str})
 
+# A preview-unavailable reason this SDK does not know, as the server sent it:
+# the vocabulary may grow, and an unknown reason is surfaced, not refused.
+MobMemberPreviewUnavailableUnknown = TypedDict(
+    "MobMemberPreviewUnavailableUnknown", {"unknown": str}
+)
+
 # A member's custody restore a mob start deferred: the restore and the cause
 # its last attempt met.
 MobMemberCustodyDeferral = TypedDict(
@@ -240,8 +254,11 @@ MobMemberSnapshot = TypedDict(
         "non_portable_disabled": NotRequired[list[WireNonPortableResourceKind]],
         # Set when this read did not observe the member's session:
         # output_preview and tokens_used are then missing, not an empty
-        # preview and a zero count. Absent when they are observations.
-        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
+        # preview and a zero count. Absent when they are observations. A
+        # reason this SDK does not know reads as {"unknown": <the value>}.
+        "preview_unavailable": NotRequired[
+            WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown
+        ],
         # Set when the member's host refused its restored registration: the
         # hook call that refused it. The member stays broken until an
         # explicit repair.
@@ -268,7 +285,9 @@ MobKickoffMemberSnapshot = TypedDict(
         "peer_connectivity": NotRequired[MobPeerConnectivity],
         "kickoff": NotRequired[dict[str, Any]],
         # As on MobMemberSnapshot.
-        "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
+        "preview_unavailable": NotRequired[
+            WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown
+        ],
         "registration_refusal": NotRequired[WireMemberRegistrationHookCall],
         "custody_deferred": NotRequired[MobMemberCustodyDeferral],
     },
@@ -607,6 +626,14 @@ class Mob:
             self.id, agent_identity, run_id, reason
         )
 
+    async def compact_member(self, agent_identity: str) -> MobCompactMemberResult:
+        """Ask a live member's next compaction check to compact.
+
+        No respawn and no threshold change; a dormant member is refused,
+        never woken.
+        """
+        return await self._client.compact_mob_member(self.id, agent_identity)
+
     async def member_live_open(
         self,
         agent_identity: str,
@@ -734,6 +761,28 @@ class Mob:
             fork_context=fork_context,
         )
 
+    async def fork_member(
+        self,
+        source_member_id: str,
+        agent_identity: str,
+        *,
+        message_index: int | None = None,
+        profile: str | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+    ) -> MobForkMemberResult:
+        """Fork a member's session at a message boundary into a new member.
+
+        See :meth:`MeerkatClient.fork_mob_member`.
+        """
+        return await self._client.fork_mob_member(
+            self.id,
+            source_member_id,
+            agent_identity,
+            message_index=message_index,
+            profile=profile,
+            runtime_mode=runtime_mode,
+        )
+
     async def wire(self, member: str, peer: str | dict[str, Any]) -> None:
         await self._client.wire_mob_members(self.id, member, peer)
 
@@ -768,6 +817,59 @@ class Mob:
             idempotency_key=idempotency_key,
         )
 
+    async def set_instruction(
+        self,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        target: InstructionTarget,
+        *,
+        content_sha256: str | None = None,
+    ) -> MobInstructionWriteResult:
+        """Write one operator instruction for the members ``target`` selects;
+        delivery to them is asynchronous."""
+        return await self._client.set_mob_instruction(
+            self.id,
+            namespace,
+            key,
+            revision,
+            body,
+            target,
+            content_sha256=content_sha256,
+        )
+
+    async def revoke_instruction(
+        self, namespace: str, key: str, revision: int
+    ) -> MobInstructionWriteResult:
+        """Revoke one operator instruction at a higher revision; the record
+        keeps its target."""
+        return await self._client.revoke_mob_instruction(
+            self.id, namespace, key, revision
+        )
+
+    async def instruction_status(
+        self,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        agent_identity: str | None = None,
+        profile: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> MobInstructionStatus:
+        """Read the mob's operator-instruction records and one page of
+        members, without waking a member."""
+        return await self._client.mob_instruction_status(
+            self.id,
+            namespace=namespace,
+            key=key,
+            agent_identity=agent_identity,
+            profile=profile,
+            offset=offset,
+            limit=limit,
+        )
+
     async def flows(self) -> list[str]:
         return await self._client.list_mob_flows(self.id)
 
@@ -792,9 +894,20 @@ class Mob:
     async def cancel_flow(self, run_id: str) -> None:
         await self._client.cancel_mob_flow(self.id, run_id)
 
-    async def subscribe_member_events(self, agent_identity: str) -> EventSubscription:
-        """Subscribe to events for a single mob member."""
-        return await self._client.subscribe_mob_member_events(self.id, agent_identity)
+    async def subscribe_member_events(
+        self,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
+    ) -> EventSubscription:
+        """Subscribe to events for a single mob member.
+
+        ``cursor`` resumes after a position, as
+        :meth:`MeerkatClient.subscribe_mob_member_events` describes.
+        """
+        return await self._client.subscribe_mob_member_events(
+            self.id, agent_identity, cursor=cursor
+        )
 
     async def subscribe_events(self) -> EventSubscription:
         """Subscribe to attributed mob-wide events."""

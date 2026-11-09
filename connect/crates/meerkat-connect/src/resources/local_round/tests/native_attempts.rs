@@ -22,7 +22,8 @@ use std::sync::{
 pub(super) const NATIVE: &str = r#"import json, os, pathlib, select, sys
 root = pathlib.Path(sys.argv[1]); pid = os.getpid()
 mode = (root/'native-mode').read_text()
-(root/(str(pid)+'.native-started')).write_text(json.dumps({'pid':pid}))
+started = root/(str(pid)+'.native-started'); temporary = started.with_suffix(started.suffix+'.tmp')
+temporary.write_text(json.dumps({'pid':pid})); os.replace(temporary, started)
 try:
     for line in sys.stdin:
         row=json.loads(line); method=row.get('method')

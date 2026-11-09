@@ -1,6 +1,6 @@
 import { render, fireEvent, cleanup } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApprovalAttention, ApprovalCard, HostAttentionCard, HostDecideSourcesProvider } from "./approval-card";
+import { ApprovalAttention, ApprovalCard, HostAttentionCard, HostDecideSourcesProvider, PrivateReplyCard } from "./approval-card";
 import { ConversationApprovals } from "./conversation-approvals";
 import { ConsoleNavigationProvider } from "../panel-kit";
 import { normalizePendingApproval, type PendingApprovalSnapshot } from "../../../console-core/src/pending-approvals";
@@ -325,6 +325,68 @@ describe("host-provided attention", () => {
     const view = render(<ApprovalAttention hostItems={1} onOpen={vi.fn()} />);
     expect(view.getByTestId("approval-attention")).toBeTruthy();
     view.rerender(<ApprovalAttention hostItems={0} onOpen={vi.fn()} />);
+    expect(view.queryByTestId("approval-attention") === null).toBe(true);
+  });
+});
+
+describe("private replies", () => {
+  const reply = {
+    id: "reply-1",
+    kind: "private_reply" as const,
+    createdAtMs: Date.now() - 120_000,
+    text: "Approved.\nThe release goes out tonight.",
+    redacted: false,
+    origin: { identity: "release-bot", interactionId: "interaction-1", inputFrameId: "frame-1" },
+  };
+  it("is a reply card: who answered, only for you, the text with its line breaks, and when", () => {
+    const view = render(<PrivateReplyCard item={reply} />);
+    const card = view.getByTestId("console-attention:reply-1");
+    expect(card.getAttribute("data-kind")).toBe("private-reply");
+    expect(view.getByText("Reply from Release bot").classList.contains("cc-approval__title")).toBe(true);
+    const audience = view.getByText("Only you");
+    expect(audience.classList.contains("cc-chip")).toBe(true);
+    expect(audience.getAttribute("title")).toBe("Only you can see this reply");
+    const text = card.querySelector(".cc-private-reply__text");
+    expect(text?.textContent).toBe("Approved.\nThe release goes out tonight.");
+    expect(view.getByText(/^Answered /).tagName).toBe("TIME");
+    // Nothing to decide: no status, and without a host or a dismiss handler no action.
+    expect(view.queryByRole("status") === null).toBe(true);
+    expect(view.queryByRole("button") === null).toBe(true);
+  });
+  it("opens the chat it answers through the host's navigation and dismisses through its handler", () => {
+    const openAgent = vi.fn();
+    const onDismiss = vi.fn();
+    const view = render(
+      <ConsoleNavigationProvider value={{ openAgent }}>
+        <PrivateReplyCard item={reply} onDismiss={onDismiss} />
+      </ConsoleNavigationProvider>,
+    );
+    fireEvent.click(view.getByRole("button", { name: "Open Release bot's chat" }));
+    expect(openAgent).toHaveBeenCalledWith("release-bot", "chat");
+    fireEvent.click(view.getByRole("button", { name: "Dismiss the reply from Release bot" }));
+    expect(onDismiss).toHaveBeenCalledWith(reply);
+  });
+  it("says a reply's content is hidden by policy when a policy left no text, and still dismisses it", () => {
+    const hidden = { ...reply, id: "reply-2", text: null, redacted: true };
+    const onDismiss = vi.fn();
+    const view = render(<PrivateReplyCard item={hidden} onDismiss={onDismiss} />);
+    const card = view.getByTestId("console-attention:reply-2");
+    expect(card.getAttribute("data-redacted")).toBe("true");
+    const text = card.querySelector(".cc-private-reply__text");
+    expect(text?.textContent).toBe("Content hidden by policy");
+    expect(text?.classList.contains("cc-private-reply__text--hidden")).toBe(true);
+    fireEvent.click(view.getByRole("button", { name: "Dismiss the reply from Release bot" }));
+    expect(onDismiss).toHaveBeenCalledWith(hidden);
+  });
+  it("adds to the Needs you count with approvals and host items", () => {
+    const view = render(<ApprovalAttention snapshot={snapshot()} hostItems={1} replies={2} onOpen={vi.fn()} />);
+    const button = view.getByRole("button", { name: "Needs you, 1 pending approval, 1 item from the host, 2 replies for you" });
+    expect(button.querySelector(".cc-approval-attention__count")?.textContent).toBe("4");
+  });
+  it("shows replies without an approval resource and hides when there is nothing", () => {
+    const view = render(<ApprovalAttention replies={1} onOpen={vi.fn()} />);
+    expect(view.getByRole("button", { name: "Needs you, 1 reply for you" })).toBeTruthy();
+    view.rerender(<ApprovalAttention replies={0} onOpen={vi.fn()} />);
     expect(view.queryByTestId("approval-attention") === null).toBe(true);
   });
 });

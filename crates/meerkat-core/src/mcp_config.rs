@@ -2374,6 +2374,23 @@ impl<'a> McpRealmPersistTarget<'a> {
             })
     }
 
+    /// [`Self::add`] for an operation that already holds `guard` over the
+    /// document's admission fences
+    /// ([`crate::ConfigRuntime::patch_under`]): it takes no fence of its own,
+    /// and a guard that does not hold them is refused with nothing written.
+    pub async fn add_under(
+        &self,
+        guard: &std::sync::Arc<crate::realm_admission::AdmissionGuard>,
+        server: McpServerConfig,
+        expected_generation: Option<u64>,
+    ) -> Result<crate::config_runtime::ConfigSnapshot, McpRealmPersistError> {
+        let (servers, generation) = self.with_added(server, expected_generation).await?;
+        Ok(self
+            .runtime
+            .patch_under(guard, Self::servers_delta(&servers)?, Some(generation))
+            .await?)
+    }
+
     /// The realm's own servers with `server` added, and the generation the
     /// write is checked against. A server holding an environment reference
     /// or an invalid access ceiling or working directory is refused before
@@ -4430,6 +4447,73 @@ command = "remove-cmd"
             "the emptied list is removed: {written}"
         );
         assert!(written.starts_with(doc), "{written}");
+    }
+
+    /// While an admission holds the realm document's fence, adding and
+    /// removing a realm server refuse typed after their bounded wait, with
+    /// nothing written. An operation that holds the fence itself adds
+    /// through `add_under`; a guard that does not hold it is refused.
+    #[tokio::test]
+    async fn realm_persist_add_and_remove_refuse_under_a_held_fence() {
+        use crate::config_runtime::ConfigRuntimeError;
+        use crate::realm_admission::{AdmissionGuard, AdmissionHold};
+        let dir = TempDir::new().unwrap();
+        let runtime = realm_runtime(dir.path());
+        let target = McpRealmPersistTarget::new(&runtime);
+        let server = |name: &str| McpServerConfig::stdio(name, "/bin/sh", vec![], HashMap::new());
+        target.add(server("kept"), None).await.unwrap();
+        let document = dir.path().join("config.toml");
+        let before = tokio::fs::read_to_string(&document).await.unwrap();
+
+        let fences = runtime.admission_fences();
+        for fence in &fences {
+            fence.ensure_exists().unwrap();
+        }
+        let mut held = AdmissionHold::try_acquire(fences.clone()).unwrap();
+        let (added, removed) =
+            tokio::join!(target.add(server("new"), None), target.remove("kept", None));
+        assert!(
+            matches!(
+                added,
+                Err(McpRealmPersistError::Config(
+                    ConfigRuntimeError::AdmissionInProgress
+                ))
+            ),
+            "{added:?}"
+        );
+        assert!(
+            matches!(
+                removed,
+                Err(McpRealmPersistError::Config(
+                    ConfigRuntimeError::AdmissionInProgress
+                ))
+            ),
+            "{removed:?}"
+        );
+        assert_eq!(tokio::fs::read_to_string(&document).await.unwrap(), before);
+        held.release();
+
+        assert!(matches!(
+            target
+                .add_under(&AdmissionGuard::none(), server("new"), None)
+                .await,
+            Err(McpRealmPersistError::Config(
+                ConfigRuntimeError::AdmissionFenceUnavailable(_)
+            ))
+        ));
+        assert_eq!(tokio::fs::read_to_string(&document).await.unwrap(), before);
+        let guard = AdmissionGuard::try_acquire(fences).unwrap();
+        target.add_under(&guard, server("new"), None).await.unwrap();
+        drop(guard);
+        let names: Vec<String> = target
+            .servers()
+            .await
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|server| server.name)
+            .collect();
+        assert_eq!(names, vec!["kept".to_string(), "new".to_string()]);
     }
 
     /// A host's entry check for the realm writer's admitted form: admits

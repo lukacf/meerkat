@@ -250,8 +250,10 @@ async fn v5_account_presenter_reuses_native_realm_profile_login_and_exact_access
     .unwrap();
     let persistence = ProviderAuthPersistence::new(
         Arc::new(FileTokenStore::new(root.path().join("vault"))),
+        // The coordinator's credential root (its lock directory's parent) is
+        // the file store's, so the fence it takes covers the store.
         Arc::new(FileLockCoordinator::new(
-            root.path().join("credential-locks"),
+            root.path().join("vault").join("credential-locks"),
         )),
     );
     let mut startup = SessionStartup {
@@ -268,8 +270,7 @@ async fn v5_account_presenter_reuses_native_realm_profile_login_and_exact_access
     let mut control = None;
     let server = tokio::spawn(server_future);
     let result=std::panic::AssertUnwindSafe(async {
-        let path=crate::realm::config_source(&storage).unwrap().config_doc_path(&storage.locator.realm);
-        meerkat::put_connector_client(Arc::new(meerkat_core::FileConfigStore::new(path,meerkat_models::canonical())),
+        meerkat::put_connector_client(crate::realm::config_source(&storage).unwrap(),
             &persistence,&storage.locator.realm,"test-profile",meerkat_core::ConnectorClientConfig {
                 issuer:origin.clone(),client:"test-client".into(),client_auth:meerkat_core::ConnectorClientAuthMethod::None,
                 authorize_params:vec![],resource_indicator:true,protocol:None,

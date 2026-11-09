@@ -604,20 +604,51 @@ impl CustodyRecovery {
         &self,
         register: impl FnOnce(bool) -> Result<T, PrivateOriginalError>,
     ) -> Result<T, PrivateOriginalError> {
-        let control = self
-            .control
-            .state
-            .lock()
-            .map_err(|_| PrivateOriginalError::Unavailable)?;
-        let readiness = self.control.readiness();
-        if control.admission_stopped || readiness.stopped() {
-            return Err(PrivateOriginalError::Unavailable);
-        }
-        register(readiness.selected())
+        // The control lock is held by a recovery round, a stop or an
+        // acceptance, and staging inside it takes the shared publication:
+        // the whole enrollment waits.
+        crate::no_wait::wait_at("custody_recovery.enroll", || {
+            let control = self
+                .control
+                .state
+                .lock()
+                .map_err(|_| PrivateOriginalError::Unavailable)?;
+            let readiness = self.control.readiness();
+            if control.admission_stopped || readiness.stopped() {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            register(readiness.selected())
+        })
     }
 
     pub(super) fn changed(&self) {
         self.control.wake.notify_one();
+    }
+
+    /// Test seam: this source's recovery control held for `hold` on a thread
+    /// of its own, as a recovery round or another enrollment holds it.
+    /// Returns once it is held; the returned thread releases it.
+    #[cfg(test)]
+    pub(crate) fn hold_control_for_test(
+        &self,
+        hold: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let control = self.control.clone();
+        let (held, holding) = std::sync::mpsc::sync_channel(0);
+        let thread = std::thread::spawn(move || {
+            let state = control
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = held.send(());
+            std::thread::sleep(hold);
+            drop(state);
+        });
+        assert!(
+            holding.recv().is_ok(),
+            "the control's recovery control hold began"
+        );
+        thread
     }
 
     pub(super) fn announce(&self) {
@@ -1448,25 +1479,30 @@ impl PrivateOriginals {
                 &actor.executor_actor_identity(),
                 entry.input(),
                 |admitted| {
-                    let _control = self
-                        .custody_recovery
-                        .control
-                        .state
-                        .lock()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    if self.custody_recovery.control.readiness().stopped() {
-                        return Err(PrivateOriginalError::Unavailable);
-                    }
-                    let _writer = self
-                        .owner
-                        .try_source_writer()
-                        .map_err(cold_service_admission::writer_error)?;
-                    stamp
-                        .check_current()
-                        .map_err(|_| PrivateOriginalError::Unavailable)?;
-                    self.owner
-                        .recover_retained_custody(&original, admitted)
-                        .map_err(cold_service_admission::writer_error)
+                    // The control lock, then the shared publication: the
+                    // whole publication waits inside the historical
+                    // admission callback.
+                    crate::no_wait::wait_at("custody_recovery.recovered_publish", || {
+                        let _control = self
+                            .custody_recovery
+                            .control
+                            .state
+                            .lock()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        if self.custody_recovery.control.readiness().stopped() {
+                            return Err(PrivateOriginalError::Unavailable);
+                        }
+                        let _writer = self
+                            .owner
+                            .try_source_writer()
+                            .map_err(cold_service_admission::writer_error)?;
+                        stamp
+                            .check_current()
+                            .map_err(|_| PrivateOriginalError::Unavailable)?;
+                        self.owner
+                            .recover_retained_custody(&original, admitted)
+                            .map_err(cold_service_admission::writer_error)
+                    })
                 },
             )
             .await;

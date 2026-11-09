@@ -393,7 +393,11 @@ pub(super) fn validate_attached_spawn_spec(
         return reject("the branch inherits the source's tool access policy".to_string());
     }
     if spec.tool_dispatch_admission.is_some() {
-        return reject("the branch inherits the source's tool dispatch admission".to_string());
+        return reject(
+            "the branch's tool dispatch admission comes from the host's spawn customizer, \
+             never from the caller"
+                .to_string(),
+        );
     }
     if spec.tool_category_overrides != meerkat_core::ToolCategoryOverrides::default() {
         return reject("the branch inherits the source's tool categories".to_string());

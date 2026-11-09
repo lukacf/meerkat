@@ -561,8 +561,11 @@ on its current session (`ReleaseOutcome::Stale` otherwise).
 member out of `auto_wire_orchestrator` and `role_wiring` (not for a placed
 member).
 
-Operator instructions (since 0.9.9, Rust only; writes need `AdminHost` and
-are never an agent tool): `set_operator_instruction` writes a slot's body at
+Operator instructions (since 0.9.9 in Rust, since 0.9.11 on JSON-RPC as
+`mob/set_instruction`, `mob/revoke_instruction` and `mob/instruction_status`,
+and in the Python and TypeScript SDKs as `Mob.set_instruction` /
+`setInstruction` and siblings; writes need `AdminHost` and are never an agent
+tool): `set_operator_instruction` writes a slot's body at
 a revision for every member, one profile's members or one member (a predicate
 over the roster, so a member added later receives it);
 `revoke_operator_instruction` revokes it at a higher revision; and
@@ -572,7 +575,15 @@ each member's whole snapshot in its session, through the session while it is
 live and store-only while it is dormant, never waking a member (at most
 `MobBuilder::with_member_instruction_delivery_concurrency` dormant deliveries
 at a time, 16 by default), and a member born on a new session carries the
-snapshot from its first build. A placed member is reported blocked. A mob
+snapshot from its first build. A placed member gets its snapshot on its
+member host over the supervisor bridge (born with it when its spawn mints
+its session on a 0.9.11 member host, so its first turn has it); one whose host runs a release
+before 0.9.11 is blocked `member_host_unsupported` until the host runs
+0.9.11 and a write selects it again; so is one on a governed member host
+(the host refuses the record `prepared_authorization_required`), and one
+whose snapshot record would not fit the bridge frame (about 1 MiB; nothing
+is sent). A
+governed runtime refuses every write `prepared_authorization_required`. A mob
 that recorded one journals at mob event schema 10, which 0.9.8 and 0.9.7
 refuse (`rkat storage doctor`: `operator-instruction-mob-events`).
 
@@ -1196,7 +1207,7 @@ respawn) checked against the caller's own session binding, never against
 arguments. Without manage scope the forker can still observe its descendants
 with `mob_check_member` (a status read never waits on the member's turn; when
 it could not observe the member's session it still answers, with a typed
-`preview_unavailable` of `observation_deadline`, `read_failed`,
+`preview_unavailable` of `observation_deadline`, `read_failed`, `store_refused`,
 `session_absent` or `not_observed_while_retiring`, meaning `output_preview`
 and `tokens_used` are missing rather than empty, and a `note` that says
 whether checking again helps), retire them with `mob_retire_member`, and see

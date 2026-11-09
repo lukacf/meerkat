@@ -2,6 +2,7 @@
 
 use crate::config::{Config, ConfigDelta, ConfigError, ConfigWarning, PersistedConfigDocument};
 use crate::model_profile::ModelCatalog;
+use crate::realm_admission::{AdmissionFence, AdmissionGuard};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -82,6 +83,42 @@ pub trait ConfigStore: Send + Sync {
         delta: ConfigDelta,
     ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
         Ok((self.patch(delta).await?, Vec::new()))
+    }
+
+    /// The admission fence of this store's document
+    /// ([`crate::realm_admission`]): every write of the document holds it
+    /// EXCLUSIVE. `None` for a store with no document (in memory), whose
+    /// writes need no fence.
+    fn admission_fence(&self) -> Option<AdmissionFence> {
+        None
+    }
+
+    /// [`Self::set`] as the raw write of a caller that already holds `guard`
+    /// over the document's admission fence and the document's config custody
+    /// (a [`crate::ConfigRuntime`]): it takes no lock of its own. A
+    /// document-backed store refuses a guard that does not hold its fence
+    /// ([`ConfigError::AdmissionFenceUnavailable`]) with nothing written; a
+    /// store with no document accepts any guard. Only the config runtime
+    /// calls it.
+    async fn set_held(&self, guard: &AdmissionGuard, config: Config) -> Result<(), ConfigError>;
+
+    /// [`Self::patch`] as the raw write under a held guard and custody, as
+    /// [`Self::set_held`].
+    async fn patch_held(
+        &self,
+        guard: &AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError>;
+
+    /// [`Self::patch_with_warnings`] as the raw write under a held guard and
+    /// custody, as [`Self::set_held`]. Default: [`Self::patch_held`] with no
+    /// warnings.
+    async fn patch_held_with_warnings(
+        &self,
+        guard: &AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        Ok((self.patch_held(guard, delta).await?, Vec::new()))
     }
 }
 
@@ -570,6 +607,20 @@ impl ConfigStore for MemoryConfigStore {
         *config = updated.clone();
         Ok(updated)
     }
+
+    /// No document, so no fence: any guard is accepted.
+    async fn set_held(&self, _guard: &AdmissionGuard, config: Config) -> Result<(), ConfigError> {
+        self.set(config).await
+    }
+
+    /// No document, so no fence: any guard is accepted.
+    async fn patch_held(
+        &self,
+        _guard: &AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        self.patch(delta).await
+    }
 }
 
 /// Metadata-tagged config store wrapper.
@@ -620,9 +671,46 @@ impl ConfigStore for TaggedConfigStore {
     ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
         self.inner.patch_with_warnings(delta).await
     }
+
+    fn admission_fence(&self) -> Option<AdmissionFence> {
+        self.inner.admission_fence()
+    }
+
+    async fn set_held(&self, guard: &AdmissionGuard, config: Config) -> Result<(), ConfigError> {
+        self.inner.set_held(guard, config).await
+    }
+
+    async fn patch_held(
+        &self,
+        guard: &AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        self.inner.patch_held(guard, delta).await
+    }
+
+    async fn patch_held_with_warnings(
+        &self,
+        guard: &AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        self.inner.patch_held_with_warnings(guard, delta).await
+    }
 }
 
 /// File-backed config store with optional bootstrap template.
+///
+/// Every write is fenced ([`crate::realm_admission`]). Its public writes
+/// ([`ConfigStore::set`], [`ConfigStore::patch`],
+/// [`ConfigStore::patch_with_warnings`]) run the config runtime's sequence
+/// for the document itself: its admission fence, its config custody, the
+/// write and the generation sidecar beside it, settled together on an owned
+/// task, so they move the generation every [`crate::ConfigRuntime`] whose
+/// sidecar lies beside the same document reads. A host's runtime of the
+/// `global` realm keeps its own sidecar in that realm's directory, which
+/// these writes do not move. A held fence refuses them
+/// ([`ConfigError::AdmissionInProgress`]) with nothing written. Its raw
+/// writes ([`ConfigStore::set_held`] and the patch forms) take the guard of
+/// a caller that holds the fence and the custody.
 pub struct FileConfigStore {
     path: PathBuf,
     create_if_missing: bool,
@@ -631,6 +719,20 @@ pub struct FileConfigStore {
     // leave half-changed, so the store stays `UnwindSafe` and
     // `RefUnwindSafe`.
     realm_chain: Option<std::panic::AssertUnwindSafe<RealmChainGuard>>,
+}
+
+impl Clone for FileConfigStore {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            create_if_missing: self.create_if_missing,
+            catalog: self.catalog,
+            realm_chain: self
+                .realm_chain
+                .as_ref()
+                .map(|chain| std::panic::AssertUnwindSafe(chain.0.clone())),
+        }
+    }
 }
 
 impl FileConfigStore {
@@ -653,6 +755,11 @@ impl FileConfigStore {
     }
 
     /// Create a store that bootstraps a global config file if missing.
+    ///
+    /// The document is created from its template only when its admission
+    /// fence and config custody are free now: it never waits, and while
+    /// either is held it creates nothing and the store reads the missing
+    /// document as empty.
     pub async fn global(catalog: ModelCatalog) -> Result<Self, ConfigError> {
         let path = Config::global_config_path()
             .ok_or_else(|| ConfigError::MissingField("HOME".to_string()))?;
@@ -662,7 +769,7 @@ impl FileConfigStore {
             catalog,
             realm_chain: None,
         };
-        store.ensure_exists().await?;
+        store.create_if_unheld().await?;
         Ok(store)
     }
 
@@ -730,11 +837,26 @@ impl FileConfigStore {
     }
 
     /// The document text as persisted; empty when the file does not exist.
+    /// A store that bootstraps its document creates it first, only when its
+    /// fence and custody are free now ([`Self::create_if_unheld`]).
     async fn read_content(&self) -> Result<String, ConfigError> {
         if self.create_if_missing {
-            self.ensure_exists().await?;
+            self.create_if_unheld().await?;
         }
+        self.read_persisted_text().await
+    }
 
+    /// The document text as a held write reads it: a store that bootstraps
+    /// its document creates it from the template first, under the caller's
+    /// guard and custody.
+    async fn read_content_held(&self, guard: &AdmissionGuard) -> Result<String, ConfigError> {
+        if self.create_if_missing && !tokio::fs::try_exists(&self.path).await? {
+            self.write_content(guard, Config::template_toml()).await?;
+        }
+        self.read_persisted_text().await
+    }
+
+    async fn read_persisted_text(&self) -> Result<String, ConfigError> {
         if !tokio::fs::try_exists(&self.path).await? {
             return Ok(String::new());
         }
@@ -764,13 +886,17 @@ impl FileConfigStore {
         PersistedConfigDocument::parse(&self.read_content().await?)
     }
 
-    /// Replace the document atomically: write a sibling temp file, sync it,
-    /// rename it over the document.
-    async fn write_content(&self, content: &str) -> Result<(), ConfigError> {
-        let parent = self
-            .path
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    /// Replace the document atomically under `guard`, which must hold the
+    /// document's admission fence (a guard that does not is refused with
+    /// nothing written): write a sibling temp file, sync it, rename it over
+    /// the document.
+    async fn write_content(
+        &self,
+        guard: &AdmissionGuard,
+        content: &str,
+    ) -> Result<(), ConfigError> {
+        guard.covers(&AdmissionFence::beside(&self.path))?;
+        let parent = parent_directory(&self.path);
         tokio::fs::create_dir_all(&parent).await?;
         let tmp_path = parent.join(format!(".config.tmp.{}", crate::time_compat::new_uuid_v7()));
         let mut tmp = tokio::fs::OpenOptions::new()
@@ -785,16 +911,82 @@ impl FileConfigStore {
         Ok(())
     }
 
-    async fn ensure_exists(&self) -> Result<(), ConfigError> {
+    /// Create the missing document from its template, as the config
+    /// runtime writes (its fence, its custody, temp file, sync, rename, and
+    /// the generation beside it), but only when the document's admission
+    /// fence and config custody are both free now. It never waits: while
+    /// either is held (by an admission, another writer, or a reader such as
+    /// [`crate::ConfigRuntime::get`]), or the fence is unavailable, it creates
+    /// nothing, and a read then sees the missing document as empty.
+    async fn create_if_unheld(&self) -> Result<(), ConfigError> {
         if tokio::fs::try_exists(&self.path).await? {
             return Ok(());
         }
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let content = Config::template_toml();
-        tokio::fs::write(&self.path, content).await?;
-        Ok(())
+        let fences = self.admission_fence().into_iter().collect();
+        let guard = match AdmissionGuard::try_acquire(fences) {
+            Ok(guard) => guard,
+            Err(refusal) => {
+                tracing::debug!(path = %self.path.display(), %refusal, "config document not created on read");
+                return Ok(());
+            }
+        };
+        let custody = match crate::config_runtime::ConfigWriterLock::try_hold(&self.custody_path())
+        {
+            Ok(Some(custody)) => custody,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                tracing::debug!(path = %self.path.display(), %error, "config document not created on read");
+                return Ok(());
+            }
+        };
+        let store = self.clone();
+        let generation_path = self.generation_path();
+        let held = Arc::clone(&guard);
+        crate::realm_admission::settle_entered(guard, async move {
+            let _custody = custody;
+            if tokio::fs::try_exists(&store.path).await? {
+                return Ok(());
+            }
+            store.write_content(&held, Config::template_toml()).await?;
+            let current = crate::config_runtime::read_generation_at(&generation_path).await?;
+            crate::config_runtime::write_generation_at(
+                &held,
+                &generation_path,
+                current.saturating_add(1),
+            )
+            .await?;
+            Ok::<_, ConfigError>(())
+        })
+        .await
+        .map_err(|lost| ConfigError::Io(std::io::Error::other(lost.to_string())))?
+    }
+
+    /// The generation sidecar of this document's own writes, beside it: the
+    /// one a [`crate::ConfigRuntime`] the surfaces build for the document's
+    /// directory reads.
+    fn generation_path(&self) -> PathBuf {
+        parent_directory(&self.path).join(GENERATION_FILE)
+    }
+
+    /// The config custody lock of [`Self::generation_path`], as a
+    /// [`crate::ConfigRuntime`] over that sidecar takes it.
+    fn custody_path(&self) -> PathBuf {
+        self.generation_path().with_extension("lock")
+    }
+
+    /// The config runtime of this document's own fenced writes.
+    fn own_runtime(&self) -> crate::ConfigRuntime {
+        crate::ConfigRuntime::new(Arc::new(self.clone()), self.generation_path())
+    }
+}
+
+/// The generation sidecar's file name beside a document.
+const GENERATION_FILE: &str = "config_state.json";
+
+fn parent_directory(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
     }
 }
 
@@ -831,9 +1023,56 @@ impl ConfigStore for FileConfigStore {
         &self,
         delta: ConfigDelta,
     ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        let (snapshot, warnings) = self.own_runtime().patch_with_warnings(delta, None).await?;
+        Ok((snapshot.config, warnings))
+    }
+
+    /// A full replace writes every field of `config` explicitly. In a realm
+    /// document each one then overrides the parent realm, so callers that
+    /// change individual keys of a realm document patch it instead.
+    async fn set(&self, config: Config) -> Result<(), ConfigError> {
+        self.own_runtime().set(config, None).await?;
+        Ok(())
+    }
+
+    async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
+        let (updated, warnings) = self.patch_with_warnings(delta).await?;
+        report_config_load_warnings_once(&self.path, &warnings);
+        Ok(updated)
+    }
+
+    /// The fence of the document's directory, named by its kind when this
+    /// store is a realm's own document in the realm layout: the user
+    /// document fence for the `global` realm's document, the realm's fence
+    /// for another realm's, and otherwise the fence beside the document. The
+    /// kind matters only in a set of several fences, which must be named by
+    /// kind; every name of it is the same fence file.
+    fn admission_fence(&self) -> Option<AdmissionFence> {
+        let beside = AdmissionFence::beside(&self.path);
+        let by_kind = self.realm_chain.as_ref().and_then(|chain| {
+            if chain.head.is_global() {
+                Some(AdmissionFence::user_document(beside.directory()))
+            } else {
+                let state_root = beside.directory().parent()?;
+                AdmissionFence::realm(state_root, &chain.head).ok()
+            }
+        });
+        Some(
+            by_kind
+                .filter(|fence| fence.path() == beside.path())
+                .unwrap_or(beside),
+        )
+    }
+
+    async fn patch_held_with_warnings(
+        &self,
+        guard: &AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+        guard.covers(&AdmissionFence::beside(&self.path))?;
         // Held from before the read to after the write.
         let _composition = self.composition_lock().await?;
-        let content = self.read_content().await?;
+        let content = self.read_content_held(guard).await?;
         let patched = PersistedConfigDocument::patch_content(&content, delta.0)?;
         // The patch already parsed this content strictly, so this parse
         // succeeds; the comparisons are against the same bytes the patch
@@ -856,17 +1095,15 @@ impl ConfigStore for FileConfigStore {
         patched
             .config
             .validate_for_write(self.catalog, &persisted.tools.mcp_servers)?;
-        self.write_content(&patched.content).await?;
+        self.write_content(guard, &patched.content).await?;
         Ok((patched.config, patched.warnings))
     }
 
-    /// A full replace writes every field of `config` explicitly. In a realm
-    /// document each one then overrides the parent realm, so callers that
-    /// change individual keys of a realm document patch it instead.
-    async fn set(&self, config: Config) -> Result<(), ConfigError> {
+    async fn set_held(&self, guard: &AdmissionGuard, config: Config) -> Result<(), ConfigError> {
+        guard.covers(&AdmissionFence::beside(&self.path))?;
         // Held from before the read to after the write.
         let _composition = self.composition_lock().await?;
-        let content = self.read_content().await?;
+        let content = self.read_content_held(guard).await?;
         let governance = persisted_governance(&content)?;
         keep_governance(&governance, &config.governance)?;
         let confinement = persisted_confinement(&content)?;
@@ -884,11 +1121,15 @@ impl ConfigStore for FileConfigStore {
         }
         config.validate_for_write(self.catalog, &self.persisted_mcp_servers_for_write().await)?;
         let content = toml::to_string_pretty(&config).map_err(ConfigError::TomlSerialize)?;
-        self.write_content(&content).await
+        self.write_content(guard, &content).await
     }
 
-    async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
-        let (updated, warnings) = self.patch_with_warnings(delta).await?;
+    async fn patch_held(
+        &self,
+        guard: &AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        let (updated, warnings) = self.patch_held_with_warnings(guard, delta).await?;
         report_config_load_warnings_once(&self.path, &warnings);
         Ok(updated)
     }
@@ -1345,6 +1586,7 @@ fn persisted_realm_edges(content: &str) -> Result<RealmEdges, ConfigError> {
 
 /// The realm chain a head realm's own document is composed into
 /// ([`FileConfigStore::with_realm_chain`]).
+#[derive(Clone)]
 struct RealmChainGuard {
     head: crate::connection::RealmId,
     documents: Arc<dyn RealmConfigSource>,
@@ -4231,5 +4473,112 @@ tier = \"r2\"\n";
             store.get().await.expect("config").governance,
             governed().governance
         );
+    }
+
+    /// The generation the sidecar beside `document` publishes.
+    async fn generation_beside(document: &Path) -> u64 {
+        crate::config_runtime::read_generation_at(&parent_directory(document).join(GENERATION_FILE))
+            .await
+            .expect("a readable generation")
+    }
+
+    /// Every public write of a file store is fenced and moves the generation
+    /// a config runtime over the same document reads: a full replace, a
+    /// patch and a patch that returns its warnings.
+    #[tokio::test]
+    async fn every_file_store_write_moves_the_generation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let document = temp.path().join("config.toml");
+        let store = FileConfigStore::new(
+            document.clone(),
+            *crate::model_profile::test_catalog::TEST_CATALOG,
+        );
+        let runtime =
+            crate::ConfigRuntime::new(Arc::new(store.clone()), temp.path().join(GENERATION_FILE));
+        assert_eq!(generation_beside(&document).await, 0);
+
+        let config = Config {
+            max_tokens: Some(100),
+            ..Config::default()
+        };
+        store.set(config).await.expect("a full replace");
+        assert_eq!(generation_beside(&document).await, 1);
+        store
+            .patch(ConfigDelta(serde_json::json!({ "max_tokens": 200 })))
+            .await
+            .expect("a patch");
+        assert_eq!(generation_beside(&document).await, 2);
+        store
+            .patch_with_warnings(ConfigDelta(serde_json::json!({ "max_tokens": 300 })))
+            .await
+            .expect("a patch with warnings");
+        let snapshot = runtime.get().await.expect("the runtime's read");
+        assert_eq!(snapshot.generation, 3);
+        assert_eq!(snapshot.config.max_tokens, Some(300));
+    }
+
+    /// A store that bootstraps its document on read creates it only when
+    /// its admission fence and its config custody are both free now, and
+    /// never waits: under a held fence, under a held custody, and inside a
+    /// config runtime's own read (whose read custody is held), it creates
+    /// nothing and reads the missing document as empty. With both free it
+    /// creates the document from its template and moves the generation.
+    #[tokio::test]
+    async fn create_on_read_creates_nothing_under_a_held_fence_or_custody_and_never_waits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let document = temp.path().join("config.toml");
+        let bootstrapping = || FileConfigStore {
+            path: document.clone(),
+            create_if_missing: true,
+            catalog: *crate::model_profile::test_catalog::TEST_CATALOG,
+            realm_chain: None,
+        };
+        let store = bootstrapping();
+        let quickly = std::time::Duration::from_secs(1);
+
+        let fence = store.admission_fence().expect("a document fence");
+        fence.ensure_exists().expect("the fence file");
+        let mut hold = crate::realm_admission::AdmissionHold::try_acquire(vec![fence])
+            .expect("a holder takes the fence");
+        let read = tokio::time::timeout(quickly, store.get())
+            .await
+            .expect("create-on-read never waits for a held fence")
+            .expect("a read");
+        assert_eq!(read.max_tokens, Config::default().max_tokens);
+        assert!(!document.exists(), "nothing is created under a held fence");
+        hold.release();
+
+        let custody = crate::config_runtime::ConfigWriterLock::try_hold(&store.custody_path())
+            .expect("the custody lock")
+            .expect("the custody is free");
+        tokio::time::timeout(quickly, store.get())
+            .await
+            .expect("create-on-read never waits for a held custody")
+            .expect("a read");
+        assert!(
+            !document.exists(),
+            "nothing is created under a held custody"
+        );
+        drop(custody);
+
+        let runtime =
+            crate::ConfigRuntime::new(Arc::new(bootstrapping()), temp.path().join(GENERATION_FILE));
+        tokio::time::timeout(quickly, runtime.get())
+            .await
+            .expect("a runtime's read never waits for its own custody")
+            .expect("a runtime's read");
+        assert!(
+            !document.exists(),
+            "nothing is created inside a runtime's own read"
+        );
+
+        store.get().await.expect("a read with both free");
+        assert_eq!(
+            tokio::fs::read_to_string(&document)
+                .await
+                .expect("the created document"),
+            Config::template_toml()
+        );
+        assert_eq!(generation_beside(&document).await, 1);
     }
 }

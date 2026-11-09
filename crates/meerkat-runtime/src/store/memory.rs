@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indexmap::IndexMap;
@@ -305,15 +305,24 @@ fn runtimes_with_recovery_work(inner: &Inner, ops: &OpsLifecycleState) -> Vec<Lo
         .collect();
     candidates
         .into_iter()
-        .filter(|rt| {
-            runtime_has_recovery_obligation(
-                &boot_facts(inner, ops, rt),
-                inner.runtime_lifecycle.get(*rt).map(Vec::as_slice),
-                inner.session_catalog.get(*rt),
-            )
-        })
+        .filter(|runtime| runtime_holds_recovery_work_in(inner, ops, runtime))
         .map(LogicalRuntimeId::new)
         .collect()
+}
+
+/// Whether `runtime_id` holds recovery work, by the one predicate the scan
+/// asks of each runtime ([`runtimes_with_recovery_work`]). A runtime the
+/// store never held has default facts and no lifecycle record: none.
+fn runtime_holds_recovery_work_in(
+    inner: &Inner,
+    ops: &OpsLifecycleState,
+    runtime_id: &str,
+) -> bool {
+    runtime_has_recovery_obligation(
+        &boot_facts(inner, ops, runtime_id),
+        inner.runtime_lifecycle.get(runtime_id).map(Vec::as_slice),
+        inner.session_catalog.get(runtime_id),
+    )
 }
 
 fn store_input_state_prechecked(
@@ -752,11 +761,11 @@ impl ToolGrantTables {
 /// Test support: the self-fence an [`InMemoryRuntimeStore`] reports
 /// ([`InMemoryRuntimeStore::set_self_fence_for_test`]), shared by every clone
 /// of the store.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Default)]
 struct SelfFenceForTest(Arc<StdMutex<Option<Arc<dyn meerkat_core::host_store::SelfFence>>>>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl std::fmt::Debug for SelfFenceForTest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SelfFenceForTest").finish_non_exhaustive()
@@ -786,6 +795,14 @@ pub struct InMemoryRuntimeStore {
     /// this cause and writes nothing.
     #[cfg(any(test, feature = "test-support"))]
     tool_grant_failure: Arc<StdMutex<Option<String>>>,
+    /// Test support: the scoped tool grant subjects whose every method fails,
+    /// each with its cause, writing nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    tool_grant_subject_failures: Arc<StdMutex<BTreeMap<String, String>>>,
+    /// Test support: how many more scoped tool grant compare-and-put calls
+    /// find the row changed by another writer.
+    #[cfg(any(test, feature = "test-support"))]
+    tool_grant_conflicts: Arc<StdMutex<usize>>,
     #[cfg(test)]
     auth_oauth_flow_store_calls: Arc<AtomicUsize>,
     #[cfg(test)]
@@ -816,9 +833,9 @@ pub struct InMemoryRuntimeStore {
     machine_lifecycle_load_panics_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
     machine_lifecycle_cas_conflicts_remaining: Arc<AtomicUsize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     machine_lifecycle_observe_errors_remaining: Arc<AtomicUsize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     machine_lifecycle_commit_errors_remaining: Arc<AtomicUsize>,
     #[cfg(test)]
     machine_lifecycle_commit_ack_losses_remaining: Arc<AtomicUsize>,
@@ -829,7 +846,7 @@ pub struct InMemoryRuntimeStore {
     #[cfg(test)]
     snapshot_byte_probe_bytes: Arc<std::sync::atomic::AtomicU64>,
     /// The self-fence a row set for the store to report.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     self_fence_for_test: SelfFenceForTest,
 }
 
@@ -946,6 +963,75 @@ impl InMemoryRuntimeStore {
         Ok(())
     }
 
+    /// Test support: while `cause` is set, every scoped tool grant method of
+    /// the subject `subject_key` fails with it (a read as `ReadFailed`, a
+    /// write as `WriteFailed`) and writes nothing, the other subjects' as
+    /// before; `None` ends that subject's failure.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_tool_grant_subject_for_test(&self, subject_key: &str, cause: Option<&str>) {
+        if let Ok(mut failures) = self.tool_grant_subject_failures.lock() {
+            match cause {
+                Some(cause) => {
+                    failures.insert(subject_key.to_string(), cause.to_string());
+                }
+                None => {
+                    failures.remove(subject_key);
+                }
+            }
+        }
+    }
+
+    /// Test support: each of the next `count` scoped tool grant
+    /// compare-and-put calls finds the row changed by another writer and
+    /// writes nothing, as a concurrent writer that won would; `0` ends them.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn conflict_tool_grant_writes_for_test(&self, count: usize) {
+        if let Ok(mut conflicts) = self.tool_grant_conflicts.lock() {
+            *conflicts = count;
+        }
+    }
+
+    /// The scripted failure of a scoped tool grant method of `subject_key`,
+    /// when one is set for that subject.
+    fn tool_grant_subject_failure(
+        &self,
+        subject_key: &str,
+        write: bool,
+    ) -> Result<(), RuntimeStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(cause) = self
+            .tool_grant_subject_failures
+            .lock()
+            .map_err(|_| RuntimeStoreError::ReadFailed("tool grant faults poisoned".into()))?
+            .get(subject_key)
+            .cloned()
+        {
+            return Err(if write {
+                RuntimeStoreError::WriteFailed(cause)
+            } else {
+                RuntimeStoreError::ReadFailed(cause)
+            });
+        }
+        let _ = (subject_key, write);
+        Ok(())
+    }
+
+    /// Whether a scripted conflict takes this compare-and-put, consuming it.
+    fn take_tool_grant_conflict(&self) -> Result<bool, RuntimeStoreError> {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let mut conflicts = self
+                .tool_grant_conflicts
+                .lock()
+                .map_err(|_| RuntimeStoreError::WriteFailed("tool grant faults poisoned".into()))?;
+            if *conflicts > 0 {
+                *conflicts -= 1;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn lock_tool_grants(
         &self,
         write: bool,
@@ -1016,8 +1102,9 @@ impl InMemoryRuntimeStore {
     /// again: a store whose writes hold a host store fence, for rows of the
     /// runtime's waits at a store fence gap. The store's own writes do not
     /// consult it.
-    #[cfg(test)]
-    pub(crate) fn set_self_fence_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn set_self_fence_for_test(
         &self,
         fence: Option<Arc<dyn meerkat_core::host_store::SelfFence>>,
     ) {
@@ -1092,6 +1179,10 @@ impl InMemoryRuntimeStore {
             tool_grants: Arc::new(StdMutex::new(ToolGrantTables::default())),
             #[cfg(any(test, feature = "test-support"))]
             tool_grant_failure: Arc::new(StdMutex::new(None)),
+            #[cfg(any(test, feature = "test-support"))]
+            tool_grant_subject_failures: Arc::new(StdMutex::new(BTreeMap::new())),
+            #[cfg(any(test, feature = "test-support"))]
+            tool_grant_conflicts: Arc::new(StdMutex::new(0)),
             #[cfg(test)]
             auth_oauth_flow_store_calls: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
@@ -1124,9 +1215,9 @@ impl InMemoryRuntimeStore {
             machine_lifecycle_load_panics_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             machine_lifecycle_cas_conflicts_remaining: Arc::new(AtomicUsize::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             machine_lifecycle_observe_errors_remaining: Arc::new(AtomicUsize::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             machine_lifecycle_commit_errors_remaining: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             machine_lifecycle_commit_ack_losses_remaining: Arc::new(AtomicUsize::new(0)),
@@ -1134,7 +1225,7 @@ impl InMemoryRuntimeStore {
             direct_member_high_water_before: Arc::new(StdMutex::new(None)),
             #[cfg(test)]
             snapshot_byte_probe_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self_fence_for_test: SelfFenceForTest::default(),
         }
     }
@@ -1239,14 +1330,21 @@ impl InMemoryRuntimeStore {
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_machine_lifecycle_observation(&self) {
+    /// Test support: fail the store's next machine lifecycle observation
+    /// (every clone of the store shares the count) with a read failure.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_next_machine_lifecycle_observation(&self) {
         self.machine_lifecycle_observe_errors_remaining
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_machine_lifecycle_commit(&self) {
+    /// Test support: fail the store's next machine lifecycle commit (every
+    /// clone of the store shares the count) with a write failure, and write
+    /// nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn fail_next_machine_lifecycle_commit(&self) {
         self.machine_lifecycle_commit_errors_remaining
             .fetch_add(1, Ordering::SeqCst);
     }
@@ -3070,7 +3168,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
     /// Test support: the self-fence a row set
     /// ([`InMemoryRuntimeStore::set_self_fence_for_test`]); none otherwise,
     /// as the trait's default.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
         self.self_fence_for_test
             .0
@@ -3226,6 +3324,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         subject_key: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, false)?;
         let tables = self.lock_tool_grants(false)?;
         Ok(tables
             .grants
@@ -3242,6 +3341,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         record_json: &[u8],
         audit_rows: &[Vec<u8>],
     ) -> Result<bool, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, true)?;
         let mut tables = self.lock_tool_grants(true)?;
         if tables.grants.contains_key(grant_id) {
             return Ok(false);
@@ -3262,7 +3362,11 @@ impl RuntimeStore for InMemoryRuntimeStore {
         next_json: &[u8],
         audit_rows: &[Vec<u8>],
     ) -> Result<bool, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, true)?;
         let mut tables = self.lock_tool_grants(true)?;
+        if self.take_tool_grant_conflict()? {
+            return Ok(false);
+        }
         let matches = tables
             .grants
             .get(grant_id)
@@ -3285,6 +3389,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         subject_key: &str,
         audit_rows: &[Vec<u8>],
     ) -> Result<(), RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, true)?;
         let mut tables = self.lock_tool_grants(true)?;
         tables.append_audit(subject_key, audit_rows)
     }
@@ -3295,6 +3400,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         after: Option<u64>,
         limit: usize,
     ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeStoreError> {
+        self.tool_grant_subject_failure(subject_key, false)?;
         let tables = self.lock_tool_grants(false)?;
         let first = after.map_or(0, |after| after.saturating_add(1));
         Ok(tables
@@ -3421,6 +3527,19 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(runtimes_with_recovery_work(&inner, &ops))
+    }
+
+    /// One runtime's facts, read under the same locks as the scan.
+    async fn runtime_holds_recovery_work(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<bool, RuntimeStoreError> {
+        let inner = self.inner.lock().await;
+        let ops = self
+            .ops_lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(runtime_holds_recovery_work_in(&inner, &ops, &runtime_id.0))
     }
 
     async fn list_runtime_delivery_records(
@@ -4550,7 +4669,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<MachineLifecycleObservation, RuntimeStoreError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .machine_lifecycle_observe_errors_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -4735,7 +4854,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         commit: MachineLifecycleCommit,
         input_states: &[InputStatePersistenceRecord],
     ) -> Result<(), RuntimeStoreError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .machine_lifecycle_commit_errors_remaining
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
@@ -5032,6 +5151,16 @@ pub(crate) mod tests {
         let store = InMemoryRuntimeStore::new();
         let fixture = scan_contract::seed(&store).await;
         scan_contract::assert_lists_exactly(&store, &fixture).await;
+    }
+
+    /// The per-runtime read answers each runtime as the scan lists it.
+    /// RED before: no per-runtime read.
+    #[tokio::test]
+    async fn boot_obligation_scan_memory_store_answers_each_runtime_as_the_scan() {
+        use crate::store::recovery_obligation::scan_contract;
+        let store = InMemoryRuntimeStore::new();
+        let fixture = scan_contract::seed(&store).await;
+        scan_contract::assert_answers_each_runtime(&store, &fixture).await;
     }
 
     fn make_receipt(run_id: RunId, seq: u64) -> RunBoundaryReceipt {
@@ -5941,6 +6070,7 @@ pub(crate) mod tests {
             messages_after: 1,
             summary_source: None,
             estimated_history_tokens_after: None,
+            instruction_snapshot: None,
         };
         session
             .add_compaction_projection_intent(intent.clone())
@@ -5974,6 +6104,7 @@ pub(crate) mod tests {
             messages_after: 1,
             summary_source: None,
             estimated_history_tokens_after: None,
+            instruction_snapshot: None,
         }
     }
 

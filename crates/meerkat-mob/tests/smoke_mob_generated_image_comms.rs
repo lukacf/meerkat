@@ -67,6 +67,7 @@ fn generated_image_comms_profile(
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -125,6 +126,7 @@ fn image_relay_profile(model: &str, peer_description: &str, image_generation: bo
         model: model.to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),
@@ -1122,11 +1124,15 @@ async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
         .member(&AgentIdentity::from("maker"))
         .await
         .expect("maker member");
+    let openai_image_model =
+        meerkat_models::default_image_generation_model(meerkat_core::Provider::OpenAI)
+            .expect("the catalog has an OpenAI image-generation default")
+            .model_id;
     maker
         .send(
             ContentInput::Text(format!(
                 "Run the provider image relay smoke now. Use exactly this tool sequence, in this order:\n\
-                 1. Call generate_image exactly once. The request must use provider openai, model gpt-image-2, \
+                 1. Call generate_image exactly once. The request must use provider openai, model {openai_image_model}, \
                  prompt \"Create a simple white poster with only the exact large black text RKAT 7319 centered. \
                  No other letters, numbers, watermarks, captions, or symbols.\", size 1024x1024, quality low, \
                  format png, count 1.\n\

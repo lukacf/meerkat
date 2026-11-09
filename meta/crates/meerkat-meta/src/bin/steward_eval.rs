@@ -236,7 +236,7 @@ fn render_fixture_sections(input: &EvalInput, realm: &str) -> (String, String, S
         signals.push_str("(none)\n");
     }
     if input.operator_routing {
-        signals.push_str("\nOPERATOR SCOPE: active (provisional keying).\n");
+        signals.push_str("\nOPERATOR SCOPE: active.\n");
     } else {
         signals.push_str("\nOPERATOR SCOPE: inactive.\n");
     }

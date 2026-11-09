@@ -162,6 +162,31 @@ pub struct RosterEntry {
     /// it. The default (`applies`) is omitted from the serialized entry.
     #[serde(default, skip_serializing_if = "crate::DefinitionWiring::is_applies")]
     pub definition_wiring: crate::DefinitionWiring,
+    /// The decision whose approval branch this member is: its typed creation
+    /// source, from its `MemberSpawned` row, which only the branch's own
+    /// opening records ([`Self::approval_branch`]).
+    #[serde(skip)]
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
+    /// Whether this member's lineage runs under a host's tool dispatch
+    /// admission, from its `MemberSpawned` row
+    /// (`MemberSpawnedEvent::dispatch_admission_lineage`). A projection
+    /// only: MobMachine holds the record for the member's incarnation
+    /// (`member_dispatch_admission_lineage`), which every verdict on the
+    /// member's builds reads; nothing decides from this field.
+    /// Internal: never on a public surface.
+    #[serde(skip, default)]
+    pub(crate) dispatch_admission_lineage: bool,
+}
+
+impl RosterEntry {
+    /// The decision whose approval branch this member is, when its typed
+    /// creation source records one: only
+    /// [`crate::MobHandle::open_approval_branch`] seats such a member, and
+    /// nothing wires, unwires or respawns it.
+    #[must_use]
+    pub fn approval_branch(&self) -> Option<&meerkat_core::approval::decision::DecisionId> {
+        self.approval_branch.as_ref()
+    }
 }
 
 /// Directed projection presence state for an undirected peer edge.
@@ -186,6 +211,8 @@ pub(crate) struct RosterAddEntry {
     pub(crate) fork_source: Option<meerkat_core::ForkBuildSource>,
     pub(crate) fork_overlay: crate::runtime::ForkOverlayOrigin,
     pub(crate) definition_wiring: crate::DefinitionWiring,
+    pub(crate) approval_branch: Option<meerkat_core::approval::decision::DecisionId>,
+    pub(crate) dispatch_admission_lineage: bool,
 }
 
 /// Tracks active members and their wiring in a mob.
@@ -296,6 +323,8 @@ impl Roster {
                     fork_source: member_spawned.fork_source.clone(),
                     fork_overlay: member_spawned.fork_overlay,
                     definition_wiring: member_spawned.definition_wiring,
+                    approval_branch: member_spawned.approval_branch().cloned(),
+                    dispatch_admission_lineage: member_spawned.dispatch_admission_lineage(),
                 });
             }
             // Retirement admission is not roster terminality. Keep the spawn
@@ -425,6 +454,14 @@ impl Roster {
                             .insert(bridge_session_id.clone());
                     }
                 }
+                // An adoption into store custody (the row's Created origin)
+                // makes the member a host root, live and on replay: its
+                // former spawner no longer reaches it.
+                if recovered.identity_entry == Some(crate::runtime::IdentityEntryOrigin::Created)
+                    && let Some(entry) = self.entries.get_mut(&recovered.agent_identity)
+                {
+                    entry.spawned_by = None;
+                }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 self.set_kickoff_by_identity(member, Some(kickoff.clone()));
@@ -534,6 +571,8 @@ impl Roster {
                     fork_source: entry.fork_source,
                     fork_overlay: entry.fork_overlay,
                     definition_wiring: entry.definition_wiring,
+                    approval_branch: entry.approval_branch,
+                    dispatch_admission_lineage: entry.dispatch_admission_lineage,
                 },
             )
             .is_none()
@@ -1159,6 +1198,8 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
+            dispatch_admission_lineage: false,
         }
     }
 
@@ -1744,6 +1785,8 @@ mod tests {
             fork_source: None,
             fork_overlay: Default::default(),
             definition_wiring: crate::DefinitionWiring::Applies,
+            approval_branch: None,
+            dispatch_admission_lineage: false,
             direct_member_fence: None,
         };
         let json = serde_json::to_string(&entry).unwrap();

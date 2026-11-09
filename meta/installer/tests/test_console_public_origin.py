@@ -216,10 +216,11 @@ async def test_private_adapters_retain_one_context_and_never_rebind_after_logout
                                      base_url=ORIGIN) as client:
             await sign_in(client, front)
             first_login = front._logins[client.cookies[front.cookie]]
-            await first_login.controller_review_start
+            # An account people share decides nothing, so it starts no review.
+            assert first_login.controller_review_start is None
             first = enrolled[0].context
             assert first is front._login_context(first_login) is first_login.context
-            assert reviews == [first] and reviews[0] is first
+            assert reviews == []
             assert first.origin == ORIGIN and first.is_current() is True
             assert (await client.get("/console/experience")).status_code == 200
             assert front._login_context(first_login) is first and len(enrolled) == 1

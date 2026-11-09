@@ -211,6 +211,38 @@ impl InMemoryMobEventStore {
             let _ = release.await;
         }
     }
+
+    /// A handle on this store's event log.
+    pub(crate) fn event_log_for_test(&self) -> InMemoryEventLogForTest {
+        InMemoryEventLogForTest(Arc::clone(&self.aggregate))
+    }
+}
+
+/// Test builds only: a handle on an in-memory store's event log, for rows
+/// that need a stored row as an older build wrote it.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct InMemoryEventLogForTest(Arc<RwLock<InMemoryMobAggregateState>>);
+
+#[cfg(test)]
+impl InMemoryEventLogForTest {
+    /// Drop the internal dispatch admission lineage marker from every stored
+    /// `MemberSpawned` row of `identity`, so each reads back as a row written
+    /// before spawn rows recorded it. Answers how many rows carried it.
+    pub(crate) async fn strip_dispatch_admission_lineage(&self, identity: &AgentIdentity) -> usize {
+        let mut aggregate = self.0.write().await;
+        let mut stripped = 0;
+        for event in &mut aggregate.events {
+            if let MobEventKind::MemberSpawned(spawned) = &mut event.kind
+                && spawned.agent_identity == *identity
+                && spawned.dispatch_admission_lineage
+            {
+                spawned.dispatch_admission_lineage = false;
+                stripped += 1;
+            }
+        }
+        stripped
+    }
 }
 
 impl Default for InMemoryMobEventStore {
@@ -2086,6 +2118,69 @@ impl MobIdentityMemberStore for InMemoryMobIdentityStore {
         }
         let aggregate = self.aggregate.read().await;
         Ok(created_row_observation(&aggregate.identity, &(mob_id.clone(), identity.clone()))?.1)
+    }
+
+    async fn purge_created_identity_rows(
+        &self,
+        write: &super::CreatedRowsPurgeWrite,
+    ) -> Result<super::CreatedRowsPurge, MobStoreError> {
+        if self.event_tx.is_none() {
+            return Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable);
+        }
+        write
+            .receipt
+            .validate()
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+        // One aggregate guard covers the receipts and the rows: everything
+        // is checked before anything changes, so a refusal leaves the store
+        // as it was.
+        let mut aggregate = self.aggregate.write().await;
+        let mob_id = write.receipt.mob_id.clone();
+        let receipt_key = (mob_id.clone(), write.receipt.operation_id.clone());
+        if let Some(existing) = aggregate.identity.change_receipts.get(&receipt_key) {
+            return Ok(if existing.request_digest == write.receipt.request_digest {
+                super::CreatedRowsPurge::Replayed {
+                    receipt: existing.clone(),
+                }
+            } else {
+                super::CreatedRowsPurge::OperationReused {
+                    receipt: existing.clone(),
+                }
+            });
+        }
+        let state = &aggregate.identity;
+        // The rows the created identity scan reads: the created entries'
+        // and the unreadable rows of schema version 2 and later.
+        let keys: Vec<(MobId, AgentIdentity)> = state
+            .created
+            .keys()
+            .chain(
+                state
+                    .unreadable_intents
+                    .iter()
+                    .filter(|(_, raw)| raw.created_domain)
+                    .map(|(key, _)| key),
+            )
+            .filter(|key| key.0 == mob_id)
+            .cloned()
+            .collect();
+        let mut rows = BTreeMap::new();
+        for key in keys {
+            if let (_, Some(observation)) = created_row_observation(state, &key)? {
+                rows.insert(key.1, observation);
+            }
+        }
+        if let Some(refusal) = super::created_rows_purge_refusal(write, &rows)? {
+            return Ok(refusal);
+        }
+        let state = &mut aggregate.identity;
+        for identity in rows.keys() {
+            state.created.remove(&(mob_id.clone(), identity.clone()));
+        }
+        state
+            .change_receipts
+            .insert(receipt_key, write.receipt.clone());
+        Ok(super::CreatedRowsPurge::Purged)
     }
 
     async fn read_member_binding_journal_from(
@@ -5712,6 +5807,7 @@ mod tests {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

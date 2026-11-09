@@ -50,6 +50,51 @@ pub fn persisted_auth_mode_is_oauth_login(mode: PersistedAuthMode) -> bool {
     meerkat_core::persisted_auth_mode_uses_oauth_login_lifecycle(mode)
 }
 
+/// The directory, under a credential root, of the coordinator's
+/// cross-process refresh locks.
+const REFRESH_LOCK_DIR: &str = "refresh-locks";
+
+/// The default credential root, `<config dir>/meerkat/credentials`: the file
+/// store's default root, and the base a keychain store's refresh locks and
+/// credential fences use.
+fn default_credential_root() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|base| base.join("meerkat").join("credentials"))
+}
+
+/// Refuse a credential write whose `guard` does not cover the credential
+/// fence C(r) of `key`'s realm under `credential_root`: nothing is written.
+/// A persisted store calls it before its first byte or operating-system
+/// call; a store with no credential root refuses every write.
+pub(crate) fn require_credential_fence(
+    guard: &meerkat_core::AdmissionGuard,
+    credential_root: Option<&std::path::Path>,
+    key: &TokenKey,
+) -> Result<(), TokenStoreError> {
+    let Some(root) = credential_root else {
+        return Err(TokenStoreError::AdmissionFence(
+            "this credential store has no credential root, so no fence can cover its writes".into(),
+        ));
+    };
+    meerkat_core::AdmissionFence::credentials(root, key.realm())
+        .and_then(|fence| guard.covers(&fence))
+        .map_err(|refusal| TokenStoreError::AdmissionFence(refusal.to_string()))
+}
+
+/// A guard over the credential fence of `key`'s realm under `root`, as a
+/// coordinator hands its closures (tests that write a persisted store
+/// directly).
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+pub(crate) fn covering_guard(
+    root: &std::path::Path,
+    key: &TokenKey,
+) -> Arc<meerkat_core::AdmissionGuard> {
+    meerkat_core::AdmissionGuard::try_acquire(vec![
+        meerkat_core::AdmissionFence::credentials(root, key.realm()).expect("a credential fence"),
+    ])
+    .expect("the credential fence is free")
+}
+
 /// Backend selector for `TokenStore::open()`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TokenStoreBackend {
@@ -77,36 +122,45 @@ impl TokenStoreBackend {
     }
 
     pub fn default_keyring_auto() -> Result<Self, TokenStoreError> {
-        let base = dirs::config_dir()
+        let root = default_credential_root()
             .ok_or_else(|| TokenStoreError::Unavailable("no XDG_CONFIG_HOME".into()))?;
         Ok(Self::Auto {
-            root: base.join("meerkat").join("credentials"),
+            root,
             service_name: "meerkat-auth".into(),
         })
     }
 
     pub fn default_file() -> Result<Self, TokenStoreError> {
-        let base = dirs::config_dir()
+        let root = default_credential_root()
             .ok_or_else(|| TokenStoreError::Unavailable("no XDG_CONFIG_HOME".into()))?;
-        Ok(Self::File {
-            root: base.join("meerkat").join("credentials"),
-        })
+        Ok(Self::File { root })
+    }
+
+    /// The credential root of this persisted backend: `root` for the file
+    /// and auto backends; for the keychain backend, the default credential
+    /// root, the base its refresh locks use. The credential fence C(r) of
+    /// every credential the backend stores for realm id `r` is
+    /// [`meerkat_core::AdmissionFence::credentials`] of this root and `r`,
+    /// and its refresh locks live in [`Self::refresh_lock_dir`]. `None` for
+    /// the ephemeral backend, which is process-local and has no fence, and
+    /// when there is no configuration directory.
+    pub fn credential_root(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Self::File { root } | Self::Auto { root, .. } => Some(root.clone()),
+            #[cfg(feature = "keyring")]
+            Self::Keyring { .. } => default_credential_root(),
+            Self::Ephemeral => None,
+        }
     }
 
     /// Canonical cross-process refresh-lock directory for this persisted
-    /// credential backend. It is derived from the same backend root so callers
-    /// never reconstruct storage conventions independently.
+    /// credential backend: `refresh-locks` under its credential root
+    /// ([`Self::credential_root`]), so callers never reconstruct storage
+    /// conventions independently. Its coordinator takes the credential
+    /// fences of that root (`FileLockCoordinator`).
     pub fn refresh_lock_dir(&self) -> Option<std::path::PathBuf> {
-        match self {
-            Self::File { root } | Self::Auto { root, .. } => Some(root.join("refresh-locks")),
-            #[cfg(feature = "keyring")]
-            Self::Keyring { .. } => dirs::config_dir().map(|base| {
-                base.join("meerkat")
-                    .join("credentials")
-                    .join("refresh-locks")
-            }),
-            Self::Ephemeral => None,
-        }
+        self.credential_root()
+            .map(|root| root.join(REFRESH_LOCK_DIR))
     }
 
     /// Whether this backend's operations can wait on the operating system
@@ -284,5 +338,77 @@ mod tests {
             .expect("valid slugs");
         assert_ne!(default_key, override_key);
         assert_eq!(override_key.keyring_account(), "dev:default_openai:work");
+    }
+}
+
+/// Test support for the rows on the modes of the credential directories the
+/// stores create: a scenario run under several process umasks.
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used)]
+pub(crate) mod umask_test_support {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// The umasks a scenario runs under: the common default, a shared-group
+    /// default, and the private one.
+    const UMASKS: [&str; 3] = ["022", "002", "077"];
+    /// Set to its umask in the child process a scenario runs in.
+    const UMASK_CHILD: &str = "MEERKAT_AUTH_STORE_TEST_UMASK_CHILD";
+    /// Printed by that child, with its umask, once the scenario passed.
+    const UMASK_CHILD_DONE: &str = "credential directory scenario passed under umask";
+
+    /// Run `scenario`, the body of the test `test` in the module `module` (the
+    /// caller's `module_path!()`), under each of `UMASKS`. The umask is
+    /// process-wide, so the shared test process never changes it: each run is
+    /// a child process of this test binary, started by a shell that sets the
+    /// umask before exec, that runs `test` alone.
+    pub(crate) fn under_each_umask(module: &str, test: &str, scenario: impl FnOnce()) {
+        if let Some(umask) = std::env::var_os(UMASK_CHILD) {
+            scenario();
+            println!("\n{UMASK_CHILD_DONE} {}", umask.to_string_lossy());
+            return;
+        }
+        let binary = std::env::current_exe().expect("the test binary");
+        let (_, module) = module
+            .split_once("::")
+            .expect("a module path within the crate");
+        let test_path = format!("{module}::{test}");
+        for umask in UMASKS {
+            #[allow(clippy::disallowed_methods)] // the test re-runs its own binary
+            let output = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "umask \"$1\" && shift && exec \"$@\"",
+                    "credential-directory-umask",
+                    umask,
+                ])
+                .arg(binary.as_os_str())
+                .args([
+                    "--exact",
+                    test_path.as_str(),
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(UMASK_CHILD, umask)
+                .output()
+                .expect("start the test under a umask");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let done = format!("{UMASK_CHILD_DONE} {umask}");
+            assert!(
+                output.status.success() && stdout.contains(done.as_str()),
+                "{test} failed under umask {umask} ({}):\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    /// The permission bits of `path`.
+    pub(crate) fn mode_bits(path: &Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
     }
 }

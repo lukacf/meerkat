@@ -13,10 +13,11 @@
 # values (two identities, three runtime ids, fence tokens 1..3, generations
 # 0..1, three sessions, the audit's strings), each run's wake-attempt cap
 # (AuditMaxAttempts, held by AuditStateConstraint) and its VIEW, which leaves
-# out the two counters no guard, other variable's update or invariant of the
-# generated model reads (model_step_count and topology_epoch). The runner
-# first checks that the model still reads neither counter anywhere else, and
-# fails otherwise. It checks eleven small runs over their whole space with TLC
+# out the four counters no guard, other variable's update or invariant of the
+# generated model reads (model_step_count, topology_epoch and the identity
+# life marker, identity_life_resets and identity_life_ends). The runner first
+# checks that the model still reads none of them anywhere else, and fails
+# otherwise. It checks eleven small runs over their whole space with TLC
 # coverage (see member_residency_audit.tla):
 # - seed (AuditSeedSpec): one identity, its seat session unborn or born,
 #   through every build seed, every boot verdict, the seal and the host
@@ -163,8 +164,8 @@ done
 # Each run's distinct-state floor is 90% of the whole space its first green
 # run found, so a guard that silently disables arms fails the lane.
 seed_states=3078
-wake_states=3198
-retire_states=22492
+wake_states=4530
+retire_states=25892
 terminal_states=422
 resume_states=4004
 edge_states=1148
@@ -186,6 +187,9 @@ seed_covered_actions=(
   ResolveMemberHostPreparationRunning
   ResolveMemberHostPreparationStopped
   ResolveMemberHostPreparationCompleted
+  ResolveMemberBuildPreparationRunning
+  ResolveMemberBuildPreparationStopped
+  ResolveMemberBuildPreparationCompleted
   PlanBootMaterializationWake
   PlanBootMaterializationVerify
   PlanBootMaterializationStayDormant
@@ -224,6 +228,9 @@ wake_covered_actions=(
   ResolveMemberRevivalFailedRunning
   ResolveMemberRevivalHostRefusedRunning
   ResolveMemberRevivalRetryableRunning
+  ResolveMemberRevivalRetryableBuildPreparationRunning
+  ResolveMemberBuildPreparationRunning
+  ResolveMemberBuildPreparationStopped
   AbandonMemberWakeDormantRunning
   AbandonMemberWakeBrokenRunning
   ResolveRecreatedMemberSessionSucceededRunningLocal
@@ -266,6 +273,8 @@ wake_covered_actions=(
 )
 
 retire_covered_actions=(
+  ResolveMemberRevivalRetryableBuildPreparationRunning
+  ResolveMemberBuildPreparationRunning
   RetireRunningReleasing
   RetireRunningReleasingArchiveOnly
   RetireRunningPreservingBinding
@@ -474,7 +483,8 @@ replace_exact_line() {
   mv "${file}.next" "${file}"
 }
 
-# The VIEW leaves out model_step_count and topology_epoch, so the generated
+# The VIEW leaves out model_step_count, topology_epoch and the identity life
+# marker (identity_life_resets, identity_life_ends), so the generated
 # model must read them nowhere but in their own updates, Init, the UNCHANGED
 # frames and the generated profiles' state constraints (which the audit does
 # not use). Prints their positions in the `vars` tuple.
@@ -498,6 +508,22 @@ allowed = {
         r"    /\\ topology_epoch' = ",
         r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
     ],
+    "identity_life_resets": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_resets = 0$",
+        r"    /\\ identity_life_resets' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+    ],
+    "identity_life_ends": [
+        r"VARIABLES ",
+        r"vars == << ",
+        r"    /\\ identity_life_ends = ",
+        r"    /\\ identity_life_ends' = ",
+        r"UnchangedFrame_[0-9a-f]+ == UNCHANGED << ",
+        r"CiStateConstraint == ",
+        r"DeepStateConstraint == ",
+    ],
 }
 for name, patterns in allowed.items():
     word = re.compile(r"\b" + name + r"\b")
@@ -511,12 +537,11 @@ names = [name.strip() for name in tuples[0][len("vars == << "):-len(" >>")].spli
 for name in allowed:
     if names.count(name) != 1:
         sys.exit(f"error: expected {name} once in the vars tuple of model.tla")
-print(names.index("model_step_count") + 1, names.index("topology_epoch") + 1)
+print(" ".join(str(names.index(name) + 1) for name in allowed))
 PY
 }
 view_positions="$(view_counter_positions)"
-step_index="${view_positions% *}"
-epoch_index="${view_positions#* }"
+read -r step_index epoch_index life_resets_index life_ends_index <<<"${view_positions}"
 
 # usage: write_cfg <run> <file> <extra invariant lines> <extra property lines>
 # where <run> is seed, wake, retire, terminal, resume, edge, seat, wake2,
@@ -531,7 +556,8 @@ write_cfg() {
       run_properties="
   AuditSeedRecoverKeepsPhase
   AuditAttemptEndsClosed
-  AuditPlanLeavesSealable"
+  AuditPlanLeavesSealable
+  AuditBuildPreparationRetryEndsOnlyItsCause"
       run_invariants="
   AuditWakingClosable"
       ;;
@@ -543,6 +569,7 @@ write_cfg() {
   AuditAttemptEndsClosed
   AuditLifecycleNeverWakes
   AuditWakeNeverSkipsWaking
+  AuditBuildPreparationRetryRefusesWakes
   AuditSucceededLeavesEndpoint
   AuditReleaseEpochFence
   AuditBindingRefusalFenced
@@ -666,6 +693,8 @@ write_cfg() {
   replace_exact_line "CONSTANTS" "CONSTANTS
   AuditStepIndex = ${step_index}
   AuditEpochIndex = ${epoch_index}
+  AuditLifeResetsIndex = ${life_resets_index}
+  AuditLifeEndsIndex = ${life_ends_index}
   AuditMaxAttempts = ${max_attempts}" "${cfg}"
   replace_exact_line "SPECIFICATION Spec" "SPECIFICATION ${spec}" "${cfg}"
   replace_exact_line "INVARIANTS" "PROPERTIES${run_properties}${properties}
@@ -821,7 +850,11 @@ for witness in \
   "recover-rotation:Action property:RecoveredFreshRotated" \
   "recover-rotation:Action property:RecoveredSameRotated" \
   "replay-same:Invariant:ReplayedKeptTopology" \
-  "replay-same:Action property:ReplayedSuccessorWokeLive"; do
+  "replay-same:Action property:ReplayedSuccessorWokeLive" \
+  "wake:Action property:BuildPreparationRetryRecorded" \
+  "wake:Action property:BuildPreparationRetryRefusedWake" \
+  "wake:Action property:BuildPreparationRetryResolved" \
+  "retire:Action property:BuildPreparationRetryRetired"; do
   run="${witness%%:*}"
   rest="${witness#*:}"
   kind="${rest%%:*}"
@@ -1320,6 +1353,23 @@ add_guard("ClassifyMemberReleaseRunning", "((scope_agent_runtime_id = None) \\/ 
   mutate replay-same duplicate_kept_row_refused \
     "Error: Invariant AuditKeptRowsReplayable is violated" \
     'add_guard("RecoverRosterWiringAlreadyRecovered", "FALSE")' "$@"
+  # The wake refusal ignores a host preparation cause: a member that owes
+  # its host the build preparation it asked to retry is woken (the wake run
+  # records that cause, so only its property can refuse it).
+  mutate wake build_preparation_retry_wakes \
+    "Error: Action property AuditBuildPreparationRetryRefusesWakes is violated" \
+    'replace_in_operator("member_wake_refusal", "IF (host_pending = TRUE) THEN", "IF (host_pending = TRUE /\\ FALSE) THEN")' "$@"
+  # The build preparation's retry ends any host preparation cause: the seed
+  # run's first-boot preparation goes with it.
+  mutate seed build_preparation_retry_ends_any_cause \
+    "Error: Action property AuditBuildPreparationRetryEndsOnlyItsCause is violated" \
+    'replace_in_update("ResolveMemberBuildPreparationRunning", "member_host_preparation_causes", "= Some(\"BuildPreparationRetry\")) THEN", "# None) THEN")' "$@"
+  # The archive that ends a member's seat keeps its build preparation retry:
+  # the retire run records one before it retires the member, so the
+  # generated invariant refuses it over a real cause.
+  mutate retire archive_keeps_build_preparation_retry \
+    "Error: Invariant build_preparation_retry_belongs_to_a_member is violated" \
+    'keep_var("ObserveMemberRetirementArchivedLive", "member_host_preparation_causes")' "$@"
 fi
 if [[ "${part}" == "witnesses" ]]; then
   echo "member residency audit reached every witness (witness runs)"

@@ -2355,6 +2355,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -2370,6 +2499,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -3226,6 +3365,112 @@
             "type": "string"
           }
         ]
+      },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
       },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
@@ -4170,6 +4415,21 @@
           {
             "const": "reasoning_disabled_by_baseline",
             "description": "The baseline turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "RequestedCompactionSkipReason": {
+        "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
+        "oneOf": [
+          {
+            "const": "first_model_request",
+            "description": "The check came before the session's first model request, when the\nsession has nothing to compact yet.",
+            "type": "string"
+          },
+          {
+            "const": "nothing_to_fold",
+            "description": "A run in flight keeps its request and its newest round, and nothing\nelse was left to fold.",
             "type": "string"
           }
         ]
@@ -6086,6 +6346,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -6368,6 +6639,36 @@
             "type": "string"
           }
         ]
+      },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
       },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
@@ -8134,6 +8435,82 @@
           "run_id",
           "results",
           "axis"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "The compaction check that consumed a host's compaction request\n(`MeerkatMachine::request_compaction`: JSON-RPC `session/compact` and\n`mob/compact_member`) compacted nothing.\n\nA check that compacts at the request publishes the ordinary\n`compaction_started`, then `compaction_completed` or\n`compaction_failed`. When the check has nothing to compact, it\npublishes this event instead, so the host can tell that the request\nwas consumed and that nothing was compacted. Published at that check,\nbefore its model request is sent. A check that consumed no request\npublishes nothing new.",
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/RequestedCompactionSkipReason",
+            "description": "Why the check compacted nothing."
+          },
+          "run_id": {
+            "$ref": "#/$defs/RunId",
+            "description": "The run whose compaction check consumed the request."
+          },
+          "type": {
+            "const": "requested_compaction_skipped",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "run_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction\ncommits (for a staged memory projection, when the runtime commits it,\nright after its `CompactionCompleted`; a compaction rolled back before\nits commit is never observed, and its entry sequence goes to the next\nentry). A restart before the entry is durable (the run's first\ncheckpoint, or the projection's commit) applies the changes again at\nthe next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+        "properties": {
+          "active": {
+            "description": "The whole active set after the entry, sorted by slot.",
+            "items": {
+              "$ref": "#/$defs/InstructionActiveRef"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+            "items": {
+              "$ref": "#/$defs/InstructionChange"
+            },
+            "type": "array"
+          },
+          "entry_sequence": {
+            "description": "Strictly increasing per session, across deltas and snapshots.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/$defs/InstructionEntryKind"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RunId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+          },
+          "session_id": {
+            "$ref": "#/$defs/SessionId"
+          },
+          "type": {
+            "const": "operator_instructions_applied",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "session_id",
+          "entry_sequence",
+          "kind"
         ],
         "type": "object"
       }
@@ -10213,6 +10590,82 @@
               "axis"
             ],
             "type": "object"
+          },
+          {
+            "description": "The compaction check that consumed a host's compaction request\n(`MeerkatMachine::request_compaction`: JSON-RPC `session/compact` and\n`mob/compact_member`) compacted nothing.\n\nA check that compacts at the request publishes the ordinary\n`compaction_started`, then `compaction_completed` or\n`compaction_failed`. When the check has nothing to compact, it\npublishes this event instead, so the host can tell that the request\nwas consumed and that nothing was compacted. Published at that check,\nbefore its model request is sent. A check that consumed no request\npublishes nothing new.",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/RequestedCompactionSkipReason",
+                "description": "Why the check compacted nothing."
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId",
+                "description": "The run whose compaction check consumed the request."
+              },
+              "type": {
+                "const": "requested_compaction_skipped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An operator-instruction entry of this session was applied. It reports\nthe instructions now in effect for the live session, not their\ndurability: the delta entry a fresh run start appended is published\nonce the run whose start appended it starts, and the snapshot entry a\ncompaction folded the session's entry rows into once that compaction\ncommits (for a staged memory projection, when the runtime commits it,\nright after its `CompactionCompleted`; a compaction rolled back before\nits commit is never observed, and its entry sequence goes to the next\nentry). A restart before the entry is durable (the run's first\ncheckpoint, or the projection's commit) applies the changes again at\nthe next fresh run start and publishes this event again.\n\nAn observation only, projected from the entry row's typed identity:\nthe session's operator-instruction status read is the authority on\nwhat is in effect. A run that never starts takes its entry back, so\nthe changes stay pending and a later run start applies them again.\n\nAppended after every released variant: declaration order is the\nimplicit discriminant (the xtask `released_enum_ordinals` test).",
+            "properties": {
+              "active": {
+                "description": "The whole active set after the entry, sorted by slot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionActiveRef"
+                },
+                "type": "array"
+              },
+              "changes": {
+                "description": "A delta's changes, sorted by slot; empty for a snapshot.",
+                "items": {
+                  "$ref": "#/$defs/InstructionChange"
+                },
+                "type": "array"
+              },
+              "entry_sequence": {
+                "description": "Strictly increasing per session, across deltas and snapshots.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/InstructionEntryKind"
+              },
+              "run_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The run whose start applied the entry; none for a snapshot of\nwhat was already in effect."
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              },
+              "type": {
+                "const": "operator_instructions_applied",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "entry_sequence",
+              "kind"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -12099,6 +12552,135 @@
         "description": "Opaque identifier for an input accepted by the runtime layer.\n\nCore passes this through in `contributing_input_ids` on receipts and events\nbut NEVER interprets it. The runtime layer creates and manages these.",
         "type": "string"
       },
+      "InstructionActiveRef": {
+        "additionalProperties": false,
+        "description": "One slot of the active set an entry leaves in effect.",
+        "properties": {
+          "body_bytes": {
+            "description": "Length of the body in UTF-8 bytes: a snapshot reads each body at\nthis length.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_sha256": {
+            "$ref": "#/$defs/InstructionContentDigest"
+          },
+          "key": {
+            "$ref": "#/$defs/InstructionKey"
+          },
+          "namespace": {
+            "$ref": "#/$defs/InstructionNamespace"
+          },
+          "revision": {
+            "$ref": "#/$defs/InstructionRevision"
+          }
+        },
+        "required": [
+          "namespace",
+          "key",
+          "revision",
+          "content_sha256",
+          "body_bytes"
+        ],
+        "type": "object"
+      },
+      "InstructionChange": {
+        "description": "One change a delta entry carries.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The body at `revision` applies from this entry on. `supersedes` is\nthe revision that was in effect for the slot, if one was.",
+            "properties": {
+              "body_bytes": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "change": {
+                "const": "activate",
+                "type": "string"
+              },
+              "content_sha256": {
+                "$ref": "#/$defs/InstructionContentDigest"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "supersedes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/InstructionRevision"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "content_sha256",
+              "body_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The slot's body stops applying: `revokes` is the revision that was in\neffect.",
+            "properties": {
+              "change": {
+                "const": "revoke",
+                "type": "string"
+              },
+              "key": {
+                "$ref": "#/$defs/InstructionKey"
+              },
+              "namespace": {
+                "$ref": "#/$defs/InstructionNamespace"
+              },
+              "revision": {
+                "$ref": "#/$defs/InstructionRevision"
+              },
+              "revokes": {
+                "$ref": "#/$defs/InstructionRevision"
+              }
+            },
+            "required": [
+              "change",
+              "namespace",
+              "key",
+              "revision",
+              "revokes"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "InstructionContentDigest": {
+        "description": "Canonical SHA-256 digest of an exact instruction body.",
+        "type": "string"
+      },
+      "InstructionEntryKind": {
+        "description": "Whether an entry carries the changes since the previous entry (appended\nat a fresh run start) or the whole active set (a compaction fold).",
+        "enum": [
+          "delta",
+          "snapshot"
+        ],
+        "type": "string"
+      },
+      "InstructionKey": {
+        "description": "Application-owned instruction key within one namespace.",
+        "type": "string"
+      },
       "InstructionKeyRef": {
         "description": "One instruction key a fork notice names.",
         "properties": {
@@ -12114,6 +12696,16 @@
           "key"
         ],
         "type": "object"
+      },
+      "InstructionNamespace": {
+        "description": "Application or issuer namespace for one instruction artifact family.",
+        "type": "string"
+      },
+      "InstructionRevision": {
+        "description": "A slot's revision: at least 1, strictly increasing per slot within the\nowner that mints it.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "InteractionFailureReason": {
         "description": "Typed reason an interaction-scoped run failed (terminal event for tap\nsubscribers).\n\nMirrors [`CompactionFailureReason`]: the variant is the typed owner of the\nfailure cause; the human-readable string is a [`Display`] derivation,\nnever a separately-carried field.\n\n[`Display`]: std::fmt::Display",
@@ -12970,6 +13562,112 @@
             "type": "string"
           }
         ]
+      },
+      "PrincipalId": {
+        "description": "Stable, caller-visible principal id.\n\nLegacy deserialization preserves previously persisted strings, including\nthose rejected by [`Self::new`]. Qualified [`PrincipalRef`] deserialization\nvalidates the id; migrating unqualified persisted ids is a separate step.",
+        "type": "string"
+      },
+      "PrincipalKind": {
+        "description": "Generic principal categories. Product-specific role names belong outside\ncore and may be mapped to these typed categories by clients.",
+        "enum": [
+          "human",
+          "personal_agent",
+          "shared_agent",
+          "runtime_host",
+          "service_account"
+        ],
+        "type": "string"
+      },
+      "PrincipalQualification": {
+        "description": "Whether an identity has an explicit trust-domain namespace.\n\nUnqualified identity preserves trusted-embedded and legacy wire contracts;\nit must not be silently assigned a domain for governed use. Qualification\nis identity vocabulary, not proof of authentication or authorization.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unqualified",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "qualified",
+                "type": "string"
+              },
+              "trust_domain_id": {
+                "$ref": "#/$defs/TrustDomainId"
+              }
+            },
+            "required": [
+              "kind",
+              "trust_domain_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PrincipalRef": {
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "qualification": {
+                  "properties": {
+                    "kind": {
+                      "const": "qualified"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                }
+              },
+              "required": [
+                "qualification"
+              ]
+            },
+            "then": {
+              "properties": {
+                "id": {
+                  "allOf": [
+                    {
+                      "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+                    },
+                    {
+                      "not": {
+                        "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "description": "Typed principal reference.\n\nPublic fields preserve the existing data contract, so an in-memory value\nis not proof of valid or authenticated identity. Governed admission must\ncall [`Self::validate_qualified`] and separately establish caller authority.",
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/PrincipalId"
+          },
+          "kind": {
+            "$ref": "#/$defs/PrincipalKind"
+          },
+          "qualification": {
+            "$ref": "#/$defs/PrincipalQualification"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
       },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
@@ -13914,6 +14612,21 @@
           {
             "const": "reasoning_disabled_by_baseline",
             "description": "The baseline turns reasoning off.",
+            "type": "string"
+          }
+        ]
+      },
+      "RequestedCompactionSkipReason": {
+        "description": "Why the compaction check that consumed a host's compaction request\ncompacted nothing, as [`AgentEvent::RequestedCompactionSkipped`] reports\nit. The vocabulary may grow.",
+        "oneOf": [
+          {
+            "const": "first_model_request",
+            "description": "The check came before the session's first model request, when the\nsession has nothing to compact yet.",
+            "type": "string"
+          },
+          {
+            "const": "nothing_to_fold",
+            "description": "A run in flight keeps its request and its newest round, and nothing\nelse was left to fold.",
             "type": "string"
           }
         ]
@@ -15873,6 +16586,17 @@
             ],
             "description": "Session-owned provenance; not accepted by transcript rewrite wire inputs."
           },
+          "requester": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TurnRequester"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The original requester the turn served: the requester its inputs\nshare, stamped at admission from the inputs, never inferred from\ncontent. Absent when the turn's inputs carry none."
+          },
           "run_id": {
             "anyOf": [
               {
@@ -16156,6 +16880,36 @@
           }
         ]
       },
+      "TrustDomainId": {
+        "allOf": [
+          {
+            "pattern": "[^\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+          },
+          {
+            "not": {
+              "pattern": "[\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\\u007f\\u0080\\u0081\\u0082\\u0083\\u0084\\u0085\\u0086\\u0087\\u0088\\u0089\\u008a\\u008b\\u008c\\u008d\\u008e\\u008f\\u0090\\u0091\\u0092\\u0093\\u0094\\u0095\\u0096\\u0097\\u0098\\u0099\\u009a\\u009b\\u009c\\u009d\\u009e\\u009f]"
+            }
+          }
+        ],
+        "description": "Exact, opaque trust-domain namespace for a qualified principal id.\n\nDomain ids are not inferred from hostnames or normalized. Constructing one\nvalidates its syntax, not the caller's authority to assert that domain.",
+        "type": "string"
+      },
+      "TurnRequester": {
+        "description": "The original requester of a turn: the principal its inputs share, and\nwhether it reached them directly.\n\nThe principal is opaque to Core. A host supplies it for the inputs it\nadmits (the authenticated caller it acts for), or a governed input's work\nassociation names it. Core carries it and never interprets it: it has no\nperson, account or assurance concept for it.",
+        "properties": {
+          "carried": {
+            "description": "Set when an input of the turn reached it through an actor other than\nthe requester: governed work another agent sent (a peer hop), or work\nanother owner admitted for the requester. Absent when the requester's\nown ingress admitted every input.",
+            "type": "boolean"
+          },
+          "principal": {
+            "$ref": "#/$defs/PrincipalRef"
+          }
+        },
+        "required": [
+          "principal"
+        ],
+        "type": "object"
+      },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
         "enum": [
@@ -16402,7 +17156,9 @@
       "live_channel_closed",
       "request_reasoning_lowered",
       "run_resumed",
-      "tool_results_bounded_for_request"
+      "tool_results_bounded_for_request",
+      "requested_compaction_skipped",
+      "operator_instructions_applied"
     ],
     "known_payloads": {
       "tool_config_changed": {

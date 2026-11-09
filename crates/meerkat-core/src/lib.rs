@@ -82,6 +82,7 @@ pub mod authorization;
 pub mod blob;
 pub mod budget;
 pub mod call_origin;
+pub mod canonical_json;
 pub use call_origin::{CALL_ORIGIN_META_KEY, TOOL_CALL_DEDUPE_KEY_META_KEY, WireCallOrigin};
 pub mod comms;
 pub mod compact;
@@ -144,9 +145,17 @@ pub mod pending_continuation;
 pub mod placement;
 pub mod prompt;
 pub mod prompt_cache_anchor;
+pub mod protected_section;
 pub mod provider;
 pub mod provider_evidence;
 pub mod provider_matrix;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod realm_admission;
+/// The wasm32 form of the admission guard: the same paths and the names
+/// target-neutral code uses, with nothing to fence.
+#[cfg(target_arch = "wasm32")]
+#[path = "realm_admission_wasm32.rs"]
+pub mod realm_admission;
 pub mod realtime_transcript;
 pub mod realtime_transcript_revision;
 pub mod realtime_transcript_sidecar;
@@ -325,12 +334,13 @@ pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BoundedToolResult,
     BudgetType, CompactionFailureReason, CompactionFitByteEvidence, CompactionFitTokenEvidence,
     CompactionPreservedHistoryFit, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
-    ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason, RunResumePointKind,
-    ScopedAgentEvent, SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason,
-    StructuredOutputOrigin, ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, ToolConfigLifecycleBit, ToolResultBoundAxis,
-    TurnErrorMetadata, VerboseEventConfig, agent_event_type, compare_event_envelopes,
-    format_verbose_event, format_verbose_event_with_config, turn_usage_summary, usage_summary,
+    ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason,
+    RequestedCompactionSkipReason, RunResumePointKind, ScopedAgentEvent,
+    SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, StructuredOutputOrigin,
+    ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    ToolConfigChangedPayload, ToolConfigLifecycleBit, ToolResultBoundAxis, TurnErrorMetadata,
+    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
+    format_verbose_event_with_config, turn_usage_summary, usage_summary,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -508,6 +518,14 @@ pub use provider_evidence::{
     TargetCacheLoweringIssuer, TokenAggregationProvenance, UNMEASURED_MARKER_PREFIX,
     UnmeasuredTurnUsageAccounting, ValidatedSourceCacheBreakpoint, canonical_cache_prefix_identity,
     provider_cache_breakpoint_claim,
+};
+#[cfg(target_arch = "wasm32")]
+pub use realm_admission::AdmissionGuard;
+#[cfg(not(target_arch = "wasm32"))]
+pub use realm_admission::{
+    AdmissionFence, AdmissionFenceKind, AdmissionGuard, AdmissionHold, AdmissionRefusal,
+    EnteredWorkLost, FenceIdentity, FenceUnavailable, FenceUnavailableCause, FileCoverage,
+    ImmutableInstallationFiles, UncoveredCredentialEntry, UncoveredFile,
 };
 pub use realtime_transcript::{
     LiveAssistantPlaybackTarget, PendingRealtimeUserContentBlob, RealtimeTranscriptApplyOutcome,
@@ -700,7 +718,7 @@ pub use tool_execution::{
     ToolExecutionContract, ToolExecutionContractError, ToolExecutionDeclarationError,
     ToolExecutionMode, ToolExecutionOwnerWitness, ToolExecutionResolutionContext,
     ToolExecutionResolutionError, ToolOperationTarget, ToolOutputPolicy, ToolProgressPolicy,
-    ephemeral_tool_catalog_binding_fingerprint,
+    ephemeral_tool_catalog_binding_fingerprint, mcp_request_digest,
 };
 pub use tool_execution_policy::{
     ExecutionPolicyGatedDispatcher, ToolDispatchAdmission, ToolExecutionPolicy,
@@ -758,7 +776,7 @@ pub use types::{
     TOOL_ARTIFACT_REF_PART_MAX_BYTES, ToolArtifactRef, ToolArtifactRefError, ToolArtifactRefPart,
     ToolArtifactRefusal, ToolAudience, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity,
     ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnUsage,
+    TranscriptMessageIdentity, TranscriptSource, TranscriptUserRole, TurnRequester, TurnUsage,
     TurnUsageAccountingMissing, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, materialize_latest_system_prompt_versions,
@@ -773,10 +791,11 @@ pub use auth::{
     AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
     AuthRouteHints, AuthStatus, AuthStatusPhase, CredentialObservation, GoogleAuthMetadata,
     GoogleRouteHints, HttpAuthorizationContent, HttpAuthorizationReceipt, HttpAuthorizationRequest,
-    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer, OpenAiAuthMetadata,
-    OpenAiRouteHints, ProviderAuthMetadata, PublishedAuthStatus, RefreshFailureObservation,
-    ResolvedAuthEnvelope, ResolvedAuthKind, TokenLifecycleClearError,
-    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published_for_transition,
+    HttpAuthorizationResponse, HttpAuthorizationResponseAction, HttpAuthorizer,
+    HttpRequestInitiator, OpenAiAuthMetadata, OpenAiRouteHints, ProviderAuthMetadata,
+    PublishedAuthStatus, RefreshFailureObservation, ResolvedAuthEnvelope, ResolvedAuthKind,
+    TokenLifecycleClearError, lease_snapshot_expires_at_datetime,
+    mark_tokens_lifecycle_published_for_transition,
     oauth_status_projection_snapshot_from_newer_marker, persisted_auth_mode_is_directly_creatable,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,

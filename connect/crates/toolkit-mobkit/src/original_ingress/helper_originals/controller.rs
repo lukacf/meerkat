@@ -146,7 +146,7 @@ impl HelperControllerIntent {
                 &intent.issuer,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         let expected = parent
             .restrictions()
             .for_child(&intent.requested)
@@ -158,7 +158,7 @@ impl HelperControllerIntent {
                 &intent.grantee,
                 intent.represented_subject.as_ref(),
             )
-            .map_err(|_| OriginalWriterError::OperationDenied)?;
+            .map_err(lineage_refusal)?;
         if child.restrictions() != &expected || binding.controller_ceiling != expected {
             return Err(OriginalWriterError::Conflict);
         }
@@ -182,6 +182,75 @@ impl HelperControllerIntent {
             .map_err(|_| OriginalWriterError::Unavailable)?;
         Ok(())
     }
+}
+
+/// A lineage resolution's refusal as a binding check's answer: the grant
+/// owner's own refusal denies the operation; an owner that cannot say now
+/// (an owner change in progress, or one published during the resolution,
+/// among them) is unavailable, retryable, never a denial.
+fn lineage_refusal(refusal: meerkat_authorization::grants::GrantRefusal) -> OriginalWriterError {
+    match refusal {
+        meerkat_authorization::grants::GrantRefusal::Unavailable => {
+            OriginalWriterError::Unavailable
+        }
+        _ => OriginalWriterError::OperationDenied,
+    }
+}
+
+/// What the current check of a helper operation's issued lineage reads of a
+/// lineage the grant owner resolved: its restrictions, and whether the owner
+/// facts it was resolved from are still current.
+trait ResolvedLineage {
+    fn restrictions(&self) -> &ExecutionRestrictions;
+    fn check_current(&self) -> Result<(), meerkat_authorization::publication::PublicationError>;
+}
+
+impl ResolvedLineage for meerkat_authorization::grants::ResolvedGrant {
+    fn restrictions(&self) -> &ExecutionRestrictions {
+        meerkat_authorization::grants::ResolvedGrant::restrictions(self)
+    }
+
+    fn check_current(&self) -> Result<(), meerkat_authorization::publication::PublicationError> {
+        meerkat_authorization::grants::ResolvedGrant::check_current(self)
+    }
+}
+
+/// The current check of a helper operation's issued lineage (`lineage`, the
+/// operation's own child grant of `intent`), as `resolve` answers each
+/// lineage resolution for its executor: the parent lineage resolves for the
+/// issuer and the issued lineage for the grantee, the issued lineage carries
+/// exactly the parent's restrictions for the requested child, and both are
+/// still current at the end. A resolution the owner cannot answer now (an
+/// owner change in progress, or one published during it) is unavailable,
+/// retryable ([`lineage_refusal`]); the owner's own refusal, and a request
+/// the parent does not allow, deny; another child is a conflict. The report,
+/// account, public and catalog checks call it with the grant owner's
+/// resolution; it is a pure function of the owner's answers, so each
+/// answer is pinned without a grant owner.
+fn check_issued_lineage<L: ResolvedLineage>(
+    intent: &ChildGrantIntent,
+    lineage: &[GrantLineageRef],
+    resolve: impl Fn(
+        &[GrantLineageRef],
+        &PrincipalRef,
+    ) -> Result<L, meerkat_authorization::grants::GrantRefusal>,
+) -> Result<(), OriginalWriterError> {
+    let parent = resolve(&intent.parent_lineage, &intent.issuer).map_err(lineage_refusal)?;
+    let expected = parent
+        .restrictions()
+        .for_child(&intent.requested)
+        .map_err(|_| OriginalWriterError::OperationDenied)?;
+    let child = resolve(lineage, &intent.grantee).map_err(lineage_refusal)?;
+    if child.restrictions() != &expected {
+        return Err(OriginalWriterError::Conflict);
+    }
+    parent
+        .check_current()
+        .map_err(|_| OriginalWriterError::Unavailable)?;
+    child
+        .check_current()
+        .map_err(|_| OriginalWriterError::Unavailable)?;
+    Ok(())
 }
 
 fn child_id(realm: &str, original: &OriginalWorkRef) -> Result<EvidenceId, OriginalWriterError> {
@@ -394,6 +463,7 @@ pub(super) async fn stage_fixture_controller(
         None => owner
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &intent.issuer,
                 intent.parent_lineage.last().unwrap(),
                 intent.id,

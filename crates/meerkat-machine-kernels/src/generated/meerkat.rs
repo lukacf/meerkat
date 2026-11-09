@@ -1297,6 +1297,60 @@ impl std::fmt::Display for CommsRuntimeId {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum CompactionRequestVerdict {
+    #[default]
+    #[serde(rename = "Requested")]
+    Requested,
+    #[serde(rename = "AlreadyRequested")]
+    AlreadyRequested,
+    #[serde(rename = "NotServing")]
+    NotServing,
+}
+impl CompactionRequestVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Requested => "Requested",
+            Self::AlreadyRequested => "AlreadyRequested",
+            Self::NotServing => "NotServing",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for CompactionRequestVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Requested" => Ok(Self::Requested),
+            "AlreadyRequested" => Ok(Self::AlreadyRequested),
+            "NotServing" => Ok(Self::NotServing),
+            other => Err(format!("invalid CompactionRequestVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for CompactionRequestVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for CompactionRequestVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum ContentShape {
     #[default]
     #[serde(rename = "conversation")]
@@ -8916,6 +8970,60 @@ impl std::fmt::Display for RegistrationPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RetainedRunSettleVerdict {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Busy")]
+    Busy,
+    #[serde(rename = "NotRetained")]
+    NotRetained,
+}
+impl RetainedRunSettleVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Busy => "Busy",
+            Self::NotRetained => "NotRetained",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RetainedRunSettleVerdict {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Busy" => Ok(Self::Busy),
+            "NotRetained" => Ok(Self::NotRetained),
+            other => Err(format!("invalid RetainedRunSettleVerdict value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RetainedRunSettleVerdict {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RetainedRunSettleVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RoutingApprovalParentKind {
     #[default]
     #[serde(rename = "SwitchTurn")]
@@ -10130,6 +10238,8 @@ pub enum RunStartHoldReason {
     ToolsNotPublished,
     #[serde(rename = "HostPreparation")]
     HostPreparation,
+    #[serde(rename = "HostRecovery")]
+    HostRecovery,
 }
 impl RunStartHoldReason {
     pub fn as_str(&self) -> &'static str {
@@ -10137,6 +10247,7 @@ impl RunStartHoldReason {
             Self::MobStop => "MobStop",
             Self::ToolsNotPublished => "ToolsNotPublished",
             Self::HostPreparation => "HostPreparation",
+            Self::HostRecovery => "HostRecovery",
         }
     }
 }
@@ -10147,6 +10258,7 @@ impl std::convert::TryFrom<&str> for RunStartHoldReason {
             "MobStop" => Ok(Self::MobStop),
             "ToolsNotPublished" => Ok(Self::ToolsNotPublished),
             "HostPreparation" => Ok(Self::HostPreparation),
+            "HostRecovery" => Ok(Self::HostRecovery),
             other => Err(format!("invalid RunStartHoldReason value `{other}`")),
         }
     }
@@ -14260,6 +14372,10 @@ pub struct State {
     pub turn_tool_overlay_deny_names: std::collections::BTreeSet<ToolName>,
     pub tool_grant_gated_names: std::collections::BTreeSet<ToolName>,
     pub tool_grant_open_names: std::collections::BTreeSet<ToolName>,
+    pub tool_grant_gated_servers: std::collections::BTreeSet<String>,
+    pub tool_grant_gates_unconfigured_servers: bool,
+    pub tool_grant_ungated_servers: std::collections::BTreeSet<String>,
+    pub tool_grant_not_mounted_names: std::collections::BTreeSet<ToolName>,
     pub input_authority_bindings: std::collections::BTreeMap<String, String>,
     pub input_authority_batch_keys: std::collections::BTreeMap<String, String>,
     pub scoped_context_binding: Option<String>,
@@ -14310,6 +14426,7 @@ pub struct State {
     pub run_stop_requested: Option<RunId>,
     pub run_start_holds: std::collections::BTreeSet<RunStartHoldReason>,
     pub input_controller_holds: std::collections::BTreeSet<String>,
+    pub resumed_run_admission_hold: Option<RunId>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub registration_live_input_seen: bool,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -14390,6 +14507,9 @@ pub struct State {
     pub live_delegation_steer_delivered_by_continuation: std::collections::BTreeMap<String, bool>,
     pub live_delegation_operation_by_interaction: std::collections::BTreeMap<String, OperationId>,
     pub live_delegation_channel_by_operation: std::collections::BTreeMap<OperationId, String>,
+    pub live_delegation_member_turn_reasoning_by_operation:
+        std::collections::BTreeMap<OperationId, LiveMemberTurnReasoning>,
+    pub live_delegation_intake_closed_channels: std::collections::BTreeSet<String>,
     pub live_delegation_schedule_state_by_operation:
         std::collections::BTreeMap<OperationId, LiveDelegationScheduleState>,
     pub live_delegation_active_worker_count_by_channel: std::collections::BTreeMap<String, u64>,
@@ -14663,6 +14783,7 @@ pub struct State {
     pub mob_overlay_peer_endpoints: std::collections::BTreeSet<PeerEndpoint>,
     pub peer_projection_epoch: u64,
     pub mob_overlay_epoch: u64,
+    pub compaction_requested: bool,
 }
 impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -15053,6 +15174,19 @@ impl std::fmt::Debug for State {
             )
             .field("tool_grant_gated_names", &self.tool_grant_gated_names)
             .field("tool_grant_open_names", &self.tool_grant_open_names)
+            .field("tool_grant_gated_servers", &self.tool_grant_gated_servers)
+            .field(
+                "tool_grant_gates_unconfigured_servers",
+                &self.tool_grant_gates_unconfigured_servers,
+            )
+            .field(
+                "tool_grant_ungated_servers",
+                &self.tool_grant_ungated_servers,
+            )
+            .field(
+                "tool_grant_not_mounted_names",
+                &self.tool_grant_not_mounted_names,
+            )
             .field(
                 "input_authority_bindings",
                 &format_args!(
@@ -15170,6 +15304,10 @@ impl std::fmt::Debug for State {
             .field("run_stop_requested", &self.run_stop_requested)
             .field("run_start_holds", &self.run_start_holds)
             .field("input_controller_holds", &self.input_controller_holds)
+            .field(
+                "resumed_run_admission_hold",
+                &self.resumed_run_admission_hold,
+            )
             .field("recovered_admitted_lanes", &self.recovered_admitted_lanes)
             .field(
                 "registration_live_input_seen",
@@ -15396,6 +15534,14 @@ impl std::fmt::Debug for State {
             .field(
                 "live_delegation_channel_by_operation",
                 &self.live_delegation_channel_by_operation,
+            )
+            .field(
+                "live_delegation_member_turn_reasoning_by_operation",
+                &self.live_delegation_member_turn_reasoning_by_operation,
+            )
+            .field(
+                "live_delegation_intake_closed_channels",
+                &self.live_delegation_intake_closed_channels,
             )
             .field(
                 "live_delegation_schedule_state_by_operation",
@@ -16236,6 +16382,7 @@ impl std::fmt::Debug for State {
             )
             .field("peer_projection_epoch", &self.peer_projection_epoch)
             .field("mob_overlay_epoch", &self.mob_overlay_epoch)
+            .field("compaction_requested", &self.compaction_requested)
             .finish()
     }
 }
@@ -19086,6 +19233,10 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ReplaceToolGrantGate {
         pub gated: std::collections::BTreeSet<ToolName>,
+        pub gated_servers: std::collections::BTreeSet<String>,
+        pub gates_unconfigured_servers: bool,
+        pub ungated_servers: std::collections::BTreeSet<String>,
+        pub not_mounted_names: std::collections::BTreeSet<ToolName>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyToolGrantOpenSet {
@@ -19094,6 +19245,54 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AbortUntilChangedSwitchTurnReconfigure {
         pub request_id: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleRetainedRun {
+        pub run_id: Option<RunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct HoldResumedRunForAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseResumedRunAdmission {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExtendToolGrantGate {
+        pub server: String,
+        pub gated: std::collections::BTreeSet<ToolName>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SurfaceStageGatedAdd {
+        pub surface_id: String,
+        pub now_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CloseLiveDelegationIntake {
+        pub channel_id: String,
+        pub runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub generation: Generation,
+    }
+    #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct BindInputRequesterBatchKey {
+        pub input_id: String,
+        pub authority_batch_key: String,
+    }
+    impl std::fmt::Debug for BindInputRequesterBatchKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("BindInputRequesterBatchKey")
+                .field("input_id", &self.input_id)
+                .field("authority_batch_key", &"<redacted>")
+                .finish()
+        }
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RequestCompaction {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ConsumeCompactionRequest {
+        pub run_id: RunId,
     }
 }
 
@@ -19529,6 +19728,15 @@ pub enum Input {
     ReplaceToolGrantGate(inputs::ReplaceToolGrantGate),
     ApplyToolGrantOpenSet(inputs::ApplyToolGrantOpenSet),
     AbortUntilChangedSwitchTurnReconfigure(inputs::AbortUntilChangedSwitchTurnReconfigure),
+    SettleRetainedRun(inputs::SettleRetainedRun),
+    HoldResumedRunForAdmission(inputs::HoldResumedRunForAdmission),
+    ReleaseResumedRunAdmission(inputs::ReleaseResumedRunAdmission),
+    ExtendToolGrantGate(inputs::ExtendToolGrantGate),
+    SurfaceStageGatedAdd(inputs::SurfaceStageGatedAdd),
+    CloseLiveDelegationIntake(inputs::CloseLiveDelegationIntake),
+    BindInputRequesterBatchKey(inputs::BindInputRequesterBatchKey),
+    RequestCompaction(inputs::RequestCompaction),
+    ConsumeCompactionRequest(inputs::ConsumeCompactionRequest),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -20129,6 +20337,15 @@ impl Input {
             Self::AbortUntilChangedSwitchTurnReconfigure(_) => {
                 InputKind::AbortUntilChangedSwitchTurnReconfigure
             }
+            Self::SettleRetainedRun(_) => InputKind::SettleRetainedRun,
+            Self::HoldResumedRunForAdmission(_) => InputKind::HoldResumedRunForAdmission,
+            Self::ReleaseResumedRunAdmission(_) => InputKind::ReleaseResumedRunAdmission,
+            Self::ExtendToolGrantGate(_) => InputKind::ExtendToolGrantGate,
+            Self::SurfaceStageGatedAdd(_) => InputKind::SurfaceStageGatedAdd,
+            Self::CloseLiveDelegationIntake(_) => InputKind::CloseLiveDelegationIntake,
+            Self::BindInputRequesterBatchKey(_) => InputKind::BindInputRequesterBatchKey,
+            Self::RequestCompaction(_) => InputKind::RequestCompaction,
+            Self::ConsumeCompactionRequest(_) => InputKind::ConsumeCompactionRequest,
         }
     }
 }
@@ -20552,6 +20769,15 @@ pub enum InputKind {
     ReplaceToolGrantGate,
     ApplyToolGrantOpenSet,
     AbortUntilChangedSwitchTurnReconfigure,
+    SettleRetainedRun,
+    HoldResumedRunForAdmission,
+    ReleaseResumedRunAdmission,
+    ExtendToolGrantGate,
+    SurfaceStageGatedAdd,
+    CloseLiveDelegationIntake,
+    BindInputRequesterBatchKey,
+    RequestCompaction,
+    ConsumeCompactionRequest,
 }
 
 pub mod signals {
@@ -22333,6 +22559,24 @@ pub mod effects {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InputControllerReleased {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RetainedRunSettleResolved {
+        pub verdict: RetainedRunSettleVerdict,
+        pub run_id: Option<RunId>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ExactRunBoundaryCancel {
+        pub run_id: RunId,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompactionRequestResolved {
+        pub verdict: CompactionRequestVerdict,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CompactionRequestConsumed {
+        pub run_id: RunId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22611,6 +22855,10 @@ pub enum Effect {
     RuntimeRegistrationReleased(effects::RuntimeRegistrationReleased),
     EmptyResumeRetirementResolved(effects::EmptyResumeRetirementResolved),
     InputControllerReleased(effects::InputControllerReleased),
+    RetainedRunSettleResolved(effects::RetainedRunSettleResolved),
+    ExactRunBoundaryCancel(effects::ExactRunBoundaryCancel),
+    CompactionRequestResolved(effects::CompactionRequestResolved),
+    CompactionRequestConsumed(effects::CompactionRequestConsumed),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22876,6 +23124,10 @@ pub enum EffectKind {
     RuntimeRegistrationReleased,
     EmptyResumeRetirementResolved,
     InputControllerReleased,
+    RetainedRunSettleResolved,
+    ExactRunBoundaryCancel,
+    CompactionRequestResolved,
+    CompactionRequestConsumed,
 }
 
 pub mod command_capabilities {
@@ -26095,6 +26347,85 @@ pub enum TransitionId {
     RequestUntilChangedSwitchTurnPendingConflictRunning,
     CompleteUntilChangedSwitchTurnReconfigureRetired,
     CompleteUntilChangedSwitchTurnReconfigureStopped,
+    SettleRetainedRunAcceptedIdle,
+    SettleRetainedRunAcceptedAttached,
+    SettleRetainedRunBusyRunCurrentInitializing,
+    SettleRetainedRunBusyRunCurrentIdle,
+    SettleRetainedRunBusyRunCurrentAttached,
+    SettleRetainedRunBusyRunCurrentRunning,
+    SettleRetainedRunBusyRunCurrentRetired,
+    SettleRetainedRunBusyRunCurrentStopped,
+    SettleRetainedRunBusyDrainingIdle,
+    SettleRetainedRunBusyDrainingAttached,
+    SettleRetainedRunBusyStaleRunIdle,
+    SettleRetainedRunBusyStaleRunAttached,
+    SettleRetainedRunBusyNotServingInitializing,
+    SettleRetainedRunBusyNotServingRunning,
+    SettleRetainedRunBusyNotServingRetired,
+    SettleRetainedRunBusyNotServingStopped,
+    SettleRetainedRunNotRetainedInitializing,
+    SettleRetainedRunNotRetainedIdle,
+    SettleRetainedRunNotRetainedAttached,
+    SettleRetainedRunNotRetainedRunning,
+    SettleRetainedRunNotRetainedRetired,
+    SettleRetainedRunNotRetainedStopped,
+    SettleRetainedRunInertDestroyed,
+    HoldResumedRunForAdmissionIdle,
+    HoldResumedRunForAdmissionAttached,
+    HoldResumedRunForAdmissionRunning,
+    HoldResumedRunForAdmissionRetired,
+    HoldResumedRunForAdmissionStopped,
+    ReleaseResumedRunAdmissionIdle,
+    ReleaseResumedRunAdmissionAttached,
+    ReleaseResumedRunAdmissionRunning,
+    ReleaseResumedRunAdmissionRetired,
+    ReleaseResumedRunAdmissionStopped,
+    ExtendToolGrantGateChangedIdle,
+    ExtendToolGrantGateChangedAttached,
+    ExtendToolGrantGateChangedRunning,
+    ExtendToolGrantGateChangedRetired,
+    ExtendToolGrantGateChangedStopped,
+    ExtendToolGrantGateUnchangedIdle,
+    ExtendToolGrantGateUnchangedAttached,
+    ExtendToolGrantGateUnchangedRunning,
+    ExtendToolGrantGateUnchangedRetired,
+    ExtendToolGrantGateUnchangedStopped,
+    SurfaceStageGatedAddIdle,
+    SurfaceStageGatedAddAttached,
+    SurfaceStageGatedAddRunning,
+    CloseLiveDelegationIntakeIdle,
+    CloseLiveDelegationIntakeAttached,
+    CloseLiveDelegationIntakeRunning,
+    CloseLiveDelegationIntakeRetired,
+    CloseLiveDelegationIntakeStopped,
+    BindInputRequesterBatchKeyIdle,
+    BindInputRequesterBatchKeyAttached,
+    BindInputRequesterBatchKeyRunning,
+    BindInputRequesterBatchKeyRetired,
+    BindInputRequesterBatchKeyStopped,
+    RequestCompactionRecordedIdle,
+    RequestCompactionRecordedAttached,
+    RequestCompactionRecordedRunning,
+    RequestCompactionAlreadyRecordedIdle,
+    RequestCompactionAlreadyRecordedAttached,
+    RequestCompactionAlreadyRecordedRunning,
+    RequestCompactionNotServingInitializing,
+    RequestCompactionNotServingRetired,
+    RequestCompactionNotServingStopped,
+    RequestCompactionNotServingDestroyed,
+    ConsumeCompactionRequestTakenRunning,
+    ConsumeCompactionRequestTakenRetired,
+    ConsumeCompactionRequestNoneRunning,
+    ConsumeCompactionRequestNoneRetired,
+    ConsumeCompactionRequestStaleRunRunning,
+    ConsumeCompactionRequestStaleRunRetired,
+    ConsumeCompactionRequestOutsideCheckRunning,
+    ConsumeCompactionRequestOutsideCheckRetired,
+    ConsumeCompactionRequestInertInitializing,
+    ConsumeCompactionRequestInertIdle,
+    ConsumeCompactionRequestInertAttached,
+    ConsumeCompactionRequestInertStopped,
+    ConsumeCompactionRequestInertDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -26298,6 +26629,10 @@ pub fn initial_state() -> State {
         turn_tool_overlay_deny_names: Default::default(),
         tool_grant_gated_names: Default::default(),
         tool_grant_open_names: Default::default(),
+        tool_grant_gated_servers: Default::default(),
+        tool_grant_gates_unconfigured_servers: false,
+        tool_grant_ungated_servers: Default::default(),
+        tool_grant_not_mounted_names: Default::default(),
         input_authority_bindings: Default::default(),
         input_authority_batch_keys: Default::default(),
         scoped_context_binding: None,
@@ -26343,6 +26678,7 @@ pub fn initial_state() -> State {
         run_stop_requested: None,
         run_start_holds: Default::default(),
         input_controller_holds: Default::default(),
+        resumed_run_admission_hold: None,
         recovered_admitted_lanes: Default::default(),
         registration_live_input_seen: false,
         op_statuses: Default::default(),
@@ -26414,6 +26750,8 @@ pub fn initial_state() -> State {
         live_delegation_steer_delivered_by_continuation: Default::default(),
         live_delegation_operation_by_interaction: Default::default(),
         live_delegation_channel_by_operation: Default::default(),
+        live_delegation_member_turn_reasoning_by_operation: Default::default(),
+        live_delegation_intake_closed_channels: Default::default(),
         live_delegation_schedule_state_by_operation: Default::default(),
         live_delegation_active_worker_count_by_channel: Default::default(),
         live_delegation_channel_worker_cap: 4,
@@ -26644,5 +26982,6 @@ pub fn initial_state() -> State {
         mob_overlay_peer_endpoints: Default::default(),
         peer_projection_epoch: 0,
         mob_overlay_epoch: 0,
+        compaction_requested: false,
     }
 }

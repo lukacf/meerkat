@@ -267,6 +267,16 @@ impl SessionBridge for PhaseScriptedBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -380,6 +390,16 @@ impl SessionBridge for PhaseScriptedBridge {
             peer_reachable_count: 0,
         })
     }
+
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(meerkat_meta::identity_first::DeclaredRosterAnswer::kept_for(&roster))
+    }
 }
 
 fn make_runtime(bridge: Option<Arc<dyn SessionBridge>>) -> Arc<IdentityRuntime> {
@@ -431,7 +451,10 @@ async fn register_bound_on(
         Some(session),
         token,
     );
-    runtime.register(make_spec(name)).await;
+    runtime
+        .register(make_spec(name))
+        .await
+        .expect("the identity registers");
     identity
 }
 
@@ -524,7 +547,10 @@ async fn a_successful_completion_bearing_send_submits_once_and_waits_for_its_own
 #[tokio::test]
 async fn no_bridge_fails_closed_and_submits_nothing() {
     let runtime = make_runtime(None);
-    runtime.register(make_spec("alice")).await;
+    runtime
+        .register(make_spec("alice"))
+        .await
+        .expect("the identity registers");
     let alice = make_identity("alice");
 
     match runtime.send_awaiting_commit(&alice, &content("turn")).await {

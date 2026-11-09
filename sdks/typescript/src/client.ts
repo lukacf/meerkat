@@ -73,6 +73,9 @@ import {
   type InterruptResult,
   type MobStopMemberRunResult,
   type StopRunResult,
+  type CompactSessionResult,
+  type MobCompactMemberResult,
+  type WireCompactionRequestOutcome,
   type WireRunStopReceipt,
   type JobsArtifactsParams,
   type JobsArtifactsResult,
@@ -276,6 +279,8 @@ import type {
   ReadSessionParams as RpcReadSessionParams,
   ReadSessionTranscriptRevisionParams as RpcReadSessionTranscriptRevisionParams,
   RealmIdParams as RpcRealmIdParams,
+  RequestToolGrantParams as RpcRequestToolGrantParams,
+  RequestToolGrantResult as RpcRequestToolGrantResult,
   RestoreSessionTranscriptRevisionParams as RpcRestoreSessionTranscriptRevisionParams,
   RevokeToolGrantParams as RpcRevokeToolGrantParams,
   RevokeToolGrantResult as RpcRevokeToolGrantResult,
@@ -294,6 +299,12 @@ import type {
   ToolGrantAuditParams as RpcToolGrantAuditParams,
   ToolGrantAuditResult as RpcToolGrantAuditResult,
   UpdateSystemPromptParams as RpcUpdateSystemPromptParams,
+  SetSessionInstructionParams as RpcSetSessionInstructionParams,
+  RevokeSessionInstructionParams as RpcRevokeSessionInstructionParams,
+  SessionInstructionStatusParams as RpcSessionInstructionStatusParams,
+  MobSetInstructionParams as RpcMobSetInstructionParams,
+  MobRevokeInstructionParams as RpcMobRevokeInstructionParams,
+  MobInstructionStatusParams as RpcMobInstructionStatusParams,
   WireDeviceCompleteResult as RpcWireDeviceCompleteResult,
   WireProvisionApiKeyResult as RpcWireProvisionApiKeyResult,
   WireRunResult as RpcWireRunResult,
@@ -322,6 +333,8 @@ import type {
   MobFlowsResult as RpcMobFlowsResult,
   MobForceCancelResult as RpcMobForceCancelResult,
   MobForkHelperParams as RpcMobForkHelperParams,
+  MobForkMemberParams as RpcMobForkMemberParams,
+  MobForkMemberResult as RpcMobForkMemberResult,
   MobHelperResult as RpcMobHelperResult,
   MobIngressInteractionParams as RpcMobIngressInteractionParams,
   MobIngressInteractionResult as RpcMobIngressInteractionResult,
@@ -352,6 +365,7 @@ import type {
   MobStatusResult as RpcMobStatusResult,
   MobStreamCloseParams as RpcMobStreamCloseParams,
   MobStreamCloseResult as RpcMobStreamCloseResult,
+  MobStreamCursor as RpcMobStreamCursor,
   MobStreamOpenParams as RpcMobStreamOpenParams,
   MobStreamOpenResult as RpcMobStreamOpenResult,
   MobSubmitWorkParams as RpcMobSubmitWorkParams,
@@ -415,10 +429,12 @@ import {
   type MobBoundedHelperResult,
   type MobHandlingMode,
   type MobForkHelperOptions,
+  type MobForkMemberOptions,
   type MobHelperResult,
   type MobHelperOptions,
   type MobKickoffMemberSnapshot,
   type MobMemberCustodyDeferral,
+  type MobMemberPreviewUnavailableUnknown,
   type MobKickoffWaitOptions,
   type MobMemberSnapshot,
   type MobPeerConnectivity,
@@ -431,6 +447,19 @@ import {
 import { parseAgentEventEnvelope } from "./event-envelope.js";
 import { isCommsSendErrorCode } from "./comms-errors.js";
 import { parseMobDestroyReport } from "./mob-destroy-report.js";
+import {
+  parseMobInstructionStatus,
+  parseMobInstructionWriteResult,
+  parseSessionInstructionStatus,
+  parseSessionInstructionWriteResult,
+  type InstructionTarget,
+  type InstructionWriteOptions,
+  type MobInstructionStatus,
+  type MobInstructionStatusOptions,
+  type MobInstructionWriteResult,
+  type SessionInstructionStatus,
+  type SessionInstructionWriteResult,
+} from "./instructions.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { parseUsage } from "./events.js";
 import type { RealtimeMessageOrigin } from "./events.js";
@@ -533,6 +562,7 @@ import type {
   TurnOptions,
   TurnToolOverlay,
   ToolCallDedupeKey,
+  ToolCallRequester,
   Usage,
   ReadyWorkFilter,
   WorkGraphEventFilter,
@@ -623,6 +653,11 @@ const PEER_INGRESS_TERMINAL_OUTCOMES = {
   rejected: true,
 } as const satisfies Record<PeerIngressTerminalOutcomeKind, true>;
 
+/**
+ * The notification a stdio connection shows its operator a durable decision
+ * with (`decision/notice`). This client has no listener for it and drops it.
+ */
+const DECISION_NOTICE_NOTIFICATION = "decision/notice";
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
 const MEERKAT_BINARY_CACHE_ROOT = path.join(
@@ -684,6 +719,26 @@ function isMobSpawnManyFailureCause(value: unknown): value is MobSpawnManyFailur
   return typeof value === "string" && MOB_SPAWN_MANY_FAILURE_CAUSES.has(value);
 }
 
+/** The principal kinds the runtime's requester grammar names. */
+const REQUESTER_PRINCIPAL_KINDS = new Set<string>([
+  "human",
+  "personal_agent",
+  "shared_agent",
+  "runtime_host",
+  "service_account",
+]);
+/** A control character, as the runtime's identity check reads one. */
+const REQUESTER_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/;
+/**
+ * Whether `value` is an id the runtime accepts for a qualified principal or a
+ * trust domain: a string that is not blank and holds no control character.
+ */
+function isRequesterIdentity(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.trim() !== "" && !REQUESTER_CONTROL_CHARACTER.test(value)
+  );
+}
+
 interface ResolvedBinary {
   command: string;
   useLegacySubcommand: boolean;
@@ -720,6 +775,36 @@ export interface MobMemberLiveOpenOptions {
    * execution-identity authority, and a member local to that server.
    */
   executionIdentity?: RpcMobMemberLiveOpenParams["execution_identity"];
+}
+
+/**
+ * A mob member identity as the subject of its scoped tool grants: its grants
+ * apply to the member's builds in the mob's running incarnation.
+ */
+export interface ToolGrantMemberSubject {
+  mobId: string;
+  identity: string;
+}
+
+/** The `tool_grants/*` subject a session id or a member identity names. */
+function toolGrantSubject(
+  subject: string | ToolGrantMemberSubject,
+): RpcGrantToolParams["subject"] {
+  return typeof subject === "string"
+    ? { kind: "session", session_id: subject }
+    : { kind: "identity", mob_id: subject.mobId, identity: subject.identity };
+}
+
+/** Options for a mob member event subscription. */
+export interface MobMemberEventsOptions {
+  /**
+   * Resume after this position: the `epoch` and `seq` of the last event
+   * received (`subscription.lastEventEpoch` and `subscription.lastEventSeq`).
+   * The stream first replays the events the member still retains after it;
+   * a cursor of another sequence space replays the current space from its
+   * earliest retained event. Without a cursor the stream is live.
+   */
+  cursor?: RpcMobStreamCursor;
 }
 
 interface WireSkillKey {
@@ -1077,6 +1162,7 @@ export class MeerkatClient {
       handler: (
         args: Record<string, unknown>,
         dedupeKey?: ToolCallDedupeKey,
+        requester?: ToolCallRequester,
       ) => Promise<string | ContentBlock[]>;
     }
   >();
@@ -1109,6 +1195,11 @@ export class MeerkatClient {
    * {@link ToolCallDedupeKey}, present when an agent-loop round dispatched
    * the call. A resumed run that dispatches the same call again passes the
    * same key.
+   *
+   * Its optional third argument is the {@link ToolCallRequester} of the run
+   * the call serves, when the run has one. The runtime sets it from the run's
+   * admitted inputs, never from the arguments, so a tool that acts in one
+   * person's name can refuse every other requester.
    */
   registerTool(
     name: string,
@@ -1117,6 +1208,7 @@ export class MeerkatClient {
     handler: (
       args: Record<string, unknown>,
       dedupeKey?: ToolCallDedupeKey,
+      requester?: ToolCallRequester,
     ) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
@@ -1961,6 +2053,119 @@ export class MeerkatClient {
     return MeerkatClient.parseInstructionActivationReadPage(raw);
   }
 
+  // -- Operator instructions ------------------------------------------------
+
+  /**
+   * Record one session-owned operator instruction: the slot's body at a
+   * revision, applied at the session's next fresh run start. A mob member's
+   * session is refused `owned_by_mob`: write to it with
+   * {@link setMobInstruction} and a member target. A refusal rejects with
+   * `MeerkatError`; {@link instructionSetCode} reads its closed code.
+   */
+  async setSessionInstruction(
+    sessionId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    options?: InstructionWriteOptions,
+  ): Promise<SessionInstructionWriteResult> {
+    const params: RpcSetSessionInstructionParams = {
+      session_id: sessionId,
+      namespace,
+      key,
+      revision,
+      body,
+    };
+    if (options?.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this.request("session/set_instruction", params);
+    return parseSessionInstructionWriteResult(raw, "Invalid session/set_instruction response");
+  }
+
+  /** Revoke one session-owned operator instruction at a higher revision. */
+  async revokeSessionInstruction(
+    sessionId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<SessionInstructionWriteResult> {
+    const params: RpcRevokeSessionInstructionParams = {
+      session_id: sessionId,
+      namespace,
+      key,
+      revision,
+    };
+    const raw = await this.request("session/revoke_instruction", params);
+    return parseSessionInstructionWriteResult(raw, "Invalid session/revoke_instruction response");
+  }
+
+  /** Read a session's committed operator-instruction state without materializing it. */
+  async sessionInstructionStatus(sessionId: string): Promise<SessionInstructionStatus> {
+    const params: RpcSessionInstructionStatusParams = { session_id: sessionId };
+    const raw = await this.request("session/instruction_status", params);
+    return parseSessionInstructionStatus(raw, "Invalid session/instruction_status response");
+  }
+
+  /**
+   * Write one operator instruction for the members `target` selects:
+   * `{ kind: "mob" }`, `{ kind: "profile", profile }` or
+   * `{ kind: "member", agent_identity }`. Resolves once the record is in the
+   * mob's journal; delivery to the members is asynchronous (see
+   * {@link mobInstructionStatus}).
+   */
+  async setMobInstruction(
+    mobId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target: InstructionTarget,
+    options?: InstructionWriteOptions,
+  ): Promise<MobInstructionWriteResult> {
+    const params: RpcMobSetInstructionParams = {
+      mob_id: mobId,
+      namespace,
+      key,
+      revision,
+      body,
+      target,
+    };
+    if (options?.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this.request("mob/set_instruction", params);
+    return parseMobInstructionWriteResult(raw, "Invalid mob/set_instruction response");
+  }
+
+  /** Revoke one operator instruction of a mob at a higher revision; the record keeps its target. */
+  async revokeMobInstruction(
+    mobId: string,
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<MobInstructionWriteResult> {
+    const params: RpcMobRevokeInstructionParams = { mob_id: mobId, namespace, key, revision };
+    const raw = await this.request("mob/revoke_instruction", params);
+    return parseMobInstructionWriteResult(raw, "Invalid mob/revoke_instruction response");
+  }
+
+  /**
+   * Read a mob's operator-instruction records and one page of members
+   * (`limit` 1 to 200, 100 when absent), without waking a member.
+   */
+  async mobInstructionStatus(
+    mobId: string,
+    options?: MobInstructionStatusOptions,
+  ): Promise<MobInstructionStatus> {
+    const params: RpcMobInstructionStatusParams = { mob_id: mobId };
+    if (options?.namespace !== undefined) params.namespace = options.namespace;
+    if (options?.key !== undefined) params.key = options.key;
+    if (options?.agentIdentity !== undefined) params.agent_identity = options.agentIdentity;
+    if (options?.profile !== undefined) params.profile = options.profile;
+    if (options?.offset !== undefined) params.offset = options.offset;
+    if (options?.limit !== undefined) params.limit = options.limit;
+    const raw = await this.request("mob/instruction_status", params);
+    return parseMobInstructionStatus(raw, "Invalid mob/instruction_status response");
+  }
+
   async restoreSessionTranscriptRevision(
     sessionId: string,
     revision: string,
@@ -2210,27 +2415,52 @@ export class MeerkatClient {
   }
 
   /**
-   * Grant one of a session's grant-gated tool names, or a gated built-in tool
-   * family, for a bounded window: `{ durationMs }` from the server's clock or
+   * Grant one of a subject's grant-gated tool names, a gated built-in tool
+   * family, or a gated MCP server (`{ mcpServer, serverTools? }`: every tool
+   * the server provides, or only the named ones), for a bounded window:
+   * `{ durationMs }` from the server's clock or
    * `{ expiresAtMs }` (UNIX ms), at most the server's maximum lifetime. The
-   * session's build must gate the target (`SessionOptions.grantGatedTools`);
-   * a family grant's `target.names` are the names the server took for it.
-   * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
-   * `family`, and the window exactly one of `durationMs` and `expiresAtMs`.
+   * subject is a session id, or a mob member identity
+   * (`{ mobId, identity }`), whose grant applies to the member's builds in
+   * the mob's running incarnation, across respawns. The session's build, or
+   * the member's gate (its profile's joined with its role's), must gate the
+   * target; a family grant's `target.names` are the names the server took
+   * for it, and an identity grant's `applies` says whether the member's
+   * running build gates the target. `options.scope` `"current_run"` also
+   * scopes the grant to the run the subject is running now (an identity's:
+   * the run of the session its member holds on the server): it opens the
+   * target in that run only and ends with it; a subject that runs no turn
+   * refuses it (the request refusal `run_not_active`: `data.kind`
+   * `"tool_grant_request_refused"`, `data.tool_grant_request_refusal.kind`
+   * `"run_not_active"`). Omitted, or `"window"`, the grant lasts for its
+   * window. `options.decisionRef` records the host's reference to the
+   * decision it made before issuing, as attribution. Throws `INVALID_ARGS`
+   * unless the target names exactly one of `tool`, `family` and `mcpServer`
+   * (`serverTools` only with `mcpServer`), and the window exactly one of
+   * `durationMs` and `expiresAtMs`.
    */
   async grantTool(
-    sessionId: string,
-    target: { tool: string; family?: never } | { family: string; tool?: never },
+    subject: string | ToolGrantMemberSubject,
+    target:
+      | { tool: string; family?: never; mcpServer?: never; serverTools?: never }
+      | { family: string; tool?: never; mcpServer?: never; serverTools?: never }
+      | { mcpServer: string; serverTools?: string[]; tool?: never; family?: never },
     window:
       | { durationMs: number; expiresAtMs?: never }
       | { expiresAtMs: number; durationMs?: never },
-    options?: { reason?: string },
+    options?: { reason?: string; scope?: "window" | "current_run"; decisionRef?: string },
   ): Promise<RpcGrantToolResult> {
-    const { tool, family } = target as { tool?: string; family?: string };
-    if ((tool === undefined) === (family === undefined)) {
+    const { tool, family, mcpServer, serverTools } = target as {
+      tool?: string;
+      family?: string;
+      mcpServer?: string;
+      serverTools?: string[];
+    };
+    const named = [tool, family, mcpServer].filter((value) => value !== undefined).length;
+    if (named !== 1 || (serverTools !== undefined && mcpServer === undefined)) {
       throw new MeerkatError(
         "INVALID_ARGS",
-        "grantTool needs exactly one of target.tool and target.family",
+        "grantTool needs exactly one of target.tool, target.family and target.mcpServer",
       );
     }
     const { durationMs, expiresAtMs } = window as { durationMs?: number; expiresAtMs?: number };
@@ -2240,12 +2470,20 @@ export class MeerkatClient {
         "grantTool needs exactly one of window.durationMs and window.expiresAtMs",
       );
     }
+    let wireTarget: RpcGrantToolParams["target"];
+    if (tool !== undefined) {
+      wireTarget = { kind: "tool", name: tool };
+    } else if (family !== undefined) {
+      wireTarget = { kind: "family", family };
+    } else {
+      wireTarget =
+        serverTools === undefined
+          ? { kind: "mcp_server", server: mcpServer as string }
+          : { kind: "mcp_server", server: mcpServer as string, tools: [...serverTools] };
+    }
     const params: RpcGrantToolParams = {
-      subject: { kind: "session", session_id: sessionId },
-      target:
-        tool !== undefined
-          ? { kind: "tool", name: tool }
-          : { kind: "family", family: family as string },
+      subject: toolGrantSubject(subject),
+      target: wireTarget,
     };
     if (durationMs !== undefined) {
       params.duration_ms = durationMs;
@@ -2253,7 +2491,56 @@ export class MeerkatClient {
       params.expires_at_ms = expiresAtMs;
     }
     if (options?.reason !== undefined) params.reason = options.reason;
+    if (options?.scope !== undefined) params.scope = { kind: options.scope };
+    if (options?.decisionRef !== undefined) params.decision_ref = options.decisionRef;
     return this.request("tool_grants/grant", params);
+  }
+
+  /**
+   * Ask for a grant of a subject's grant-gated tool name or tool family that
+   * a person approves. The subject is a session id, or a mob member identity
+   * (`{ mobId, identity }`), as for `grantTool`. `target` names exactly one
+   * of `tool` and `family`, as for `grantTool`; `durationMs` bounds the grant
+   * from its issuance, at most the server's maximum lifetime;
+   * `options.scope` `"current_run"` also scopes it to the run the subject is
+   * running now (an identity's: the run of the session its member holds on
+   * the server). The server holds a
+   * durable decision of kind `tool_grant.issue` and issues nothing: once a
+   * person approves the decision, the server issues the grant under the id
+   * the result names. The result is the request as a list shows it (status
+   * `requested`) and its decision. A server whose persistence keeps no
+   * durable decisions answers capability unavailable. Needs a Meerkat 0.9.11
+   * or newer server: an older one answers method not found (`-32601`),
+   * raised as an error that names the method.
+   * Throws `INVALID_ARGS` unless the target names exactly one of `tool` and
+   * `family`.
+   */
+  async requestToolGrant(
+    subject: string | ToolGrantMemberSubject,
+    target: { tool: string; family?: never } | { family: string; tool?: never },
+    durationMs: number,
+    options?: { reason?: string; scope?: "window" | "current_run" },
+  ): Promise<RpcRequestToolGrantResult> {
+    const { tool, family } = target as { tool?: string; family?: string };
+    if ((tool === undefined) === (family === undefined)) {
+      throw new MeerkatError(
+        "INVALID_ARGS",
+        "requestToolGrant needs exactly one of target.tool and target.family",
+      );
+    }
+    const params: RpcRequestToolGrantParams = {
+      subject: toolGrantSubject(subject),
+      target:
+        tool !== undefined
+          ? { kind: "tool", name: tool }
+          : { kind: "family", family: family as string },
+      duration_ms: durationMs,
+    };
+    if (options?.scope !== undefined) params.scope = { kind: options.scope };
+    if (options?.reason !== undefined) params.reason = options.reason;
+    return this.request("tool_grants/request", params).catch(
+      MeerkatClient.decisionMethodServed("tool_grants/request"),
+    );
   }
 
   /**
@@ -2270,34 +2557,44 @@ export class MeerkatClient {
   }
 
   /**
-   * List a session's scoped tool grants, each due grant settled as expired
-   * first. Ended (expired or revoked) grants are listed only with
-   * `includeEnded`; `unreadable` names any stored grant the server cannot
-   * read.
+   * List a subject's scoped tool grants (a session id, or a mob member
+   * identity `{ mobId, identity }`, whose retired history stays readable),
+   * each due grant settled as expired first. Ended (expired, revoked or
+   * run-ended) grants are listed only with `includeEnded`; `unreadable`
+   * names any stored grant the server cannot read. For a member identity in
+   * the mob's roster the result also carries `gate`: `running`, what the
+   * member's live build gates and the names it ignored as not mounted
+   * (`null` when no build of it is live on the server), and `next_build`,
+   * the gate its next build resolves. The gate is advisory. On a 0.9.11 or
+   * newer server that keeps durable decisions, the subject's grant requests
+   * (`requestToolGrant`) follow its grants: open and approved ones as
+   * `requested` and, with `includeEnded`, recently declined ones as
+   * `declined`.
    */
   async listToolGrants(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     options?: { includeEnded?: boolean },
   ): Promise<RpcListToolGrantsResult> {
     const params: RpcListToolGrantsParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
     };
     if (options?.includeEnded !== undefined) params.include_ended = options.includeEnded;
     return this.request("tool_grants/list", params);
   }
 
   /**
-   * Read a page of the audit log of a session's scoped tool grants, in
-   * sequence order. While the result carries `next_sequence`, pass it as the
-   * next page's `afterSequence`. A row the server cannot read is named in
+   * Read a page of the audit log of a subject's scoped tool grants (a
+   * session id, or a mob member identity `{ mobId, identity }`), in sequence
+   * order. While the result carries `next_sequence`, pass it as the next
+   * page's `afterSequence`. A row the server cannot read is named in
    * `unreadable`.
    */
   async toolGrantAudit(
-    sessionId: string,
+    subject: string | ToolGrantMemberSubject,
     options?: { afterSequence?: number; limit?: number },
   ): Promise<RpcToolGrantAuditResult> {
     const params: RpcToolGrantAuditParams = {
-      subject: { kind: "session", session_id: sessionId },
+      subject: toolGrantSubject(subject),
     };
     if (options?.afterSequence !== undefined) params.after_sequence = options.afterSequence;
     if (options?.limit !== undefined) params.limit = options.limit;
@@ -2319,8 +2616,9 @@ export class MeerkatClient {
    * answers, the server shows the connection's operator each decision of the
    * page that is open, waits for a human and is held for an approver id the
    * operator acts for (once per connection), and records each presentation.
-   * It writes a `decision/notice` for each decision it shows; this client
-   * drops those notices.
+   * Such a decision that opens while the connection is open is shown at
+   * once, without a list. The server writes a `decision/notice` for each
+   * decision it shows; this client drops those notices.
    */
   async listDecisions(options?: {
     kind?: string;
@@ -2379,9 +2677,11 @@ export class MeerkatClient {
   /**
    * Record what a host presenter showed of a durable decision: the audience,
    * the subject digest shown, the parts shown, the channel and message
-   * references and the host clock reading `at_ms`. It counts only when it
-   * shows every canonical part to the party that decides now. Needs a
-   * Meerkat 0.9.11 or newer server: an older one answers method not found
+   * references and the host clock reading `at_ms`; a summary a surface with
+   * a size limit showed adds the `link` it carried (`reference` and
+   * `served_digest`). It counts only when it shows every canonical part, or
+   * its link served the held rendering, to the party that decides now. Needs
+   * a Meerkat 0.9.11 or newer server: an older one answers method not found
    * (`-32601`), raised as a `MeerkatError` that names the method.
    */
   async presentDecision(
@@ -3495,6 +3795,31 @@ export class MeerkatClient {
   }
 
   /**
+   * Ask a live mob member's next compaction check to compact. The member is
+   * not respawned and its compaction thresholds do not change. The outcome
+   * is `requested`, or `already_requested` when a request no check consumed
+   * yet was already recorded. A dormant member is refused, never woken.
+   */
+  async compactMobMember(
+    mobId: string,
+    agentIdentity: string,
+  ): Promise<MobCompactMemberResult> {
+    const result = await this.request("mob/compact_member", {
+      mob_id: mobId,
+      agent_identity: agentIdentity,
+    });
+    const context = "Invalid mob/compact_member response";
+    if (typeof result.mob_id !== "string" || typeof result.agent_identity !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing mob_id or agent_identity`);
+    }
+    return {
+      mob_id: result.mob_id,
+      agent_identity: result.agent_identity,
+      outcome: MeerkatClient.parseCompactionRequestOutcome(result.outcome, context),
+    };
+  }
+
+  /**
    * Open a live realtime channel on a mob member. The member's mob checks
    * the member first, and the member's own live host serves the transport
    * or refuses it typed. A WebRTC bootstrap's offer is answered with
@@ -4215,6 +4540,47 @@ export class MeerkatClient {
     );
   }
 
+  /**
+   * Fork a member's session at a message boundary into a new member. The new
+   * member `agentIdentity` holds the source's messages before
+   * `options.messageIndex` (its committed end when absent) and takes the
+   * source member's profile and runtime mode unless named. A source whose
+   * turn is in flight is refused with `SESSION_BUSY`, and nothing is seated.
+   */
+  async forkMobMember(
+    mobId: string,
+    sourceMemberId: string,
+    agentIdentity: string,
+    options?: MobForkMemberOptions,
+  ): Promise<RpcMobForkMemberResult> {
+    const params: RpcMobForkMemberParams = {
+      mob_id: mobId,
+      source_member_id: sourceMemberId,
+      agent_identity: agentIdentity,
+    };
+    if (options?.messageIndex != null) params.message_index = options.messageIndex;
+    if (options?.profile != null) params.profile = options.profile;
+    if (options?.runtimeMode != null) params.runtime_mode = options.runtimeMode;
+    const result = (await this.request("mob/fork_member", params)) as unknown as Record<
+      string,
+      unknown
+    >;
+    const context = "Invalid mob/fork_member response";
+    for (const field of ["agent_identity", "member_ref", "session_id", "source_session_id"]) {
+      if (typeof result[field] !== "string" || result[field] === "") {
+        throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
+      }
+    }
+    const messageCount = result.message_count;
+    if (typeof messageCount !== "number" || !Number.isSafeInteger(messageCount) || messageCount < 0) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: message_count must be a non-negative integer`,
+      );
+    }
+    return result as unknown as RpcMobForkMemberResult;
+  }
+
   async wireMobMembers(mobId: string, member: string, peer: MobPeerTarget): Promise<void> {
     const payload =
       typeof peer === "string"
@@ -4415,10 +4781,18 @@ export class MeerkatClient {
     );
   }
 
-  async subscribeMobMemberEvents(mobId: string, agentIdentity: string): Promise<EventSubscription<AgentEventEnvelope>> {
+  async subscribeMobMemberEvents(
+    mobId: string,
+    agentIdentity: string,
+    options?: MobMemberEventsOptions,
+  ): Promise<EventSubscription<AgentEventEnvelope>> {
+    const params: RpcMobStreamOpenParams = { mob_id: mobId, agent_identity: agentIdentity };
+    if (options?.cursor != null) {
+      params.cursor = { epoch: options.cursor.epoch, seq: options.cursor.seq };
+    }
     return this.openEventSubscription(
       "mob/stream_open",
-      { mob_id: mobId, agent_identity: agentIdentity },
+      params,
       "mob/stream_close",
       MeerkatClient.parseAgentEventEnvelope,
     );
@@ -4777,6 +5151,35 @@ export class MeerkatClient {
       session_id: result.session_id,
       receipt: MeerkatClient.parseRunStopReceipt(result.receipt, context),
     };
+  }
+
+  /** @internal Ask the session's next compaction check to compact. */
+  async _compact(sessionId: string): Promise<CompactSessionResult> {
+    const result = await this.request("session/compact", {
+      session_id: sessionId,
+    });
+    const context = "Invalid session/compact response";
+    if (typeof result.session_id !== "string") {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing session_id`);
+    }
+    return {
+      session_id: result.session_id,
+      outcome: MeerkatClient.parseCompactionRequestOutcome(result.outcome, context),
+    };
+  }
+
+  /** Validate a compaction request's outcome (a closed vocabulary). */
+  private static parseCompactionRequestOutcome(
+    raw: unknown,
+    context: string,
+  ): WireCompactionRequestOutcome {
+    if (raw !== "requested" && raw !== "already_requested") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: outcome must be 'requested' or 'already_requested'`,
+      );
+    }
+    return raw;
   }
 
   /**
@@ -5212,6 +5615,67 @@ export class MeerkatClient {
   }
 
   /**
+   * The `requester` of a `tool/execute` request: the original requester of
+   * the run the call serves, read as the runtime's grammar reads it. An
+   * absent or malformed value is `undefined`, no requester, which a
+   * person-scoped tool refuses. Malformed is anything the runtime refuses: a
+   * principal kind outside `human`, `personal_agent`, `shared_agent`,
+   * `runtime_host` and `service_account`; a qualification that is null, has
+   * an unknown kind, or carries a field its kind does not have; a blank trust
+   * domain or one with a control character; and a blank qualified id or one
+   * with a control character.
+   */
+  static parseToolCallRequester(raw: unknown): ToolCallRequester | undefined {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return undefined;
+    }
+    const { principal, carried } = raw as Record<string, unknown>;
+    if (principal === null || typeof principal !== "object" || Array.isArray(principal)) {
+      return undefined;
+    }
+    const wirePrincipal = principal as Record<string, unknown>;
+    const { kind, id } = wirePrincipal;
+    if (
+      typeof kind !== "string" ||
+      !REQUESTER_PRINCIPAL_KINDS.has(kind) ||
+      typeof id !== "string" ||
+      id.trim() === ""
+    ) {
+      return undefined;
+    }
+    let trustDomainId: string | undefined;
+    if (Object.prototype.hasOwnProperty.call(wirePrincipal, "qualification")) {
+      const qualification = wirePrincipal.qualification;
+      if (qualification === null || typeof qualification !== "object" || Array.isArray(qualification)) {
+        return undefined;
+      }
+      const fields = qualification as Record<string, unknown>;
+      const keys = Object.keys(fields).sort().join(",");
+      if (fields.kind === "qualified") {
+        const domain = fields.trust_domain_id;
+        if (
+          keys !== "kind,trust_domain_id" ||
+          !isRequesterIdentity(domain) ||
+          !isRequesterIdentity(id)
+        ) {
+          return undefined;
+        }
+        trustDomainId = domain;
+      } else if (fields.kind !== "unqualified" || keys !== "kind") {
+        return undefined;
+      }
+    }
+    if (carried !== undefined && typeof carried !== "boolean") {
+      return undefined;
+    }
+    return {
+      principal:
+        trustDomainId === undefined ? { kind, id } : { kind, id, trust_domain_id: trustDomainId },
+      carried: carried === true,
+    };
+  }
+
+  /**
    * Type-narrow an inbound live-adapter observation against
    * {@link WireLiveAdapterObservation}.
    *
@@ -5528,6 +5992,11 @@ export class MeerkatClient {
         this.dispatchConsentNotice(params);
         return;
       }
+      if (method === DECISION_NOTICE_NOTIFICATION) {
+        // A decision notice names no session and this client has no
+        // listener for it: it is dropped, never buffered as a session event.
+        return;
+      }
       if (method === "session/stream_event" || method === "mob/stream_event") {
         const streamId = String(params.stream_id ?? "");
         const queue = this.streamQueues.get(streamId);
@@ -5540,10 +6009,12 @@ export class MeerkatClient {
             ? { event: rawEvent, scope_id: scopeId, scope_path: scopePath }
             : rawEvent;
         const sequence = params.sequence;
+        const epoch = params.epoch;
         const delivery: SubscriptionEvent = {
           event,
           rpcSequence: typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0
             ? sequence : undefined,
+          epoch: typeof epoch === "string" && epoch !== "" ? epoch : undefined,
         };
         if (queue && event) {
           queue.put(delivery);
@@ -6651,29 +7122,35 @@ export class MeerkatClient {
 
   /**
    * Parse the typed reason a member-status read carries no observed preview.
-   * Absent (or `null`) means `output_preview`/`tokens_used` are observations;
-   * a value outside the closed vocabulary fails closed.
+   * Absent (or `null`) means `output_preview`/`tokens_used` are observations.
+   * The field is advisory and its vocabulary may grow: a reason this SDK
+   * does not know reads as `{ unknown: <value> }`, so a newer server never
+   * fails the read. A value that is not a string is malformed and fails
+   * closed.
    */
   private static parseWireMemberPreviewUnavailable(
     raw: unknown,
     context: string,
-  ): WireMemberPreviewUnavailable | undefined {
+  ): WireMemberPreviewUnavailable | MobMemberPreviewUnavailableUnknown | undefined {
     if (raw == null) {
       return undefined;
+    }
+    if (typeof raw !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: preview_unavailable must be a string`,
+      );
     }
     const values: readonly WireMemberPreviewUnavailable[] = [
       "observation_deadline",
       "read_failed",
       "session_absent",
       "not_observed_while_retiring",
+      "store_refused",
     ];
-    if (typeof raw === "string" && values.includes(raw as WireMemberPreviewUnavailable)) {
-      return raw as WireMemberPreviewUnavailable;
-    }
-    throw new MeerkatError(
-      "INVALID_RESPONSE",
-      `${context}: preview_unavailable must be a valid preview-unavailable reason`,
-    );
+    return values.includes(raw as WireMemberPreviewUnavailable)
+      ? (raw as WireMemberPreviewUnavailable)
+      : { unknown: raw };
   }
 
   /**
@@ -9103,8 +9580,11 @@ export class MeerkatClient {
       if (handler) {
         const args = (params.arguments ?? {}) as Record<string, unknown>;
         const dedupeKey = MeerkatClient.parseToolCallDedupeKey(params.dedupe_key);
+        // The runtime names the run's requester here, never in the
+        // arguments; absent or malformed is no requester.
+        const requester = MeerkatClient.parseToolCallRequester(params.requester);
         handler
-          .handler(args, dedupeKey)
+          .handler(args, dedupeKey, requester)
           .then((content) => {
             this.writeCallbackResponse(child, requestId, { content, is_error: false });
           })

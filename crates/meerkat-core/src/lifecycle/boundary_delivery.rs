@@ -131,6 +131,12 @@ pub struct DurableTurnBoundaryAppends {
     /// the rows, so `reply_to_peer` can answer a delivery that joined
     /// mid-run exactly as one that started the turn.
     peer_reply_capabilities: Vec<crate::comms::PeerReplyCapability>,
+    /// Request-only context of the input these appends belong to
+    /// ([`super::run_primitive::RuntimeTurnMetadata::request_only_context`]),
+    /// which the runner adds to the running turn's request-only context
+    /// (distinct values, in order) when it writes the rows, so every later
+    /// request of the turn carries it. It never becomes a row.
+    request_only_context: Vec<super::run_primitive::TurnRequestContext>,
 }
 
 impl DurableTurnBoundaryAppends {
@@ -204,6 +210,7 @@ impl DurableTurnBoundaryAppends {
             model_projection,
             peer_ingested_events,
             peer_reply_capabilities: Vec::new(),
+            request_only_context: Vec::new(),
         })
     }
 
@@ -215,6 +222,18 @@ impl DurableTurnBoundaryAppends {
         capabilities: Vec<crate::comms::PeerReplyCapability>,
     ) -> Self {
         self.peer_reply_capabilities = capabilities;
+        self
+    }
+
+    /// Attach the request-only context of the input these appends belong to
+    /// (read by the runtime from the admitted input in this process, never
+    /// from a stored one).
+    #[must_use]
+    pub fn with_request_only_context(
+        mut self,
+        context: Vec<super::run_primitive::TurnRequestContext>,
+    ) -> Self {
+        self.request_only_context = context;
         self
     }
 
@@ -251,6 +270,13 @@ impl DurableTurnBoundaryAppends {
         &self.peer_reply_capabilities
     }
 
+    /// Request-only context the runner adds to the running turn when it
+    /// applies these appends.
+    #[must_use]
+    pub fn request_only_context(&self) -> &[super::run_primitive::TurnRequestContext] {
+        &self.request_only_context
+    }
+
     pub(crate) fn into_parts(self) -> DurableTurnBoundaryAppendParts {
         DurableTurnBoundaryAppendParts {
             input_id: self.input_id,
@@ -258,6 +284,7 @@ impl DurableTurnBoundaryAppends {
             model_projection: self.model_projection,
             peer_ingested_events: self.peer_ingested_events,
             peer_reply_capabilities: self.peer_reply_capabilities,
+            request_only_context: self.request_only_context,
         }
     }
 }
@@ -269,6 +296,7 @@ pub(crate) struct DurableTurnBoundaryAppendParts {
     pub(crate) model_projection: ContentInput,
     pub(crate) peer_ingested_events: Vec<crate::event::AgentEvent>,
     pub(crate) peer_reply_capabilities: Vec<crate::comms::PeerReplyCapability>,
+    pub(crate) request_only_context: Vec<super::run_primitive::TurnRequestContext>,
 }
 
 /// What became of one durable boundary delivery, as observed by the runtime

@@ -89,7 +89,7 @@ Controls when and how compaction runs.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `auto_compact_threshold` | `u64` | model-aware; raw struct default `100_000` | Token high-water mark. If config leaves it implicit, `AgentFactory` uses four-fifths of the selected catalog model's context window. An explicit config or per-build override wins. |
+| `auto_compact_threshold` | `u64` | model-aware; raw struct default `100_000` | Token high-water mark. If config leaves it implicit, `AgentFactory` uses four-fifths of the selected catalog model's context window, or of the selected account's prompt limit when the account states a smaller one (a GitHub Copilot account model's `max_prompt_tokens`). An explicit config or per-build override wins, up to the selected account's prompt limit (a higher value is lowered to it, with a warning). |
 | `max_request_bytes` | `Option<u64>` | `None` | Optional host request-body cap. Byte compaction triggers at four-fifths of the stricter available cap: this value or an exact provider-reported cap. |
 | `recent_turn_budget` | `usize` | `4` | Maximum number of recent complete conversational turns to retain. A turn starts only at a conversational User message; typed injected context stays attached to that turn. Capacity recovery may retain fewer turns. |
 | `max_summary_tokens` | `u32` | `4096` | Maximum tokens the LLM may produce for the compaction summary. |
@@ -177,6 +177,29 @@ The decision flow:
   </Step>
 </Steps>
 
+### Compaction a host asks for
+
+A host can ask a live session to compact now, without a rebuild and without
+changing any threshold: `session/compact` over JSON-RPC (`mob/compact_member`
+for a mob member), `Session.compact()` in the SDKs, or
+`MeerkatMachine::request_compaction` in Rust. The session's runtime
+registration records the request, and the next check consumes it: the check
+before the next model request, in the running turn once its tool results are
+in, or in the next turn. That check compacts without the decision flow above
+(the cadence and the thresholds); what happens
+during the compaction is unchanged, so a turn in flight keeps its request and
+newest round, and a check with nothing to fold compacts nothing. A session's
+first model request has nothing to compact either: a request made before it
+is consumed there and compacts nothing. A check that consumes the request
+and compacts nothing says so: it publishes `requested_compaction_skipped`
+with the run and the reason (`first_model_request` or `nothing_to_fold`)
+instead of `compaction_started`. A `nothing_to_fold` skip records a
+compaction attempt like any other, so the ordinary trigger may then wait up
+to `min_turns_between_compactions` checks. Two requests
+before a check give one compaction. The request is never persisted, and a
+session with no live runtime is refused rather than loaded for it. A session
+whose agent has no compactor never consumes a request: it stays requested.
+
 ## What happens during compaction
 
 When compaction triggers:
@@ -247,7 +270,11 @@ When compaction triggers:
     `trimmed` with the last kind of text cut, or `requests_only` with how many
     of the user requests it kept), and `estimated_history_tokens_after`: the
     history estimate the rewrite left, in the unit of
-    `estimated_history_tokens`.
+    `estimated_history_tokens`. With the durable memory store the runtime
+    finalizes the projection after the run's boundary commit, so the event
+    follows the run's `run_completed` on the session's event stream, which an
+    RPC client receives through `session/stream_open`; a turn's own
+    `session/event` stream has ended by then and does not carry it.
   </Step>
 </Steps>
 
@@ -294,6 +321,20 @@ For each discarded message:
   source handle (the offset range of the source message), and a timestamp.
 
 This means previously discarded conversation content becomes searchable via the `memory_search` tool.
+
+With the durable HNSW store, a compaction's staged batch becomes visible
+once the runtime boundary that commits its rewrite is acknowledged: the live
+agent finalizes it at that boundary, or at its startup when the session is
+revived. A session no agent will host again can still owe one, for a mob
+member whose stopped run compacted and that is rotated or deleted before it
+wakes. `PersistentSessionService::settle_owed_compaction_projections`
+finalizes such a session's owed batches cold (no actor is built and no model
+is called) and answers the records it published
+(`OwedCompactionSettlement::Settled`), or `Live` when the session is hosted
+in the process, whose agent owns the finalization. A mob's rotation onto a
+fresh session settles the session it leaves this way, and
+`MobHandle::settle_member_owed_compaction_projections` lets a host settle a
+seated member's session, and read its discards, before it ends that session.
 
 ## The `memory_search` tool
 

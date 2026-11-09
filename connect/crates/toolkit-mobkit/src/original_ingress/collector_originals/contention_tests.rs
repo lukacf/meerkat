@@ -168,6 +168,7 @@ async fn ordinary_original_keeps_precedence_after_contended_collector_probe() {
         .owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             EvidenceId::new("ordinary-base").unwrap(),
             principal("admin"),

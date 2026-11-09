@@ -61,7 +61,7 @@ function SharedHost() {
     scopeKey: scope,
     load: signal => callConsoleRpc(baseUrl, "meta/gating/pending", {}, undefined, signal),
     decide: (pendingId, decision, signal) => callConsoleRpc(baseUrl, "meta/gating/decide", {
-      pending_id: pendingId, decision, approver_id: "acceptance-operator", reason: "Reviewed evidence",
+      pending_id: pendingId, decision, reason: "Reviewed evidence",
     }, undefined, signal),
   }), [scope, baseUrl]);
   useEffect(() => {

@@ -12,6 +12,7 @@ use super::types::{
     ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineWindowPage,
     ConsoleTimelineWindowQuery, NewConsoleFrame, streamed_block_payload,
 };
+use super::{SendState, SendTransition};
 
 pub type ConsoleLogResult<T> = Result<T, ConsoleLogError>;
 
@@ -133,6 +134,50 @@ pub trait ConsoleLogStore: Send + Sync {
         status: ConsoleFrameStatus,
     ) -> ConsoleLogResult<Option<ConsoleFrame>>;
 
+    /// Apply the send machine's `transition` to a send frame's own current
+    /// state, atomically. When the machine accepts it from the state the
+    /// frame's status records, the status becomes the next state's, `note`
+    /// (a payload field and its value, such as the `delivery_hold` of a held
+    /// dispatch) is recorded, and the updated frame is answered. A
+    /// transition the machine refuses from that state, or a frame that is no
+    /// send's, answers `None` and changes nothing: a hold is never recorded
+    /// over a send that was submitted or settled. A store that cannot change
+    /// a frame answers an error.
+    async fn transition_send_frame(
+        &self,
+        frame_id: &str,
+        transition: SendTransition,
+        note: Option<(&'static str, serde_json::Value)>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _ = (frame_id, transition, note);
+        Err(boxed_error(
+            "this console log store does not move a send through its states",
+        ))
+    }
+
+    /// Whether this store implements [`Self::transition_send_frame`] and
+    /// [`Self::take_send_frame_hold`]: a governed Console send moves through
+    /// both, so a Console whose store answers `false` refuses every governed
+    /// send before anything is reserved. By default `false`; a store that
+    /// implements both answers `true`, and a wrapper forwards all three.
+    fn supports_send_transitions(&self) -> bool {
+        false
+    }
+
+    /// Take a send frame's `delivery_hold`, as a compare-and-set on the
+    /// hold: while the frame records one, clear it and answer the updated
+    /// frame; when it records none (another dispatch took it, or none was
+    /// recorded), answer `None` and change nothing. A dispatch again of a
+    /// held send takes the hold first, so of concurrent takers exactly one
+    /// gets it. A store that cannot change a frame's payload answers an
+    /// error.
+    async fn take_send_frame_hold(&self, frame_id: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _ = frame_id;
+        Err(boxed_error(
+            "this console log store does not record a send's delivery hold",
+        ))
+    }
+
     async fn query_frames(
         &self,
         query: ConsoleTimelineQuery,
@@ -166,6 +211,20 @@ pub trait ConsoleLogStore: Send + Sync {
 
     async fn frame_by_dedupe_key(&self, dedupe_key: &str)
     -> ConsoleLogResult<Option<ConsoleFrame>>;
+
+    /// The send record of the console send whose interaction id is
+    /// `interaction_id`: its `user_input` frame, read newest first, so a
+    /// recent send is found after the frames written since. A send's
+    /// interaction id is unique (it is derived from the send's dedupe key).
+    /// Stores that cannot answer keep the default and report none: a reply
+    /// to such a send then has no thread to go to. A store that wraps
+    /// another must forward this method.
+    async fn send_frame_by_interaction(
+        &self,
+        _interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        Ok(None)
+    }
 
     /// Console sends that have not settled (`user_input` frames of a send,
     /// still accepted, dispatching, or redacted at acceptance), oldest first.
@@ -303,6 +362,10 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
         ConsoleSendDedupeDurability::ProcessLifetime
     }
 
+    fn supports_send_transitions(&self) -> bool {
+        true
+    }
+
     async fn append_if_absent(&self, frame: NewConsoleFrame) -> ConsoleLogResult<AppendOutcome> {
         let mut state = self
             .state
@@ -381,6 +444,54 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
             return Ok(None);
         };
         frame.status = status;
+        frame.frame_version = frame.frame_version.saturating_add(1);
+        frame.updated_at_ms = Some(current_time_ms());
+        Ok(Some(frame.clone()))
+    }
+
+    async fn transition_send_frame(
+        &self,
+        frame_id: &str,
+        transition: SendTransition,
+        note: Option<(&'static str, serde_json::Value)>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let Some(seq) = state.id_to_seq.get(frame_id).copied() else {
+            return Ok(None);
+        };
+        let Some(frame) = state.frames.get_mut(&seq) else {
+            return Ok(None);
+        };
+        let Some(status) = send_frame_transition(frame.status, transition) else {
+            return Ok(None);
+        };
+        if let Some((field, value)) = note {
+            set_payload_field(&mut frame.payload, field, Some(value))?;
+        }
+        frame.status = status;
+        frame.frame_version = frame.frame_version.saturating_add(1);
+        frame.updated_at_ms = Some(current_time_ms());
+        Ok(Some(frame.clone()))
+    }
+
+    async fn take_send_frame_hold(&self, frame_id: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let Some(seq) = state.id_to_seq.get(frame_id).copied() else {
+            return Ok(None);
+        };
+        let Some(frame) = state.frames.get_mut(&seq) else {
+            return Ok(None);
+        };
+        if frame.payload.get("delivery_hold").is_none() {
+            return Ok(None);
+        }
+        set_payload_field(&mut frame.payload, "delivery_hold", None)?;
         frame.frame_version = frame.frame_version.saturating_add(1);
         frame.updated_at_ms = Some(current_time_ms());
         Ok(Some(frame.clone()))
@@ -532,6 +643,22 @@ impl ConsoleLogStore for InMemoryConsoleLogStore {
             return Ok(None);
         };
         Ok(state.frames.get(&seq).cloned())
+    }
+
+    async fn send_frame_by_interaction(
+        &self,
+        interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        Ok(state
+            .frames
+            .values()
+            .rev()
+            .find(|frame| is_send_record_of(frame, interaction_id))
+            .cloned())
     }
 
     async fn unsettled_send_frames(
@@ -1020,6 +1147,10 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         self.dedupe_durability
     }
 
+    fn supports_send_transitions(&self) -> bool {
+        true
+    }
+
     async fn append_if_absent(&self, frame: NewConsoleFrame) -> ConsoleLogResult<AppendOutcome> {
         let _fence = self.operation_fence()?;
         let mut conn = self
@@ -1142,6 +1273,98 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         select_frame_by_id(&conn, frame_id)
     }
 
+    async fn transition_send_frame(
+        &self,
+        frame_id: &str,
+        transition: SendTransition,
+        note: Option<(&'static str, serde_json::Value)>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _fence = self.operation_fence()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let Some((payload_json, status)) = conn
+            .query_row(
+                "SELECT payload_json, status FROM console_frames WHERE id = ?1",
+                params![frame_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(into_boxed)?
+        else {
+            return Ok(None);
+        };
+        let Some(next) = send_frame_transition(ConsoleFrameStatus::from_str(&status), transition)
+        else {
+            return Ok(None);
+        };
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&payload_json).map_err(into_boxed)?;
+        if let Some((field, value)) = note {
+            set_payload_field(&mut payload, field, Some(value))?;
+        }
+        let next_json = serde_json::to_string(&payload).map_err(into_boxed)?;
+        // A compare-and-set on the state read above: a writer on another
+        // connection that moved the send first leaves nothing to apply.
+        let changed = conn
+            .execute(
+                "UPDATE console_frames SET status = ?1, payload_json = ?2, frame_version = frame_version + 1, updated_at_ms = ?3 WHERE id = ?4 AND status = ?5 AND payload_json = ?6",
+                params![
+                    next.as_str(),
+                    next_json,
+                    current_time_ms() as i64,
+                    frame_id,
+                    status,
+                    payload_json
+                ],
+            )
+            .map_err(into_boxed)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        select_frame_by_id(&conn, frame_id)
+    }
+
+    async fn take_send_frame_hold(&self, frame_id: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _fence = self.operation_fence()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        let Some(held_json) = conn
+            .query_row(
+                "SELECT payload_json FROM console_frames WHERE id = ?1",
+                params![frame_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(into_boxed)?
+        else {
+            return Ok(None);
+        };
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&held_json).map_err(into_boxed)?;
+        if payload.get("delivery_hold").is_none() {
+            return Ok(None);
+        }
+        set_payload_field(&mut payload, "delivery_hold", None)?;
+        let taken_json = serde_json::to_string(&payload).map_err(into_boxed)?;
+        // The compare-and-set: the row changes only while it still holds the
+        // payload read above, its hold included. A writer on another
+        // connection that took or changed it first leaves nothing to take.
+        let changed = conn
+            .execute(
+                "UPDATE console_frames SET payload_json = ?1, frame_version = frame_version + 1, updated_at_ms = ?2 WHERE id = ?3 AND payload_json = ?4",
+                params![taken_json, current_time_ms() as i64, frame_id, held_json],
+            )
+            .map_err(into_boxed)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        select_frame_by_id(&conn, frame_id)
+    }
+
     async fn query_frames(
         &self,
         query: ConsoleTimelineQuery,
@@ -1245,6 +1468,34 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
         select_frame_by_dedupe(&conn, dedupe_key)
     }
 
+    async fn send_frame_by_interaction(
+        &self,
+        interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        let _fence = self.operation_fence()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| boxed_error("console log lock poisoned"))?;
+        // Newest first, down the rowid: a recent send is found after the
+        // rows written since it, without reading older ones.
+        let frames = query_sql_frames(
+            &conn,
+            "SELECT cursor_seq, id, dedupe_key, timestamp_ms, runtime_key, identity,
+                    conversation_id, session_id, kind, status, frame_version, updated_at_ms, payload_json,
+                    source_kind, source_cursor, source_event_id, interaction_id,
+                    parent_frame_id, caused_by_frame_id, turn_id, run_id, COALESCE(member_provenance_json,
+                    (SELECT payload_json FROM console_member_provenance WHERE id = member_provenance_id)), member_provenance_id, update_marker_shares_provenance
+             FROM console_frames
+             WHERE kind = 'user_input' AND source_kind = 'send' AND interaction_id = ?1
+             ORDER BY cursor_seq DESC LIMIT 1",
+            params![interaction_id],
+        )?;
+        Ok(frames
+            .into_iter()
+            .find(|frame| is_send_record_of(frame, interaction_id)))
+    }
+
     async fn unsettled_send_frames(
         &self,
         window: usize,
@@ -1269,7 +1520,7 @@ impl ConsoleLogStore for SqliteConsoleLogStore {
              FROM console_frames
              WHERE cursor_seq > COALESCE((SELECT MAX(cursor_seq) FROM console_frames), 0) - ?1
                AND kind = 'user_input' AND source_kind = 'send'
-               AND status IN ('accepted', 'dispatching', 'redacted')
+               AND status IN ('accepted', 'dispatching', 'submitted', 'redacted')
              ORDER BY cursor_seq ASC LIMIT ?2",
             params![window, limit],
         )?;
@@ -1691,8 +1942,17 @@ fn is_unsettled_send_frame(frame: &ConsoleFrame) -> bool {
             frame.status,
             ConsoleFrameStatus::Accepted
                 | ConsoleFrameStatus::Dispatching
+                | ConsoleFrameStatus::Submitted
                 | ConsoleFrameStatus::Redacted
         )
+}
+
+/// Whether `frame` is the send record of the console send whose interaction
+/// id is `interaction_id`.
+fn is_send_record_of(frame: &ConsoleFrame, interaction_id: &str) -> bool {
+    frame.kind == "user_input"
+        && frame.source.kind == ConsoleFrameSourceKind::Send
+        && frame.interaction_id.as_deref() == Some(interaction_id)
 }
 
 pub(crate) fn stable_frame_id(dedupe_key: &str) -> String {
@@ -1709,6 +1969,39 @@ fn to_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+/// The status a send frame moves to under `transition` from the status it
+/// records, as the send machine answers; `None` when the machine refuses
+/// it from that state, or the frame is no send's.
+fn send_frame_transition(
+    status: ConsoleFrameStatus,
+    transition: SendTransition,
+) -> Option<ConsoleFrameStatus> {
+    let (next, _effects) = SendState::from_send_frame_status(status)?
+        .apply(transition)
+        .ok()?;
+    next.frame_status()
+}
+
+/// Record (`Some`) or clear (`None`) a send frame's payload `field`.
+fn set_payload_field(
+    payload: &mut serde_json::Value,
+    field: &str,
+    value: Option<serde_json::Value>,
+) -> ConsoleLogResult<()> {
+    let Some(fields) = payload.as_object_mut() else {
+        return Err(boxed_error("a send frame's payload is not an object"));
+    };
+    match value {
+        Some(value) => {
+            fields.insert(field.to_string(), value);
+        }
+        None => {
+            fields.remove(field);
+        }
+    }
+    Ok(())
 }
 
 fn boxed_error(message: impl Into<String>) -> ConsoleLogError {

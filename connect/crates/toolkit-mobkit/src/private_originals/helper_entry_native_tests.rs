@@ -246,6 +246,9 @@ async fn exercise(mode: DeliveryMode) {
                     .external_addressable
             );
             assert_eq!(fixture.model_requests(), 0);
+            // The private helper is an identity entry: Core refuses public
+            // external work to it as an identity member, whatever its
+            // profile's addressability says.
             let public_helper = handle.member(&helper_member).await.unwrap();
             match public_helper
                 .send(
@@ -254,11 +257,11 @@ async fn exercise(mode: DeliveryMode) {
                 )
                 .await
             {
-                Err(meerkat_mob::MobError::NotExternallyAddressable(identity)) => {
-                    assert_eq!(identity, helper_member)
+                Err(meerkat_mob::MobError::IdentityMember { member_id }) => {
+                    assert_eq!(member_id, helper_member)
                 }
                 Err(error) => {
-                    panic!("expected exact public helper addressability refusal: {error}")
+                    panic!("expected the exact public helper identity member refusal: {error}")
                 }
                 Ok(_) => panic!("public external work entered the private helper"),
             }
@@ -718,8 +721,9 @@ async fn admission_fence_refuses_retained_original_and_returns_helper_feedback_t
         assert!(
             matches!(refused,
             Err(meerkat_mobkit::identity_first::IdentityRuntimeError::GovernedInput(
-                meerkat_mobkit::identity_first::GovernedInputError::Bind(ref message)))
-                if message == "Toolkit source admission is stopped"),
+                meerkat_mobkit::identity_first::GovernedInputError::Refused(ref refusal)))
+                if refusal.kind == meerkat_mobkit::identity_first::GovernedBindRefusalKind::Closed
+                    && refusal.detail == "Toolkit source admission is stopped"),
             "the actual retained binder must refuse before native admission"
         );
         assert_eq!(
@@ -1334,7 +1338,7 @@ async fn fresh_helper_reset_catalog_calls_require_explicit_successor_parent() {
             drop(resolved);
             if successor {
                 let mut mutation = fixture.machine.try_controller_grant_mutation().unwrap();
-                fixture.source.owner.grants().revoke(&lineage[0].root_authority, &lineage[0], &mut mutation).unwrap();
+                fixture.source.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), &lineage[0].root_authority, &lineage[0], &mut mutation).unwrap();
                 drop(mutation);
                 assert!(fixture.source.owner.grants().resolve_lineage(lineage,
                     &helper_member.logical_owner, association.candidate().represented_subject.as_ref()).is_err());

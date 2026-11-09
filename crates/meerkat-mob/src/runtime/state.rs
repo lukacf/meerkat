@@ -425,6 +425,14 @@ pub(super) struct SubmitWorkPayload {
     pub llm_identity_applied_tx: Option<super::handle::MemberTurnLlmIdentityAppliedSender>,
     pub ack_mode: crate::mob_machine::SubmitWorkAckMode,
     pub content_attribution: crate::mob_machine::WorkContentAttribution,
+    /// The original requester the host authenticated for this work
+    /// (`WorkSpec::with_requester`). Shell dispatch carrier only: only host
+    /// human input carries it, onto the member runtime's admitted input.
+    pub requester: Option<meerkat_core::PrincipalRef>,
+    /// The label naming the person who sent this work, for the member's
+    /// model (`WorkSpec::with_sender_label`). Shell dispatch carrier only:
+    /// only host human input carries it.
+    pub sender_label: Option<crate::ids::SenderLabel>,
     /// A caller-bound governed input realized for this work exactly as
     /// bound, in place of a turn built from `content`. Shell dispatch
     /// carrier only: the MobMachine admits the same identity facts as for
@@ -778,6 +786,16 @@ pub(super) enum ScopeAdmissionSubject {
     /// The declared apply of a host's roster of identity entries: a host
     /// verb, which an agent never runs.
     DeclaredApply,
+    /// A door that acts on this member's session as its host (a turn start,
+    /// a system context append, a live channel's open, control or close): it
+    /// reaches an identity entry, or a member whose name is reserved
+    /// unreadable, only for a principal that holds `AdminHost`, and an agent
+    /// never acts on an entry's member through it.
+    MemberHost(crate::ids::AgentIdentity),
+    /// External work for this member, asked before anything is submitted:
+    /// MobMachine's SubmitWork admission of `WorkOrigin::External` answers
+    /// it, as it answers an unkeyed member send.
+    ExternalWork(crate::ids::AgentIdentity),
 }
 
 pub(super) enum MobCommand {
@@ -1010,6 +1028,9 @@ pub(super) enum MobCommand {
     },
     /// Internal: the retry of a member whose boot work is still owed is due.
     RetryOwedMemberWake { agent_identity: AgentIdentity },
+    /// Internal: the retry timer of a member's build preparation the host
+    /// asked to retry (BuildPreparationRetry) is due.
+    RetryMemberBuildPreparation { agent_identity: AgentIdentity },
     /// An owed edge repair's timer fired (the actor's own self-send).
     RepairOwedEdge {
         edge: super::actor::member_wake::MemberWiringEdge,
@@ -1273,6 +1294,26 @@ pub(super) enum MobCommand {
         input: Box<mob_dsl::MobMachineInput>,
         reply_tx: oneshot::Sender<Result<Vec<mob_dsl::MobMachineEffect>, MobError>>,
     },
+    /// What this mob observes of a fork source's tool dispatch admission
+    /// lineage (its build in this process, its lineage record, or the host's
+    /// answer for its next build), for a fork of it. Driven by the handle's
+    /// fork paths after their own admission; not a surface command.
+    ObserveForkSourceDispatchLineage {
+        source_identity: AgentIdentity,
+        source_session_id: SessionId,
+        reply_tx: oneshot::Sender<Result<mob_dsl::MemberDispatchAdmissionLineage, MobError>>,
+    },
+    /// One fork seat's tool dispatch admission, decided by MobMachine from
+    /// the observed `lineage`, asking the host's spawn customizer for
+    /// `child` when the machine says so. Driven by the handle's fork paths
+    /// before anything is forked; not a surface command.
+    ResolveSeatDispatchAdmission {
+        lineage: mob_dsl::MemberDispatchAdmissionLineage,
+        child: Box<super::handle::SpawnMemberSpec>,
+        spawn_source: super::handle::SpawnSource,
+        spawner: Option<AgentIdentity>,
+        reply_tx: oneshot::Sender<Result<super::fork_build::SeatDispatchAdmission, MobError>>,
+    },
     /// Actor-linearized no-op used by fenced member-operator execution before
     /// any operation whose implementation may otherwise be projection-only.
     /// The command gate performs the exact residency validation; the handler
@@ -1477,6 +1518,13 @@ pub(super) enum MobCommand {
         release_rx: oneshot::Receiver<()>,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
+    /// Test-only: whether `agent_identity`'s owed-boot wake retry timer is
+    /// armed now.
+    #[cfg(test)]
+    OwedMemberWakeRetryArmedForTest {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<bool, MobError>>,
+    },
     #[cfg(test)]
     ParkActorForObservationTest {
         entered_tx: oneshot::Sender<()>,
@@ -1530,6 +1578,12 @@ pub(super) enum MobCommand {
     ProjectMemberStatus {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<Result<super::MobMemberSnapshot, crate::MobError>>,
+    },
+    /// The host retries the build preparation it asked to retry for a member
+    /// ([`super::MobHandle::resolve_member_build_preparation`]).
+    ResolveMemberBuildPreparation {
+        agent_identity: crate::ids::AgentIdentity,
+        reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
     },
     /// Release a host's run-start hold on a member (#1500).
     ReleaseMemberRunStarts {
@@ -1589,9 +1643,12 @@ pub(super) enum MobCommand {
         reply_tx: oneshot::Sender<Result<super::declared_apply::DeclarationStep, crate::MobError>>,
     },
     /// Seal a complete declared roster in one MobMachine step: `desired` is
-    /// every identity the roster lists.
+    /// every identity the roster lists, and `intent_named` every identity a
+    /// host's identity intent row names, readable or not, which the seal
+    /// leaves as it is.
     SealDeclaredRoster {
         desired: std::collections::BTreeSet<crate::ids::AgentIdentity>,
+        intent_named: std::collections::BTreeSet<crate::ids::AgentIdentity>,
         reply_tx: oneshot::Sender<Result<super::declared_apply::SealAnswer, crate::MobError>>,
     },
     /// Open a declared apply (`MobHandle::apply_declared_roster`): one apply
@@ -1804,6 +1861,22 @@ pub(super) enum MobCommand {
         reason: String,
         reply_tx: oneshot::Sender<Result<meerkat_contracts::WireRunStopReceipt, MobError>>,
     },
+    /// A host's settle of the run a local member's runtime retained, without
+    /// resuming it and without a model request: the member runtime's
+    /// machine decides (`SettleRetainedRun`). `Cancel`-scoped at chokepoint
+    /// (a); never wakes the member.
+    SettleMemberRetainedRun {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::RetainedRunSettlement, MobError>>,
+    },
+    /// A host's request that a LOCAL member's next compaction check compact,
+    /// without a respawn and without changing its thresholds: the member
+    /// runtime's machine decides (`RequestCompaction`). `SendCommand`-scoped
+    /// at chokepoint (a); never wakes the member.
+    RequestMemberCompaction {
+        agent_identity: AgentIdentity,
+        reply_tx: oneshot::Sender<Result<meerkat_runtime::CompactionRequestReceipt, MobError>>,
+    },
     /// Open a live channel on a member (§16 phase 6b, DEC-P6B-C2).
     /// Identity-addressed and placement-blind (DL3); `Live`-scoped at
     /// chokepoint (a). There is deliberately NO MobMachine input for the
@@ -1975,6 +2048,20 @@ pub(super) enum MobCommand {
                 crate::operator_instruction::OperatorInstructionReceipt,
                 crate::operator_instruction::OperatorInstructionError,
             >,
+        >,
+    },
+    /// Issue a scoped tool grant to a member identity, decided against the
+    /// live roster as it commits: the identity must be in the roster and
+    /// bound to a member, and the grant's subject names the mob's live
+    /// incarnation. Ordered with the retirement, identity-entry end and
+    /// reset that end an identity's grants, so a grant never outlives a
+    /// retirement. Host verb (`AdminHost`), never an agent tool.
+    #[cfg(feature = "runtime-adapter")]
+    GrantMemberTool {
+        identity: AgentIdentity,
+        grant: Box<super::member_grant_gate::MemberToolGrant>,
+        reply_tx: oneshot::Sender<
+            Result<meerkat_runtime::tool_grant::StoredToolGrant, super::member_grant_gate::MemberToolGrantError>,
         >,
     },
     /// The mob's delivery owner asks MobMachine to prepare one owed member's
@@ -2334,6 +2421,7 @@ impl MobCommand {
             Self::ReleaseMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. } => ShutdownAnswerClass::ActorCompletion,
             Self::ReloadMemberRegistration { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2357,6 +2445,8 @@ impl MobCommand {
             Self::CommitFlowFrameStorePlan { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMachineInput { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ApplyMachineInputEffects { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ObserveForkSourceDispatchLineage { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolveSeatDispatchAdmission { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ValidateCommandAuthority { .. } => ShutdownAnswerClass::CallerRequest,
             Self::AdmitControlScope { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PruneStaleMemberOperatorRequests { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2404,6 +2494,8 @@ impl MobCommand {
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => ShutdownAnswerClass::CallerRequest,
             #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 ShutdownAnswerClass::CallerRequest
             }
@@ -2417,6 +2509,7 @@ impl MobCommand {
             Self::ProjectMemberList { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ProjectMemberStatus { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ReleaseMemberRunStarts { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::ResolveMemberBuildPreparation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PlanDormantSeats { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PlanMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StartMemberRotation { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2450,6 +2543,8 @@ impl MobCommand {
             Self::CompleteHostForkedParticipantSpawn { .. } => ShutdownAnswerClass::CallerRequest,
             Self::HardCancelMember { .. } => ShutdownAnswerClass::CallerRequest,
             Self::StopMemberRun { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::SettleMemberRetainedRun { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::RequestMemberCompaction { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveOpen { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveClose { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberLiveStatus { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2470,6 +2565,8 @@ impl MobCommand {
             Self::Grants { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SetOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
             Self::RevokeOperatorInstruction { .. } => ShutdownAnswerClass::CallerRequest,
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PrepareMemberInstructionDelivery { .. } => ShutdownAnswerClass::CallerRequest,
             Self::SettleMemberInstructionDeliveries { .. } => ShutdownAnswerClass::CallerRequest,
             Self::PollEvents { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2545,6 +2642,8 @@ impl MobCommand {
             Self::WakeMember { .. } => "WakeMember",
             Self::MemberWakeTimedOut { .. } => "MemberWakeTimedOut",
             Self::RetryOwedMemberWake { .. } => "RetryOwedMemberWake",
+            Self::RetryMemberBuildPreparation { .. } => "RetryMemberBuildPreparation",
+            Self::ResolveMemberBuildPreparation { .. } => "ResolveMemberBuildPreparation",
             Self::RepairOwedEdge { .. } => "RepairOwedEdge",
             Self::ReleaseHeldMember { .. } => "ReleaseHeldMember",
             Self::ReleaseMember { .. } => "ReleaseMember",
@@ -2599,6 +2698,8 @@ impl MobCommand {
             Self::CommitFlowFrameStorePlan { .. } => "CommitFlowFrameStorePlan",
             Self::ProjectMachineInput { .. } => "ProjectMachineInput",
             Self::ApplyMachineInputEffects { .. } => "ApplyMachineInputEffects",
+            Self::ObserveForkSourceDispatchLineage { .. } => "ObserveForkSourceDispatchLineage",
+            Self::ResolveSeatDispatchAdmission { .. } => "ResolveSeatDispatchAdmission",
             Self::ValidateCommandAuthority { .. } => "ValidateCommandAuthority",
             Self::AdmitControlScope { .. } => "AdmitControlScope",
             Self::PruneStaleMemberOperatorRequests { .. } => "PruneStaleMemberOperatorRequests",
@@ -2641,6 +2742,8 @@ impl MobCommand {
             Self::LifecycleNotificationBurst { .. } => "LifecycleNotificationBurst",
             #[cfg(test)]
             Self::ParkActorForObservationTest { .. } => "ParkActorForObservationTest",
+            #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { .. } => "OwedMemberWakeRetryArmedForTest",
             #[cfg(test)]
             Self::InjectUnreadableNameAtLadderOpenForTest { .. } => {
                 "InjectUnreadableNameAtLadderOpenForTest"
@@ -2700,6 +2803,8 @@ impl MobCommand {
             Self::Grants { .. } => "Grants",
             Self::SetOperatorInstruction { .. } => "SetOperatorInstruction",
             Self::RevokeOperatorInstruction { .. } => "RevokeOperatorInstruction",
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => "GrantMemberTool",
             Self::PrepareMemberInstructionDelivery { .. } => "PrepareMemberInstructionDelivery",
             Self::SettleMemberInstructionDeliveries { .. } => "SettleMemberInstructionDeliveries",
             Self::PollEvents { .. } => "PollEvents",
@@ -2708,6 +2813,8 @@ impl MobCommand {
             Self::ForceCancel { .. } => "ForceCancel",
             Self::HardCancelMember { .. } => "HardCancelMember",
             Self::StopMemberRun { .. } => "StopMemberRun",
+            Self::SettleMemberRetainedRun { .. } => "SettleMemberRetainedRun",
+            Self::RequestMemberCompaction { .. } => "RequestMemberCompaction",
             Self::MemberHistory { .. } => "MemberHistory",
             Self::CompleteHostForkedParticipantSpawn { .. } => "CompleteHostForkedParticipantSpawn",
             Self::CreateForkedParticipant { .. } => "CreateForkedParticipant",

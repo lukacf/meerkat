@@ -642,6 +642,63 @@ fn toml_source_uses_native_parser_and_retains_exact_input_identity() {
 }
 
 #[test]
+fn an_application_definition_naming_a_profile_auth_binding_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let bound = "[mob]\nid = \"household\"\n\n[profiles.research]\nmodel = \"claude-opus-4-8\"\nauth_binding = { realm = \"global\", binding = \"team_key\" }\n";
+    // An operator's own definition may name the binding; an application's
+    // setup definition may not, in either source form.
+    let operator_definition = MobDefinition::from_toml(bound).unwrap();
+    let binding = operator_definition.profiles[&ProfileName::from("research")]
+        .as_inline()
+        .and_then(|profile| profile.auth_binding.clone())
+        .expect("the operator parser keeps the profile binding");
+
+    let mut from_toml = input(&root);
+    from_toml.definition = ApplicationSetupDefinition::Toml { text: bound.into() };
+    let error = from_toml
+        .validate()
+        .err()
+        .expect("a TOML setup definition that names a binding is refused");
+    assert!(error.contains("auth_binding"), "{error}");
+
+    let mut native = input(&root);
+    let ApplicationSetupDefinition::Native { definition } = &mut native.definition else {
+        unreachable!()
+    };
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("research"))
+        .and_then(meerkat_mob::ProfileBinding::as_inline_mut)
+        .expect("inline research profile")
+        .auth_binding = Some(binding);
+    let error = native
+        .validate()
+        .err()
+        .expect("a native setup definition that names a binding is refused");
+    assert!(error.contains("auth_binding"), "{error}");
+
+    // A retained bundle whose source names one, with a definition that
+    // matches it, is refused when it is read again.
+    let (restored, _) = finish(input(&root).validate().unwrap(), prepared(&root)).unwrap();
+    let mut bound_definition = MobDefinition::from_toml(bound).unwrap();
+    restored
+        .helper_projection()
+        .unwrap()
+        .compose_definition(&mut bound_definition)
+        .unwrap();
+    let mut retained = restored.clone();
+    retained.definition_source = ApplicationSetupDefinition::Toml { text: bound.into() };
+    retained.definition = bound_definition;
+    let error = retained
+        .helper_projection()
+        .err()
+        .expect("a retained setup definition that names a binding is refused");
+    assert!(error.contains("auth_binding"), "{error}");
+    assert!(!root.join("state").exists());
+}
+
+#[test]
 fn exclusive_application_role_preserves_keys_and_rejects_initial_borrowers() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();

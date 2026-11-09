@@ -622,6 +622,35 @@ pub(crate) mod scan_contract {
             "the scan lists exactly the runtimes with recovery work"
         );
     }
+
+    /// The per-runtime read
+    /// ([`RuntimeStore::runtime_holds_recovery_work`](crate::store::RuntimeStore::runtime_holds_recovery_work))
+    /// answers each runtime of the fixture as the scan lists it, and a
+    /// runtime the store never held as holding none.
+    pub(crate) async fn assert_answers_each_runtime(
+        store: &dyn RuntimeStore,
+        fixture: &ScanFixture,
+    ) {
+        for runtime in fixture.runtimes() {
+            let holds = store
+                .runtime_holds_recovery_work(runtime)
+                .await
+                .expect("the per-runtime read answers");
+            assert_eq!(
+                holds,
+                fixture.listed.contains(runtime),
+                "{runtime}: the per-runtime read answers as the scan lists it"
+            );
+        }
+        let never = LogicalRuntimeId::new("scan-never-held");
+        assert!(
+            !store
+                .runtime_holds_recovery_work(&never)
+                .await
+                .expect("the per-runtime read answers"),
+            "a runtime the store never held holds no recovery work"
+        );
+    }
 }
 
 #[cfg(test)]

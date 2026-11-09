@@ -308,6 +308,16 @@ pub(crate) struct OriginalCancellationSource {
     pub association: Option<InputAuthorityAssociation>,
 }
 
+/// The admitted-custody check's answer without waiting.
+pub(crate) enum AdmittedNow {
+    /// Another owner's short section holds the originals collection, or an
+    /// owner change of the publication is in progress: nothing was checked.
+    Held,
+    /// The check ran: the already admitted custody, if any (boxed: the input
+    /// is large and `Held` carries nothing).
+    Checked(Box<Option<(Input, PendingToolkitOriginal)>>),
+}
+
 /// The exact native-bound input before any Candidate publication. Dropping this
 /// value changes no source custody. Staging rechecks the current source owner.
 pub(crate) struct PreparedToolkitOriginal {
@@ -335,6 +345,20 @@ impl PreparedToolkitOriginal {
             })
     }
 
+    /// [`Self::admitted`] for a bind that answers "not now": it never waits,
+    /// and answers [`AdmittedNow::Held`] where `admitted` would wait.
+    pub(crate) fn try_admitted(&self) -> Result<AdmittedNow, RuntimeDriverError> {
+        match self.owner.try_admitted_guard(&self.original) {
+            Ok(Some(pending)) => Ok(AdmittedNow::Checked(Box::new(
+                pending.map(|pending| (self.input.clone(), pending)),
+            ))),
+            Ok(None) => Ok(AdmittedNow::Held),
+            Err(_) => Err(RuntimeDriverError::ValidationFailed {
+                reason: "Toolkit admitted original is unavailable".into(),
+            }),
+        }
+    }
+
     pub(crate) fn stage(self) -> Result<(Input, PendingToolkitOriginal), RuntimeDriverError> {
         let pending = self
             .owner
@@ -359,11 +383,10 @@ impl PreparedToolkitOriginal {
             return Err(OriginalWriterError::WrongOwner);
         }
         self.owner.check_bound_source(&self.original)?;
-        let _publication = self
-            .owner
-            .publication
-            .begin_owner_change()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        let _publication = crate::no_wait::wait_at("original_ingress.rebind_candidate", || {
+            self.owner.publication.begin_owner_change()
+        })
+        .map_err(|_| OriginalWriterError::Unavailable)?;
         let mut originals = self
             .owner
             .originals
@@ -434,11 +457,10 @@ impl PendingToolkitOriginal {
         if !self.pending || !settlement.enrolled() {
             return Ok(());
         }
-        let _publication = self
-            .owner
-            .publication
-            .begin_owner_change()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        let _publication = crate::no_wait::wait_at("original_ingress.enroll_settlement", || {
+            self.owner.publication.begin_owner_change()
+        })
+        .map_err(|_| OriginalWriterError::Unavailable)?;
         let mut originals = self
             .owner
             .originals
@@ -464,7 +486,9 @@ impl PendingToolkitOriginal {
             return Ok(self.original.clone());
         }
         self.pending = false;
-        let publication = self.owner.publication.begin_owner_change();
+        let publication = crate::no_wait::wait_at("original_ingress.admit", || {
+            self.owner.publication.begin_owner_change()
+        });
         let mut originals = self
             .owner
             .originals
@@ -502,7 +526,9 @@ impl Drop for PendingToolkitOriginal {
         // Withdrawal changes no admitted contributor. As in the native-owned
         // stock reference, remove an unadmitted candidate even if publication
         // is unavailable, while retaining its immutable durable binding.
-        let _publication = self.owner.publication.begin_owner_change();
+        let _publication = crate::no_wait::wait_at("original_ingress.withdraw_candidate", || {
+            self.owner.publication.begin_owner_change()
+        });
         let mut originals = self
             .owner
             .originals
@@ -568,14 +594,18 @@ impl toolkit_store::RecordChangePublication for ToolkitOriginalOwner {
                     .expect("test publication probe failed");
             }
         }
-        // The canonical SQLite owner invokes this before a validated UPDATE.
-        // This is the same publication used by native grants and source
-        // cancellation, not a second record or permission owner.
+        // The canonical SQLite owner invokes this before a validated UPDATE,
+        // inside its transaction: a protected section. This is the same
+        // publication used by native grants and source cancellation, not a
+        // second record or permission owner.
+        let _section = meerkat_core::protected_section::enter(
+            meerkat_core::protected_section::ProtectedSection::HostStoreTransaction,
+        );
         Ok(Box::new(RecordPublicationGuard {
-            _guard: self
-                .publication
-                .begin_owner_change()
-                .map_err(|_| toolkit_store::StoreError::Synchronization)?,
+            _guard: crate::no_wait::wait_at("store.begin_record_change", || {
+                self.publication.begin_owner_change()
+            })
+            .map_err(|_| toolkit_store::StoreError::Synchronization)?,
         }))
     }
 }
@@ -631,6 +661,7 @@ impl ToolkitOriginalOwner {
     ) -> Result<Self, GrantDurabilityError> {
         let publication = LocalAuthorizationPublication::new();
         let grants = LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             configuration,
             store,
             publication.clone(),
@@ -873,6 +904,7 @@ impl ToolkitOriginalOwner {
             invocation,
             operation_owner,
             retained_resume,
+            kept_original: None,
         }
         .into_configuration();
         let ordinary = configuration.ingress.clone();
@@ -1026,6 +1058,7 @@ impl ToolkitOriginalOwner {
         let child = self
             .grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 authenticated_grant_issuer,
                 parent,
                 child_id,
@@ -1892,9 +1925,10 @@ impl ToolkitOriginalOwner {
                 self.change_with_collection_within(deadline, std::thread::sleep, || {}, retain)
             }
             None => {
-                let _publication = self
-                    .publication
-                    .begin_owner_change()
+                let _publication =
+                    crate::no_wait::wait_at("original_ingress.first_binding_write", || {
+                        self.publication.begin_owner_change()
+                    })
                     .map_err(|_| OriginalWriterError::Unavailable)?;
                 let mut originals = self
                     .originals
@@ -1994,10 +2028,10 @@ impl ToolkitOriginalOwner {
         let observed = Self::binding_observation(&association, observation)?;
         // The existing writer mutex spans durable observation and this write.
         // Native publication is acquired only after storage I/O has finished.
-        let _publication = self
-            .publication
-            .begin_owner_change()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        let _publication = crate::no_wait::wait_at("original_ingress.publish_binding", || {
+            self.publication.begin_owner_change()
+        })
+        .map_err(|_| OriginalWriterError::Unavailable)?;
         let mut originals = self
             .originals
             .try_lock()
@@ -2636,6 +2670,55 @@ impl ToolkitOriginalOwner {
             .map_err(|_| RuntimeDriverError::ValidationFailed {
                 reason: "Toolkit original is not retained by this source owner".into(),
             })?;
+        self.prepare_retained(
+            original,
+            selected_session,
+            input,
+            event_key,
+            transport_authentication,
+            controller,
+        )
+    }
+
+    /// [`Self::prepare_authenticated_input`] for a bind that answers "not
+    /// now": `Ok(None)` when another owner's short section holds the
+    /// originals collection right now and nothing was prepared. Never waits.
+    pub(crate) fn try_prepare_authenticated_input(
+        self: &Arc<Self>,
+        original: &Arc<RetainedToolkitOriginal>,
+        selected_session: &meerkat_core::SessionId,
+        input: Input,
+        event_key: IdempotencyKey,
+        transport_authentication: HistoricalEvidenceRef,
+        controller: ControllerModelClient,
+    ) -> Result<Option<PreparedToolkitOriginal>, RuntimeDriverError> {
+        match self.retained_now(original) {
+            Ok(true) => self
+                .prepare_retained(
+                    original,
+                    selected_session,
+                    input,
+                    event_key,
+                    transport_authentication,
+                    controller,
+                )
+                .map(Some),
+            Ok(false) => Ok(None),
+            Err(_) => Err(RuntimeDriverError::ValidationFailed {
+                reason: "Toolkit original is not retained by this source owner".into(),
+            }),
+        }
+    }
+
+    fn prepare_retained(
+        self: &Arc<Self>,
+        original: &Arc<RetainedToolkitOriginal>,
+        selected_session: &meerkat_core::SessionId,
+        input: Input,
+        event_key: IdempotencyKey,
+        transport_authentication: HistoricalEvidenceRef,
+        controller: ControllerModelClient,
+    ) -> Result<PreparedToolkitOriginal, RuntimeDriverError> {
         let claims = original.association.candidate();
         if claims.target.logical_runtime.as_str()
             != meerkat_runtime::LogicalRuntimeId::for_session(selected_session).to_string()
@@ -2680,6 +2763,7 @@ impl ToolkitOriginalOwner {
         // takes the publication writer before the collection and rechecks facts.
         let mut collection_unavailable = false;
         let admitted = self.publication.observe(|| {
+            crate::no_wait::may_wait("original_ingress.admitted_guard");
             let originals = match self.originals.lock() {
                 Ok(originals) => originals,
                 Err(_) => {
@@ -2711,10 +2795,12 @@ impl ToolkitOriginalOwner {
             Err(PublicationError::Changed) => {
                 // Preserve the old slow-path Admitted recheck. A changing
                 // observation is not proof that this is a first input.
-                let _publication = self
-                    .publication
-                    .begin_owner_change()
+                let _publication =
+                    crate::no_wait::wait_at("original_ingress.admitted_guard.change", || {
+                        self.publication.begin_owner_change()
+                    })
                     .map_err(|_| OriginalWriterError::Unavailable)?;
+                crate::no_wait::may_wait("original_ingress.admitted_guard.recheck");
                 let originals = self
                     .originals
                     .lock()
@@ -2744,6 +2830,55 @@ impl ToolkitOriginalOwner {
         Ok(None)
     }
 
+    /// [`Self::admitted_guard`] without waiting: `Ok(None)` while another
+    /// owner's short section holds the originals collection or an owner
+    /// change of the publication is in progress (nothing checked); the
+    /// whole check runs again after it.
+    fn try_admitted_guard(
+        self: &Arc<Self>,
+        original: &Arc<RetainedToolkitOriginal>,
+    ) -> Result<Option<Option<PendingToolkitOriginal>>, OriginalWriterError> {
+        let mut held = false;
+        let mut collection_unavailable = false;
+        let admitted = self.publication.observe(|| {
+            let originals = match self.originals.try_lock() {
+                Ok(originals) => originals,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    held = true;
+                    return false;
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    collection_unavailable = true;
+                    return false;
+                }
+            };
+            originals
+                .iter()
+                .filter_map(OriginalRecord::bound)
+                .any(|bound| {
+                    Arc::ptr_eq(&bound.retained, original)
+                        && bound.operation == OriginalOperationDisposition::Open
+                        && bound.source_custody == Some(SourceCustody::Admitted)
+                })
+        });
+        if collection_unavailable {
+            return Err(OriginalWriterError::Unavailable);
+        }
+        if held {
+            return Ok(None);
+        }
+        match admitted {
+            Ok((true, _)) => Ok(Some(Some(PendingToolkitOriginal {
+                owner: self.clone(),
+                original: original.clone(),
+                pending: false,
+            }))),
+            Ok((false, _)) => Ok(Some(None)),
+            Err(PublicationError::Changed) => Ok(None),
+            Err(PublicationError::Unavailable) => Err(OriginalWriterError::Unavailable),
+        }
+    }
+
     fn record_candidate_with_controller(
         self: &Arc<Self>,
         original: &Arc<RetainedToolkitOriginal>,
@@ -2752,10 +2887,10 @@ impl ToolkitOriginalOwner {
         if let Some(pending) = self.admitted_guard(original)? {
             return Ok(pending);
         }
-        let _publication = self
-            .publication
-            .begin_owner_change()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        let _publication = crate::no_wait::wait_at("original_ingress.record_candidate", || {
+            self.publication.begin_owner_change()
+        })
+        .map_err(|_| OriginalWriterError::Unavailable)?;
         let mut originals = self
             .originals
             .lock()
@@ -2902,7 +3037,12 @@ impl ToolkitOriginalOwner {
             .last()
             .ok_or(OriginalWriterError::UnsupportedMandate)?;
         self.grants
-            .revoke(authenticated_caller, child, custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                authenticated_caller,
+                child,
+                custody,
+            )
             .map_err(OriginalWriterError::Grant)
     }
 
@@ -2910,19 +3050,46 @@ impl ToolkitOriginalOwner {
         &self,
         original: &Arc<RetainedToolkitOriginal>,
     ) -> Result<(), OriginalWriterError> {
-        let originals = self
-            .originals
-            .try_lock()
-            .map_err(|_| OriginalWriterError::Unavailable)?;
+        if self.retained_now(original)? {
+            Ok(())
+        } else {
+            Err(OriginalWriterError::Unavailable)
+        }
+    }
+
+    /// Whether `original` is retained here, by a try of the originals
+    /// collection: `Ok(false)` when another owner's short section holds it
+    /// right now and nothing was checked. Never waits.
+    fn retained_now(
+        &self,
+        original: &Arc<RetainedToolkitOriginal>,
+    ) -> Result<bool, OriginalWriterError> {
+        let originals = match self.originals.try_lock() {
+            Ok(originals) => originals,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(OriginalWriterError::Unavailable);
+            }
+        };
         if originals
             .iter()
             .filter_map(OriginalRecord::bound)
             .any(|current| Arc::ptr_eq(&current.retained, original))
         {
-            Ok(())
+            Ok(true)
         } else {
             Err(OriginalWriterError::WrongOwner)
         }
+    }
+
+    /// Whether another owner's short section holds this owner's originals
+    /// collection right now, or an owner change of its publication is in
+    /// progress: a pure, non-blocking read, for a "not now" answer's wait.
+    pub(crate) fn sources_held(&self) -> bool {
+        matches!(
+            self.originals.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) || self.publication.change_in_progress().is_some()
     }
 }
 
@@ -3126,6 +3293,7 @@ fn wait_for_lock<T>(
     deadline: std::time::Instant,
     mut pause: impl FnMut(std::time::Duration),
 ) -> Result<std::sync::MutexGuard<'_, T>, ControllerReadinessFailure> {
+    crate::no_wait::may_wait("original_ingress.wait_for_lock");
     let mut step = std::time::Duration::from_micros(20);
     loop {
         match lock.try_lock() {
@@ -3254,9 +3422,10 @@ impl ToolkitOriginalOwner {
             }
             first = false;
             {
-                let _publication = self
-                    .publication
-                    .begin_owner_change()
+                let _publication =
+                    crate::no_wait::wait_at("original_ingress.change_with_collection", || {
+                        self.publication.begin_owner_change()
+                    })
                     .map_err(|_| OriginalWriterError::Unavailable)?;
                 match self.originals.try_lock() {
                     Ok(mut originals) => return apply(&mut originals),

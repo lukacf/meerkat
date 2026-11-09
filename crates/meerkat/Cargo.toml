@@ -21,6 +21,8 @@ exclude = [
     "tests/brain_swap_surface_parity.rs",
     # workspace launch-site gate over clippy.toml and every crate's sources
     "tests/host_launch_sites.rs",
+    # workspace admission fence gate over every crate's sources
+    "tests/admission_fence_sites.rs",
     # needs the unpublished mcp-test-server crate
     "tests/integration.rs",
     # needs the unpublished mcp-test-server crate
@@ -75,6 +77,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }

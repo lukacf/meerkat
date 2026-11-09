@@ -109,6 +109,7 @@ export type {
   MemberRunStopContributor,
   MemberRunStopReceipt,
   MemberRuntimeState,
+  GrantToolOptions,
 } from "./runtime.js";
 
 // -- Data models ----------------------------------------------------------
@@ -116,6 +117,8 @@ export type {
 // Rich tool-result content blocks for callback tool handlers.
 export { textBlock, imageBlock, imageBlobBlock, toolContent, ToolResultContent } from "./tool-content.js";
 export type { ContentBlock } from "./tool-content.js";
+export { parseToolCallRequester } from "./tool-requester.js";
+export type { RequesterPrincipal, ToolCallRequester } from "./tool-requester.js";
 
 export {
   parseForkBuildSource,
@@ -168,8 +171,25 @@ export {
 
 // -- Agent builder --------------------------------------------------------
 
-export type { SessionAgentBuilder, ErrorCallback } from "./agent-builder.js";
+export type {
+  SessionAgentBuilder,
+  ErrorCallback,
+  DecisionNoticeHandler,
+} from "./agent-builder.js";
 export { CallbackDispatcher } from "./agent-builder.js";
+
+// -- Durable decisions ------------------------------------------------------
+
+export type {
+  DecisionAttestation,
+  DecisionDecideOptions,
+  DecisionIngressDeclaration,
+  DecisionListOptions,
+} from "./decisions.js";
+export {
+  DECIDE_INSIDE_TOOL_CALLBACK_KIND,
+  DecideInsideToolCallbackError,
+} from "./errors.js";
 
 // -- Errors ---------------------------------------------------------------
 
@@ -200,6 +220,12 @@ export {
   SYSTEM_ROW_PRUNE_REFUSED_KIND,
   SYSTEM_ROW_PRUNE_REFUSAL_CAUSES,
   TRANSCRIPT_REVISION_CONFLICT_KIND,
+  TOOL_GRANT_REQUEST_REFUSED_KIND,
+  TOOL_GRANT_REQUEST_REFUSAL_KINDS,
+  REALM_MCP_OUTCOME_UNKNOWN_KIND,
+  REALM_MCP_REFUSED_KIND,
+  REALM_MCP_REFUSAL_KINDS,
+  REALM_MCP_UNAVAILABLE_KIND,
   WORKGRAPH_UNAVAILABLE_CODE,
   WORKGRAPH_CONFLICT_CODE,
   IDENTITY_UNRESUMABLE_CODE,
@@ -220,6 +246,10 @@ export {
   FlowRunIdempotencyConflictError,
   SystemRowPruneRefusedError,
   TranscriptRevisionConflictError,
+  ToolGrantRequestRefusedError,
+  RealmMcpOutcomeUnknownError,
+  RealmMcpRefusedError,
+  RealmMcpUnavailableError,
   InitInProgressError,
   WorkGraphUnavailableError,
   WorkGraphConflictError,

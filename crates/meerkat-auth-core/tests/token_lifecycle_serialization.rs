@@ -56,10 +56,19 @@ impl TokenStore for Store {
         self.loads.fetch_add(1, Ordering::SeqCst);
         self.inner.load(key).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        self.inner.save(key, tokens).await
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        self.inner.save(fence, key, tokens).await
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         if self.block_clear.load(Ordering::SeqCst) {
             self.entered.add_permits(1);
             self.finish.acquire().await.expect("finish permit").forget();
@@ -67,7 +76,7 @@ impl TokenStore for Store {
         if self.fail_clear.load(Ordering::SeqCst) {
             return Err(TokenStoreError::Unavailable("fixture clear failure".into()));
         }
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.inner.list().await
@@ -98,7 +107,10 @@ async fn seed(
     let marked =
         meerkat_core::mark_tokens_lifecycle_published_for_transition(&key, &tokens, &transition)
             .expect("actual marker");
-    store.save(&key, &marked).await.expect("seed");
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .expect("seed");
     marked
 }
 

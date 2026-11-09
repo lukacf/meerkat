@@ -903,11 +903,42 @@ impl MeerkatMachine {
                     LiveBoundaryInputDisposition::QueuedFallback,
                 ));
             };
+            // Inputs of different requesters never share a run, and the
+            // Steer lane is first in, first out across requesters: the
+            // machine decides which input may join this run. An input of
+            // another requester than the run's batch (or with a requester
+            // while the run has none, or the reverse), or one behind an
+            // earlier steer of another requester that waits for a run of its
+            // own, keeps its admitted state, Queued in the Steer lane with
+            // its delivery class, and the runtime loop serves it in admission
+            // order after this run: no generated transition runs here, and
+            // the `LiveBoundaryUnavailable` normalization (to the Queue lane)
+            // is never applied, so no later steer overtakes it. Every earlier
+            // steer the predicate lets this one pass has this one's key or is
+            // held (the runtime loop's plan passes a held steer over too).
+            if !driver
+                .driver_ingress()
+                .live_boundary_joins_run_batch(input_id, &run_id)
+            {
+                drop(driver);
+                tracing::debug!(
+                    session_id = %session_id,
+                    input_id = %input_id,
+                    run_id = %run_id,
+                    "live-boundary candidate keeps its Steer-lane place for a run of its own"
+                );
+                return Ok((
+                    held_mutation_gate,
+                    LiveBoundaryInputDisposition::QueuedFallback,
+                ));
+            }
             // Arbitrate only an actual active-run boundary. Before a run has
             // acquired queue authority, multiple Steer inputs intentionally
             // remain eligible for one generated same-boundary batch.
             //
-            // FIFO is per machine-owned delivery class: a durable delivery
+            // Within one requester, FIFO is per machine-owned delivery class
+            // (across requesters the machine's predicate above keeps every
+            // earlier steer ahead): a durable delivery
             // occupies its own boundary slot (and may wait across a closed
             // window), so it never pushes a later request-only steer to a
             // follow-up turn, and vice versa. Within the request-only class
@@ -1034,14 +1065,20 @@ impl MeerkatMachine {
                 // transcript identity so both paths produce the same rows.
                 // A peer message keeps the reply capability its follow-up
                 // turn would carry, so `reply_to_peer` can answer it in the
-                // run it joins.
+                // run it joins, and the input's request-only context (held
+                // in this process only) joins the running turn's requests.
                 let persisted_input = driver
                     .as_driver()
                     .input_state(input_id)
                     .and_then(|state| state.persisted_input.as_ref());
-                let transcript_identity = persisted_input.map(|input| {
-                    crate::runtime_loop::for_input(input, semantics).transcript_identity
-                });
+                let stamped =
+                    persisted_input.map(|input| crate::runtime_loop::for_input(input, semantics));
+                let transcript_identity = stamped
+                    .as_ref()
+                    .map(|metadata| metadata.transcript_identity.clone());
+                let request_only_context = stamped
+                    .map(|metadata| metadata.request_only_context)
+                    .unwrap_or_default();
                 let reply_capabilities = persisted_input
                     .and_then(crate::input::peer_reply_capability)
                     .into_iter()
@@ -1051,7 +1088,11 @@ impl MeerkatMachine {
                     crate::input::projection_durable_boundary_appends(&projection),
                     transcript_identity,
                 )
-                .map(|appends| appends.with_peer_reply_capabilities(reply_capabilities));
+                .map(|appends| {
+                    appends
+                        .with_peer_reply_capabilities(reply_capabilities)
+                        .with_request_only_context(request_only_context)
+                });
                 match appends {
                     Ok(appends) => (run_id, LiveBoundaryDeliveryPlan::Durable(appends)),
                     Err(error) => {
@@ -1295,14 +1336,40 @@ impl MeerkatMachine {
         });
         let realization = {
             let mut driver = witness.driver.lock().await;
-            driver
-                .machine_realize_live_boundary_context_injected(
-                    &run_id,
-                    std::slice::from_ref(input_id),
-                    session_snapshot,
-                    session_id,
+            // The machine decides again, under M, whether the input may join:
+            // an input admitted ahead of it with another key while its
+            // context was prepared (a prioritized one, or one a run returned
+            // to the Steer lane) keeps it behind, in the Steer lane.
+            if driver
+                .driver_ingress()
+                .live_boundary_joins_run_batch(input_id, &run_id)
+            {
+                Some(
+                    driver
+                        .machine_realize_live_boundary_context_injected(
+                            &run_id,
+                            std::slice::from_ref(input_id),
+                            session_snapshot,
+                            session_id,
+                        )
+                        .await,
                 )
-                .await
+            } else {
+                None
+            }
+        };
+        let Some(realization) = realization else {
+            drop(prepared);
+            tracing::debug!(
+                session_id = %session_id,
+                run_id = %run_id,
+                input_id = %input_id,
+                "live-boundary context keeps its Steer-lane place behind an earlier steer of another requester"
+            );
+            return Ok((
+                held_mutation_gate,
+                LiveBoundaryInputDisposition::QueuedFallback,
+            ));
         };
         if let Err(error) = realization {
             // Driver implementations roll this atomic realization back to the
@@ -2378,7 +2445,7 @@ impl MeerkatMachine {
                     let effects = staged.effects.clone();
                     let signal = Self::post_admission_signal_from_effects(&effects);
                     let runtime_effect =
-                        crate::effect::runtime_effect_projection_optional_from_dsl_effects(
+                        crate::effect::boundary_cancel_dispatch_optional_from_dsl_effects(
                             &effects,
                         )
                         .map_err(|reason| {
@@ -2389,20 +2456,14 @@ impl MeerkatMachine {
                     // Build the exact abort guard before the first await after
                     // the DSL transition minted its pending dispatch fact.
                     let cancel_plan = runtime_effect
-                        .map(|projected_effect| {
+                        .map(|dispatch| {
                             let committed_state = staged.committed_snapshot.state();
-                            let expected_run_id = committed_state
-                                .current_run_id
-                                .as_ref()
-                                .and_then(
-                                    crate::meerkat_machine::dsl_authority::current_run_id_from_dsl,
-                                )
-                                .ok_or_else(|| {
-                                    RuntimeDriverError::Internal(
-                                        "AcceptWithCompletion emitted boundary cancel without a valid exact active run id"
-                                            .to_string(),
-                                    )
-                                })?;
+                            if dispatch.run_id().is_none() {
+                                return Err(RuntimeDriverError::Internal(
+                                    "AcceptWithCompletion emitted boundary cancel without a valid exact active run id"
+                                        .to_string(),
+                                ));
+                            }
                             let dispatch_generation =
                                 committed_state.boundary_cancel_dispatch_generation;
                             let dispatch_lifecycle_phase = committed_state.lifecycle_phase;
@@ -2432,8 +2493,7 @@ impl MeerkatMachine {
                                 },
                                 boundary_handle: boundary_handle.clone(),
                                 pending_dispatch,
-                                expected_run_id,
-                                projected_effect,
+                                dispatch,
                                 dispatch_generation,
                                 dispatch_lifecycle_phase,
                             })

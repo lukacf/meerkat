@@ -985,6 +985,7 @@ pub fn render_machine_contract_markdown(
             |name| runtime_internal_inputs.contains(name),
         );
     }
+    render_ci_samples_markdown(&mut out, schema);
     render_enum_markdown(&mut out, "Signals", &schema.signals);
     render_enum_markdown(&mut out, "Effects", &schema.effects);
 
@@ -1426,9 +1427,11 @@ pub fn render_machine_ci_cfg(
         &named_bindings,
     );
     let input_samples = machine_input_sample_constants(schema);
+    let typed_samples = machine_input_typed_sample_constants(schema);
 
     pushln!(&mut out, "SPECIFICATION Spec");
-    if !domains.is_empty() || uses_u64_max || !input_samples.is_empty() {
+    if !domains.is_empty() || uses_u64_max || !input_samples.is_empty() || !typed_samples.is_empty()
+    {
         pushln!(&mut out, "CONSTANTS");
         if uses_u64_max {
             push_u64_max_cfg_assignment(&mut out);
@@ -1492,6 +1495,18 @@ pub fn render_machine_ci_cfg(
             };
             writeln!(&mut out, "  {} = {}", constant, render_u64_set(&values))
                 .expect("write to string");
+        }
+        // A `CiSamples` input field: the CI profile explores exactly its
+        // declared values, the Deep profile the field type's whole domain,
+        // through the operators the generated model defines.
+        for (constant, _, _) in &typed_samples {
+            writeln!(
+                &mut out,
+                "  {} <- {}",
+                constant,
+                cfg_assignment_operator_name(constant, operator_suffix)
+            )
+            .expect("write to string");
         }
     }
     if !schema.invariants.is_empty() {
@@ -3208,6 +3223,42 @@ fn render_enum_markdown(out: &mut String, label: &str, schema: &EnumSchema) {
             .expect("write to string");
         }
     }
+    pushln!(out);
+}
+
+/// The input fields a machine's CI profile samples (`CiSamples`), in
+/// declaration order, as one sentence of the generated contract; nothing for
+/// a machine that declares none.
+fn render_ci_samples_markdown(out: &mut String, schema: &MachineSchema) {
+    let samples = schema
+        .input_field_domains
+        .iter()
+        .filter_map(|declaration| match &declaration.domain {
+            meerkat_machine_schema::InputFieldDomainKind::CiSamples(values) => Some(format!(
+                "`{}`.`{}` as `{}`",
+                declaration.input,
+                declaration.field,
+                render_explicit_values(values)
+            )),
+            meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(_)
+            | meerkat_machine_schema::InputFieldDomainKind::StateField(_)
+            | meerkat_machine_schema::InputFieldDomainKind::CiValues(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let Some((last, rest)) = samples.split_last() else {
+        return;
+    };
+    let listed = if rest.is_empty() {
+        last.clone()
+    } else {
+        format!("{} and {last}", rest.join(", "))
+    };
+    pushln!(out, "## CI Profile Samples");
+    writeln!(
+        out,
+        "The CI profile samples {listed}; the Deep profile and every composition explore each field's whole domain."
+    )
+    .expect("write to string");
     pushln!(out);
 }
 
@@ -5719,6 +5770,90 @@ mod tests {
         );
     }
 
+    /// A `CiSamples` declaration ranges a field of any type over a model
+    /// constant that each profile's config assigns through an operator of
+    /// the model: the CI profile the declared values, the Deep profile the
+    /// field type's whole domain. DurableDecisionMachine's carried
+    /// presentation is the shipped case; Present declares nothing, so it
+    /// keeps every link a presentation's link can serve.
+    #[test]
+    fn ci_samples_narrow_the_ci_profile_alone_for_a_field_of_any_type() {
+        let schema = meerkat_machine_schema::catalog::dsl::dsl_durable_decision_machine();
+        let model = render_machine_semantic_model(&schema).expect("render DurableDecisionMachine");
+        let ci = render_machine_ci_cfg(&schema, false).expect("valid CI CFG");
+        let deep = render_machine_ci_cfg(&schema, true).expect("valid Deep CFG");
+        let next = model
+            .split_once("\nNext ==\n")
+            .map(|(_, rest)| rest.split("\n\n").next().unwrap_or(""))
+            .expect("Next block");
+        let constants_line = model
+            .lines()
+            .find(|line| line.starts_with("CONSTANTS "))
+            .expect("model constants");
+        let decide = next
+            .lines()
+            .filter(|line| line.contains(": Decide"))
+            .collect::<Vec<_>>();
+        assert!(!decide.is_empty(), "Decide has Next disjuncts");
+        for (field, ci_values, deep_domain) in [
+            (
+                "carried_audience",
+                "{Some(\"alpha\")}",
+                "OptionDecisionPartyValues",
+            ),
+            (
+                "carried_digest",
+                "{Some(\"alpha\")}",
+                "OptionDecisionDigestValues",
+            ),
+            ("carried_complete", "{FALSE}", "BOOLEAN"),
+            (
+                "carried_link_served_digest",
+                "{Some(\"alpha\")}",
+                "OptionDecisionDigestValues",
+            ),
+        ] {
+            let constant = format!("InputSamples_Decide_{field}");
+            for line in &decide {
+                assert!(
+                    line.contains(&format!("\\E {field} \\in {constant} : ")),
+                    "Decide.{field} ranges over {constant}: {line}"
+                );
+            }
+            assert!(
+                constants_line.contains(&constant),
+                "the model declares {constant}: {constants_line}"
+            );
+            assert!(
+                model.contains(&format!("\n{constant}Ci == {ci_values}\n")),
+                "the model defines the CI samples of Decide.{field}"
+            );
+            assert!(
+                model.contains(&format!("\n{constant}Deep == {deep_domain}\n")),
+                "the model defines the Deep domain of Decide.{field}"
+            );
+            assert!(
+                ci.contains(&format!("\n  {constant} <- {constant}Ci\n")),
+                "the CI config samples Decide.{field}:\n{ci}"
+            );
+            assert!(
+                deep.contains(&format!("\n  {constant} <- {constant}Deep\n")),
+                "the Deep config keeps the whole domain of Decide.{field}:\n{deep}"
+            );
+        }
+        let present = next
+            .lines()
+            .filter(|line| line.contains(": Present"))
+            .collect::<Vec<_>>();
+        assert!(!present.is_empty(), "Present has Next disjuncts");
+        for line in present {
+            assert!(
+                line.contains("\\E link_served_digest \\in OptionDecisionDigestValues : "),
+                "Present keeps every served link: {line}"
+            );
+        }
+    }
+
     /// SessionDocumentMachine's CI bound: under a step bound of 5 the CI
     /// profile explores the samples it declares, in every Next disjunct of
     /// the input's transitions; the Deep profile keeps `0..2` for each of
@@ -8185,7 +8320,10 @@ impl<'a> CompositionTlaCompiler<'a> {
             Some(meerkat_machine_schema::InputFieldDomainKind::CiValues(values)) => {
                 render_u64_set(&broad_input_samples(values))
             }
-            None => self.binding_domain_for_type(ty),
+            // ... and the whole type domain of a `CiSamples` field.
+            Some(meerkat_machine_schema::InputFieldDomainKind::CiSamples(_)) | None => {
+                self.binding_domain_for_type(ty)
+            }
         }
     }
 
@@ -10549,6 +10687,11 @@ impl<'a> MachineTlaCompiler<'a> {
                 .into_iter()
                 .map(|(constant, _)| constant),
         );
+        model_constants.extend(
+            machine_input_typed_sample_constants(self.schema)
+                .into_iter()
+                .map(|(constant, _, _)| constant),
+        );
         if machine_uses_u64_max(self.schema) {
             model_constants.push(TLA_RUST_U64_MAX_CONSTANT.to_owned());
         }
@@ -10614,6 +10757,29 @@ impl<'a> MachineTlaCompiler<'a> {
                 TypeRef::Seq(_) | TypeRef::Option(_) | TypeRef::Map(_, _)
             )
         }) {
+            pushln!(&mut out);
+        }
+        // What each profile's config assigns a `CiSamples` input field's
+        // constant: the CI profile the declared values, the Deep profile the
+        // field type's whole domain (defined above).
+        let typed_samples = machine_input_typed_sample_constants(self.schema);
+        for (constant, samples, ty) in &typed_samples {
+            writeln!(
+                &mut out,
+                "{} == {}",
+                cfg_assignment_operator_name(constant, "Ci"),
+                render_explicit_values(samples)
+            )
+            .expect("write to string");
+            writeln!(
+                &mut out,
+                "{} == {}",
+                cfg_assignment_operator_name(constant, "Deep"),
+                self.binding_domain_for_type(ty)
+            )
+            .expect("write to string");
+        }
+        if !typed_samples.is_empty() {
             pushln!(&mut out);
         }
         writeln!(
@@ -11523,6 +11689,29 @@ impl<'a> MachineTlaCompiler<'a> {
         pushln!(
             out,
             "    {{ edge \\in arg_wiring_edges : /\\ edge.a # arg_agent_identity /\\ edge.b # arg_agent_identity }}"
+        );
+        // An edge's other end, and the owned edges a removal leaves (every
+        // owned edge of the removed identity ends, whichever end owns it):
+        // the catalog-native Rust helpers' mirrors.
+        writeln!(
+            out,
+            "{}(arg_edge, arg_agent_identity) ==",
+            prefix("mob_machine_wiring_edge_other")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    IF arg_edge.a = arg_agent_identity THEN arg_edge.b ELSE arg_edge.a"
+        );
+        writeln!(
+            out,
+            "{}(arg_identity_edge_owners, arg_agent_identity) ==",
+            prefix("mob_machine_owned_edges_without_identity")
+        )
+        .expect("write to string");
+        pushln!(
+            out,
+            "    [edge \\in {{ e \\in DOMAIN arg_identity_edge_owners : /\\ e.a # arg_agent_identity /\\ e.b # arg_agent_identity }} |-> arg_identity_edge_owners[edge]]"
         );
         writeln!(
             out,
@@ -12611,10 +12800,13 @@ impl<'a> MachineTlaCompiler<'a> {
                 additional_values_domain(&self.binding_domain_for_type(ty), values)
             }
             // A model constant that each profile's config assigns: the CI
-            // profile the declared values, the Deep profile those and `0..2`.
-            Some((input, meerkat_machine_schema::InputFieldDomainKind::CiValues(_))) => {
-                input_samples_constant_name(input, binding)
-            }
+            // profile the declared values, the Deep profile those and `0..2`
+            // for `CiValues`, the field type's whole domain for `CiSamples`.
+            Some((
+                input,
+                meerkat_machine_schema::InputFieldDomainKind::CiValues(_)
+                | meerkat_machine_schema::InputFieldDomainKind::CiSamples(_),
+            )) => input_samples_constant_name(input, binding),
             None => self.binding_domain_for_type(ty),
         }
     }
@@ -14625,8 +14817,8 @@ fn additional_values_domain(default: &str, values: &BTreeSet<u64>) -> String {
     format!("({default} \\cup {{{values}}})")
 }
 
-/// The model constant that a `CiValues` input field ranges over in the
-/// generated model; each profile's config assigns it.
+/// The model constant that a `CiValues` or `CiSamples` input field ranges
+/// over in the generated model; each profile's config assigns it.
 fn input_samples_constant_name(input: &str, field: &str) -> String {
     format!("InputSamples_{}_{}", tla_ident(input), tla_ident(field))
 }
@@ -14659,7 +14851,43 @@ fn machine_input_sample_constants(schema: &MachineSchema) -> Vec<(String, &BTree
                 values,
             )),
             meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(_)
-            | meerkat_machine_schema::InputFieldDomainKind::StateField(_) => None,
+            | meerkat_machine_schema::InputFieldDomainKind::StateField(_)
+            | meerkat_machine_schema::InputFieldDomainKind::CiSamples(_) => None,
+        })
+        .collect()
+}
+
+/// Every `CiSamples` input field of a machine, in declaration order: the
+/// model constant the field ranges over, the values the CI profile assigns
+/// it, and the field's type, whose whole domain the Deep profile assigns it.
+/// The schema's validation resolves every declared field.
+fn machine_input_typed_sample_constants(
+    schema: &MachineSchema,
+) -> Vec<(String, &[meerkat_machine_schema::TlcValue], TypeRef)> {
+    schema
+        .input_field_domains
+        .iter()
+        .filter_map(|declaration| match &declaration.domain {
+            meerkat_machine_schema::InputFieldDomainKind::CiSamples(samples) => {
+                let field = schema
+                    .inputs
+                    .variant_named(declaration.input.as_str())
+                    .ok()?
+                    .fields
+                    .iter()
+                    .find(|field| field.name == declaration.field)?;
+                Some((
+                    input_samples_constant_name(
+                        declaration.input.as_str(),
+                        declaration.field.as_str(),
+                    ),
+                    samples.as_slice(),
+                    field.ty.clone(),
+                ))
+            }
+            meerkat_machine_schema::InputFieldDomainKind::AdditionalValues(_)
+            | meerkat_machine_schema::InputFieldDomainKind::StateField(_)
+            | meerkat_machine_schema::InputFieldDomainKind::CiValues(_) => None,
         })
         .collect()
 }

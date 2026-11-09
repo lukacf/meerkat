@@ -128,6 +128,9 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobMemberListEntryWire",
     "WireMemberProgressSnapshot",
     "WireMemberCustodyDeferral",
+    # A profile's member tool grant gate, listed before the tool config that
+    # carries it.
+    "WireGrantGatedTools",
     "WireMobToolConfig",
     "WireMobProfile",
     "WireMobRun",
@@ -194,6 +197,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobSpawnHelperParams",
     "MobForkHelperParams",
     "MobHelperResult",
+    "MobForkMemberParams",
+    "MobForkMemberResult",
     "MobForceCancelResult",
     "MobTurnStartParams",
     "MobMemberStatusResult",
@@ -248,6 +253,8 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobHardCancelResult",
     "MobStopMemberRunParams",
     "MobStopMemberRunResult",
+    "MobCompactMemberParams",
+    "MobCompactMemberResult",
     "MobMemberLiveOpenParams",
     "MobMemberLiveChannelParams",
     "MobMemberLiveStatusParams",
@@ -434,6 +441,8 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "StopRunParams",
     "StopRunResult",
     "WireRunStopContributor",
+    "CompactSessionParams",
+    "CompactSessionResult",
     "ListSessionTranscriptRevisionsParams",
     "ListSessionsParams",
     "ListSessionsResult",
@@ -469,6 +478,9 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "WireUnreadableToolGrant",
     "WireToolGrantAuditRow",
     "WireUnreadableToolGrantAuditRow",
+    "WireToolGrantGateEntries",
+    "WireToolGrantGateView",
+    "WireMemberToolGrantGate",
     "GrantToolParams",
     "GrantToolResult",
     "RevokeToolGrantParams",
@@ -477,11 +489,33 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     "ListToolGrantsResult",
     "ToolGrantAuditParams",
     "ToolGrantAuditResult",
+    # Operator instructions (`session/*_instruction*`, `mob/*_instruction*`).
+    # The records precede the params and results that carry them.
+    "InstructionSetErrorData",
+    "WireInstructionSlotView",
+    "WireInstructionEffectiveSlot",
+    "WireSessionInstructionSlot",
+    "SetSessionInstructionParams",
+    "RevokeSessionInstructionParams",
+    "SessionInstructionStatusParams",
+    "SessionInstructionWriteResult",
+    "SessionInstructionStatusResult",
+    "WireInstructionRecord",
+    "WireMemberInstructionSlot",
+    "WireMemberInstructionDelivery",
+    "WireMemberInstructionStatus",
+    "MobSetInstructionParams",
+    "MobRevokeInstructionParams",
+    "MobInstructionStatusParams",
+    "MobInstructionWriteResult",
+    "MobInstructionStatusResult",
     # Durable decisions (`decision/*`). The records precede the params and
     # results that carry them.
     "WireCanonicalPart",
+    "WirePresentationLink",
     "WirePresentationRecord",
     "WireDecisionOutcome",
+    "WireDecisionEffect",
     "WireDecision",
     "WireUnreadableDecision",
     "DecisionPresentationRequest",
@@ -497,6 +531,10 @@ PUBLIC_RPC_CATALOG_OBJECT_TYPES = [
     # presentation precedes it.
     "WireDecisionNoticePresentation",
     "WireDecisionNotice",
+    # `tool_grants/request`: its result carries the decision that holds the
+    # request, so it follows the decision records.
+    "RequestToolGrantParams",
+    "RequestToolGrantResult",
 ]
 
 PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
@@ -513,6 +551,7 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireRunStopReceipt",
     "WireRunStopCompletion",
     "WireInputTerminalOutcome",
+    "WireCompactionRequestOutcome",
     "WireDeviceCompleteResult",
     "AuthLogoutParams",
     "AuthStatusParams",
@@ -524,16 +563,39 @@ PUBLIC_RPC_CATALOG_ALIAS_TYPES = [
     "WireLoginCancelled",
     # Scoped tool grant vocabulary. Every alias the audit event union names
     # precedes it: the generated Python aliases evaluate in roster order. The
-    # request subject and target are closed; the result ones are tolerant.
+    # request subject, target and scope are closed; the result ones are
+    # tolerant.
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
+    "ToolGrantScopeRequest",
     "WireToolGrantSubject",
     "WireToolGrantTarget",
     "WireToolGrantIssuer",
+    "WireToolGrantScope",
     "WireToolGrantStatus",
     "WireToolGrantExpiryDriver",
     "WireToolGrantRefusalKind",
     "WireToolGrantAuditEvent",
+    "WireToolGrantApplies",
+    # Operator-instruction vocabulary. The refusal codes, dispositions,
+    # effects, entry kinds and state kinds are closed; the pending and block
+    # reasons, the residency and the lowering are tolerant (their schemas
+    # list the known values; the SDK parsers keep any other value). Every
+    # alias a union names precedes it.
+    "InstructionSetErrorCode",
+    "InstructionEffect",
+    "InstructionEntryKind",
+    "WireInstructionPendingReason",
+    "WireInstructionBlockReason",
+    "WireInstructionResidency",
+    "WireInstructionLowering",
+    "WireSessionInstructionDisposition",
+    "WireMobInstructionDisposition",
+    "WireInstructionTarget",
+    "WireInstructionSlotState",
+    "WireInstructionTargetOwner",
+    "WireMemberInstructionDeliveryState",
+    "WireInstructionEffectiveRead",
     # Durable decision vocabulary. The request audience is closed; the result
     # vocabularies are tolerant; the refusal and the error data are closed.
     "DecisionAudienceRequest",
@@ -560,6 +622,7 @@ PARAMS_UNION_ALIAS_TYPES = {
     "LoginStartParams",
     "ToolGrantSubjectRequest",
     "ToolGrantTargetRequest",
+    "ToolGrantScopeRequest",
     "DecisionAudienceRequest",
 }
 
@@ -783,6 +846,8 @@ MOB_RPC_CONTRACT_HELPER_TYPES = [
     "WireGeminiThinkingConfig",
     "WireOpenAiPromptCacheOptions",
     "WireProviderParamsOverride",
+    # `MobStreamOpenParams.cursor`: the member stream resume position.
+    "MobStreamCursor",
 ]
 
 # Item 6 / K20 pattern: the `skills/list` RPC result is catalog-typed
@@ -890,6 +955,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "WireContentInput",
         "WireAuthBindingRef",
         "WireMobProfile",
+        "WireGrantGatedTools",
         "WireMobToolConfig",
         "WireResolvedModelCapabilities",
         "PublicTurnToolOverlay",
@@ -1113,6 +1179,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         "WireRunStopCompletion",
         "WireInputTerminalOutcome",
         "WireRuntimeState",
+        # A compaction request's outcome stays named inside
+        # `CompactSessionResult` / `MobCompactMemberResult`.
+        "WireCompactionRequestOutcome",
     }
 
 
@@ -7101,6 +7170,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "      'credential_interaction_required',",
             "      'credential_access_pending',",
             "      'credential_store_unavailable',",
+            "      'source_unavailable',",
             "    ],",
             "    `${path}.kind`,",
             "    'wire auth error kind',",

@@ -267,6 +267,12 @@ const externalAuthFailure: ExternalAuthFailure = {
   kind: 'refresh_failed',
   detail: 'browser refresh token revoked',
 };
+const sourceUnavailableExternalAuthFailure: ExternalAuthFailure = {
+  kind: 'source_unavailable',
+  detail: 'identity provider unreachable',
+};
+// @ts-expect-error a source_unavailable rejection carries its detail.
+const detaillessSourceUnavailable: ExternalAuthFailure = { kind: 'source_unavailable' };
 const typedExternalAuthResolver: ExternalAuthResolver = async () => externalAuthLease;
 const externalAuthResult: ExternalAuthResolverResult = externalAuthLease;
 // @ts-expect-error bare bearer strings are not structured auth envelopes.
@@ -547,6 +553,17 @@ function handleEvent(event: AgentEvent): string {
       return `${event.type}:${event.run_id}:${event.axis}:${event.results
         .map((result) => `${result.tool_name}/${result.tool_use_id}:${result.kept_bytes}/${result.total_bytes}`)
         .join(',')}`;
+    case 'requested_compaction_skipped':
+      // The compaction check that consumed a host's compaction request
+      // compacted nothing: the run whose check it was, and why
+      // (`first_model_request` or `nothing_to_fold`).
+      return `${event.type}:${event.run_id}:${event.reason}`;
+    case 'operator_instructions_applied':
+      // An observation of one applied operator-instruction entry: a delta
+      // a fresh run start appended (its `run_id` and `changes`) or a
+      // compaction's snapshot, with the whole active set after it. The
+      // session's instruction status read is the authority.
+      return `${event.type}:${event.session_id}:${event.entry_sequence}:${event.kind}:${event.run_id ?? 'none'}:${(event.active ?? []).length}:${(event.changes ?? []).length}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;

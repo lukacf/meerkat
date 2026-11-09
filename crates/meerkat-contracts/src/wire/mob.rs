@@ -526,6 +526,16 @@ pub struct WireMobToolConfig {
     pub deny: Vec<String>,
     #[serde(default)]
     pub mcp: Vec<String>,
+    /// The member tool grant gate: the built-in tool families and tool
+    /// names members of the profile mount hidden and refused until a live
+    /// scoped tool grant opens them. Omitted when empty, for the same
+    /// compatibility reason as `read_only`: a gated profile sent to an older
+    /// server is refused there, never read ungated.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::wire::WireGrantGatedTools::is_empty"
+    )]
+    pub grant_gated: crate::wire::WireGrantGatedTools,
 }
 
 fn read_only_is_false(value: &bool) -> bool {
@@ -666,6 +676,16 @@ pub struct MobToolConfigInput {
     /// still offers and withholds the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bundles: Vec<String>,
+    /// The member tool grant gate: the built-in tool families and tool
+    /// names members of the profile mount hidden and refused until a live
+    /// scoped tool grant opens them. A member's gate is its own profile's
+    /// joined with its role's current gate. Leave a gated family's switch
+    /// off: the gate mounts it, and an older server keeps it off.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::wire::WireGrantGatedTools::is_empty"
+    )]
+    pub grant_gated: crate::wire::WireGrantGatedTools,
 }
 
 /// Profile binding input: either an inline profile or a realm profile reference.
@@ -2842,6 +2862,45 @@ pub struct MobForkHelperParams {
     pub backend: Option<WireMobBackendKind>,
 }
 
+/// Request payload for `mob/fork_member`: fork a member's session at a
+/// message boundary and seat the fork as a new member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobForkMemberParams {
+    pub mob_id: String,
+    /// The member whose session is forked.
+    pub source_member_id: String,
+    /// The new member's identity.
+    pub agent_identity: String,
+    /// Where the copied prefix ends, as on `session/fork_at`: the new
+    /// member's transcript is the source's messages before this index.
+    /// Absent takes the source's committed transcript end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<usize>,
+    /// The new member's profile. Absent takes the source member's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The new member's runtime mode. Absent takes the source member's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<WireMobRuntimeMode>,
+}
+
+/// Response payload for `mob/fork_member`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MobForkMemberResult {
+    pub agent_identity: String,
+    pub member_ref: WireMemberRef,
+    /// The new member's session: the committed fork.
+    pub session_id: String,
+    /// The session the fork was cut from.
+    pub source_session_id: String,
+    /// Messages in the new member's transcript after the fork, as
+    /// `session/fork_at` counts them.
+    pub message_count: usize,
+}
+
 /// Typed terminal/truncation state for a bounded helper projection.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -3282,6 +3341,10 @@ pub enum WireMemberPreviewUnavailable {
     /// The member is retiring; a status read of a retiring member is answered
     /// without reading its session.
     NotObservedWhileRetiring,
+    /// The store refuses to read the member's session until its realm is
+    /// reopened (a host store whose scope of the session, or whose realm, is
+    /// poisoned). Later reads of the member answer the same until then.
+    StoreRefused,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3697,6 +3760,24 @@ pub struct MobStreamOpenParams {
     pub mob_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_identity: Option<String>,
+    /// Resume the member stream `agent_identity` names right after this
+    /// position: the events the member still retains after it are replayed,
+    /// then the stream is live. Absent opens the stream live. A mob-wide
+    /// stream (no `agent_identity`) takes no cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<MobStreamCursor>,
+}
+
+/// A position in a mob member's event sequence: the `epoch` a member
+/// `mob/stream_event` names and the `seq` of its event (`event.seq`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct MobStreamCursor {
+    /// The sequence space of the position (a UUID).
+    pub epoch: String,
+    /// The last envelope sequence the client received in that space.
+    pub seq: u64,
 }
 
 /// Response payload for `mob/stream_open`.
@@ -5476,10 +5557,16 @@ mod tests {
                 WireMemberPreviewUnavailable::NotObservedWhileRetiring,
                 "not_observed_while_retiring",
             ),
+            (WireMemberPreviewUnavailable::StoreRefused, "store_refused"),
         ] {
             assert_eq!(
                 serde_json::to_value(marker).expect("serialize marker"),
                 serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<WireMemberPreviewUnavailable>(serde_json::json!(wire))
+                    .expect("deserialize marker"),
+                marker
             );
         }
     }

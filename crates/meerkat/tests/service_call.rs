@@ -797,6 +797,7 @@ impl Host {
             server(SERVER, &MAIL_OPERATIONS, &calls, &issuer, SUBJECT).connector_approval();
         let grant = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &operator(),
                 id("collector-mail"),
                 collector(),
@@ -907,7 +908,12 @@ impl Host {
 
     fn revoke_grant(&self, grant: &GrantLineageRef) {
         self.grants
-            .revoke(&operator(), grant, &mut NoController)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &operator(),
+                grant,
+                &mut NoController,
+            )
             .expect("the operator revokes the grant");
     }
 }
@@ -974,6 +980,7 @@ fn composition(
         invocation: ScopedInvocation::from_policy(Arc::new(Permissive)),
         operation_owner: Arc::new(Operations { reviewed }),
         retained_resume: None,
+        kept_original: None,
     }
     .into_configuration()
 }
@@ -1108,6 +1115,7 @@ async fn a_host_or_owner_without_service_call_support_refuses_unavailable() {
                 reviewed: BTreeSet::new(),
             }),
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: false,
             configured_mcp_attachment: None,
         },
@@ -1221,6 +1229,7 @@ async fn a_second_connector_server_has_no_lineage_and_is_denied() {
     let both_installations = host
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &operator(),
             id("collector-both"),
             collector(),
@@ -1285,6 +1294,7 @@ async fn a_reinstalled_binding_with_another_account_is_denied_and_an_unrecorded_
     let unrecorded = host
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &operator(),
             id("collector-mail-unrecorded"),
             collector(),

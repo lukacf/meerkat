@@ -865,6 +865,7 @@ impl SqliteAgentMemoryStore {
         realm: &str,
         identity: &AgentIdentity,
         memory: NewAgentMemory,
+        author: MemoryAuthor,
     ) -> Result<AgentMemoryRecord, AgentMemoryError> {
         let title = compact_whitespace(&memory.title);
         let body = memory.body.trim().to_string();
@@ -901,9 +902,10 @@ impl SqliteAgentMemoryStore {
             let batch = StagedMutationBatch {
                 kind: StagedBatchKind::FreshWrite,
                 realm: realm.to_string(),
-                // RPC/SDK writes are application-principal writes (§7.2);
-                // the P1 Recorder threads real agent authorship.
-                author: MemoryAuthor::Application,
+                // RPC/SDK writes are application-principal writes (§7.2),
+                // a console write names its operator; the P1 Recorder
+                // threads real agent authorship.
+                author,
                 ops: vec![StagedOp::Create {
                     id: None,
                     scope: scope.clone(),
@@ -947,6 +949,7 @@ impl SqliteAgentMemoryStore {
         realm: &str,
         identity: &AgentIdentity,
         memory_id: &str,
+        author: MemoryAuthor,
     ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
         let memory_id = memory_id.trim().to_string();
         if memory_id.is_empty() {
@@ -958,11 +961,12 @@ impl SqliteAgentMemoryStore {
             realm: realm.to_string(),
             identity: identity.as_str().to_string(),
         };
-        self.forget_in_scope_blocking(&scope, &memory_id, MemoryAuthor::Application)
+        self.forget_in_scope_blocking(&scope, &memory_id, author)
     }
 
-    /// Shared tombstone path for the wire `forget` (Application principal)
-    /// and the Recorder's `forget_authored` (Agent principal).
+    /// Shared tombstone path for the wire `forget` (Application principal,
+    /// or the console's operator) and the Recorder's `forget_authored`
+    /// (Agent principal).
     fn forget_in_scope_blocking(
         &self,
         scope: &MemoryScope,
@@ -1012,8 +1016,9 @@ impl SqliteAgentMemoryStore {
         scope: &MemoryScope,
         prior: &str,
         record: NewMemoryRecord,
+        author: MemoryAuthor,
     ) -> Result<MemoryId, AgentMemoryError> {
-        self.supersede_with_author_blocking(scope, prior, record, MemoryAuthor::Application)
+        self.supersede_with_author_blocking(scope, prior, record, author)
             .map(|receipt| receipt.memory_id)
     }
 
@@ -1584,10 +1589,21 @@ impl AgentMemoryProvider for SqliteAgentMemoryStore {
         identity: &AgentIdentity,
         memory: NewAgentMemory,
     ) -> Result<AgentMemoryRecord, AgentMemoryError> {
+        self.remember_by(realm, identity, memory, MemoryAuthor::Application)
+            .await
+    }
+
+    async fn remember_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory: NewAgentMemory,
+        author: MemoryAuthor,
+    ) -> Result<AgentMemoryRecord, AgentMemoryError> {
         let store = self.clone();
         let realm = realm.to_string();
         let identity = identity.clone();
-        run_blocking(move || store.remember_blocking(&realm, &identity, memory)).await
+        run_blocking(move || store.remember_blocking(&realm, &identity, memory, author)).await
     }
 
     fn supports_forget(&self) -> bool {
@@ -1600,11 +1616,22 @@ impl AgentMemoryProvider for SqliteAgentMemoryStore {
         identity: &AgentIdentity,
         memory_id: &str,
     ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
+        self.forget_by(realm, identity, memory_id, MemoryAuthor::Application)
+            .await
+    }
+
+    async fn forget_by(
+        &self,
+        realm: &str,
+        identity: &AgentIdentity,
+        memory_id: &str,
+        author: MemoryAuthor,
+    ) -> Result<AgentMemoryForgetResult, AgentMemoryError> {
         let store = self.clone();
         let realm = realm.to_string();
         let identity = identity.clone();
         let memory_id = memory_id.to_string();
-        run_blocking(move || store.forget_blocking(&realm, &identity, &memory_id)).await
+        run_blocking(move || store.forget_blocking(&realm, &identity, &memory_id, author)).await
     }
 
     async fn manifest(
@@ -1627,10 +1654,21 @@ impl AgentMemoryProvider for SqliteAgentMemoryStore {
         prior: &str,
         record: NewMemoryRecord,
     ) -> Result<MemoryId, AgentMemoryError> {
+        self.supersede_by(scope, prior, record, MemoryAuthor::Application)
+            .await
+    }
+
+    async fn supersede_by(
+        &self,
+        scope: &MemoryScope,
+        prior: &str,
+        record: NewMemoryRecord,
+        author: MemoryAuthor,
+    ) -> Result<MemoryId, AgentMemoryError> {
         let store = self.clone();
         let scope = scope.clone();
         let prior = prior.to_string();
-        run_blocking(move || store.supersede_blocking(&scope, &prior, record)).await
+        run_blocking(move || store.supersede_blocking(&scope, &prior, record, author)).await
     }
 
     fn supports_supersede(&self) -> bool {
@@ -2110,6 +2148,64 @@ impl StewardStore for SqliteAgentMemoryStore {
                 )
                 .map_err(sql_err)?;
                 Ok(())
+            })
+        })
+        .await
+    }
+
+    /// The retirement's row, with status `private`: inserted, or a pending
+    /// row of the same retirement settled so. The exit-interview queue
+    /// (status `pending`) never lists it again.
+    async fn record_private_retirement(
+        &self,
+        realm: &str,
+        identity: &str,
+        session_key: Option<&str>,
+        cause: &str,
+        retired_at_ms: u64,
+    ) -> Result<(), AgentMemoryError> {
+        let store = self.clone();
+        let realm = realm.to_string();
+        let identity = identity.to_string();
+        let session_key = session_key.map(str::to_string);
+        let cause = cause.to_string();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                conn.execute(
+                    "INSERT INTO pending_harvests \
+                     (identity, session_key, cause, retired_at_ms, status) \
+                     VALUES (?1, ?2, ?3, ?4, 'private') \
+                     ON CONFLICT (identity, retired_at_ms) DO UPDATE SET status = 'private'",
+                    params![identity, session_key, cause, retired_at_ms as i64],
+                )
+                .map_err(sql_err)?;
+                Ok(())
+            })
+        })
+        .await
+    }
+
+    async fn private_retired_identities(
+        &self,
+        realm: &str,
+    ) -> Result<std::collections::BTreeSet<String>, AgentMemoryError> {
+        let store = self.clone();
+        let realm = realm.to_string();
+        run_blocking(move || {
+            store.with_realm_conn(&realm, |conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT DISTINCT identity FROM pending_harvests WHERE status = 'private'",
+                    )
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(sql_err)?;
+                let mut identities = std::collections::BTreeSet::new();
+                for row in rows {
+                    identities.insert(row.map_err(sql_err)?);
+                }
+                Ok(identities)
             })
         })
         .await
@@ -5368,7 +5464,7 @@ mod tests {
             .stage(StagedMutationBatch {
                 kind: StagedBatchKind::FreshWrite,
                 realm: "team".to_string(),
-                author: MemoryAuthor::Operator,
+                author: MemoryAuthor::Operator { principal: None },
                 ops: vec![StagedOp::Create {
                     id: None,
                     scope,
@@ -6085,28 +6181,28 @@ mod tests {
             .remember_authored(
                 &identity_scope("writer"),
                 payload("Writer fact", "A fact"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         store
             .forget_authored(
                 &identity_scope("writer"),
                 &forgotten.memory_id,
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         store
             .remember_authored(
                 &identity_scope("writer"),
                 payload("Writer note", "A note"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         store
             .propose(
                 &mob,
                 payload("Mob proposal", "For the mob"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         store
@@ -6488,7 +6584,7 @@ mod tests {
                 .remember_authored(
                     &scope,
                     payload(&format!("Fact {index}"), &format!("Body {index}")),
-                    MemoryAuthor::Operator,
+                    MemoryAuthor::Operator { principal: None },
                 )
                 .await?;
         }
@@ -6535,14 +6631,18 @@ mod tests {
         let store = SqliteAgentMemoryStore::open(dir.path())?;
         let scope = identity_scope("team")?;
         let root = store
-            .remember_authored(&scope, payload("Fact", "v1"), MemoryAuthor::Operator)
+            .remember_authored(
+                &scope,
+                payload("Fact", "v1"),
+                MemoryAuthor::Operator { principal: None },
+            )
             .await?;
         let mid = store
             .supersede_authored(
                 &scope,
                 &root.memory_id,
                 payload("Fact", "v2"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
         let tip = store
@@ -6550,7 +6650,7 @@ mod tests {
                 &scope,
                 &mid.memory_id,
                 payload("Fact", "v3"),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await?;
 
@@ -6874,7 +6974,13 @@ mod tests {
             .record_by_id(REVIEW_REALM, &successor.memory_id)
             .await?
             .ok_or("successor exists")?;
-        assert_eq!(successor_record.provenance.author, MemoryAuthor::Operator);
+        // The release names the operator who reviewed it.
+        assert_eq!(
+            successor_record.provenance.author,
+            MemoryAuthor::Operator {
+                principal: Some(REVIEWER.to_string())
+            }
+        );
         assert_eq!(successor_record.kind, MemoryKind::Preference);
         assert_eq!(successor_record.tags, origin_before.tags);
 

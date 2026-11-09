@@ -355,6 +355,34 @@ def test_console_intrinsic_rules_reject_before_destination_private_or_source_wri
     assert 'surrogate-marker' not in json.dumps(result)
 
 
+OIDC_FIELDS = [
+    {'key': 'CONSOLE_USER_ID', 'label': 'Console operator email', 'secret': False, 'required': True},
+    {'key': 'CONSOLE_OIDC_CLIENT_SECRET', 'label': 'OIDC client secret', 'secret': True, 'required': True},
+    {'key': 'CONSOLE_ALLOWED_EMAILS', 'label': 'People who may sign in', 'secret': False, 'required': False},
+]
+OIDC_SOURCE = json.dumps({'authentication': 'oidc', 'issuer': 'https://login.example.test',
+    'client_id': 'forge-console', 'client_secret': {'env': 'CONSOLE_OIDC_CLIENT_SECRET'}}).encode()
+
+
+@pytest.mark.parametrize('changed,key', [
+    ({'CONSOLE_USER_ID': 'operator-marker'}, 'CONSOLE_USER_ID'),
+    ({'CONSOLE_ALLOWED_EMAILS': 'people-marker'}, 'CONSOLE_ALLOWED_EMAILS'),
+])
+def test_oidc_console_rules_reject_before_destination_private_or_source_writes(destination, changed, key):
+    root, request, files, live = destination
+    files['application/console.json'] = OIDC_SOURCE
+    files['application/configuration.json'] = json.dumps({'fields': OIDC_FIELDS}).encode()
+    request['archive'], request['binding']['transferred_source_digest'] = bundle(files)
+    request['settings'].update({'CONSOLE_USER_ID': 'owner@example.test',
+        'CONSOLE_OIDC_CLIENT_SECRET': 'client-secret-value', 'CONSOLE_ALLOWED_EMAILS': 'person@example.test',
+        **changed})
+    result = controller.handle(request)
+    assert result['error']['code'] == 'configuration-invalid'
+    assert [field['key'] for field in result['error']['fields']] == [key]
+    assert not root.exists()
+    assert 'marker' not in json.dumps(result) and 'client-secret-value' not in json.dumps(result)
+
+
 def test_console_destination_preserves_exact_password_and_validates_legacy_scalar_helper(destination):
     root, request, files, live = destination
     files['application/console.json'] = b'{"authentication":"local-password"}'

@@ -25,7 +25,7 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::callback_dispatcher::{CallbackRequestEnvelope, CallbackResponseHandoff};
 use crate::handlers::RpcResponseExt;
 use crate::protocol::{RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse};
-use crate::router::{MethodRouter, NotificationSink, RoutedRpcResponse};
+use crate::router::{MethodRouter, NotificationSink, ProcessDefaultRoute, RoutedRpcResponse};
 use crate::session_runtime::SessionRuntime;
 use crate::transport::{
     AdmittedJsonlMessage, BlockingWriter, JSONL_MAX_FRAME_BYTES, JSONL_SMALL_FRAME_BYTES,
@@ -1032,6 +1032,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     ///
     /// The server reads JSON-RPC requests from `reader`, dispatches them
     /// via the `MethodRouter`, and writes responses/notifications to `writer`.
+    /// Its connection becomes the runtime's process-default `session/event`
+    /// route ([`MethodRouter::new`]): build one server per runtime with it, or
+    /// serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     pub fn new(
         reader: R,
         writer: W,
@@ -1042,12 +1046,37 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     }
 
     /// Create a new RPC server with an optional skill runtime for introspection.
+    ///
+    /// As with [`Self::new`], build one server per runtime with it, or serve
+    /// several connections on one runtime with [`crate::serve_tcp_connection`].
     pub fn new_with_skill_runtime(
         reader: R,
         writer: W,
         runtime: Arc<SessionRuntime>,
         config_store: Arc<dyn ConfigStore>,
         skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    ) -> Result<Self, ServerError> {
+        Self::new_on_connection(
+            reader,
+            writer,
+            runtime,
+            config_store,
+            skill_runtime,
+            ProcessDefaultRoute::Install,
+        )
+    }
+
+    /// [`Self::new_with_skill_runtime`] for one connection of a server that
+    /// may hold several on the same runtime: `default_route` says whether
+    /// this connection also becomes the runtime's process-default
+    /// `session/event` route ([`MethodRouter::new`]).
+    fn new_on_connection(
+        reader: R,
+        writer: W,
+        runtime: Arc<SessionRuntime>,
+        config_store: Arc<dyn ConfigStore>,
+        skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+        default_route: ProcessDefaultRoute,
     ) -> Result<Self, ServerError> {
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let notification_sink = NotificationSink::new(notification_tx);
@@ -1071,9 +1100,14 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             crate::callback_dispatcher::CallbackRoute::new(callback_request_tx.clone());
         let callback_id_counter = callback_route.id_counter();
 
-        let router = MethodRouter::new(Arc::clone(&runtime), config_store, notification_sink)?
-            .with_skill_runtime(skill_runtime)
-            .with_callback_route(callback_route);
+        let router = MethodRouter::new_on_connection(
+            Arc::clone(&runtime),
+            config_store,
+            notification_sink,
+            default_route,
+        )?
+        .with_skill_runtime(skill_runtime)
+        .with_callback_route(callback_route);
         #[cfg(feature = "openai-live")]
         let router = router.with_experimental_live_public_observation_publisher(Arc::new(
             ExperimentalLiveRpcObservationPublisher {
@@ -1229,6 +1263,10 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
     /// `SessionRuntime::init_callback_channel()`. This ensures the callback channel
     /// exists before mob resume (so `ExternalToolsProvider` closures can read it),
     /// while the server owns the receiver for the `tool/execute` dispatch loop.
+    /// Like the process-default callback route, its connection becomes the
+    /// runtime's process-default `session/event` route: build one server per
+    /// runtime with it, or serve several connections on one runtime with
+    /// [`crate::serve_tcp_connection`].
     pub fn new_with_skill_runtime_and_mob_state(
         reader: R,
         writer: W,
@@ -1335,6 +1373,13 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // the connection is idle, preventing stale leaks.
         let mut callback_sweep = tokio::time::interval(tokio::time::Duration::from_secs(30));
         callback_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // A connection whose operator decides durable decisions presents to
+        // it each decision the runtime opens from now on, before the first
+        // request is read. A connection without an operator is told nothing.
+        // Dropping the handle (this future dropped included) stops the
+        // presentations.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        let decision_presentations = self.router.spawn_decision_presentations();
 
         let connection_result: Result<(), ServerError> = async {
             loop {
@@ -1619,15 +1664,28 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
         .await;
 
-        // The connection is closed. A governed pipe's consent scope retires
-        // here, first, so no eligibility observed for the pipe stays current
-        // while the handlers and sessions below drain.
+        // The connection is closed: it presents no opened decision any more.
+        // A presentation whose notice was not written records nothing, and
+        // a list or a decide waiting for the presentation's pass goes on.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        if let Some(presentations) = &decision_presentations {
+            presentations.abort();
+        }
+        // A governed pipe's consent scope retires next, before anything
+        // waits or drains, so no eligibility observed for the pipe stays
+        // current while the presentations end and the handlers and sessions
+        // below drain.
         #[cfg(feature = "local-authorization")]
         self.router.close_governed_connection();
         // So does the connection's operator for durable decisions: a decide
         // on it that commits from here is not eligible.
         #[cfg(all(unix, feature = "local-authorization"))]
         self.router.close_decision_operator();
+        // Only then does the connection wait for the presentations to end.
+        #[cfg(all(unix, feature = "local-authorization"))]
+        if let Some(presentations) = decision_presentations {
+            presentations.finished().await;
+        }
 
         // EOF or any read/write failure closes the response queue before we
         // return. Dispatch tasks that finish later receive a send error and
@@ -2161,7 +2219,10 @@ pub struct LiveWsConfig {
 ///
 /// The stream is split into read/write halves and wired directly into the
 /// generic `RpcServer`. The caller is responsible for the accept loop —
-/// this function handles exactly one connection lifetime.
+/// this function handles exactly one connection lifetime. The connection is
+/// one of the several a runtime may serve: it receives the `session/event`
+/// copies of the turns its own requests start and of the sessions it holds,
+/// and never becomes the runtime's process-default route.
 pub async fn serve_tcp_connection(
     stream: tokio::net::TcpStream,
     runtime: Arc<SessionRuntime>,
@@ -2207,12 +2268,17 @@ async fn serve_tcp_connection_with_options_and_admission(
 ) -> Result<(), ServerError> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
-    let mut server = RpcServer::new_with_skill_runtime(
+    // One of the connections a shared runtime serves: its turns' session/event
+    // copies reach it through its own requests and the sessions it holds,
+    // and it never becomes the runtime's process-default route, so another
+    // connection's turns never reach it.
+    let mut server = RpcServer::new_on_connection(
         reader,
         write_half,
         runtime,
         config_store,
         skill_runtime,
+        ProcessDefaultRoute::Leave,
     )?;
     if let Some(admission) = admission {
         server = server.with_rpc_request_admission(admission);
@@ -4439,16 +4505,16 @@ mod tests {
         use meerkat_core::approval::decision::{
             ApproverId, DecisionHoldRequest, DecisionKind, DecisionOperationId,
             DecisionPrincipalKey, DecisionRenderer, DecisionRendering, DecisionRequestBody,
-            DecisionRow, DecisionStore, DecisionSubjectKey, Sha256Digest,
+            DecisionRow, DecisionStore, DecisionSubjectKey, Sha256Digest, StoredDecision,
         };
         use meerkat_core::connection::RealmId;
         use meerkat_core::{
             Config, ConfigStore, MemoryConfigStore, PrincipalKind, PrincipalRef, TrustDomainId,
         };
-        use tokio::io::AsyncWriteExt as _;
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
         use crate::router::NotificationSink;
-        use crate::server::RpcServer;
+        use crate::server::{RpcServer, ServerError};
         use crate::session_runtime::SessionRuntime;
 
         /// A pipe that refuses every line written to it.
@@ -4567,6 +4633,337 @@ mod tests {
             assert_eq!(row.state.first_presented_to_approver_at_ms, None, "{row:?}");
             assert!(row.presentations.is_empty(), "{row:?}");
             drop(client);
+        }
+
+        /// The rendering the rows below hold.
+        const RENDERING: &str = "Release build 7 to production.";
+        /// How long a row waits for an answer or a notice the connection owes.
+        const NOTICE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+        /// How long a connection must stay silent before it counts as drained.
+        const QUIET: std::time::Duration = std::time::Duration::from_millis(500);
+
+        /// A runtime over the SQLite realm `decisions` under `root`, which
+        /// keeps durable decisions. Its stdio operator is this process's
+        /// operating-system user, acting for `operator`.
+        async fn decisions_runtime(root: &std::path::Path) -> Arc<SessionRuntime> {
+            let (_, bundle) = meerkat::open_realm_persistence_in(
+                root,
+                "decisions",
+                Some(meerkat_store::RealmBackend::Sqlite),
+                None,
+            )
+            .await
+            .expect("open the realm");
+            let runtime = Arc::new(
+                SessionRuntime::new(
+                    meerkat::AgentFactory::minimal(),
+                    Config::default(),
+                    4,
+                    bundle,
+                    NotificationSink::noop(),
+                )
+                .expect("compose the RPC session runtime"),
+            );
+            runtime.set_realm_context(
+                Some(RealmId::parse("decisions").expect("realm id")),
+                None,
+                None,
+            );
+            runtime
+        }
+
+        /// The hold of `subject` for `approver`, until far in the future.
+        fn hold_request(subject: &str, approver: &str) -> DecisionHoldRequest {
+            let requester = PrincipalRef::in_domain(
+                PrincipalKind::PersonalAgent,
+                "builder",
+                TrustDomainId::new("example.org").expect("trust domain"),
+            )
+            .expect("principal");
+            DecisionHoldRequest::new(
+                DecisionKind::new("release").expect("kind"),
+                DecisionSubjectKey::new(subject).expect("subject key"),
+                DecisionOperationId::new(format!("operation:{subject}")).expect("operation id"),
+                Sha256Digest::of(br#"{"build":7}"#),
+                DecisionRequestBody::from_value(&serde_json::json!({"build": 7}))
+                    .expect("request body"),
+                DecisionPrincipalKey::of(&requester).expect("principal key"),
+                ApproverId::new(approver).expect("approver id"),
+                u64::MAX / 2,
+                DecisionRendering::new(RENDERING).expect("rendering"),
+                DecisionRenderer::new("render.v1").expect("renderer"),
+            )
+        }
+
+        /// The params of the approving `decision/decide` of `held`.
+        fn decide_params(held: &StoredDecision) -> serde_json::Value {
+            serde_json::json!({
+                "decision_id": held.decision_id.to_string(),
+                "approve": true,
+                "presented_digest": held.descriptor.subject_digest.to_string(),
+            })
+        }
+
+        /// One connection of a shared runtime over an in-memory pipe, its
+        /// server loop running in a task. Every `decision/notice` it writes is
+        /// kept.
+        struct Client {
+            writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+            lines: tokio::io::Lines<
+                tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+            >,
+            next_id: u64,
+            notices: Vec<serde_json::Value>,
+            served: tokio::task::JoinHandle<Result<(), ServerError>>,
+        }
+
+        impl Client {
+            /// A connection of `runtime`, whose operator is this process's
+            /// operating-system user when `operator` is set. The connections
+            /// share the runtime: none shuts it down when it ends.
+            fn start(runtime: &Arc<SessionRuntime>, operator: bool) -> Self {
+                let (client, server_side) = tokio::io::duplex(1 << 16);
+                let (server_reader, server_writer) = tokio::io::split(server_side);
+                let config_store: Arc<dyn ConfigStore> = Arc::new(MemoryConfigStore::new(
+                    Config::default(),
+                    meerkat_models::canonical(),
+                ));
+                let mut server = RpcServer::new(
+                    tokio::io::BufReader::new(server_reader),
+                    server_writer,
+                    Arc::clone(runtime),
+                    config_store,
+                )
+                .expect("compose the server");
+                if operator {
+                    server = server.with_local_decision_operator();
+                }
+                server.skip_shutdown_on_eof = true;
+                let served = tokio::spawn(async move { server.run().await });
+                let (reader, writer) = tokio::io::split(client);
+                Self {
+                    writer,
+                    lines: tokio::io::BufReader::new(reader).lines(),
+                    next_id: 0,
+                    notices: Vec::new(),
+                    served,
+                }
+            }
+
+            /// The next line the server writes within `wait`, `None` when it
+            /// writes none.
+            async fn next_message(
+                &mut self,
+                wait: std::time::Duration,
+            ) -> Option<serde_json::Value> {
+                let line = tokio::time::timeout(wait, self.lines.next_line())
+                    .await
+                    .ok()?
+                    .expect("read the pipe")?;
+                let message: serde_json::Value = serde_json::from_str(&line).expect("a JSON line");
+                if message["method"] == "decision/notice" {
+                    self.notices.push(message["params"].clone());
+                }
+                Some(message)
+            }
+
+            /// Send one request and read up to its answer.
+            async fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+                self.next_id += 1;
+                let id = self.next_id;
+                let line = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                });
+                self.writer
+                    .write_all(format!("{line}\n").as_bytes())
+                    .await
+                    .expect("write the request");
+                loop {
+                    let message = self
+                        .next_message(NOTICE_DEADLINE)
+                        .await
+                        .unwrap_or_else(|| panic!("no answer to {method}"));
+                    if message["id"] == id {
+                        return message;
+                    }
+                }
+            }
+
+            /// Read what the server writes until it stays silent for
+            /// [`QUIET`].
+            async fn drain(&mut self) {
+                while self.next_message(QUIET).await.is_some() {}
+            }
+
+            /// The notice presenting `decision_id`, waiting for it if it has
+            /// not arrived yet.
+            async fn presented(&mut self, decision_id: &str) -> serde_json::Value {
+                let deadline = tokio::time::Instant::now() + NOTICE_DEADLINE;
+                loop {
+                    if let Some(notice) = self.notices.iter().find(|notice| {
+                        notice["decision_id"] == decision_id && notice["event"] == "presented"
+                    }) {
+                        return notice.clone();
+                    }
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    assert!(
+                        self.next_message(left).await.is_some(),
+                        "the connection presented no {decision_id}; its notices: {:?}",
+                        self.notices
+                    );
+                }
+            }
+
+            /// The decisions the `presented` notices named, in order.
+            fn presented_ids(&self) -> Vec<String> {
+                self.notices
+                    .iter()
+                    .filter(|notice| notice["event"] == "presented")
+                    .map(|notice| {
+                        notice["decision_id"]
+                            .as_str()
+                            .expect("a decision id")
+                            .to_owned()
+                    })
+                    .collect()
+            }
+
+            /// End the connection and wait for its server loop.
+            async fn close(self) {
+                drop(self.writer);
+                drop(self.lines);
+                let _ = tokio::time::timeout(NOTICE_DEADLINE, self.served).await;
+            }
+        }
+
+        /// A decision that opens while the operator's connection is open,
+        /// for an approver id the operator acts for, is presented to the
+        /// operator at once, without a list, and recorded under the notice's
+        /// id; the operator decides it without a list, and a later list
+        /// presents it no more. A decision held before the connection
+        /// started is presented by the client's first list, as before. A
+        /// second connection of the runtime, with no operator, is told
+        /// nothing and has no route to decide.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_decision_that_opens_is_presented_to_the_operator_at_once() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let runtime = decisions_runtime(root.path()).await;
+            let decisions = runtime.decision_service();
+            let earlier = decisions
+                .hold(hold_request("build-6", "operator"), false)
+                .expect("hold");
+            let mut operator = Client::start(&runtime, true);
+            let mut plain = Client::start(&runtime, false);
+            for client in [&mut operator, &mut plain] {
+                let initialized = client.call("initialize", serde_json::json!({})).await;
+                assert!(initialized.get("error").is_none(), "{initialized}");
+            }
+            // Starting presents nothing.
+            operator.drain().await;
+            assert!(operator.notices.is_empty(), "{:?}", operator.notices);
+
+            let opened = decisions
+                .hold(hold_request("build-7", "operator"), false)
+                .expect("hold");
+            let opened_id = opened.decision_id.to_string();
+            let notice = operator.presented(&opened_id).await;
+            assert_eq!(notice["approver_id"], "operator", "{notice}");
+            assert_eq!(notice["phase"], "open", "{notice}");
+            assert_eq!(notice["presentation"]["rendering"], RENDERING, "{notice}");
+
+            // The operator decides it without a list: the decide waits for
+            // the presentation in flight, and it was recorded under the
+            // notice's id.
+            let decided = operator
+                .call("decision/decide", decide_params(&opened))
+                .await;
+            assert_eq!(
+                decided["result"]["decision"]["phase"], "approved",
+                "{decided}"
+            );
+            let shown = decisions.get(&opened.decision_id).expect("read");
+            assert_eq!(shown.presentations.len(), 1, "{shown:?}");
+            assert_eq!(
+                shown.presentations[0].message_ref.as_str(),
+                notice["notice_id"],
+                "{shown:?}"
+            );
+            assert!(
+                shown.state.first_presented_to_approver_at_ms.is_some(),
+                "{shown:?}"
+            );
+            let listed = operator.call("decision/list", serde_json::json!({})).await;
+            assert!(listed.get("error").is_none(), "{listed}");
+            assert_eq!(
+                operator.presented_ids(),
+                vec![opened_id, earlier.decision_id.to_string()],
+                "{:?}",
+                operator.notices
+            );
+
+            plain.drain().await;
+            assert!(plain.notices.is_empty(), "{:?}", plain.notices);
+            let refused = plain.call("decision/decide", decide_params(&earlier)).await;
+            assert_eq!(refused["error"]["code"], -32601, "{refused}");
+
+            operator.close().await;
+            plain.close().await;
+            runtime.try_shutdown().await.expect("shut the runtime down");
+        }
+
+        /// An opening the operator may not see is not shown to it: a
+        /// decision for an approver id the operator does not act for, and
+        /// one in its review stage, get no notice and no presentation, and
+        /// the operator's decide of the first is refused.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_opening_the_operator_does_not_decide_is_not_presented() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let runtime = decisions_runtime(root.path()).await;
+            let decisions = runtime.decision_service();
+            let mut operator = Client::start(&runtime, true);
+            let initialized = operator.call("initialize", serde_json::json!({})).await;
+            assert!(initialized.get("error").is_none(), "{initialized}");
+
+            let owners = decisions
+                .hold(hold_request("build-8", "team:owners"), false)
+                .expect("hold");
+            let reviewer = PrincipalRef::in_domain(
+                PrincipalKind::SharedAgent,
+                "reviewer",
+                TrustDomainId::new("example.org").expect("trust domain"),
+            )
+            .expect("principal");
+            let in_review = decisions
+                .hold(
+                    hold_request("build-9", "operator")
+                        .with_reviewer(DecisionPrincipalKey::of(&reviewer).expect("key")),
+                    false,
+                )
+                .expect("hold");
+            operator.drain().await;
+            assert!(operator.notices.is_empty(), "{:?}", operator.notices);
+            for held in [&owners, &in_review] {
+                let row = decisions.get(&held.decision_id).expect("read");
+                assert!(row.presentations.is_empty(), "{row:?}");
+                assert_eq!(row.state.first_presented_to_approver_at_ms, None);
+            }
+            let refused = operator
+                .call("decision/decide", decide_params(&owners))
+                .await;
+            assert_eq!(
+                refused["error"]["data"],
+                serde_json::json!({
+                    "kind": "decision_refused",
+                    "decision_refusal": {"kind": "not_eligible"},
+                }),
+                "{refused}"
+            );
+
+            operator.close().await;
+            runtime.try_shutdown().await.expect("shut the runtime down");
         }
     }
 }

@@ -592,6 +592,7 @@ impl PlacedKickoffReconciler {
                             run_id: None,
                             objective_id: Some(intent.objective_id),
                             turn_input: None,
+                            requester: None,
                         },
                         ..Default::default()
                     },

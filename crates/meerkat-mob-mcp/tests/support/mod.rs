@@ -392,6 +392,35 @@ fn fixture_builder(
     Arc<meerkat_store::JsonlStore>,
     std::path::PathBuf,
 ) {
+    fixture_builder_with_config(root, client, meerkat::Config::default())
+}
+
+/// [`fixture_builder`] whose builds read `config` as the realm's config.
+fn fixture_builder_with_config(
+    root: &std::path::Path,
+    client: Arc<dyn LlmClient>,
+    config: meerkat::Config,
+) -> (
+    meerkat::FactoryAgentBuilder,
+    Arc<meerkat_store::JsonlStore>,
+    std::path::PathBuf,
+) {
+    fixture_builder_with_optional_client(root, Some(client), config)
+}
+
+/// [`fixture_builder_with_config`] with no client override when `client` is
+/// `None`: every build, and every in-place identity switch, then builds its
+/// LLM client from `config` (its realm bindings and self-hosted servers), as
+/// production does.
+fn fixture_builder_with_optional_client(
+    root: &std::path::Path,
+    client: Option<Arc<dyn LlmClient>>,
+    config: meerkat::Config,
+) -> (
+    meerkat::FactoryAgentBuilder,
+    Arc<meerkat_store::JsonlStore>,
+    std::path::PathBuf,
+) {
     let project_root = root.join("project-root");
     let context_root = root.join("context-root");
     for dir in [&project_root, &context_root] {
@@ -409,8 +438,8 @@ fn fixture_builder(
         .context_root(context_root)
         .builtins(false)
         .comms(true);
-    let mut builder = meerkat::FactoryAgentBuilder::new(factory, meerkat::Config::default());
-    builder.default_llm_client = Some(client);
+    let mut builder = meerkat::FactoryAgentBuilder::new(factory, config);
+    builder.default_llm_client = client;
     let store = Arc::new(meerkat_store::JsonlStore::new(root.join("sessions-jsonl")));
     builder.default_session_store = Some(Arc::new(meerkat_store::StoreAdapter::new(store.clone())));
     (builder, store, project_root)
@@ -624,6 +653,69 @@ pub fn agent_mob_tools_state(
     configure: impl FnOnce(MobMcpState) -> MobMcpState,
 ) -> Arc<MobMcpState> {
     let (builder, store, _project_root) = fixture_builder(root, client);
+    agent_mob_tools_state_over(builder, store, configure)
+}
+
+/// [`agent_mob_tools_state`] whose builds read `config` as the realm's
+/// config (its `[models.<id>]` entries, for one).
+pub fn agent_mob_tools_state_with_config(
+    root: &std::path::Path,
+    client: Arc<dyn LlmClient>,
+    config: meerkat::Config,
+    configure: impl FnOnce(MobMcpState) -> MobMcpState,
+) -> Arc<MobMcpState> {
+    let (builder, store, _project_root) = fixture_builder_with_config(root, client, config);
+    agent_mob_tools_state_over(builder, store, configure)
+}
+
+/// [`agent_mob_tools_state`] with no LLM client override: builds and
+/// in-place identity switches build their clients from `config`, so a test
+/// observes the provider requests on the endpoints `config` names. The
+/// mob state carries an in-memory WorkGraph service, so a helper whose build
+/// resolves WorkGraph on (a `minimal` delegate does) gets its namespace grant.
+pub fn agent_mob_tools_state_on_configured_providers(
+    root: &std::path::Path,
+    config: meerkat::Config,
+) -> Arc<MobMcpState> {
+    let (builder, store, _project_root) = fixture_builder_with_optional_client(root, None, config);
+    let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store;
+    // In-place identity switches need the session-LLM reconfigure host,
+    // which this composition installs as every product surface does.
+    let (service, runtime) =
+        meerkat::surface::build_runtime_backed_service_with_default_reconfigure_host(
+            builder,
+            32,
+            meerkat::PersistenceBundle::new(
+                store_dyn,
+                Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+                Arc::new(meerkat_store::MemoryBlobStore::default()),
+            )
+            .expect("persistence bundle"),
+            root.join("reconfigure-config-state.json"),
+        )
+        .expect("compose the runtime-backed service");
+    let state = Arc::new(
+        MobMcpState::new_with_runtime_adapter(service, Some(runtime), MobControlPrincipal::Owner)
+            .expect("mob state")
+            .with_workgraph_service(Some(meerkat::WorkGraphService::new(Arc::new(
+                meerkat::MemoryWorkGraphStore::new(),
+            )))),
+    );
+    *mob_tools_slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(
+        meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(Arc::clone(&state)),
+    ));
+    state
+}
+
+/// The runtime-backed composition of [`agent_mob_tools_state`] over `builder`.
+fn agent_mob_tools_state_over(
+    builder: meerkat::FactoryAgentBuilder,
+    store: Arc<meerkat_store::JsonlStore>,
+    configure: impl FnOnce(MobMcpState) -> MobMcpState,
+) -> Arc<MobMcpState> {
     let mob_tools_slot = Arc::clone(&builder.default_mob_tools);
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
     let (service, runtime) = meerkat::surface::build_runtime_backed_service(
@@ -1115,6 +1207,7 @@ pub fn participant_profile(description: &str) -> meerkat_mob::Profile {
         model: "claude-haiku-4-5-20251001".to_string(),
         provider: None,
         self_hosted_server_id: None,
+        auth_binding: None,
         image_generation_provider: None,
         auto_compact_threshold: None,
         resume_overrides: Vec::new(),

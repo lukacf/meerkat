@@ -586,6 +586,7 @@ fn definition() -> MobDefinition {
             model: MODEL.into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -725,6 +726,7 @@ impl Fixture {
         let grants = owner.grants();
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("controller"),
                 principal("agent"),
@@ -734,6 +736,7 @@ impl Fixture {
             .unwrap();
         let invocation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("invocation"),
                 principal("user"),
@@ -772,8 +775,17 @@ impl Fixture {
         let native = opened.as_mut().unwrap();
         let handle = native.mob_handle();
         let member = MemberIdentity::from(MEMBER);
+        // The identity label marks this spawn as the identity's member, as
+        // Meta marks its own: registering the identity then adopts the
+        // member as the identity's entry, where an unmarked one is refused
+        // as a worker holding the name.
         handle
-            .spawn_spec(SpawnMemberSpec::new("worker", member.clone()))
+            .spawn_spec(
+                SpawnMemberSpec::new("worker", member.clone()).with_labels(BTreeMap::from([(
+                    "agent_identity".to_owned(),
+                    MEMBER.to_owned(),
+                )])),
+            )
             .await
             .unwrap();
         let session = handle
@@ -848,7 +860,10 @@ impl Fixture {
             placement: None,
         };
         // Core already owns this spawned member and session; registration adds its roster spec.
-        runtime.register(member_spec.clone()).await;
+        runtime
+            .register(member_spec.clone())
+            .await
+            .expect("the identity registers");
         let status = runtime.status(&identity).await.unwrap();
         assert_eq!(status.state, IdentityLifecycleState::Active);
         assert_eq!(status.session_id, Some(session.clone()));
@@ -1709,6 +1724,7 @@ async fn controller_only_owner_refuses_operation_basis_before_persistence() {
     let grants = owner.grants();
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("controller"),
             principal("agent"),
@@ -1718,6 +1734,7 @@ async fn controller_only_owner_refuses_operation_basis_before_persistence() {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("operation"),
             principal("admin"),

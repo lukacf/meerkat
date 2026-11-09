@@ -12,8 +12,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use super::{
-    GovernedDispatchOperation, StepOwnerChangeWait, ToolDispatchContext, governed_malformed,
-    refuses_to_rebuild,
+    GovernedDispatchOperation, StepOwnerChangeWait, ToolDispatchContext, child_issuance_waits,
+    governed_malformed, refuses_to_rebuild,
 };
 use crate::ToolCallView;
 use crate::approval::review::{EnteredBasis, EnteredSteps, ReviewOwnerError, ReviewedEntryCustody};
@@ -344,7 +344,10 @@ impl EnteredDispatchOperation {
 
     /// [`Self::issue_child_if_current_within`], waiting out what refused it
     /// to rebuild, as [`Self::run_if_current_within_after_owner_change`]
-    /// does (site `tool_child_issuance`). An attempt that answers `Ok`
+    /// does (site `tool_child_issuance`), and a held admission fence of the
+    /// grant owner's store
+    /// ([`crate::authorization::ChildIssuanceAdmissionInProgress`]) the same
+    /// way. An attempt that answers `Ok`
     /// carries the grant owner's typed outcome, which callers must keep; an
     /// attempt that refused appended nothing, and the next one may recover
     /// or issue the intended child under its stable id. It never spends.
@@ -377,7 +380,7 @@ impl EnteredDispatchOperation {
     ) -> Result<Box<dyn std::any::Any + Send>, crate::ToolError> {
         loop {
             let answer = self.issue_child_if_current_within(further, intent);
-            if refuses_to_rebuild(&answer) && wait.again().await {
+            if child_issuance_waits(&answer) && wait.again().await {
                 continue;
             }
             return answer;

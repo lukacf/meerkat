@@ -24,6 +24,7 @@ fn targeted(
         owner
             .grants()
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 base,
                 id(&format!("{label}-{suffix}")),

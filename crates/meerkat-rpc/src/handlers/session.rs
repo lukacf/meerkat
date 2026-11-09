@@ -816,6 +816,10 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     if let Some(route) = callback_route {
         runtime.bind_session_callback_route(session_id.clone(), route);
     }
+    // The creating connection holds the session's session/event route: the
+    // turns no request waits on write their copies to it, and to no other
+    // connection.
+    runtime.hold_session_event_route(session_id.clone(), notification_sink.clone());
 
     // Immediate creates need a live runtime loop before the first turn starts.
     // Deferred creates register on-demand through the session/* router entry
@@ -889,9 +893,10 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         let skill_refs_for_turn = skill_refs.clone();
         let request_context_for_turn = request_context.clone();
         let initial_turn_overrides_for_turn = initial_turn_overrides.clone();
+        let connection_for_turn = notification_sink.clone();
         tokio::spawn(async move {
             let result = runtime_for_turn
-                .start_turn_via_runtime_with_request_context(
+                .start_turn_via_runtime_on_connection(
                     &sid_for_turn,
                     prompt_for_turn,
                     injected_context_for_turn,
@@ -901,6 +906,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
                     None,
                     initial_turn_overrides_for_turn,
                     request_context_for_turn,
+                    Some(connection_for_turn),
                     session_events,
                 )
                 .await;
@@ -959,7 +965,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
         }
     } else {
         match runtime
-            .start_turn_via_runtime_with_request_context(
+            .start_turn_via_runtime_on_connection(
                 &session_id,
                 params.prompt,
                 injected_context,
@@ -969,6 +975,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
                 None,
                 initial_turn_overrides,
                 request_context.clone(),
+                Some(notification_sink.clone()),
                 session_events,
             )
             .await
@@ -1460,6 +1467,34 @@ pub async fn handle_archive(
 
     match runtime.archive_session(&session_id).await {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"archived": true})),
+        Err(rpc_err) => RpcResponse::from_error(id, rpc_err),
+    }
+}
+
+/// Handle `session/compact`: ask a live session's next compaction check to
+/// compact, without a rebuild. A session with no live runtime in this
+/// process is refused, never loaded or woken.
+pub async fn handle_compact(
+    id: Option<RpcId>,
+    params: Option<&RawValue>,
+    runtime: &SessionRuntime,
+) -> RpcResponse {
+    let params: meerkat_contracts::CompactSessionParams = match parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp.with_id(id),
+    };
+    let session_id = match parse_session_id_for_runtime(id.clone(), &params.session_id, runtime) {
+        Ok(sid) => sid,
+        Err(resp) => return resp,
+    };
+    match runtime.request_compaction(&session_id).await {
+        Ok(receipt) => RpcResponse::success(
+            id,
+            meerkat_contracts::CompactSessionResult {
+                session_id: session_id.to_string(),
+                outcome: receipt.wire_outcome(),
+            },
+        ),
         Err(rpc_err) => RpcResponse::from_error(id, rpc_err),
     }
 }

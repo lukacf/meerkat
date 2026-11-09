@@ -217,11 +217,21 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         use meerkat_toolkit::host_lifetime::control::{
             HostCloseReason, HostCloseState, PrivateHostLifetimeControl,
         };
+        // The product's close order: custody recovery stops as the close
+        // begins, and its last round is joined, within the product's bound,
+        // before the native join and the final release. A test that joins
+        // the recovery itself checks its result; the close only waits for it.
+        self.source.stop_custody_recovery();
         let close = self
             ._lifetime
             .begin_close_activation(HostCloseReason::Shutdown)
             .map_err(|error| error.to_string());
         let native = self.shutdown().await;
+        let _recovery = tokio::time::timeout(
+            crate::host_gateway::CLOSE_JOIN_BOUND,
+            self.source.join_custody_recovery(),
+        )
+        .await;
         let local = match close {
             Ok(close) => self
                 ._lifetime
@@ -235,7 +245,13 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         if local.state != HostCloseState::Settled {
             return Err(format!("host close: {local:?}"));
         }
-        Ok(())
+        // Every join of this host returned, its custody recovery's, its
+        // native runtime's and its lifetime's: the close's final release
+        // ends the native custody.
+        self._lifetime
+            .release_native_custody()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub(super) async fn publish_fixture_controller(
@@ -624,8 +640,14 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
             None
         } else {
             let member = MemberIdentity::from(MEMBER);
+            // The identity label marks this spawn as the identity's member, as
+            // Meta marks its own: registering the identity then adopts the
+            // member as the identity's entry, where an unmarked one is refused
+            // as a worker holding the name.
             handle
-                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()))
+                .spawn_spec(SpawnMemberSpec::new("worker", member.clone()).with_labels(
+                    BTreeMap::from([("agent_identity".to_owned(), MEMBER.to_owned())]),
+                ))
                 .await
                 .unwrap();
             let session = handle
@@ -696,7 +718,10 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         }
         if let Some(session) = &live_session {
             // Core already owns this spawned member and session; registration adds its roster spec.
-            runtime.register(member_spec.clone()).await;
+            runtime
+                .register(member_spec.clone())
+                .await
+                .expect("the identity registers");
             let status = runtime.status(&identity).await.unwrap();
             assert_eq!(status.state, IdentityLifecycleState::Active);
             assert_eq!(status.session_id, Some(session.clone()));

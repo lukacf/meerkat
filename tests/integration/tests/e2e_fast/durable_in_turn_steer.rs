@@ -511,6 +511,7 @@ fn steer_header(source: meerkat_runtime::InputOrigin) -> meerkat_runtime::InputH
         idempotency_key: None,
         supersession_key: None,
         correlation_id: None,
+        requester: None,
     }
 }
 

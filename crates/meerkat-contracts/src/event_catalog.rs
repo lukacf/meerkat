@@ -70,4 +70,14 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     // `tool_name`) with `kept_bytes` and `total_bytes`, and the limit it did
     // not fit with them whole (`axis`: `request_bytes` or `context_window`).
     "tool_results_bounded_for_request",
+    // The compaction check that consumed a host's compaction request
+    // (`session/compact`, `mob/compact_member`) compacted nothing: the run
+    // id and the reason (`first_model_request` or `nothing_to_fold`).
+    "requested_compaction_skipped",
+    // An operator-instruction entry of the session was applied: a run-start
+    // delta once its run starts, or a compaction's snapshot once it commits.
+    // `entry_sequence`, `kind` (`delta` or `snapshot`), the applying `run_id`,
+    // the `active` set after the entry and a delta's `changes`. An
+    // observation: the session's instruction status read is the authority.
+    "operator_instructions_applied",
 ];

@@ -66,6 +66,7 @@ pub fn canonical_machine_schemas() -> Vec<MachineSchema> {
         dsl::dsl_temporary_council_lifecycle_machine(),
         dsl::dsl_tool_grant_lifecycle_machine(),
         dsl::dsl_mob_store_restore_lifecycle_machine(),
+        dsl::dsl_host_store_writer_fence_machine(),
     ]
 }
 
@@ -184,6 +185,11 @@ pub fn canonical_machine_production_owner_relations() -> Vec<MachineProductionOw
             "MobStoreRestoreLifecycleMachine",
             dsl::MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_CRATE,
             dsl::MOB_STORE_RESTORE_LIFECYCLE_PRODUCTION_RUST_MODULE,
+        ),
+        MachineProductionOwnerRelation::new(
+            "HostStoreWriterFenceMachine",
+            dsl::HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_CRATE,
+            dsl::HOST_STORE_WRITER_FENCE_PRODUCTION_RUST_MODULE,
         ),
     ]
 }

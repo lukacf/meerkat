@@ -115,12 +115,27 @@ async fn persistent_gateway_runtime(
 
 /// [`persistent_gateway_runtime`] over the state directory `state`, which a
 /// later runtime composed over the same directory restores.
-async fn persistent_gateway_runtime_in(
+pub(super) async fn persistent_gateway_runtime_in(
     state: &std::path::Path,
     mob_id: &str,
     mob_header: &str,
     tail: &str,
 ) -> Result<MobRuntime, Box<dyn std::error::Error + Send + Sync>> {
+    let (runtime, _session_store) =
+        persistent_gateway_runtime_and_store_in(state, mob_id, mob_header, tail).await?;
+    Ok(runtime)
+}
+
+/// [`persistent_gateway_runtime_in`] with the session store its runtime
+/// persists through: the store a runtime with agent memory hands its
+/// distiller and its steward as their transcript source.
+pub(super) async fn persistent_gateway_runtime_and_store_in(
+    state: &std::path::Path,
+    mob_id: &str,
+    mob_header: &str,
+    tail: &str,
+) -> Result<(MobRuntime, Arc<dyn meerkat::SessionStore>), Box<dyn std::error::Error + Send + Sync>>
+{
     use crate::storage_layout::MetaStorageLayout;
 
     let layout = MetaStorageLayout::with_injected_roots(state.to_path_buf(), None);
@@ -134,7 +149,12 @@ async fn persistent_gateway_runtime_in(
             .await
             .map_err(|error| error.to_string())?;
     spec.options.default_llm_client = Some(Arc::new(TestClient::default()));
-    Ok(Box::pin(MobRuntime::bootstrap(spec)).await?)
+    let session_store = spec
+        .durable_session_store
+        .clone()
+        .ok_or("a persistent runtime keeps a durable session store")?;
+    let runtime = Box::pin(MobRuntime::bootstrap(spec)).await?;
+    Ok((runtime, session_store))
 }
 
 fn request(method: &str, params: Value) -> JsonRpcRequest {
@@ -340,6 +360,8 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
             crate::side_chat::SideChatLineage {
                 source_identity: "alpha".to_string(),
                 source_session_id: source_session_id.clone(),
+                creator: None,
+                private_to: None,
             },
         )]),
         "the roster's fork facts name the side chat's source and the session it was forked from"
@@ -2789,5 +2811,342 @@ async fn a_member_list_call_reads_no_fork_facts_of_its_own() -> TestResult {
         0,
         "the list call takes the side chats' lineages from its access priming"
     );
+    Ok(())
+}
+
+/// The roster label a side chat names who opened it in.
+const CREATOR: &str = "side_chat_creator";
+/// The person who opens the side chats below.
+const ALICE: &str = "alice@example.test";
+/// A principal a label names that no fork wrote.
+const MALLORY: &str = "mallory@example.test";
+
+/// An access rule `id` that denies `subject` every agent action on the
+/// agents whose labels name `creator` as a side chat's creator.
+fn deny_created_by(id: &str, subject: &str, creator: &str) -> AccessRule {
+    AccessRule {
+        id: id.to_string(),
+        effect: crate::access::AccessEffect::Deny,
+        subjects: vec![subject.to_string()],
+        actions: vec!["agent.*".to_string()],
+        match_labels: BTreeMap::from([(CREATOR.to_string(), creator.to_string())]),
+        ..AccessRule::default()
+    }
+}
+
+/// A side chat records who opened it: the fork writes the caller's console
+/// principal next to the source it names, the fork's answer reports it, and
+/// the console's member rows, stream events and access priming carry it.
+/// A fork by a caller without a principal records none, even when the
+/// source carries a creator label of its own (a fork copies the source's
+/// application labels).
+#[tokio::test]
+async fn a_side_chat_records_its_creator() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-creator", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[(CREATOR, MALLORY)]).await?;
+    let controller = enforced(vec![
+        grant(
+            "alice-drives-the-source",
+            ALICE,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
+        grant(
+            "alice-names-the-side-chat",
+            ALICE,
+            &[ACTION_AGENT_SPAWN],
+            "alpha-side",
+        ),
+        grant(
+            "the-watcher-reads-the-source",
+            "watcher@example.test",
+            &[ACTION_AGENT_VIEW],
+            "alpha",
+        ),
+        deny_created_by("not-alices-side-chats", "watcher@example.test", ALICE),
+    ])?;
+
+    let forked = fork_as(&runtime, &controller, ALICE, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+    assert_eq!(
+        forked["result"]["creator"],
+        json!(ALICE),
+        "the fork reports who opened the side chat: {forked:#?}"
+    );
+    let side = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-side"))
+        .await?
+        .ok_or("the side chat is seated")?;
+    assert_eq!(
+        side.labels.get(CREATOR).map(String::as_str),
+        Some(ALICE),
+        "the roster names the creator next to the source"
+    );
+
+    // An anonymous fork of the same source records no creator: the source's
+    // own label does not follow it.
+    let anonymous = fork_when_idle(&runtime, "alpha", "alpha-anonymous").await;
+    assert!(
+        anonymous["error"].is_null(),
+        "the anonymous fork succeeds: {anonymous:#?}"
+    );
+    assert!(
+        anonymous["result"]["creator"].is_null(),
+        "a caller without a principal is recorded as no creator: {anonymous:#?}"
+    );
+    let anonymous_side = runtime
+        .handle()
+        .get_member(&AgentIdentity::from("alpha-anonymous"))
+        .await?
+        .ok_or("the anonymous side chat is seated")?;
+    assert_ne!(
+        anonymous_side.labels.get(CREATOR).map(String::as_str),
+        Some(MALLORY),
+        "the source's creator label does not follow the fork"
+    );
+
+    // The console's member rows.
+    let (snapshot, _) = Box::pin(build_live_snapshot(
+        &runtime,
+        &[],
+        None,
+        &AllowAllConsoleVisibilityPolicy,
+        &ConsoleSnapshotReadModel::default(),
+        None,
+    ))
+    .await;
+    let row_creator = |member: &str| {
+        snapshot
+            .members
+            .iter()
+            .find(|row| row.agent_identity == member)
+            .map(|row| row.labels.get(CREATOR).cloned())
+            .unwrap_or_else(|| panic!("{member} is a console member"))
+    };
+    assert_eq!(row_creator("alpha-side").as_deref(), Some(ALICE));
+    assert_eq!(row_creator("alpha-anonymous"), None);
+    assert_eq!(
+        row_creator("alpha"),
+        None,
+        "a creator label on a member no fork made is no creator"
+    );
+
+    // Stream events, by the exact authority of the incarnation that emits
+    // them.
+    assert_eq!(
+        event_attributes(&runtime, "alpha-side")
+            .await?
+            .labels
+            .get(CREATOR)
+            .map(String::as_str),
+        Some(ALICE)
+    );
+    assert_eq!(
+        event_attributes(&runtime, "alpha-anonymous")
+            .await?
+            .labels
+            .get(CREATOR),
+        None
+    );
+
+    // Every route's access priming: a deny over the creator label hides
+    // Alice's side chat and nothing else.
+    prime_access_cache_from_runtime(&runtime, &controller).await;
+    let watcher = controller.view_for_subject(Some("watcher@example.test"));
+    assert!(watcher.can_view_agent("alpha"));
+    assert!(
+        watcher.can_view_agent("alpha-anonymous"),
+        "a side chat without a creator is not Alice's"
+    );
+    assert!(
+        !watcher.can_view_agent("alpha-side"),
+        "the access rules read the creator a fork recorded"
+    );
+    Ok(())
+}
+
+/// A creator label counts only on a side chat a fork made: a member that
+/// carries one from its spawn shows none on the console's member rows, its
+/// stream events or the access priming, so a rule over the label neither
+/// hides it nor names it.
+#[tokio::test]
+async fn a_creator_label_no_fork_wrote_counts_nowhere() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-forged-creator", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    Box::pin(
+        runtime.handle().spawn_spec(
+            SpawnMemberSpec::new("worker", AgentIdentity::from("forger"))
+                .with_labels(BTreeMap::from([(CREATOR.to_string(), MALLORY.to_string())])),
+        ),
+    )
+    .await?;
+
+    let (snapshot, _) = Box::pin(build_live_snapshot(
+        &runtime,
+        &[],
+        None,
+        &AllowAllConsoleVisibilityPolicy,
+        &ConsoleSnapshotReadModel::default(),
+        None,
+    ))
+    .await;
+    let forger_row = snapshot
+        .members
+        .iter()
+        .find(|row| row.agent_identity == "forger")
+        .ok_or("the forger is a console member")?;
+    assert_eq!(
+        forger_row.labels.get(CREATOR),
+        None,
+        "a creator label no fork wrote is no creator on the member rows"
+    );
+    assert_eq!(
+        event_attributes(&runtime, "forger")
+            .await?
+            .labels
+            .get(CREATOR),
+        None,
+        "nor on stream events"
+    );
+
+    let controller = enforced(vec![
+        grant(
+            "the-watcher-reads-everything",
+            "watcher@example.test",
+            &[ACTION_AGENT_VIEW],
+            "*",
+        ),
+        deny_created_by("not-mallorys", "watcher@example.test", MALLORY),
+    ])?;
+    prime_access_cache_from_runtime(&runtime, &controller).await;
+    let watcher = controller.view_for_subject(Some("watcher@example.test"));
+    assert!(
+        watcher.can_view_agent("forger"),
+        "a forged creator label hides nothing"
+    );
+    Ok(())
+}
+
+/// `GET /console/experience` on `router` as the caller `token` signs in.
+async fn experience_as(router: &axum::Router, token: &str) -> Value {
+    use tower::ServiceExt;
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/console/experience")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .expect("experience request"),
+        )
+        .await
+        .expect("experience response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1 << 24)
+        .await
+        .expect("experience body");
+    serde_json::from_slice(&body).expect("experience json")
+}
+
+/// A side chat's creator is someone's principal: the console shows it to
+/// that person and to access admins, and clears it for every other viewer
+/// of the side chat, on the member list and in the experience. The viewer
+/// still sees the side chat and its source.
+#[tokio::test]
+async fn side_chat_creator_hidden_from_other_viewers() -> TestResult {
+    use super::console_human_admission_tests::{BOB, state};
+    use super::console_token_lapse_tests::{console_rpc_as, human_claims, now_seconds, token};
+    const ROOT: &str = "root@example.test";
+    const ROBOT: &str = "svc:robot";
+
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-creator-viewers", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[]).await?;
+    let controller = enforced(vec![
+        grant(
+            "bob-drives-the-source",
+            BOB,
+            &[ACTION_AGENT_VIEW, ACTION_AGENT_SEND],
+            "alpha",
+        ),
+        grant(
+            "bob-names-the-side-chat",
+            BOB,
+            &[ACTION_AGENT_SPAWN],
+            "alpha-side",
+        ),
+        grant(
+            "the-robot-reads-the-source",
+            ROBOT,
+            &[ACTION_AGENT_VIEW],
+            "alpha",
+        ),
+    ])?;
+    let forked = fork_as(&runtime, &controller, BOB, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+
+    let mut console = state();
+    console
+        .decisions
+        .auth
+        .email_allowlist
+        .push(ROOT.to_string());
+    let router = console_json_router_with_state(ConsoleJsonState {
+        runtime: Some(runtime.clone()),
+        access: Some(controller.clone()),
+        ..console
+    });
+    let expires = Some(now_seconds() + 3600);
+    let viewers = [
+        ("the creator", token(human_claims(), expires), Some(BOB)),
+        (
+            "an access admin",
+            token(
+                json!({ "sub": "oidc-sub-root", "email": ROOT, "provider": "google_oauth" }),
+                expires,
+            ),
+            Some(BOB),
+        ),
+        (
+            "another viewer",
+            token(json!({ "email": ROBOT }), expires),
+            None,
+        ),
+    ];
+    for (viewer, token, creator) in &viewers {
+        let listed = console_rpc_as(&router, Some(token), "meta/list_members", json!({})).await;
+        let row = listed["result"]
+            .as_array()
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    row["agent_identity"] == json!("alpha-side")
+                        || row["member_id"] == json!("alpha-side")
+                })
+            })
+            .unwrap_or_else(|| panic!("{viewer} lists the side chat: {listed:#}"));
+        assert_eq!(
+            row["labels"][CREATOR].as_str(),
+            *creator,
+            "{viewer}'s member list: {row:#}"
+        );
+
+        let experience = experience_as(&router, token).await;
+        let rows = experience["agent_sidebar"]["live_snapshot"]["agents"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let side_chat = sidebar_row(&rows, "alpha-side")
+            .unwrap_or_else(|| panic!("{viewer} sees the side chat: {experience:#}"));
+        assert_eq!(side_chat["side_chat_of"], json!("alpha"), "{viewer}");
+        assert_eq!(
+            side_chat["labels"][CREATOR].as_str(),
+            *creator,
+            "{viewer}'s experience: {side_chat:#}"
+        );
+    }
     Ok(())
 }

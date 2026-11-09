@@ -22,8 +22,10 @@ async function audit(fixture) {
   assert(Array.isArray(response.body.result?.entries), JSON.stringify(response));
   return response.body.result.entries;
 }
-const decide = (fixture, id, decision = "approve", approver = "fixture-operator") => rpc(fixture.baseUrl, "meta/gating/decide", {
-  pending_id: id, approver_id: approver, decision, reason: "Reviewed the complete owner request",
+// The console decides as the signed-in person: fixtures started with
+// `person: true` sign every proxied request in, and no request names an approver.
+const decide = (fixture, id, decision = "approve") => rpc(fixture.baseUrl, "meta/gating/decide", {
+  pending_id: id, decision, reason: "Reviewed the complete owner request",
 });
 function accessDenied(response) {
   assert.equal(response.body.error?.code, -32030, JSON.stringify(response));
@@ -55,14 +57,14 @@ async function capture(page, name) {
 }
 async function withApi(name, run) {
   requirePrebuilt();
-  const fixture = await startFixture();
+  const fixture = await startFixture({ person: true });
   try { await run(fixture); await writeEvidence(name, fixture); }
   catch (error) { await writeEvidence(`${name}-failure`, fixture, { error: String(error) }).catch(() => {}); throw error; }
   finally { await fixture.close(); }
 }
 async function withBrowser(name, run) {
   requirePrebuilt();
-  const fixture = await startFixture();
+  const fixture = await startFixture({ person: true });
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
   page.setDefaultTimeout(20_000);
@@ -83,29 +85,29 @@ async function withBrowser(name, run) {
 async function ownerRestart() {
   requirePrebuilt();
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "meta-approval-owner-"));
-  let fixture = await startFixture({ stateDir });
+  let fixture = await startFixture({ stateDir, person: true });
   try {
     const origin = { identity: "router:main", interaction_id: "review-interaction", conversation_id: "release-review" };
     const created = await fixture.control("approval", { ...origin, action: "Publish the reviewed workgraph report" });
     assert(created.pending_id, JSON.stringify(created));
     const first = await rpc(fixture.baseUrl, "meta/gating/pending");
     assert.deepEqual(first.body.result.pending[0].origin, origin);
-    await fixture.close(); fixture = await startFixture({ stateDir });
+    await fixture.close(); fixture = await startFixture({ stateDir, person: true });
     const restored = await rpc(fixture.baseUrl, "meta/gating/pending");
     assert.deepEqual(restored.body.result.pending[0], first.body.result.pending[0]);
     const escalated = await rpc(fixture.baseUrl, "meta/gating/decide", {
-      pending_id: created.pending_id, approver_id: "fixture-operator", decision: "escalate", reason: "Second reviewer required",
+      pending_id: created.pending_id, decision: "escalate", reason: "Second reviewer required",
     });
     assert(escalated.body.result.next_pending_id, JSON.stringify(escalated.body));
-    await fixture.close(); fixture = await startFixture({ stateDir });
+    await fixture.close(); fixture = await startFixture({ stateDir, person: true });
     const successor = (await rpc(fixture.baseUrl, "meta/gating/pending")).body.result.pending[0];
     assert.equal(successor.pending_id, escalated.body.result.next_pending_id);
     assert.deepEqual(successor.origin, origin);
     const decided = await rpc(fixture.baseUrl, "meta/gating/decide", {
-      pending_id: successor.pending_id, approver_id: "fixture-operator", decision: "approve", reason: "Reviewed complete request",
+      pending_id: successor.pending_id, decision: "approve", reason: "Reviewed complete request",
     });
     assert.equal(decided.body.result.outcome, "allowed", JSON.stringify(decided.body));
-    await fixture.close(); fixture = await startFixture({ stateDir });
+    await fixture.close(); fixture = await startFixture({ stateDir, person: true });
     assert.deepEqual((await rpc(fixture.baseUrl, "meta/gating/pending")).body.result.pending, []);
     const audit = (await rpc(fixture.baseUrl, "meta/gating/audit", { limit: 100 })).body.result.entries;
     assert(audit.some(item => item.detail?.origin?.interaction_id === origin.interaction_id));
@@ -120,7 +122,7 @@ async function ownerRestart() {
 async function lateApprovalGeometry(host) {
   requirePrebuilt();
   const geometry = require("./real-conversation.cjs").geometry;
-  const fixture = await startFixture();
+  const fixture = await startFixture({ person: true });
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
   const monitor = geometry.browserErrors(page);
@@ -273,6 +275,15 @@ async function accessMatrix() {
 
     await fixture.control("access", { mode: "open" });
     assert.equal((await pending(fixture)).length, 3, "access filtering never deletes the hidden request");
+    // Only a signed-in person decides: an anonymous caller (the backend
+    // directly, without the proxy's sign-in) and a request that names an
+    // approver are refused, and nothing is decided.
+    const anonymous = await rpc(fixture.backendUrl, "meta/gating/decide", { pending_id: publicRequest.pending_id, decision: "approve" });
+    assert.equal(anonymous.body.error?.code, -32057, JSON.stringify(anonymous));
+    assert.equal(anonymous.body.error?.data?.kind, "approver_unauthenticated", JSON.stringify(anonymous));
+    const named = await rpc(fixture.baseUrl, "meta/gating/decide", { pending_id: publicRequest.pending_id, approver_id: fixture.personPrincipal, decision: "approve" });
+    assert.equal(named.body.error?.code, -32602, JSON.stringify(named));
+    assert.equal((await pending(fixture)).length, 3, "refused decisions leave every request pending");
     decisionResult(await decide(fixture, publicRequest.pending_id), publicRequest.pending_id, "approve");
     decisionResult(await decide(fixture, privateRequest.pending_id, "reject"), privateRequest.pending_id, "reject");
     decisionResult(await decide(fixture, originless.pending_id, "reject"), originless.pending_id, "reject");
@@ -294,14 +305,19 @@ async function ownerEdges() {
     assert.deepEqual(successor.origin, origin);
     assert((await decide(fixture, created.pending_id)).body.error, "the predecessor cannot be decided twice");
 
-    // The fixture routes escalations to the fixture operator, so the successor's
-    // eligible approver is that operator: the race is between two of its decisions.
-    const competitors = await Promise.all([decide(fixture, successor.pending_id, "approve", "fixture-operator"), decide(fixture, successor.pending_id, "reject", "fixture-operator")]);
+    // The fixture routes escalations to the fixture person, so the successor's
+    // eligible approver is that person: the race is between two of its decisions.
+    const competitors = await Promise.all([decide(fixture, successor.pending_id, "approve"), decide(fixture, successor.pending_id, "reject")]);
     assert.equal(competitors.filter(result => result.body.result).length, 1, "exactly one competing decision wins");
     assert.equal(competitors.filter(result => result.body.error).length, 1);
     assert.deepEqual(await pending(fixture), []);
     const settledAudit = await audit(fixture);
-    assert.equal(settledAudit.filter(item => item.pending_id === successor.pending_id && ["approval_decided", "rejection_decided"].includes(item.event_type)).length, 1);
+    const settled = settledAudit.filter(item => item.pending_id === successor.pending_id && ["approval_decided", "rejection_decided"].includes(item.event_type));
+    assert.equal(settled.length, 1);
+    // The decision records who decided and how the console knew it, never the token.
+    assert.equal(settled[0].detail.deciding_principal, fixture.personPrincipal, JSON.stringify(settled[0]));
+    assert.equal(settled[0].detail.deciding_assurance, "person_authenticated", JSON.stringify(settled[0]));
+    assert.match(settled[0].detail.login_scope_digest, /^sha256:[0-9a-f]{64}$/, JSON.stringify(settled[0]));
 
     const expiring = await fixture.control("approval", { ...origin, timeout_ms: 1000, action: "Review before the owner deadline" });
     assert((await pending(fixture)).some(item => item.pending_id === expiring.pending_id));
@@ -336,12 +352,17 @@ async function accessRevocation(host) {
       // The explicit inbox must explain that state after Needs you disappears.
       await page.getByTestId("nav:gating").click();
       await page.getByText("Approvals are not available for this connection", { exact: true }).waitFor();
-      const capabilityReads = fixture.observations.filter(item => {
-        try { return JSON.parse(item.request || "{}").method === "meta/capabilities"; }
-        catch { return false; }
-      });
-      const advertised = JSON.parse(capabilityReads.at(-1)?.response || "{}").result?.methods;
-      assert(Array.isArray(advertised), "revocation captured the advertised capabilities");
+      // The fixture's proxy records an exchange when its request starts and
+      // fills in the response as it arrives, so the newest capabilities read
+      // can still be in flight here: wait until it holds a whole response.
+      const advertised = await eventually(() => {
+        const capabilityReads = fixture.observations.filter(item => {
+          try { return JSON.parse(item.request || "{}").method === "meta/capabilities"; }
+          catch { return false; }
+        });
+        const methods = JSON.parse(capabilityReads.at(-1)?.response || "{}").result?.methods;
+        return Array.isArray(methods) && methods;
+      }, "revocation captured the advertised capabilities");
       assert(!advertised.includes("meta/gating/pending"), "revocation removes the read capability before dispatch");
       assert.equal(await page.getByText("No pending approvals.", { exact: true }).count(), 0, "unsupported is not an empty success");
     }

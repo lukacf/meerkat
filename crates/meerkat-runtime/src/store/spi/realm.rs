@@ -21,7 +21,13 @@
 //!
 //! # Fencing
 //!
-//! The realm keeps the writer rules of [`meerkat_core::host_store`]:
+//! The realm keeps the writer rules of [`meerkat_core::host_store`]. Their
+//! lifecycle facts (the writer's phase, the token it commits with, the grant
+//! it has not installed, the acquires it gave up on, the holder it waits out,
+//! and why it stopped or lost the realm) belong to the realm's
+//! `HostStoreWriterFenceMachine` ([`super::writer_fence`]): the realm reports
+//! each store answer and each fact of its clock as an input, and does what
+//! the machine decides.
 //!
 //! - Open acquires with [`AcquireMode::Exclusive`] by default: a live holder
 //!   answers [`SpiError::Held`] with what remains of its lease. After an
@@ -39,7 +45,31 @@
 //!   before it does. Another live holder, or a foreign batch, poisons the
 //!   realm. Renews and re-acquires never overlap, and a re-acquire runs on
 //!   a task of its own, so a dropped caller never leaves a granted token
-//!   unrecorded.
+//!   unrecorded. A grant whose listing fails stays this writer's own: the
+//!   next re-acquire meets it as the holder and takes its lease over. A
+//!   re-acquire compares only with what the open's listing installed: the
+//!   open holds the gate a re-acquire takes until that listing is in place,
+//!   and the re-acquire of a realm whose open failed before it neither
+//!   acquires nor lists. Both listings run after their acquire returned,
+//!   once per grant: the four scope kinds at once, each kind's pages in
+//!   order, and a failed page fails the whole listing.
+//! - **An acquire the realm gave up on** (it runs under the realm's acquire
+//!   timeout) may still be granted by a store that completes a request its
+//!   caller dropped: a token this writer never recorded then holds the fence.
+//!   So while an acquire of this writer timed out since its last grant, a
+//!   holder it does not know may be its own: it waits out that holder's
+//!   recorded lease, making no acquire before it ends, and acquires again.
+//!   The same holder still holding after that end, its lease moved later by
+//!   more than one renew interval, renewed it, and only a live writer
+//!   renews: that poisons the realm, as a foreign batch in the listing does.
+//!   One whose lease did not move was renewed by nobody (a store that answers
+//!   the remaining lease rounded down makes the recorded end early): it is
+//!   waited out again. A remaining lease is capped at the declared lease.
+//!   With no timed-out acquire, an unknown holder poisons at once.
+//! - **Token order:** a re-acquire's grant must answer a token above the one
+//!   the writer holds, as every grant must answer a token above every earlier
+//!   one. A grant at or below it breaks the store's token order: the realm is
+//!   poisoned with a cause that names the store, not another writer.
 //! - **Self-fence on the local clock:** a mutation runs only while the last
 //!   renew did not fail and the last successful acquire or renew *started*
 //!   less than the lease minus the host-declared margin ago
@@ -63,12 +93,48 @@
 //! reopens the realm. A fence loss poisons the whole realm. An unknown
 //! outcome is always settled (by retrying the same batch, or by reading the
 //! head's commit id) before a scope's next version is written, and a
-//! poisoned scope writes no next version at all. A batch whose outcome stays
-//! unknown is remembered as such, so a later re-acquire does not read it as
-//! another writer's. The realm keeps every poisoned scope with its cause
-//! ([`SpiRealm::poisoned_scopes`]), and a read across many scopes refuses
-//! only while a scope of a family it reads is poisoned
-//! ([`SpiRealm::check_cross_scope_read_of`]).
+//! poisoned scope writes no next version at all. A batch is sent, the first
+//! time or again, only while the realm holds its fence and before the
+//! self-fence deadline of the token it carries; a settle still unknown at
+//! that deadline stops there, typed ([`SpiError::UnsettledAtFenceWindow`]),
+//! and poisons its scopes like any batch whose outcome stays unknown. A
+//! settle whose retry budget runs out first stops typed as well
+//! ([`SpiError::UnsettledPastRetryBudget`]). A
+//! batch whose outcome stays unknown is remembered as such, so a later
+//! re-acquire does not read it as another writer's. The realm keeps every
+//! poisoned scope with its cause ([`SpiRealm::poisoned_scopes`]), and a read
+//! across many scopes refuses only while a scope of a family it reads is
+//! poisoned ([`SpiRealm::check_cross_scope_read_of`]).
+//!
+//! # Containment
+//!
+//! A store that meets obligation 4 at load answers a typed conflict for a
+//! scope two batches hold one version of, and its listings report such a
+//! scope per scope ([`HeadPage::conflicts`]). The realm quarantines that
+//! scope instead of failing: the open records each conflict its listing
+//! reports and opens the rest, and a load that meets a conflict records it
+//! then (a chunk's conflict under the chunk's name and under its owner's
+//! key). A quarantined scope is never in the baseline a re-acquire compares
+//! with. It refuses every call ([`SpiError::ScopeQuarantined`], whose cause
+//! names each conflicted incarnation and the repair), every read across its
+//! family refuses typed while it is quarantined, and the reads that list
+//! runtimes name it, or refuse typed while they cannot name it
+//! ([`SpiRealm::quarantined_scopes`] lists every one). A
+//! re-acquire's listing must show each recorded conflict unchanged, its
+//! version and, where both sides name them, its commit ids, and no other: a
+//! conflict on another scope, a recorded one listed among the heads, or one
+//! missing from both lists is a batch this writer did not write, and the
+//! realm is lost. Only a repair in the store, then a reopen, lifts a
+//! quarantine.
+//!
+//! Which scopes are poisoned or quarantined, and why, is the writer fence
+//! machine's: a scope is usable, poisoned or quarantined for the life of an
+//! open, never both, and the first classification stands. The realm reports
+//! each decision as an input, keeps the texts, and caches each scope's
+//! classification on its cell, written under the cell's lock when the cell
+//! is created and in the call that classified the scope. Lock order: a
+//! scope's lock, then the cells lock, then the writer fence's; the claimed
+//! lock, then the cells lock, then the writer fence's.
 //!
 //! # Cancellation
 //!
@@ -85,20 +151,33 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// The realm's clock: the lease window, the re-acquire's anchors and the
+// commit retry budget. Tokio's instant is the system's monotonic clock, and
+// the clock of the realm's own timers, so a test that pauses tokio's clock
+// sees the window close and the budget run out as its timers advance.
+use tokio::time::Instant;
 
 use meerkat_core::host_store::{
-    AcquireMode, CommitBatch, CommitId, FenceTiming, FenceToken, HostStore, HostStoreError,
-    MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeKind, ScopeName, ScopeRef, ScopeUpdate,
-    ScopeVersion, SelfFence, SelfFenceWindow,
+    AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
+    HostStoreError, MAX_BATCH_BYTES, MAX_ROW_BYTES, Row, RowIndex, ScopeConflict, ScopeHead,
+    ScopeKind, ScopeName, ScopeRef, ScopeUpdate, ScopeVersion, SelfFence, SelfFenceWindow,
 };
-use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use super::SpiError;
 use super::codec::{
     self, CHUNK_TAG, ChunkHeadV1, ChunkRef, FORMAT_V1, PinnedV1, RowOp, ScopeHeadV1, WindowV1,
 };
+use super::writer_fence::{
+    HostStoreWriterFenceEffect as FenceEffect, HostStoreWriterFenceInput as FenceInput,
+    HostStoreWriterFenceMachineAuthority, HostStoreWriterFenceMachineMutator,
+    HostStoreWriterFencePhase as FencePhase, ScopePoisonCause, WriterFenceAcquireOutcome,
+    WriterFenceAcquireStep, WriterFenceListingOutcome, WriterFenceLostCause, WriterFenceRefusal,
+    WriterFenceRenewOutcome, WriterFenceStopCause,
+};
+use crate::store::RefusedScope;
 
 /// A row entry value larger than this goes to a chunk scope.
 pub const INLINE_VALUE_LIMIT: usize = 256 * 1024;
@@ -175,7 +254,10 @@ pub struct SpiRealmConfig {
     /// the last.
     pub renew_timeout: Duration,
     /// How long an unknown or unavailable commit is retried before the
-    /// scopes it touched are poisoned.
+    /// scopes it touched are poisoned. No attempt is sent past the
+    /// self-fence deadline of the token the batch carries, so while renews
+    /// fail a longer budget is cut at the self-fence window
+    /// ([`FenceTiming::self_fence_window`]).
     pub commit_retry_budget: Duration,
 }
 
@@ -284,6 +366,37 @@ pub struct PoisonedScope {
     pub cause: String,
 }
 
+/// A quarantined scope ([`SpiRealm::quarantined_scopes`]): the store
+/// reports a conflict for it (two batches hold one of its versions), and it
+/// refuses every call until it is repaired in the store and the realm is
+/// reopened. A reopen alone quarantines it again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct QuarantinedScope {
+    /// The scope as its refusals name it: `<tag>:<key>`. A scope whose key
+    /// its store name hashes (a key over 200 bytes, or with a control
+    /// character) is named `<tag>:h<hash>` until a call names its key, and
+    /// a chunk by its full store name.
+    pub scope: String,
+    /// The store names of its conflicted incarnations.
+    pub names: Vec<String>,
+    /// The cause its refusals carry: each conflicted incarnation with the
+    /// version that holds two batches and their commit ids, and the repair.
+    pub cause: String,
+}
+
+/// A scope's classification as its cell caches it: the writer fence
+/// machine's entry for the scope, with the cause its refusals carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Classification {
+    /// Neither poisoned nor quarantined.
+    Usable,
+    /// Poisoned: memory may differ from the host for it.
+    Poisoned(String),
+    /// Quarantined: the store reports a conflict for it.
+    Quarantined(String),
+}
+
 /// One scope's lock and journal state.
 pub type ScopeCell = Mutex<ScopeState>;
 
@@ -343,7 +456,8 @@ pub struct ScopeState {
     /// Chunks referenced from rows of the window (spills), by row index.
     row_chunks: Vec<(u64, ChunkRef)>,
     body: Body,
-    poison: Option<String>,
+    /// The scope's classification, cached from the writer fence.
+    classification: Classification,
 }
 
 impl ScopeState {
@@ -359,7 +473,7 @@ impl ScopeState {
             since_checkpoint: 0,
             row_chunks: Vec::new(),
             body: Body::Loaded,
-            poison: None,
+            classification: Classification::Usable,
         }
     }
 
@@ -393,7 +507,7 @@ impl ScopeState {
             } else {
                 Body::Unloaded
             },
-            poison: None,
+            classification: Classification::Usable,
         })
     }
 
@@ -417,7 +531,30 @@ impl ScopeState {
     /// The poison cause, when this scope is poisoned.
     #[must_use]
     pub fn poison(&self) -> Option<&str> {
-        self.poison.as_deref()
+        match &self.classification {
+            Classification::Poisoned(cause) => Some(cause),
+            Classification::Usable | Classification::Quarantined(_) => None,
+        }
+    }
+
+    /// The quarantine's cause, when the store reports a conflict for this
+    /// scope.
+    #[must_use]
+    pub fn quarantine(&self) -> Option<&str> {
+        match &self.classification {
+            Classification::Quarantined(cause) => Some(cause),
+            Classification::Usable | Classification::Poisoned(_) => None,
+        }
+    }
+
+    /// The cause of this scope's refusal, when it refuses every call until
+    /// the realm is reopened: poisoned or quarantined.
+    #[must_use]
+    pub fn refusal(&self) -> Option<&str> {
+        match &self.classification {
+            Classification::Poisoned(cause) | Classification::Quarantined(cause) => Some(cause),
+            Classification::Usable => None,
+        }
     }
 
     /// Whether the next commit should carry the scope's full image, so the
@@ -530,6 +667,74 @@ struct ListedHead {
     head: ScopeHeadV1,
 }
 
+/// One kind's listing as the open keeps it: every visible scope's head, and
+/// every conflicted scope.
+#[derive(Debug, Default)]
+struct KindHeads {
+    heads: Vec<ScopeHead>,
+    conflicts: Vec<ScopeConflict>,
+}
+
+/// One kind's listing as a re-acquire keeps it: every visible scope's
+/// version (not its head), and every conflicted scope.
+#[derive(Debug, Default)]
+struct KindVersions {
+    versions: Vec<(ScopeName, ScopeVersion)>,
+    conflicts: Vec<ScopeConflict>,
+}
+
+/// A re-acquire's listing of every kind.
+#[derive(Debug, Default)]
+struct Listing {
+    /// Every visible scope's version.
+    heads: HashMap<(ScopeKind, String), ScopeVersion>,
+    /// Every conflicted scope.
+    conflicts: Vec<ScopeConflict>,
+}
+
+/// Whether a re-acquire's listing shows exactly the conflicts the writer
+/// fence recorded, `versions` and `commit_ids` by name: each listed conflict
+/// matches the record of its own name, at the same version and, where both
+/// name commit ids, with the same ids (ids known on one side only do not
+/// make it foreign), and each recorded name is listed as a conflict, not
+/// among the heads. Anything else is a change this writer did not make: a
+/// conflict on a scope not quarantined, a recorded one at another version
+/// or with other ids, one listed among the heads (repaired meanwhile, or a
+/// cut that now hides one of its batches), or one missing from both lists.
+/// An owner quarantined at a load for its chunk's conflict records the
+/// chunk's name, never its own, so its unchanged head is no change.
+fn listed_conflicts_match(
+    listed: &Listing,
+    versions: &BTreeMap<String, u64>,
+    commit_ids: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    let conflicted: HashSet<&str> = listed
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.name.as_str())
+        .collect();
+    let visible: HashSet<&str> = listed.heads.keys().map(|(_, name)| name.as_str()).collect();
+    let each_listed_is_recorded = listed.conflicts.iter().all(|conflict| {
+        let name = conflict.name.as_str();
+        let same_ids = match commit_ids.get(name) {
+            Some(recorded) if !recorded.is_empty() && !conflict.commit_ids.is_empty() => {
+                let listed: BTreeSet<String> = conflict
+                    .commit_ids
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect();
+                &listed == recorded
+            }
+            _ => true,
+        };
+        versions.get(name) == Some(&conflict.version.get()) && same_ids
+    });
+    let each_recorded_is_listed = versions
+        .keys()
+        .all(|name| conflicted.contains(name.as_str()) && !visible.contains(name.as_str()));
+    each_listed_is_recorded && each_recorded_is_listed
+}
+
 #[derive(Debug, Clone)]
 struct ChunkMeta {
     version: ScopeVersion,
@@ -571,6 +776,134 @@ impl ScopePlan {
     }
 }
 
+/// The realm's writer fence: the state of its `HostStoreWriterFenceMachine`
+/// (the writer's phase, the token it commits with, the grant it has not
+/// installed, the acquires it gave up on and the holder it waits out, and
+/// which scopes are poisoned or quarantined), and what the machine leaves to
+/// the realm: the texts of the realm's loss and of each poisoned scope, the
+/// names each quarantined key was recorded with, and the instant the
+/// waited-out holder's recorded lease ends.
+struct WriterFence {
+    machine: HostStoreWriterFenceMachineAuthority,
+    /// Why the realm was lost, in words, recorded with the machine's loss.
+    lost: Option<String>,
+    /// The waited-out holder and the instant its recorded lease ends unless
+    /// it is renewed: when the answer arrived plus what the store said
+    /// remained of it, capped at the declared lease. For an exact answer
+    /// that is the store's own end; a store that rounds the remaining lease
+    /// down makes it early, and the holder met again after it, its lease not
+    /// moved later by more than one renew interval, is waited out again.
+    waited_until: Option<(FenceToken, Instant)>,
+    /// Each poisoned scope, with its cause in words, by the key the machine
+    /// records it under: written only with the machine's
+    /// `ScopePoisonRecorded`.
+    poisoned: BTreeMap<String, PoisonedScope>,
+    /// The conflicted incarnations each quarantined key was recorded with,
+    /// by name: written only with the machine's `ScopeQuarantineRecorded`.
+    quarantined: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl WriterFence {
+    /// The writer fence of a realm the open granted `token`.
+    fn opened(token: FenceToken) -> Self {
+        let mut fence = Self {
+            machine: HostStoreWriterFenceMachineAuthority::new(),
+            lost: None,
+            waited_until: None,
+            poisoned: BTreeMap::new(),
+            quarantined: BTreeMap::new(),
+        };
+        fence.apply(FenceInput::Open { token: token.get() }, |_| String::new());
+        fence
+    }
+
+    fn phase(&self) -> FencePhase {
+        self.machine.state().lifecycle_phase
+    }
+
+    /// The classification of the scope the machine records under `key`,
+    /// with its refusal's cause; `live` is the incarnation the open listed
+    /// beside a conflicted one, which the quarantine's cause names too.
+    fn classification(&self, key: &str, live: Option<&ScopeName>) -> Classification {
+        if self.machine.state().quarantined_keys.contains(key) {
+            Classification::Quarantined(self.quarantine_cause(key, live))
+        } else if let Some(poisoned) = self.poisoned.get(key) {
+            Classification::Poisoned(poisoned.cause.clone())
+        } else {
+            Classification::Usable
+        }
+    }
+
+    /// The cause a quarantined key's refusals carry: each conflicted
+    /// incarnation recorded for it, with its version and commit ids, the
+    /// live incarnation beside them, and the repair.
+    fn quarantine_cause(&self, key: &str, live: Option<&ScopeName>) -> String {
+        let state = self.machine.state();
+        let mut parts: Vec<String> = self
+            .quarantined
+            .get(key)
+            .into_iter()
+            .flatten()
+            .map(|name| {
+                let version = state
+                    .quarantine_versions
+                    .get(name)
+                    .copied()
+                    .unwrap_or_default();
+                let ids = match state.quarantine_commit_ids.get(name) {
+                    Some(ids) if !ids.is_empty() => format!(
+                        "commit ids {}",
+                        ids.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ),
+                    _ => "the store names no commit ids".to_string(),
+                };
+                format!("{name} is conflicted in the store at version {version} ({ids})")
+            })
+            .collect();
+        if let Some(live) = live {
+            parts.push(format!("its live incarnation is {live}"));
+        }
+        format!(
+            "{}: repair the scope in the store, then reopen the realm",
+            parts.join("; ")
+        )
+    }
+
+    /// Apply `input` to the machine. When the input loses the realm, `loss`
+    /// describes the loss from the machine's cause; the description is kept
+    /// with the machine's state and logged.
+    fn apply(
+        &mut self,
+        input: FenceInput,
+        loss: impl FnOnce(WriterFenceLostCause) -> String,
+    ) -> Vec<FenceEffect> {
+        let effects = match HostStoreWriterFenceMachineMutator::apply(&mut self.machine, input) {
+            Ok(transition) => transition.effects().to_vec(),
+            Err(error) => {
+                // Every (phase, input) pair has an arm; a refusal from the
+                // kernel is a broken rule of the machine, and changes
+                // nothing.
+                tracing::error!(?error, "host store writer fence refused an input");
+                return Vec::new();
+            }
+        };
+        let mut loss = Some(loss);
+        for effect in &effects {
+            if let FenceEffect::RealmLost { cause } = effect
+                && let Some(loss) = loss.take()
+            {
+                let text = loss(*cause);
+                tracing::error!(
+                    cause = %text,
+                    "host store realm poisoned; every call refuses until it is reopened"
+                );
+                self.lost = Some(text);
+            }
+        }
+        effects
+    }
+}
+
 /// The shared realm handle. See the module documentation.
 pub struct SpiRealm {
     host: Arc<dyn HostStore>,
@@ -579,16 +912,17 @@ pub struct SpiRealm {
     /// How long after the start of the last successful acquire or renew
     /// this writer may write (the lease minus the self-fence margin).
     self_fence_window: Duration,
-    /// The token this writer commits with; a re-acquire replaces it.
-    fence: AtomicU64,
+    /// The writer fence: its machine decides when the writer stops,
+    /// re-acquires, resumes or loses the realm, and the token it commits
+    /// with.
+    writer_fence: StdMutex<WriterFence>,
     /// What the open waited out of a superseded holder's lease.
     superseded_lease: Duration,
     writer: String,
     counter: AtomicU64,
+    /// The start of the last successful acquire or renew: the self-fence
+    /// window counts from it.
     lease_start: StdMutex<Instant>,
-    /// Set when a renew failed or the window was seen closed; cleared only
-    /// by a fresh fenced acquire, never by a renew.
-    stopped: AtomicBool,
     /// Commits hold it shared; a re-acquire holds it exclusive, so no batch
     /// carrying the old token is in flight when the token changes.
     fence_gate: tokio::sync::RwLock<()>,
@@ -603,19 +937,15 @@ pub struct SpiRealm {
     reacquire_in_flight: StdMutex<Option<SharedReacquire>>,
     /// The version of every visible scope as this writer last saw or wrote
     /// it: a re-acquire compares a fresh listing with it to prove no other
-    /// writer committed while this one was stopped.
-    known_heads: StdMutex<HashMap<(ScopeKind, String), ScopeVersion>>,
+    /// writer committed while this one was stopped. `None` until the open's
+    /// listing installs it: a re-acquire compares only with a baseline the
+    /// open installed, and without one it neither acquires nor lists.
+    known_heads: StdMutex<Option<HashMap<(ScopeKind, String), ScopeVersion>>>,
     /// Scopes a batch with an unknown outcome touched, with every version
     /// (`None`: absent) each may be at: the batch may or may not have
     /// landed. A re-acquire accepts any of them; a later landed batch
     /// on the scope settles it.
     uncertain: StdMutex<HashMap<(ScopeKind, String), Vec<Option<ScopeVersion>>>>,
-    realm_poison: StdMutex<Option<String>>,
-    /// Every poisoned scope, with its cause: a scope enters once, when it is
-    /// poisoned, and stays until the realm is reopened. A read across many
-    /// scopes checks only the families it reads
-    /// ([`Self::check_cross_scope_read_of`]).
-    poisoned: StdMutex<BTreeMap<ScopeId, String>>,
     cells: StdMutex<HashMap<ScopeId, Arc<ScopeCell>>>,
     listed: StdMutex<HashMap<String, Vec<ListedHead>>>,
     /// Families claimed so far, with the refusal of a claim that failed.
@@ -646,7 +976,7 @@ impl SelfFence for SpiRealm {
         SelfFenceWindow {
             elapsed: self.lease_started().elapsed(),
             window: self.self_fence_window,
-            renew_failed: self.stopped.load(Ordering::Acquire),
+            renew_failed: lock(&self.writer_fence).machine.state().writer_stopped,
         }
     }
 
@@ -691,8 +1021,8 @@ impl SelfFence for SpiRealm {
             match (reacquired, last_error) {
                 (_, Some(error @ SpiError::RealmPoisoned(_))) => tracing::warn!(
                     %error,
-                    "host store writer's fence window is closed and another writer holds the \
-                     realm; the dispatch does not proceed"
+                    "host store writer's fence window is closed and the realm is lost; the \
+                     dispatch does not proceed"
                 ),
                 (Ok(()), _) => tracing::warn!(
                     "host store writer's fence window closed again right after its re-acquire; \
@@ -715,10 +1045,11 @@ impl SelfFence for SpiRealm {
     }
 
     /// The realm lost its fence: it is poisoned (another writer's holder or
-    /// batch, a fenced-out renew or commit, or a break of the writer's own
-    /// rules), and this writer never resumes.
+    /// batch, a fenced-out renew or commit, a store that broke its token
+    /// order, or a break of the writer's own rules), and this writer never
+    /// resumes.
     fn lost(&self) -> bool {
-        self.realm_poisoned().is_some()
+        lock(&self.writer_fence).phase() == FencePhase::Lost
     }
 }
 
@@ -789,6 +1120,14 @@ impl Drop for SlowSettle<'_> {
 type SharedReacquire =
     futures::future::Shared<futures::future::BoxFuture<'static, Result<(), SpiError>>>;
 
+/// A body read and folded: its values, its stamps, and the chunks its rows
+/// spill to, by row index.
+type FoldedBody = (
+    BTreeMap<String, Arc<Vec<u8>>>,
+    BTreeMap<String, Stamp>,
+    Vec<(u64, ChunkRef)>,
+);
+
 /// Clears the realm's re-acquire slot when the re-acquire task ends, however
 /// it ends.
 struct ClearReacquireInFlight(Arc<SpiRealm>);
@@ -799,10 +1138,52 @@ impl Drop for ClearReacquireInFlight {
     }
 }
 
+/// What a re-acquire does after an acquire answered, as its writer fence
+/// decided.
+enum AcquireNext {
+    /// Take the writer's own recorded lease over.
+    Takeover,
+    /// Prove the grant with a fresh listing.
+    Prove(FenceGrant),
+}
+
+/// Log that the writer stopped, and why.
+fn writer_stopped(cause: &str) {
+    tracing::warn!(%cause, "host store writer stopped; it resumes only on a fresh acquire");
+}
+
+/// The refusal of a re-acquire with no baseline to compare its listing
+/// with: the open failed before its listing installed one.
+fn no_baseline() -> SpiError {
+    SpiError::LeaseLapsed(
+        "the realm's open did not install its listing, which a re-acquire compares with".into(),
+    )
+}
+
+/// What a realm loss reported as `text` answers when the writer fence
+/// refused the report before the realm opened: a misuse that names the
+/// refusal. `None` otherwise: the loss's recorded cause answers, whether the
+/// report lost the realm or the realm was lost already.
+pub(crate) fn refused_loss(effects: &[FenceEffect], text: &str) -> Option<SpiError> {
+    effects.iter().find_map(|effect| match effect {
+        FenceEffect::RequestRefused {
+            reason: WriterFenceRefusal::NotOpened,
+        } => Some(SpiError::Misuse(format!(
+            "a realm loss was reported before the realm opened, and refused: {text}"
+        ))),
+        _ => None,
+    })
+}
+
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The family tag a classification key starts with.
+fn key_tag(key: &str) -> &str {
+    key.split_once(':').map_or(key, |(tag, _)| tag)
 }
 
 fn next_version(previous: Option<ScopeVersion>) -> Result<ScopeVersion, SpiError> {
@@ -822,6 +1203,15 @@ impl SpiRealm {
     /// Acquire the realm's fence, start renewing it, wait out a superseded
     /// holder's lease, and list every head (after the acquire, before
     /// the first commit). Chunks whose owner no longer exists are deleted.
+    /// A scope the listing reports conflicted is quarantined, and the rest
+    /// of the realm opens.
+    ///
+    /// That listing installs the baseline a re-acquire compares with. The
+    /// open holds the gate a re-acquire takes from before the renewal starts
+    /// until the baseline is in place: a renew that fails meanwhile stops the
+    /// writer, and its re-acquire waits for the open's listing instead of
+    /// listing beside it and comparing with no baseline. Renews do not take
+    /// the gate, so they keep the lease through the listing.
     ///
     /// # Errors
     /// [`SpiError::Held`] when an exclusive acquire meets a live holder; the
@@ -845,20 +1235,17 @@ impl SpiRealm {
             host,
             timing,
             self_fence_window,
-            fence: AtomicU64::new(grant.token.get()),
+            writer_fence: StdMutex::new(WriterFence::opened(grant.token)),
             superseded_lease: grant.superseded_lease,
             writer: uuid::Uuid::now_v7().simple().to_string(),
             counter: AtomicU64::new(0),
             lease_start: StdMutex::new(started),
-            stopped: AtomicBool::new(false),
             fence_gate: tokio::sync::RwLock::new(()),
             slow_settles: tokio::sync::watch::Sender::new(0),
             renew_gate: Mutex::new(()),
             reacquire_in_flight: StdMutex::new(None),
-            known_heads: StdMutex::new(HashMap::new()),
+            known_heads: StdMutex::new(None),
             uncertain: StdMutex::new(HashMap::new()),
-            realm_poison: StdMutex::new(None),
-            poisoned: StdMutex::new(BTreeMap::new()),
             cells: StdMutex::new(HashMap::new()),
             listed: StdMutex::new(HashMap::new()),
             claimed: StdMutex::new(HashMap::new()),
@@ -868,6 +1255,9 @@ impl SpiRealm {
             renew_timeout,
             me: me.clone(),
         });
+        // No re-acquire lists until this open's listing installed the
+        // baseline it compares with.
+        let listing = realm.fence_gate.write().await;
         realm.spawn_renewal();
         if !grant.superseded_lease.is_zero() {
             // The superseded holder stops writing the self-fence margin
@@ -875,7 +1265,14 @@ impl SpiRealm {
             // lease is over.
             tokio::time::sleep(grant.superseded_lease).await;
         }
-        realm.list_all().await?;
+        if let Err(error) = realm.list_all().await {
+            // The realm is never served. The writer fence hears so before
+            // the gate drops, and refuses any re-acquire: there is no
+            // baseline to compare a fresh listing with.
+            realm.apply_fence(FenceInput::OpenListingFailed, |_| String::new());
+            return Err(error);
+        }
+        drop(listing);
         realm.sweep_ownerless_chunks().await;
         Ok(realm)
     }
@@ -883,7 +1280,7 @@ impl SpiRealm {
     /// The fence token this realm commits with now.
     #[must_use]
     pub fn fence(&self) -> FenceToken {
-        FenceToken::new(self.fence.load(Ordering::Acquire))
+        FenceToken::new(lock(&self.writer_fence).machine.state().token)
     }
 
     /// The options this realm was opened with.
@@ -926,39 +1323,211 @@ impl SpiRealm {
     /// The realm poison cause, when the fence was lost.
     #[must_use]
     pub fn realm_poisoned(&self) -> Option<String> {
-        lock(&self.realm_poison).clone()
+        let fence = lock(&self.writer_fence);
+        (fence.phase() == FencePhase::Lost).then(|| fence.lost.clone().unwrap_or_default())
     }
 
     /// Whether any scope is poisoned.
     #[must_use]
     pub fn has_poisoned_scopes(&self) -> bool {
-        !lock(&self.poisoned).is_empty()
+        !lock(&self.writer_fence)
+            .machine
+            .state()
+            .poisoned_scopes
+            .is_empty()
+    }
+
+    /// Whether the scope `id` is poisoned: it refuses every call until the
+    /// realm is reopened.
+    #[must_use]
+    pub fn scope_poisoned(&self, id: &ScopeId) -> bool {
+        lock(&self.writer_fence)
+            .machine
+            .state()
+            .poisoned_scopes
+            .contains_key(&codec::scope_key(id.family.tag, &id.key))
+    }
+
+    /// Whether the scope `id` refuses every call until the realm is
+    /// reopened: it is poisoned, or quarantined.
+    #[must_use]
+    pub fn scope_refused(&self, id: &ScopeId) -> bool {
+        let key = codec::scope_key(id.family.tag, &id.key);
+        let fence = lock(&self.writer_fence);
+        let state = fence.machine.state();
+        state.poisoned_scopes.contains_key(&key) || state.quarantined_keys.contains(&key)
     }
 
     /// Every poisoned scope, in scope order, with its cause. A scope stays
     /// poisoned until the realm is reopened.
     #[must_use]
     pub fn poisoned_scopes(&self) -> Vec<PoisonedScope> {
-        lock(&self.poisoned)
-            .iter()
-            .map(|(id, cause)| PoisonedScope {
-                id: id.clone(),
-                cause: cause.clone(),
-            })
-            .collect()
+        self.poisoned_where(|_| true)
     }
 
     /// The poisoned scopes of `family`, in key order, with their causes.
     #[must_use]
     pub fn poisoned_scopes_of(&self, family: ScopeFamily) -> Vec<PoisonedScope> {
-        lock(&self.poisoned)
-            .iter()
-            .filter(|(id, _)| id.family == family)
-            .map(|(id, cause)| PoisonedScope {
-                id: id.clone(),
-                cause: cause.clone(),
+        self.poisoned_where(|id| id.family == family)
+    }
+
+    /// The poisoned scopes `keep` keeps, in scope order: the writer fence's
+    /// entries, with the causes recorded with them.
+    fn poisoned_where(&self, keep: impl Fn(&ScopeId) -> bool) -> Vec<PoisonedScope> {
+        let fence = lock(&self.writer_fence);
+        let mut poisoned: Vec<PoisonedScope> = fence
+            .machine
+            .state()
+            .poisoned_scopes
+            .keys()
+            .filter_map(|key| fence.poisoned.get(key))
+            .filter(|scope| keep(&scope.id))
+            .cloned()
+            .collect();
+        poisoned.sort_by(|left, right| left.id.cmp(&right.id));
+        poisoned
+    }
+
+    /// Every quarantined scope, in key order: the store reports a conflict
+    /// for each, and each refuses every call until it is repaired in the
+    /// store and the realm is reopened.
+    #[must_use]
+    pub fn quarantined_scopes(&self) -> Vec<QuarantinedScope> {
+        self.quarantined_where(None)
+            .into_iter()
+            .map(|(scope, _)| scope)
+            .collect()
+    }
+
+    /// The quarantine of the scope `id`, when the store reports a conflict
+    /// for it: named by `id`, with its conflicted incarnations (the same
+    /// store names [`Self::quarantined_scopes`] lists, which names a scope
+    /// whose store name hashes its key by that name until a call names it)
+    /// and the cause its refusals carry. Reads the writer fence only, and
+    /// names nothing: an adapter that knows a key matches it to a
+    /// quarantine the realm lists by a hash.
+    #[must_use]
+    pub fn quarantine_of(&self, id: &ScopeId) -> Option<QuarantinedScope> {
+        let key = codec::scope_key(id.family.tag, &id.key);
+        let fence = lock(&self.writer_fence);
+        if !fence.machine.state().quarantined_keys.contains(&key) {
+            return None;
+        }
+        let names = fence
+            .quarantined
+            .get(&key)
+            .map(|names| names.iter().cloned().collect())
+            .unwrap_or_default();
+        Some(QuarantinedScope {
+            scope: id.to_string(),
+            names,
+            cause: fence.quarantine_cause(&key, None),
+        })
+    }
+
+    /// The quarantined scopes of `families` (of any family with `None`), in
+    /// key order, each with the id a call names it by when the realm knows
+    /// it: its store name keeps its key verbatim, or a call named it.
+    fn quarantined_where(
+        &self,
+        families: Option<&[ScopeFamily]>,
+    ) -> Vec<(QuarantinedScope, Option<ScopeId>)> {
+        let entries: Vec<(String, Vec<String>, String)> = {
+            let fence = lock(&self.writer_fence);
+            fence
+                .machine
+                .state()
+                .quarantined_keys
+                .iter()
+                .filter(|key| {
+                    families.is_none_or(|families| {
+                        families.iter().any(|family| key_tag(key) == family.tag)
+                    })
+                })
+                .map(|key| {
+                    let names = fence
+                        .quarantined
+                        .get(key)
+                        .map(|names| names.iter().cloned().collect())
+                        .unwrap_or_default();
+                    (key.clone(), names, fence.quarantine_cause(key, None))
+                })
+                .collect()
+        };
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        // The ids calls named, for the keys their store names hash. The
+        // writer fence's lock is not held: the cells lock comes first.
+        let named: HashMap<String, ScopeId> = lock(&self.cells)
+            .keys()
+            .map(|id| (codec::scope_key(id.family.tag, &id.key), id.clone()))
+            .filter(|(key, _)| entries.iter().any(|(quarantined, ..)| quarantined == key))
+            .collect();
+        entries
+            .into_iter()
+            .map(|(key, names, cause)| {
+                let tag = key_tag(&key);
+                let id = named.get(&key).cloned().or_else(|| {
+                    families
+                        .into_iter()
+                        .flatten()
+                        .find(|family| family.tag == tag)
+                        .and_then(|family| {
+                            codec::plain_key(&key, family.tag)
+                                .map(|plain| ScopeId::new(*family, plain))
+                        })
+                });
+                let scope = match (&id, codec::plain_key(&key, tag)) {
+                    (Some(id), _) => id.to_string(),
+                    (None, Some(plain)) if tag != CHUNK_TAG => format!("{tag}:{plain}"),
+                    (None, _) => key.clone(),
+                };
+                (
+                    QuarantinedScope {
+                        scope,
+                        names,
+                        cause,
+                    },
+                    id,
+                )
             })
             .collect()
+    }
+
+    /// The scopes of `family` that refuse every call, poisoned until the
+    /// realm is reopened or quarantined until they are repaired in the
+    /// store and the realm is reopened, each with its refusal: the reads
+    /// that list runtimes name each one. The first list holds every such
+    /// scope the realm can name by its id, in scope order; the second every
+    /// quarantined scope of `family` whose store name hashes its key and
+    /// that no call named yet, its refusal naming it by that name: such a
+    /// read cannot name it, answers the others, and reports it there.
+    pub(crate) fn refused_scopes_of(
+        &self,
+        family: ScopeFamily,
+    ) -> (Vec<(ScopeId, RefusedScope)>, Vec<RefusedScope>) {
+        let mut refused: Vec<(ScopeId, RefusedScope)> = self
+            .poisoned_scopes_of(family)
+            .into_iter()
+            .map(|scope| {
+                let refusal = RefusedScope::new(scope.id.to_string(), scope.cause);
+                (scope.id, refusal)
+            })
+            .collect();
+        let mut unnamed = Vec::new();
+        for (scope, id) in self.quarantined_where(Some(&[family])) {
+            match id {
+                Some(id) => {
+                    let refusal = RefusedScope::of_quarantined(id.to_string(), scope.cause);
+                    refused.push((id, refusal));
+                }
+                None => unnamed.push(RefusedScope::of_quarantined(scope.scope, scope.cause)),
+            }
+        }
+        refused.sort_by(|left, right| left.0.cmp(&right.0));
+        refused.dedup_by(|left, right| left.0 == right.0);
+        (refused, unnamed)
     }
 
     /// Refuse when the realm is poisoned.
@@ -969,54 +1538,82 @@ impl SpiRealm {
         }
     }
 
-    /// Refuse a cross-scope read while the realm or any scope is poisoned:
-    /// a poisoned scope's memory may be ahead of the host. The conservative
+    /// Refuse a cross-scope read while the realm or any scope is poisoned
+    /// or quarantined: a poisoned scope's memory may be ahead of the host,
+    /// and a quarantined one is not in memory at all. The conservative
     /// form, for a read that may depend on a scope of any family; an
     /// adapter names the families a read depends on with
     /// [`Self::check_cross_scope_read_of`].
     ///
     /// # Errors
-    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
-    /// every poisoned scope.
+    /// [`SpiError::RealmPoisoned`], [`SpiError::ScopesQuarantined`] naming
+    /// every quarantined scope and every poisoned one, or
+    /// [`SpiError::ScopesPoisoned`] naming every poisoned scope when none
+    /// is quarantined.
     pub fn check_cross_scope_read(&self) -> Result<(), SpiError> {
         self.check_realm()?;
-        let poisoned = self.poisoned_scopes();
-        if poisoned.is_empty() {
-            Ok(())
-        } else {
-            Err(SpiError::ScopesPoisoned { scopes: poisoned })
-        }
+        Self::refuse_scopes(self.poisoned_scopes(), self.quarantined_scopes())
     }
 
     /// Refuse a read across every scope of `families` while the realm, or a
-    /// scope of one of those families, is poisoned: that scope's memory may
-    /// differ from the host, and the read answers from memory.
+    /// scope of one of those families, is poisoned or quarantined: a
+    /// poisoned scope's memory may differ from the host, a quarantined
+    /// scope is not in memory, and the read answers from memory.
     ///
     /// A scope of another family cannot change what such a read answers. A
     /// scope's memory changes only under its own lock, in a call that
     /// commits before releasing it, or the scope is poisoned, and a call that
     /// touches memory outside the scopes it locked poisons the scope it
     /// touched (or the realm, when that scope is busy). So a read of these
-    /// families' memory never depends on another family's poisoned scope,
-    /// and is answered while one exists.
+    /// families' memory never depends on another family's poisoned or
+    /// quarantined scope, and is answered while one exists.
     ///
     /// # Errors
-    /// [`SpiError::RealmPoisoned`], or [`SpiError::ScopesPoisoned`] naming
-    /// the poisoned scopes of `families`.
+    /// [`SpiError::RealmPoisoned`], [`SpiError::ScopesQuarantined`] naming
+    /// the quarantined and poisoned scopes of `families`, or
+    /// [`SpiError::ScopesPoisoned`] naming the poisoned ones when none is
+    /// quarantined.
     pub fn check_cross_scope_read_of(&self, families: &[ScopeFamily]) -> Result<(), SpiError> {
         self.check_realm()?;
-        let poisoned: Vec<PoisonedScope> = lock(&self.poisoned)
-            .iter()
-            .filter(|(id, _)| families.contains(&id.family))
-            .map(|(id, cause)| PoisonedScope {
-                id: id.clone(),
-                cause: cause.clone(),
-            })
+        let poisoned = self.poisoned_where(|id| families.contains(&id.family));
+        let quarantined = self
+            .quarantined_where(Some(families))
+            .into_iter()
+            .map(|(scope, _)| scope)
             .collect();
-        if poisoned.is_empty() {
-            Ok(())
-        } else {
+        Self::refuse_scopes(poisoned, quarantined)
+    }
+
+    /// The quarantined scopes of `family`, in key order, each with the id a
+    /// call names it by when the realm knows it (`None` while its store name
+    /// hashes its key and no call named it) and its refusal: for a read that
+    /// cannot tell which of those scopes it needs, since a quarantined
+    /// scope's head, and so what it holds, is unknown, and that answers
+    /// without them and reports them.
+    pub(crate) fn quarantined_of(
+        &self,
+        family: ScopeFamily,
+    ) -> Vec<(Option<ScopeId>, RefusedScope)> {
+        self.quarantined_where(Some(&[family]))
+            .into_iter()
+            .map(|(scope, id)| (id, RefusedScope::of_quarantined(scope.scope, scope.cause)))
+            .collect()
+    }
+
+    /// The refusal of a cross-scope read that met these scopes.
+    fn refuse_scopes(
+        poisoned: Vec<PoisonedScope>,
+        quarantined: Vec<QuarantinedScope>,
+    ) -> Result<(), SpiError> {
+        if !quarantined.is_empty() {
+            Err(SpiError::ScopesQuarantined {
+                quarantined,
+                poisoned,
+            })
+        } else if !poisoned.is_empty() {
             Err(SpiError::ScopesPoisoned { scopes: poisoned })
+        } else {
+            Ok(())
         }
     }
 
@@ -1033,15 +1630,19 @@ impl SpiRealm {
         self.slow_settles.subscribe()
     }
 
-    /// Refuse a call on a poisoned scope (or realm).
+    /// Refuse a call on a poisoned or quarantined scope (or realm).
     pub fn check_scope(&self, state: &ScopeState) -> Result<(), SpiError> {
         self.check_realm()?;
-        match &state.poison {
-            Some(cause) => Err(SpiError::ScopePoisoned {
+        match &state.classification {
+            Classification::Usable => Ok(()),
+            Classification::Poisoned(cause) => Err(SpiError::ScopePoisoned {
                 scope: state.id.to_string(),
                 cause: cause.clone(),
             }),
-            None => Ok(()),
+            Classification::Quarantined(cause) => Err(SpiError::ScopeQuarantined {
+                scope: state.id.to_string(),
+                cause: cause.clone(),
+            }),
         }
     }
 
@@ -1049,30 +1650,84 @@ impl SpiRealm {
         *lock(&self.lease_start)
     }
 
-    /// A renew that started at `started` succeeded. It extends the window
-    /// only while the writer has not stopped: a stopped writer resumes on a
-    /// fresh acquire alone.
-    fn renewed(&self, started: Instant) {
-        if self.stopped.load(Ordering::Acquire) {
-            return;
-        }
-        let mut slot = lock(&self.lease_start);
-        if started.duration_since(*slot) >= self.self_fence_window {
-            // The window closed before this renew started: an acquire made
-            // meanwhile may have missed the last renew. Stop instead.
-            drop(slot);
-            self.stop("the self-fence window closed before a renew");
-            return;
-        }
-        if started > *slot {
-            *slot = started;
+    /// Apply `input` to the writer fence; see [`WriterFence::apply`].
+    fn apply_fence(
+        &self,
+        input: FenceInput,
+        loss: impl FnOnce(WriterFenceLostCause) -> String,
+    ) -> Vec<FenceEffect> {
+        lock(&self.writer_fence).apply(input, loss)
+    }
+
+    /// The refusal of a call once the realm is lost: its recorded cause.
+    fn lost_realm(&self) -> SpiError {
+        SpiError::RealmPoisoned(self.realm_poisoned().unwrap_or_default())
+    }
+
+    /// The writer saw its self-fence window closed: a live writer stops, and
+    /// one that is not live writes nothing already.
+    fn window_closed(&self) {
+        let effects = self.apply_fence(FenceInput::WindowClosed, |_| String::new());
+        if effects
+            .iter()
+            .any(|effect| matches!(effect, FenceEffect::WriterStopped { .. }))
+        {
+            writer_stopped("the self-fence window closed");
         }
     }
 
-    fn stop(&self, cause: &str) {
-        if !self.stopped.swap(true, Ordering::AcqRel) {
-            tracing::warn!(%cause, "host store writer stopped; it resumes only on a fresh acquire");
+    /// The renew of `token` that started at `started` answered `answer`.
+    /// A renew that succeeded counts the window from its start; a stopped
+    /// writer resumes on a fresh acquire alone, never on a renew. Returns
+    /// whether the realm is lost, which ends the renewal.
+    fn renew_answered(
+        &self,
+        token: FenceToken,
+        started: Instant,
+        answer: Result<Result<(), HostStoreError>, tokio::time::error::Elapsed>,
+    ) -> bool {
+        let (outcome, current, failure) = match answer {
+            Ok(Ok(())) => (WriterFenceRenewOutcome::Renewed, token, None),
+            Ok(Err(HostStoreError::FencedOut { current })) => {
+                (WriterFenceRenewOutcome::FencedOut, current, None)
+            }
+            Ok(Err(error)) => (WriterFenceRenewOutcome::Failed, token, Some(error)),
+            Err(_) => (WriterFenceRenewOutcome::TimedOut, token, None),
+        };
+        // A renew that started once the window had closed may have missed an
+        // acquire made meanwhile: it stops the writer instead.
+        let in_window = started.duration_since(self.lease_started()) < self.self_fence_window;
+        let effects = self.apply_fence(
+            FenceInput::RenewAnswered {
+                outcome,
+                renewed: token.get(),
+                current: current.get(),
+                in_window,
+            },
+            |_| format!("fenced out: token {current} superseded token {token}"),
+        );
+        let mut lost = false;
+        for effect in effects {
+            match effect {
+                FenceEffect::WindowAnchored { .. } => {
+                    let mut slot = lock(&self.lease_start);
+                    if started > *slot {
+                        *slot = started;
+                    }
+                }
+                FenceEffect::WriterStopped { cause } => match (cause, &failure) {
+                    (WriterFenceStopCause::WindowClosedBeforeRenew, _) => {
+                        writer_stopped("the self-fence window closed before a renew");
+                    }
+                    (WriterFenceStopCause::RenewTimedOut, _) => writer_stopped("a renew timed out"),
+                    (_, Some(error)) => writer_stopped(&format!("a renew failed: {error}")),
+                    (_, None) => writer_stopped("a renew failed"),
+                },
+                FenceEffect::RealmLost { .. } => lost = true,
+                _ => {}
+            }
         }
+        lost
     }
 
     /// Whether this writer may write: it has not stopped (no failed renew
@@ -1091,16 +1746,18 @@ impl SpiRealm {
     /// holder re-acquires; it never resumes on a later renew).
     ///
     /// # Errors
-    /// [`SpiError::LeaseLapsed`] when the acquire fails or times out
-    /// (nothing is poisoned: the caller has not mutated anything yet), and
-    /// [`SpiError::RealmPoisoned`] when another writer holds the realm or
-    /// committed while this one was stopped.
+    /// [`SpiError::LeaseLapsed`] when the acquire fails or times out, or
+    /// while the writer waits out a holder that may be its own acquire that
+    /// timed out (nothing is poisoned: the caller has not mutated anything
+    /// yet), and [`SpiError::RealmPoisoned`] when the realm is lost: another
+    /// writer holds it or committed while this one was stopped, or the store
+    /// broke its token order.
     pub async fn ensure_lease(&self) -> Result<(), SpiError> {
         self.check_realm()?;
         if self.lease_is_live() {
             return Ok(());
         }
-        self.stop("the self-fence window closed");
+        self.window_closed();
         self.shared_reacquire()?.await
     }
 
@@ -1140,7 +1797,11 @@ impl SpiRealm {
     /// Acquire the fence again after a stop, and resume only when no other
     /// writer committed in between: a fresh listing (which, after the
     /// acquire, shows every batch committed before it) must match every
-    /// version this writer last saw or wrote.
+    /// version this writer last saw or wrote. A holder this writer does not
+    /// know is waited out while an acquire of its own timed out since its
+    /// last grant (see the module documentation). The writer fence machine
+    /// decides each step; this sends the calls it asks for and reports their
+    /// answers.
     async fn reacquire(&self) -> Result<(), SpiError> {
         let _serial = self.renew_gate.lock().await;
         self.reacquire_serialized().await
@@ -1152,144 +1813,440 @@ impl SpiRealm {
         if self.lease_is_live() {
             return Ok(());
         }
-        // No batch with the old token may be in flight.
+        // A live writer whose window closed stops before it re-acquires.
+        self.window_closed();
+        // An exclusive acquire cannot supersede a holder before its
+        // recorded lease ends: make none until then.
+        if let Some(waiting) = self.wait_out_holder(Instant::now()) {
+            return Err(waiting);
+        }
+        // No batch with the old token may be in flight, and the open's
+        // listing is over: the open holds the gate until it installed the
+        // baseline, or until the writer fence heard that its listing failed
+        // (then the fence refuses the re-acquire below: the realm is never
+        // served, and there is nothing to compare a listing with).
         let _no_commits = self.fence_gate.write().await;
-        let previous = self.fence();
         let started = Instant::now();
-        let acquired = tokio::time::timeout(
-            self.config.renew_timeout,
-            self.host.acquire_fence(AcquireMode::Exclusive),
-        )
-        .await;
-        let grant = match acquired {
-            Ok(Ok(grant)) => grant,
-            Ok(Err(HostStoreError::Held { holder, .. })) if holder == previous => {
-                // This writer's own lease is still recorded and nobody
-                // acquired since: supersede it, with nothing to wait out.
-                match tokio::time::timeout(
-                    self.config.renew_timeout,
-                    self.host.acquire_fence(AcquireMode::Takeover),
-                )
-                .await
-                {
-                    Ok(Ok(grant)) => grant,
-                    Ok(Err(error)) => {
-                        return Err(SpiError::LeaseLapsed(format!(
-                            "the writer stopped and a re-acquire failed: {error}"
-                        )));
-                    }
-                    Err(_) => {
-                        return Err(SpiError::LeaseLapsed(
-                            "the writer stopped and a re-acquire timed out".into(),
-                        ));
-                    }
-                }
-            }
-            Ok(Err(HostStoreError::Held { holder, .. })) => {
-                return Err(self.poison_realm(format!(
-                    "fenced out while stopped: token {holder} holds the realm"
-                )));
-            }
-            Ok(Err(error)) => {
-                return Err(SpiError::LeaseLapsed(format!(
-                    "the writer stopped and a re-acquire failed: {error}"
-                )));
-            }
-            Err(_) => {
-                return Err(SpiError::LeaseLapsed(
-                    "the writer stopped and a re-acquire timed out".into(),
-                ));
+        let Some(mut step) = self.begin_reacquire()? else {
+            return Ok(());
+        };
+        let grant = loop {
+            let mode = match step {
+                WriterFenceAcquireStep::Exclusive => AcquireMode::Exclusive,
+                WriterFenceAcquireStep::TakeoverOwn => AcquireMode::Takeover,
+            };
+            let sent = Instant::now();
+            let acquired =
+                tokio::time::timeout(self.config.renew_timeout, self.host.acquire_fence(mode))
+                    .await;
+            match self.acquire_answered(acquired, sent)? {
+                AcquireNext::Takeover => step = WriterFenceAcquireStep::TakeoverOwn,
+                AcquireNext::Prove(grant) => break grant,
             }
         };
-        let listed = self.list_versions().await?;
-        if !self.listing_matches(&listed) {
-            return Err(self.poison_realm(
-                "another writer committed while this one was stopped; reopen the realm".into(),
-            ));
+        let checked = match self.list_versions().await {
+            Ok(listed) => match self.listing_matches(&listed) {
+                Some(clean) => Ok((listed.heads, clean)),
+                None => Err(no_baseline()),
+            },
+            Err(error) => Err(error),
+        };
+        let (listed, clean) = match checked {
+            Ok(checked) => checked,
+            Err(error) => {
+                // The grant stays this writer's own: the next re-acquire takes
+                // its lease over.
+                self.apply_fence(
+                    FenceInput::ListingChecked {
+                        outcome: WriterFenceListingOutcome::Failed,
+                        token: grant.token.get(),
+                    },
+                    |_| String::new(),
+                );
+                return Err(error);
+            }
+        };
+        let outcome = if clean {
+            WriterFenceListingOutcome::Clean
+        } else {
+            WriterFenceListingOutcome::ForeignBatch
+        };
+        let effects = self.apply_fence(
+            FenceInput::ListingChecked {
+                outcome,
+                token: grant.token.get(),
+            },
+            |_| "another writer committed while this one was stopped; reopen the realm".into(),
+        );
+        if !effects
+            .iter()
+            .any(|effect| matches!(effect, FenceEffect::TokenInstalled { .. }))
+        {
+            return Err(self.lost_realm());
         }
-        self.fence.store(grant.token.get(), Ordering::Release);
-        *lock(&self.known_heads) = listed;
+        *lock(&self.known_heads) = Some(listed);
         lock(&self.uncertain).clear();
         // The listing may have outlasted the window counted from the
-        // acquire: renew once with the new token and count the window
-        // from that renew's start.
+        // acquire: renew once with the new token and count the window from
+        // that renew's start.
         let renew_started = Instant::now();
-        match tokio::time::timeout(self.renew_timeout, self.host.renew_fence(grant.token)).await {
-            Ok(Ok(())) => {}
+        let renewed =
+            tokio::time::timeout(self.renew_timeout, self.host.renew_fence(grant.token)).await;
+        let (outcome, current, failure) = match renewed {
+            Ok(Ok(())) => {
+                // The window counts from this renew before the writer
+                // resumes, so no reader sees it live under the old anchor.
+                *lock(&self.lease_start) = renew_started.max(started);
+                (WriterFenceRenewOutcome::Renewed, grant.token, None)
+            }
             Ok(Err(HostStoreError::FencedOut { current })) => {
-                return Err(self.poison_realm(format!(
+                (WriterFenceRenewOutcome::FencedOut, current, None)
+            }
+            Ok(Err(error)) => (WriterFenceRenewOutcome::Failed, grant.token, Some(error)),
+            Err(_) => (WriterFenceRenewOutcome::TimedOut, grant.token, None),
+        };
+        let effects = self.apply_fence(
+            FenceInput::RenewAnswered {
+                outcome,
+                renewed: grant.token.get(),
+                current: current.get(),
+                in_window: true,
+            },
+            |_| {
+                format!(
                     "fenced out right after a re-acquire: token {current} superseded token {}",
                     grant.token
-                )));
-            }
-            Ok(Err(error)) => {
-                return Err(SpiError::LeaseLapsed(format!(
-                    "the renew after a re-acquire failed: {error}"
-                )));
-            }
-            Err(_) => {
-                return Err(SpiError::LeaseLapsed(
-                    "the renew after a re-acquire timed out".into(),
-                ));
+                )
+            },
+        );
+        for effect in effects {
+            match effect {
+                FenceEffect::WriterResumed { .. } => {
+                    tracing::info!(
+                        token = %grant.token,
+                        "host store writer re-acquired the fence and resumes"
+                    );
+                    return Ok(());
+                }
+                FenceEffect::WriterStopped {
+                    cause: WriterFenceStopCause::ResumeRenewTimedOut,
+                } => {
+                    return Err(SpiError::LeaseLapsed(
+                        "the renew after a re-acquire timed out".into(),
+                    ));
+                }
+                FenceEffect::WriterStopped { .. } => {
+                    let error = failure
+                        .as_ref()
+                        .map_or_else(String::new, ToString::to_string);
+                    return Err(SpiError::LeaseLapsed(format!(
+                        "the renew after a re-acquire failed: {error}"
+                    )));
+                }
+                _ => {}
             }
         }
-        *lock(&self.lease_start) = renew_started.max(started);
-        self.stopped.store(false, Ordering::Release);
-        tracing::info!(token = %grant.token, "host store writer re-acquired the fence and resumes");
-        Ok(())
+        Err(self.lost_realm())
+    }
+
+    /// Ask the writer fence for a re-acquire of a stopped writer: the
+    /// acquire to send first, or `None` when the writer is live again. A
+    /// realm whose open failed its listing is refused, typed as a missing
+    /// baseline.
+    fn begin_reacquire(&self) -> Result<Option<WriterFenceAcquireStep>, SpiError> {
+        for effect in self.apply_fence(FenceInput::BeginReacquire, |_| String::new()) {
+            match effect {
+                FenceEffect::AcquireRequested { step } => return Ok(Some(step)),
+                FenceEffect::RequestRefused {
+                    reason: WriterFenceRefusal::AlreadyLive,
+                } => return Ok(None),
+                FenceEffect::RequestRefused {
+                    reason: WriterFenceRefusal::OpenListingFailed,
+                } => return Err(no_baseline()),
+                _ => {}
+            }
+        }
+        match self.check_realm() {
+            Err(lost) => Err(lost),
+            Ok(()) => Err(SpiError::LeaseLapsed(
+                "the writer stopped and its re-acquire could not start".into(),
+            )),
+        }
+    }
+
+    /// Report the answer of an acquire of the re-acquire to the writer fence,
+    /// and say what comes next. `sent` is when the acquire was sent: the
+    /// store decided its answer at or after it.
+    fn acquire_answered(
+        &self,
+        acquired: Result<Result<FenceGrant, HostStoreError>, tokio::time::error::Elapsed>,
+        sent: Instant,
+    ) -> Result<AcquireNext, SpiError> {
+        let installed = self.fence();
+        let own_grant = lock(&self.writer_fence).machine.state().own_grant;
+        let (outcome, token, remaining, failure, grant) = match acquired {
+            Ok(Ok(grant)) => (
+                WriterFenceAcquireOutcome::Granted,
+                grant.token,
+                Duration::ZERO,
+                None,
+                Some(grant),
+            ),
+            Ok(Err(HostStoreError::Held { holder, remaining })) => (
+                WriterFenceAcquireOutcome::Held,
+                holder,
+                // A compliant holder's lease is never longer than the
+                // declared one; a longer answer is outside the contract
+                // and would put the recorded end past any clock.
+                remaining.min(self.timing.lease()),
+                Some(HostStoreError::Held { holder, remaining }),
+                None,
+            ),
+            Ok(Err(error)) => (
+                WriterFenceAcquireOutcome::Failed,
+                FenceToken::new(0),
+                Duration::ZERO,
+                Some(error),
+                None,
+            ),
+            Err(_) => (
+                WriterFenceAcquireOutcome::TimedOut,
+                FenceToken::new(0),
+                Duration::ZERO,
+                None,
+                None,
+            ),
+        };
+        // The holder met again after the writer waited out the end it
+        // recorded renewed its lease only when that lease now ends more than
+        // one renew interval later. The new end is read from when this
+        // acquire was sent: the store decided its answer at or after that
+        // instant, so an answer that reaches the writer late cannot move the
+        // end later, and a store that rounds the remaining lease down only
+        // makes it earlier. A holder that renews on schedule moves its end by
+        // at least the lease minus one interval (two intervals at least), so
+        // a live renewer still reads as moved.
+        let lease_moved = outcome == WriterFenceAcquireOutcome::Held
+            && lock(&self.writer_fence)
+                .waited_until
+                .is_some_and(|(waited, until)| {
+                    waited == token && sent + remaining > until + self.timing.renew_interval()
+                });
+        let effects = self.apply_fence(
+            FenceInput::AcquireAnswered {
+                outcome,
+                token: token.get(),
+                lease_moved,
+            },
+            |cause| match cause {
+                WriterFenceLostCause::HeldByAnother => {
+                    format!("fenced out while stopped: token {token} holds the realm")
+                }
+                WriterFenceLostCause::HolderRenewed => format!(
+                    "fenced out while stopped: token {token} renewed its lease after this writer \
+                     waited it out, so another writer holds the realm"
+                ),
+                WriterFenceLostCause::TokenOrder => match own_grant {
+                    Some(own) if token.get() <= own => format!(
+                        "the host store broke its token order: it granted token {token}, not \
+                         above token {own}, an earlier grant of this writer whose listing \
+                         failed, though every grant must answer a token above every earlier \
+                         one; reopen the realm"
+                    ),
+                    _ => format!(
+                        "the host store broke its token order: it granted token {token}, not \
+                         above the installed token {installed}, though every grant must answer \
+                         a token above every earlier one; reopen the realm"
+                    ),
+                },
+                other => format!("the re-acquire lost the realm: {other:?}"),
+            },
+        );
+        for effect in effects {
+            match effect {
+                FenceEffect::AcquireRequested {
+                    step: WriterFenceAcquireStep::TakeoverOwn,
+                } => return Ok(AcquireNext::Takeover),
+                FenceEffect::GrantReceived { .. } => {
+                    if let Some(grant) = grant {
+                        return Ok(AcquireNext::Prove(grant));
+                    }
+                }
+                FenceEffect::HolderWaitedOut { .. } => {
+                    let timed_out = {
+                        let mut fence = lock(&self.writer_fence);
+                        fence.waited_until = Some((token, Instant::now() + remaining));
+                        fence.machine.state().timed_out
+                    };
+                    tracing::warn!(
+                        token = %token,
+                        ?remaining,
+                        timed_out,
+                        "host store fence is held by a token this writer does not know while \
+                         acquires of its own timed out; it may be one of them, granted late, so \
+                         the writer waits out its recorded lease and acquires again"
+                    );
+                    return Err(SpiError::LeaseLapsed(format!(
+                        "token {token} holds the fence for {remaining:?} more; it may be an \
+                         acquire of this writer that timed out, granted late, so the writer \
+                         waits it out"
+                    )));
+                }
+                FenceEffect::WriterStopped {
+                    cause: WriterFenceStopCause::ReacquireTimedOut,
+                } => {
+                    return Err(SpiError::LeaseLapsed(
+                        "the writer stopped and a re-acquire timed out".into(),
+                    ));
+                }
+                FenceEffect::WriterStopped { .. } => {
+                    let error = failure
+                        .as_ref()
+                        .map_or_else(String::new, ToString::to_string);
+                    return Err(SpiError::LeaseLapsed(format!(
+                        "the writer stopped and a re-acquire failed: {error}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Err(self.lost_realm())
+    }
+
+    /// The refusal of a re-acquire made before the recorded lease of the
+    /// holder this writer waits out ends, as of `now`; `None` once it ended
+    /// (the writer fence hears so), or when the writer waits out no holder.
+    fn wait_out_holder(&self, now: Instant) -> Option<SpiError> {
+        let mut fence = lock(&self.writer_fence);
+        if fence.phase() != FencePhase::WaitingOut {
+            return None;
+        }
+        if let Some((holder, until)) = fence.waited_until
+            && now < until
+        {
+            return Some(SpiError::LeaseLapsed(format!(
+                "the writer waits out the recorded lease of token {holder} ({:?} more): it may \
+                 be an acquire of this writer that timed out, granted late",
+                until - now
+            )));
+        }
+        fence.apply(FenceInput::LeaseEnded, |_| String::new());
+        None
     }
 
     /// Whether a fresh listing shows only batches this writer wrote: every
     /// scope at the version this writer last saw or wrote, or, for a scope a
     /// batch with an unknown outcome touched, at any version that batch
-    /// leaves possible.
-    fn listing_matches(&self, listed: &HashMap<(ScopeKind, String), ScopeVersion>) -> bool {
+    /// leaves possible; and exactly the recorded conflicts
+    /// ([`listed_conflicts_match`]). `None` while the open has not installed
+    /// the baseline: such a listing proves nothing either way.
+    fn listing_matches(&self, listed: &Listing) -> Option<bool> {
+        // The recorded conflicts, read first: the writer fence's lock is
+        // never held with the baseline's.
+        let (versions, commit_ids) = {
+            let fence = lock(&self.writer_fence);
+            let state = fence.machine.state();
+            (
+                state.quarantine_versions.clone(),
+                state.quarantine_commit_ids.clone(),
+            )
+        };
         let known = lock(&self.known_heads);
+        let known = known.as_ref()?;
         let uncertain = lock(&self.uncertain);
         let keys: HashSet<&(ScopeKind, String)> = known
             .keys()
-            .chain(listed.keys())
+            .chain(listed.heads.keys())
             .chain(uncertain.keys())
             .collect();
-        keys.into_iter().all(|key| {
-            let seen = listed.get(key).copied();
+        let heads_match = keys.into_iter().all(|key| {
+            let seen = listed.heads.get(key).copied();
             match uncertain.get(key) {
                 Some(possible) => possible.contains(&seen) || seen == known.get(key).copied(),
                 None => seen == known.get(key).copied(),
             }
-        })
+        });
+        Some(heads_match && listed_conflicts_match(listed, &versions, &commit_ids))
     }
 
-    /// The version of every visible scope, from one listing.
-    async fn list_versions(&self) -> Result<HashMap<(ScopeKind, String), ScopeVersion>, SpiError> {
-        let mut versions = HashMap::new();
-        for kind in LISTED_KINDS {
-            let mut after: Option<ScopeName> = None;
-            loop {
-                let page = self
-                    .host
-                    .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
-                    .await?;
-                for scope in page.heads {
-                    versions.insert((kind, scope.name.as_str().to_string()), scope.head.version);
-                }
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => break,
-                }
+    /// One listing of every scope, as a re-acquire keeps it: each visible
+    /// scope's version (a page's heads are dropped as it is read), and every
+    /// conflicted scope.
+    async fn list_versions(&self) -> Result<Listing, SpiError> {
+        let mut listing = Listing::default();
+        let kinds = self
+            .list_kinds(|kept: &mut KindVersions, page: HeadPage| {
+                kept.versions.extend(
+                    page.heads
+                        .into_iter()
+                        .map(|scope| (scope.name, scope.head.version)),
+                );
+                kept.conflicts.extend(page.conflicts);
+            })
+            .await?;
+        for (kind, kept) in kinds {
+            for (name, version) in kept.versions {
+                listing
+                    .heads
+                    .insert((kind, name.as_str().to_string()), version);
+            }
+            listing.conflicts.extend(kept.conflicts);
+        }
+        Ok(listing)
+    }
+
+    /// One pass over every listed kind: the kinds at once, each kind's
+    /// pages in order ([`Self::list_kind`]), so a listing waits for its
+    /// slowest kind rather than for the sum of them. `keep` takes each page
+    /// into its kind's `T` as the page is read. The first page that fails
+    /// fails the whole pass and drops the other kinds' calls; the caller
+    /// installs nothing of it, and lists again only after a fresh acquire.
+    async fn list_kinds<T: Default>(
+        &self,
+        keep: impl Fn(&mut T, HeadPage) + Sync,
+    ) -> Result<Vec<(ScopeKind, T)>, SpiError> {
+        let keep = &keep;
+        let listed =
+            futures::future::try_join_all(LISTED_KINDS.map(|kind| self.list_kind(kind, keep)))
+                .await?;
+        Ok(LISTED_KINDS.into_iter().zip(listed).collect())
+    }
+
+    /// Every page of `kind`, page after page, each taken into one `T` by
+    /// `keep`: each call's cursor is the `next` of the answer before it, so
+    /// a kind never has two pages in flight and no cursor crosses kinds.
+    async fn list_kind<T: Default>(
+        &self,
+        kind: ScopeKind,
+        keep: &(impl Fn(&mut T, HeadPage) + Sync),
+    ) -> Result<T, SpiError> {
+        let mut kept = T::default();
+        let mut after: Option<ScopeName> = None;
+        loop {
+            let page = self
+                .host
+                .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
+                .await?;
+            let next = page.next.clone();
+            keep(&mut kept, page);
+            match next {
+                Some(next) => after = Some(next),
+                None => return Ok(kept),
             }
         }
-        Ok(versions)
     }
 
     /// Record what a landed batch did to the scope versions this writer
-    /// knows.
+    /// knows. Nothing commits before the open's listing installed them.
     fn record_landed(&self, batch: &CommitBatch) {
         let mut known = lock(&self.known_heads);
         let mut uncertain = lock(&self.uncertain);
         for update in batch.updates() {
             let key = (update.scope.kind, update.scope.name.as_str().to_string());
             uncertain.remove(&key);
+            let Some(known) = known.as_mut() else {
+                continue;
+            };
             if update.delete {
                 known.remove(&key);
             } else {
@@ -1331,31 +2288,85 @@ impl SpiRealm {
         }
     }
 
-    fn poison_realm(&self, cause: String) -> SpiError {
-        let mut slot = lock(&self.realm_poison);
-        let cause = slot.get_or_insert(cause).clone();
-        tracing::error!(%cause, "host store realm poisoned; every call refuses until it is reopened");
-        SpiError::RealmPoisoned(cause)
+    /// Lose the realm to `cause`, in words `text`: every call refuses until
+    /// it is reopened. A realm already lost keeps its first cause, and the
+    /// refusal names it. A loss the writer fence refuses before the open is
+    /// a misuse, and answers so.
+    fn poison_realm(&self, cause: WriterFenceLostCause, text: String) -> SpiError {
+        let effects = self.apply_fence(FenceInput::Poison { cause }, |_| text.clone());
+        refused_loss(&effects, &text).unwrap_or_else(|| self.lost_realm())
     }
 
     /// Poison one scope: it refuses every call until the realm reopens.
-    /// For adapters whose memory may now differ from the host for it.
+    /// For adapters whose memory may now differ from the host for it. A
+    /// scope already poisoned keeps its first cause, and a quarantined one
+    /// stays quarantined: its quarantine already refuses everything a
+    /// poison refuses.
     pub fn poison(&self, state: &mut ScopeState, cause: &str) {
-        self.poison_scope(state, cause);
+        self.poison_scope(state, ScopePoisonCause::Adapter, cause);
     }
 
     /// Poison the whole realm (an adapter rule was broken and the affected
     /// scope could not be singled out).
     pub fn poison_all(&self, cause: String) -> SpiError {
-        self.poison_realm(cause)
+        self.poison_realm(WriterFenceLostCause::AdapterRule, cause)
     }
 
-    fn poison_scope(&self, state: &mut ScopeState, cause: &str) {
-        if state.poison.is_none() {
-            state.poison = Some(cause.to_string());
-            lock(&self.poisoned).insert(state.id.clone(), cause.to_string());
-            tracing::error!(scope = %state.id, %cause, "host store scope poisoned; it refuses until the realm is reopened");
+    /// Poison one scope through the writer fence, `cause` naming the
+    /// decision site and `text` the failure: the machine records the first
+    /// cause, and `state`, whose lock the caller holds, caches the scope's
+    /// classification as the machine then holds it. A scope already
+    /// classified keeps its classification; a report before the open, or
+    /// once the realm is lost, changes nothing (every call already refuses
+    /// with the realm's cause after a loss).
+    pub(crate) fn poison_scope(&self, state: &mut ScopeState, cause: ScopePoisonCause, text: &str) {
+        if state.classification != Classification::Usable {
+            return;
         }
+        let key = codec::scope_key(state.id.family.tag, &state.id.key);
+        let (effects, classification) = {
+            let mut fence = lock(&self.writer_fence);
+            let effects = fence.apply(
+                FenceInput::ScopePoisoned {
+                    scope: key.clone(),
+                    cause,
+                },
+                |_| String::new(),
+            );
+            if effects
+                .iter()
+                .any(|effect| matches!(effect, FenceEffect::ScopePoisonRecorded { .. }))
+            {
+                fence.poisoned.insert(
+                    key.clone(),
+                    PoisonedScope {
+                        id: state.id.clone(),
+                        cause: text.to_string(),
+                    },
+                );
+            }
+            let classification = fence.classification(&key, state.name.as_ref());
+            (effects, classification)
+        };
+        for effect in &effects {
+            match effect {
+                FenceEffect::ScopePoisonRecorded { .. } => tracing::error!(
+                    scope = %state.id,
+                    cause = %text,
+                    "host store scope poisoned; it refuses until the realm is reopened"
+                ),
+                FenceEffect::RequestRefused {
+                    reason: WriterFenceRefusal::NotOpened,
+                } => tracing::error!(
+                    scope = %state.id,
+                    cause = %text,
+                    "a host store scope poison was reported before the realm opened; a misuse, \
+                     ignored"
+                ),
+                _ => {}
+            }
+        }
+        state.classification = classification;
     }
 
     /// Renew once per renew interval while the writer runs. A failed renew
@@ -1379,8 +2390,8 @@ impl SpiRealm {
                 // Renews and re-acquires never overlap: a renew still in
                 // flight with an old token cannot meet the new one.
                 let _serial = realm.renew_gate.lock().await;
-                if realm.stopped.load(Ordering::Acquire) || !realm.lease_is_live() {
-                    realm.stop("the self-fence window closed");
+                if !realm.lease_is_live() {
+                    realm.window_closed();
                     if let Err(error) = realm.reacquire_serialized().await {
                         tracing::warn!(%error, "host store re-acquire failed; writes stay stopped");
                     }
@@ -1388,27 +2399,10 @@ impl SpiRealm {
                 }
                 let started = Instant::now();
                 let token = realm.fence();
-                match tokio::time::timeout(realm.renew_timeout, realm.host.renew_fence(token)).await
-                {
-                    Ok(Ok(())) => realm.renewed(started),
-                    Ok(Err(HostStoreError::FencedOut { current }))
-                        if current != token && current == realm.fence() =>
-                    {
-                        // A stale renew of this writer's own superseded
-                        // token: the current token is ours.
-                    }
-                    Ok(Err(HostStoreError::FencedOut { current })) => {
-                        realm.poison_realm(format!(
-                            "fenced out: token {current} superseded token {token}"
-                        ));
-                        return;
-                    }
-                    Ok(Err(error)) => {
-                        realm.stop(&format!("a renew failed: {error}"));
-                    }
-                    Err(_) => {
-                        realm.stop("a renew timed out");
-                    }
+                let answer =
+                    tokio::time::timeout(realm.renew_timeout, realm.host.renew_fence(token)).await;
+                if realm.renew_answered(token, started, answer) {
+                    return;
                 }
             }
         });
@@ -1426,74 +2420,142 @@ impl SpiRealm {
         format!("{}.{}", self.writer, self.next_token())
     }
 
+    /// List every head at the open ([`Self::list_kinds`]) and install what
+    /// the listing shows: the listed heads of each family, the chunk table,
+    /// and the scope versions a re-acquire compares with. Every conflicted
+    /// scope the listing reports is quarantined, out of the listed heads and
+    /// the baseline. Nothing is installed when the listing fails.
     async fn list_all(&self) -> Result<(), SpiError> {
         let mut listed: HashMap<String, Vec<ListedHead>> = HashMap::new();
         let mut chunks: HashMap<String, ChunkMeta> = HashMap::new();
         let mut known: HashMap<(ScopeKind, String), ScopeVersion> = HashMap::new();
-        for kind in LISTED_KINDS {
-            let mut after: Option<ScopeName> = None;
-            loop {
-                let page = self
-                    .host
-                    .list_heads(kind, after.as_ref(), LIST_PAGE_HEADS)
-                    .await?;
-                for scope in page.heads {
-                    known.insert((kind, scope.name.as_str().to_string()), scope.head.version);
-                    let Some(tag) = codec::name_tag(&scope.name).map(str::to_string) else {
-                        // Not a name this journal writes: leave it alone.
-                        continue;
-                    };
-                    if tag == CHUNK_TAG {
-                        if kind != ScopeKind::Record {
-                            return Err(SpiError::Corrupt(format!(
-                                "chunk scope {} has kind {kind}",
-                                scope.name
-                            )));
-                        }
-                        let head = ChunkHeadV1::decode(&scope.head.head)?;
-                        chunks.insert(
-                            scope.name.as_str().to_string(),
-                            ChunkMeta {
-                                version: scope.head.version,
-                                owner: head.owner,
-                            },
-                        );
-                        continue;
-                    }
-                    let head = ScopeHeadV1::decode(&scope.head.head)?;
-                    if head.fam != tag || !codec::name_encodes(&scope.name, &tag, &head.key) {
+        let mut conflicts = Vec::new();
+        let kinds = self
+            .list_kinds(|kept: &mut KindHeads, page: HeadPage| {
+                kept.heads.extend(page.heads);
+                kept.conflicts.extend(page.conflicts);
+            })
+            .await?;
+        for (kind, kept) in kinds {
+            conflicts.extend(kept.conflicts);
+            for scope in kept.heads {
+                known.insert((kind, scope.name.as_str().to_string()), scope.head.version);
+                let Some(tag) = codec::name_tag(&scope.name).map(str::to_string) else {
+                    // Not a name this journal writes: leave it alone.
+                    continue;
+                };
+                if tag == CHUNK_TAG {
+                    if kind != ScopeKind::Record {
                         return Err(SpiError::Corrupt(format!(
-                            "scope {} does not encode its head's family {} and key",
-                            scope.name, head.fam
+                            "chunk scope {} has kind {kind}",
+                            scope.name
                         )));
                     }
-                    listed.entry(tag).or_default().push(ListedHead {
-                        name: scope.name,
-                        version: scope.head.version,
-                        head,
-                    });
+                    let head = ChunkHeadV1::decode(&scope.head.head)?;
+                    chunks.insert(
+                        scope.name.as_str().to_string(),
+                        ChunkMeta {
+                            version: scope.head.version,
+                            owner: head.owner,
+                        },
+                    );
+                    continue;
                 }
-                match page.next {
-                    Some(next) => after = Some(next),
-                    None => break,
+                let head = ScopeHeadV1::decode(&scope.head.head)?;
+                if head.fam != tag || !codec::name_encodes(&scope.name, &tag, &head.key) {
+                    return Err(SpiError::Corrupt(format!(
+                        "scope {} does not encode its head's family {} and key",
+                        scope.name, head.fam
+                    )));
                 }
+                listed.entry(tag).or_default().push(ListedHead {
+                    name: scope.name,
+                    version: scope.head.version,
+                    head,
+                });
             }
         }
         *lock(&self.listed) = listed;
         *lock(&self.chunks) = chunks;
-        *lock(&self.known_heads) = known;
+        *lock(&self.known_heads) = Some(known);
+        for conflict in &conflicts {
+            self.quarantine_listed(conflict);
+        }
         Ok(())
+    }
+
+    /// The open's listing reports `conflict`: record it under its key (the
+    /// scope's name without its incarnation, a chunk's full name), and log
+    /// it once.
+    fn quarantine_listed(&self, conflict: &ScopeConflict) {
+        let key = codec::name_key(&conflict.name);
+        let commit_ids = conflict
+            .commit_ids
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        if self.record_quarantine(&key, &conflict.name, conflict.version, commit_ids) {
+            tracing::error!(
+                scope = %key,
+                name = %conflict.name,
+                version = conflict.version.get(),
+                commit_ids = ?conflict.commit_ids,
+                "host store scope quarantined: the store reports two batches at one of its \
+                 versions; it refuses every call until it is repaired in the store and the realm \
+                 is reopened"
+            );
+        }
+    }
+
+    /// Record the conflicted incarnation `name` of the scope the writer
+    /// fence classifies under `key`, at `version`, in the writer fence.
+    /// Answers whether the machine recorded something new.
+    fn record_quarantine(
+        &self,
+        key: &str,
+        name: &ScopeName,
+        version: ScopeVersion,
+        commit_ids: BTreeSet<String>,
+    ) -> bool {
+        let mut fence = lock(&self.writer_fence);
+        let effects = fence.apply(
+            FenceInput::ScopeQuarantined {
+                key: key.to_string(),
+                name: name.as_str().to_string(),
+                version: version.get(),
+                commit_ids,
+            },
+            |_| String::new(),
+        );
+        let mut recorded = false;
+        for effect in effects {
+            if let FenceEffect::ScopeQuarantineRecorded { key, name } = effect {
+                fence.quarantined.entry(key).or_default().insert(name);
+                recorded = true;
+            }
+        }
+        recorded
     }
 
     /// Delete chunks whose owner is not a listed scope: garbage of a crash
     /// between a chunk and the batch that would have referenced it, or of a
-    /// deleted owner. Best effort; a failure leaves garbage, not corruption.
+    /// deleted owner. A quarantined scope still owns its chunks: its
+    /// conflicted incarnations count as owners. Best effort; a failure
+    /// leaves garbage, not corruption.
     async fn sweep_ownerless_chunks(&self) {
-        let owners: HashSet<String> = lock(&self.listed)
+        let mut owners: HashSet<String> = lock(&self.listed)
             .values()
             .flatten()
             .map(|listed| listed.name.as_str().to_string())
             .collect();
+        owners.extend(
+            lock(&self.writer_fence)
+                .machine
+                .state()
+                .quarantine_versions
+                .keys()
+                .cloned(),
+        );
         let doomed: Vec<(String, ScopeVersion)> = lock(&self.chunks)
             .iter()
             .filter(|(_, meta)| !owners.contains(&meta.owner))
@@ -1542,6 +2604,13 @@ impl SpiRealm {
     /// claimed once per realm: a later claim answers the family's registered
     /// cells, or the first claim's refusal again.
     ///
+    /// Each cell starts with its scope's classification. A quarantined
+    /// scope of the family whose store name keeps its key verbatim is
+    /// claimed as well, with no incarnation, so an adapter that lists the
+    /// family names it typed (its cell refuses every call) instead of
+    /// leaving it out; one whose name hashes its key is known by that name
+    /// only ([`Self::quarantined_scopes`]).
+    ///
     /// # Errors
     /// [`SpiError::Corrupt`] when two live incarnations claim one key.
     pub fn claim(&self, family: ScopeFamily) -> Result<Vec<Arc<ScopeCell>>, SpiError> {
@@ -1572,6 +2641,8 @@ impl SpiRealm {
 
     fn claim_listed(&self, family: ScopeFamily) -> Result<Vec<Arc<ScopeCell>>, SpiError> {
         let listed = lock(&self.listed).remove(family.tag).unwrap_or_default();
+        // The claimed lock (the caller's), then the cells lock, then the
+        // writer fence's.
         let mut cells = lock(&self.cells);
         let mut claimed = BTreeMap::new();
         for entry in listed {
@@ -1587,7 +2658,20 @@ impl SpiRealm {
                     "two live incarnations of {id} exist"
                 )));
             }
-            let state = ScopeState::from_head(id.clone(), entry.name, entry.version, &entry.head)?;
+            // A live incarnation listed beside a conflicted one of its key
+            // starts quarantined, and its refusal names both.
+            let classification = self.classification_of(&id, Some(&entry.name));
+            let mut state =
+                ScopeState::from_head(id.clone(), entry.name, entry.version, &entry.head)?;
+            state.classification = classification;
+            claimed.insert(id, Arc::new(Mutex::new(state)));
+        }
+        for id in self.quarantined_plain_ids(family) {
+            if cells.contains_key(&id) || claimed.contains_key(&id) {
+                continue;
+            }
+            let mut state = ScopeState::empty(id.clone());
+            state.classification = self.classification_of(&id, None);
             claimed.insert(id, Arc::new(Mutex::new(state)));
         }
         let mut out = Vec::with_capacity(claimed.len());
@@ -1596,6 +2680,27 @@ impl SpiRealm {
             out.push(cell);
         }
         Ok(out)
+    }
+
+    /// The classification the writer fence holds for the scope `id`, as a
+    /// new cell of it caches it; `live` is the incarnation the open listed
+    /// for it, which a quarantine's cause names beside the conflicted ones.
+    fn classification_of(&self, id: &ScopeId, live: Option<&ScopeName>) -> Classification {
+        let key = codec::scope_key(id.family.tag, &id.key);
+        lock(&self.writer_fence).classification(&key, live)
+    }
+
+    /// The ids of the quarantined scopes of `family` whose store names keep
+    /// their keys verbatim.
+    fn quarantined_plain_ids(&self, family: ScopeFamily) -> Vec<ScopeId> {
+        lock(&self.writer_fence)
+            .machine
+            .state()
+            .quarantined_keys
+            .iter()
+            .filter_map(|key| codec::plain_key(key, family.tag))
+            .map(|key| ScopeId::new(family, key))
+            .collect()
     }
 
     /// The realm's one value of type `T`, created by `init` on first use:
@@ -1622,15 +2727,22 @@ impl SpiRealm {
         Ok(value)
     }
 
-    /// The cell of a scope, created empty (no incarnation) when unknown.
+    /// The cell of a scope, created empty (no incarnation) when unknown. A
+    /// new cell starts with its scope's classification: a scope quarantined
+    /// at the open has no cell until a call needs it, and refuses from that
+    /// call on.
     #[must_use]
     pub fn cell(&self, id: &ScopeId) -> Arc<ScopeCell> {
+        // The cells lock, then the writer fence's.
         let mut cells = lock(&self.cells);
-        Arc::clone(
-            cells
-                .entry(id.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(ScopeState::empty(id.clone())))),
-        )
+        if let Some(cell) = cells.get(id) {
+            return Arc::clone(cell);
+        }
+        let mut state = ScopeState::empty(id.clone());
+        state.classification = self.classification_of(id, None);
+        let cell = Arc::new(Mutex::new(state));
+        cells.insert(id.clone(), Arc::clone(&cell));
+        cell
     }
 
     /// The ids of every registered scope of a family, in key order.
@@ -1655,8 +2767,22 @@ impl SpiRealm {
         guards
     }
 
-    /// The pinned values of a scope, chunked ones read and verified.
+    /// The pinned values of a scope, chunked ones read and verified. A
+    /// poisoned or quarantined scope refuses first, as every call on it
+    /// does, and a chunk whose load answers a typed conflict quarantines the
+    /// scope ([`Self::load_body`]).
     pub async fn pinned_values(
+        &self,
+        state: &mut ScopeState,
+    ) -> Result<BTreeMap<String, Arc<Vec<u8>>>, SpiError> {
+        self.check_scope(state)?;
+        match self.read_pinned(state).await {
+            Ok(values) => Ok(values),
+            Err(error) => Err(self.load_failed(state, error)),
+        }
+    }
+
+    async fn read_pinned(
         &self,
         state: &ScopeState,
     ) -> Result<BTreeMap<String, Arc<Vec<u8>>>, SpiError> {
@@ -1681,14 +2807,35 @@ impl SpiRealm {
     /// adapter has installed the answered values in its memory and called
     /// [`ScopeState::mark_loaded`], so a call dropped in between leaves it
     /// unloaded and the next call loads it again.
+    ///
+    /// A read that answers a typed conflict, of the scope's own rows or of a
+    /// chunk it references, quarantines the scope, never poisons it: nothing
+    /// of the load reached memory. The call answers
+    /// [`SpiError::ScopeQuarantined`], and so does every later call on it.
     pub async fn load_body(
         &self,
         state: &mut ScopeState,
     ) -> Result<BTreeMap<String, Arc<Vec<u8>>>, SpiError> {
         self.check_scope(state)?;
-        let Some(name) = state.name.clone() else {
+        if state.name.is_none() {
             state.body = Body::Loaded;
             return Ok(BTreeMap::new());
+        }
+        let (values, stamps, row_chunks) = match self.fold_body(state).await {
+            Ok(folded) => folded,
+            Err(error) => return Err(self.load_failed(state, error)),
+        };
+        state.rows = stamps;
+        state.row_chunks = row_chunks;
+        self.collect_owned_garbage(state).await;
+        Ok(values)
+    }
+
+    /// The body of a scope that has an incarnation, read and folded: its
+    /// values, its stamps and the chunks its rows spill to.
+    async fn fold_body(&self, state: &ScopeState) -> Result<FoldedBody, SpiError> {
+        let Some(name) = state.name.clone() else {
+            return Ok((BTreeMap::new(), BTreeMap::new(), Vec::new()));
         };
         let scope = ScopeRef::new(state.id.family.kind, name.clone());
         let mut values: BTreeMap<String, Arc<Vec<u8>>> = BTreeMap::new();
@@ -1739,10 +2886,72 @@ impl SpiRealm {
                 values.insert(key.clone(), value);
             }
         }
-        state.rows = stamps;
-        state.row_chunks = row_chunks;
-        self.collect_owned_garbage(state).await;
-        Ok(values)
+        Ok((values, stamps, row_chunks))
+    }
+
+    /// A load of `state`'s scope failed with `error`. A typed conflict, of
+    /// the scope's own rows or of a chunk it references, quarantines the
+    /// scope ([`Self::quarantine_at_load`]) and answers its refusal; any
+    /// other failure comes back unchanged.
+    fn load_failed(&self, state: &mut ScopeState, error: SpiError) -> SpiError {
+        match error {
+            SpiError::Host(HostStoreError::Conflict {
+                scope,
+                current: Some(version),
+            }) => self.quarantine_at_load(state, &scope, version),
+            other => other,
+        }
+    }
+
+    /// A load of `state`'s scope met a typed conflict: `conflicted`, the
+    /// scope itself or a chunk it references, holds two batches at
+    /// `version`. The scope is quarantined under its key, recorded with the
+    /// conflicted name: for its own conflict that name is its own; for a
+    /// chunk's, the chunk's own entry is recorded too. The conflicted
+    /// incarnation, the scope's own or the chunk, is quarantined for its own
+    /// conflict, so it leaves the baseline, as the open's listing would have
+    /// left it out; a chunk's owner stays in it, its head unchanged (its
+    /// record names the chunk, never itself). `state` caches the
+    /// classification the machine then holds. Answers the call's refusal.
+    fn quarantine_at_load(
+        &self,
+        state: &mut ScopeState,
+        conflicted: &ScopeRef,
+        version: ScopeVersion,
+    ) -> SpiError {
+        let key = codec::scope_key(state.id.family.tag, &state.id.key);
+        let own = state.name.as_ref() == Some(&conflicted.name);
+        if !own {
+            self.record_quarantine(
+                &codec::name_key(&conflicted.name),
+                &conflicted.name,
+                version,
+                BTreeSet::new(),
+            );
+        }
+        let recorded = self.record_quarantine(&key, &conflicted.name, version, BTreeSet::new());
+        if let Some(known) = lock(&self.known_heads).as_mut() {
+            known.remove(&(conflicted.kind, conflicted.name.as_str().to_string()));
+        }
+        state.classification = lock(&self.writer_fence).classification(&key, state.name.as_ref());
+        if recorded {
+            tracing::error!(
+                scope = %state.id,
+                conflicted = %conflicted.name,
+                version = version.get(),
+                "host store scope quarantined: a load met two batches at one version; it refuses \
+                 every call until it is repaired in the store and the realm is reopened"
+            );
+        }
+        match self.check_scope(state) {
+            Err(refusal) => refusal,
+            // The writer fence recorded nothing (the realm has not opened):
+            // the load's own failure answers.
+            Ok(()) => SpiError::Host(HostStoreError::Conflict {
+                scope: conflicted.clone(),
+                current: Some(version),
+            }),
+        }
     }
 
     /// Fold one row op into the entries. A chunked entry gets its stamp
@@ -1907,7 +3116,7 @@ impl SpiRealm {
                 // with a change may now differ from the host.
                 let cause = error.to_string();
                 for index in changed {
-                    self.poison_scope(&mut *scopes[index], &cause);
+                    self.poison_scope(&mut *scopes[index], ScopePoisonCause::PlanFailed, &cause);
                 }
                 return Err(error);
             }
@@ -1927,11 +3136,16 @@ impl SpiRealm {
             }
             Err(error) => {
                 let cause = error.to_string();
+                let site = match &error {
+                    SpiError::UnsettledAtFenceWindow { .. }
+                    | SpiError::UnsettledPastRetryBudget { .. } => ScopePoisonCause::Unsettled,
+                    _ => ScopePoisonCause::Refused,
+                };
                 for plan in &plans {
-                    self.poison_scope(&mut *scopes[plan.index], &cause);
+                    self.poison_scope(&mut *scopes[plan.index], site, &cause);
                 }
                 if matches!(error, SpiError::Host(HostStoreError::FencedOut { .. })) {
-                    return Err(self.poison_realm(cause));
+                    return Err(self.poison_realm(WriterFenceLostCause::FencedOutCommit, cause));
                 }
                 Err(error)
             }
@@ -2057,13 +3271,33 @@ impl SpiRealm {
     /// [`commit_retry_pause`] says. From its first retryable answer, or once
     /// its first call outlasts the host's declared longest commit, the
     /// settle counts in [`Self::slow_settles`] until it ends.
+    ///
+    /// A batch is sent, the first time or again, only while the realm holds
+    /// its fence and before the self-fence deadline of the token it carries
+    /// ([`Self::fence_deadline`]): the token's lease at the store may end
+    /// soon after that deadline, and another writer may then acquire. Past
+    /// it the settle stops with [`SpiError::UnsettledAtFenceWindow`]: the
+    /// batch's outcome is unknown, never taken as landed. A head read that
+    /// shows the batch still settles it as landed, whenever it is made. A
+    /// settle whose retry budget runs out first stops with
+    /// [`SpiError::UnsettledPastRetryBudget`], its outcome unknown the same
+    /// way.
     async fn commit_settled(&self, batch: &CommitBatch) -> Result<(), SpiError> {
         let deadline = Instant::now() + self.config.commit_retry_budget;
         // A local of this future: it drops on every return below, and with
         // the future when the caller drops the settle mid-way.
         let mut slow: Option<SlowSettle<'_>> = None;
         let mut attempt: u32 = 0;
+        let mut last: Option<HostStoreError> = None;
         loop {
+            self.check_realm()?;
+            if Instant::now() >= self.fence_deadline() {
+                return Err(SpiError::UnsettledAtFenceWindow {
+                    token: batch.fence(),
+                    attempts: attempt,
+                    last,
+                });
+            }
             let mut call = self.host.commit(batch);
             let answer = if slow.is_some() {
                 call.await
@@ -2095,10 +3329,24 @@ impl SpiRealm {
             attempt = attempt.saturating_add(1);
             let backoff = commit_retry_pause(batch.commit_id(), attempt);
             if Instant::now() + backoff >= deadline {
-                return Err(SpiError::Host(error));
+                return Err(SpiError::UnsettledPastRetryBudget {
+                    attempts: attempt,
+                    last: error,
+                });
             }
+            last = Some(error);
             tokio::time::sleep(backoff).await;
         }
+    }
+
+    /// The instant from which no batch carrying this writer's current token
+    /// is sent: the start of its last successful acquire or renew plus the
+    /// self-fence window, before the lease the store recorded from that call
+    /// can end. A renew of the token moves it later; a failed renew does not
+    /// move it at all. A settle in flight holds the fence gate, so no
+    /// re-acquire changes the token under it.
+    fn fence_deadline(&self) -> Instant {
+        self.lease_started() + self.self_fence_window
     }
 
     /// Whether `batch` landed, read from its first update's scope: the head
@@ -2520,8 +3768,12 @@ impl SpiRealm {
 
     fn adopt(&self, state: &mut ScopeState, plan: ScopePlan) {
         if plan.delete {
+            // The cell keeps its classification: only a usable scope
+            // commits, and a delete leaves it usable.
             let id = state.id.clone();
+            let classification = state.classification.clone();
             *state = ScopeState::empty(id);
+            state.classification = classification;
             return;
         }
         let window = plan_window_of(&plan);
@@ -2686,7 +3938,8 @@ impl Drop for ArmedScopes {
         if self.armed {
             let cause = "a call was dropped while it changed this scope; memory may hold a change the host never got";
             for guard in &mut self.guards {
-                self.realm.poison(guard, cause);
+                self.realm
+                    .poison_scope(guard, ScopePoisonCause::Dropped, cause);
             }
         }
     }

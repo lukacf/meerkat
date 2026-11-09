@@ -5429,6 +5429,61 @@ async def test_client_session_and_mob_observe_methods_use_explicit_rpc_methods()
 
 
 @pytest.mark.asyncio
+async def test_fork_mob_member_sends_the_boundary_and_parses_the_fork():
+    from meerkat import Mob, MobForkMemberResult
+
+    client = MeerkatClient()
+    calls = []
+    fork = {
+        "agent_identity": "main-branch",
+        "member_ref": "ref-1",
+        "session_id": "child-session",
+        "source_session_id": "source-session",
+        "message_count": 3,
+    }
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        return dict(fork)
+
+    client._request = fake_request  # type: ignore[method-assign]
+    result = await client.fork_mob_member("mob-1", "main", "main-branch", message_index=3)
+    assert result == MobForkMemberResult(**fork)
+    await Mob(client, "mob-1").fork_member(
+        "main", "main-branch", profile="worker", runtime_mode="turn_driven"
+    )
+    assert calls == [
+        (
+            "mob/fork_member",
+            {
+                "mob_id": "mob-1",
+                "source_member_id": "main",
+                "agent_identity": "main-branch",
+                "message_index": 3,
+            },
+        ),
+        (
+            "mob/fork_member",
+            {
+                "mob_id": "mob-1",
+                "source_member_id": "main",
+                "agent_identity": "main-branch",
+                "profile": "worker",
+                "runtime_mode": "turn_driven",
+            },
+        ),
+    ]
+
+    async def malformed_request(_method, _params):
+        return {"agent_identity": "main-branch"}
+
+    client._request = malformed_request  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError) as failure:
+        await client.fork_mob_member("mob-1", "main", "main-branch")
+    assert failure.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
 async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     client = MeerkatClient()
     calls = []
@@ -5885,6 +5940,7 @@ async def test_mob_member_status_parses_tri_state_peer_connectivity():
         "read_failed",
         "session_absent",
         "not_observed_while_retiring",
+        "store_refused",
     ],
 )
 async def test_mob_member_status_surfaces_preview_unavailable(marker):
@@ -5931,7 +5987,9 @@ async def test_mob_member_status_omits_absent_or_null_preview_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_mob_member_status_rejects_unknown_preview_unavailable():
+async def test_mob_member_status_reads_an_unknown_preview_unavailable_as_unknown():
+    # The marker is advisory and its vocabulary may grow: a reason this SDK
+    # does not know is surfaced, not refused.
     client = MeerkatClient()
 
     async def fake_request(_method, _params):
@@ -5945,22 +6003,30 @@ async def test_mob_member_status_rejects_unknown_preview_unavailable():
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    with pytest.raises(MeerkatError, match="invalid preview_unavailable"):
-        await client.mob_member_status("mob-1", "agent-a")
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["preview_unavailable"] == {"unknown": "stale"}
+    assert "output_preview" not in status
 
-    async def fake_object_request(_method, _params):
-        return {
-            "status": "active",
-            "member_ref": _make_member_ref("mob-1", "agent-a"),
-            "tokens_used": 0,
-            "is_final": False,
-            "preview_unavailable": {"kind": "observation_deadline"},
-        }
 
-    client._request = fake_object_request  # type: ignore[method-assign]
+@pytest.mark.asyncio
+async def test_mob_member_status_rejects_a_preview_unavailable_that_is_not_a_string():
+    client = MeerkatClient()
 
-    with pytest.raises(MeerkatError, match="invalid preview_unavailable"):
-        await client.mob_member_status("mob-1", "agent-a")
+    for malformed in ({"kind": "observation_deadline"}, 42, True):
+
+        async def fake_request(_method, _params, malformed=malformed):
+            return {
+                "status": "active",
+                "member_ref": _make_member_ref("mob-1", "agent-a"),
+                "tokens_used": 0,
+                "is_final": False,
+                "preview_unavailable": malformed,
+            }
+
+        client._request = fake_request  # type: ignore[method-assign]
+
+        with pytest.raises(MeerkatError, match="invalid preview_unavailable"):
+            await client.mob_member_status("mob-1", "agent-a")
 
 
 @pytest.mark.asyncio
@@ -5983,6 +6049,13 @@ async def test_wait_mob_members_carry_preview_unavailable():
                     "tokens_used": 7,
                     "is_final": False,
                 },
+                {
+                    "agent_identity": "reviewer",
+                    "status": "active",
+                    "tokens_used": 0,
+                    "is_final": False,
+                    "preview_unavailable": "a_newer_reason",
+                },
             ]
         }
 
@@ -5994,6 +6067,7 @@ async def test_wait_mob_members_carry_preview_unavailable():
     ):
         assert members[0]["preview_unavailable"] == "observation_deadline"
         assert "preview_unavailable" not in members[1]
+        assert members[2]["preview_unavailable"] == {"unknown": "a_newer_reason"}
 
 
 @pytest.mark.asyncio
@@ -8979,6 +9053,31 @@ def test_tool_results_bounded_for_request_is_known_and_retains_exact_payload():
     assert control.delta == "continued"
 
 
+def test_requested_compaction_skipped_is_known_and_retains_exact_payload():
+    from meerkat.generated.event_inventory import KNOWN_AGENT_EVENT_TYPES
+    from meerkat.generated.event_types import RequestedCompactionSkipReason
+
+    raw = {
+        "type": "requested_compaction_skipped",
+        "run_id": "01900000-0000-7000-8000-000000000003",
+        "reason": "first_model_request",
+    }
+    assert raw["type"] in KNOWN_AGENT_EVENT_TYPES
+    assert set(get_args(RequestedCompactionSkipReason)) == {
+        "first_model_request",
+        "nothing_to_fold",
+    }
+    event = parse_event(json.loads(json.dumps(raw)))
+    # In the generated inventory, without a handwritten class: the
+    # raw-preserving UnknownEvent path keeps every field of the event.
+    assert isinstance(event, UnknownEvent)
+    assert event.type == raw["type"]
+    assert event.data == raw
+    control = parse_event({"type": "text_delta", "delta": "continued"})
+    assert isinstance(control, TextDelta)
+    assert control.delta == "continued"
+
+
 def test_wire_tool_result_retains_typed_observation_settlement_companions():
     from dataclasses import asdict
     import json
@@ -9398,7 +9497,7 @@ def test_hook_failed_preserves_unknown_future_causes(reason):
     ("unsupported_requirement", "required execution confinement is unsupported by this backend"),
     ("backend_unavailable", "required execution confinement backend is unavailable"),
     ("preparation_failed", "confined process preparation failed"),
-    ("untrusted_configuration_source", "launch configuration comes from a source a confined process can write"),
+    ("untrusted_configuration_source", "launch configuration comes from a source the host does not trust"),
 ])
 def test_hook_failed_displays_each_known_confinement_cause_exactly(refusal, message):
     from meerkat.events import HookFailed

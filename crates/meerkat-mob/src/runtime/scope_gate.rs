@@ -97,6 +97,12 @@ impl MobCommand {
             | Self::SpawnAttachedForkedParticipant { .. }
             // Releasing a host's run-start hold lets the member start runs.
             | Self::ReleaseMemberRunStarts { .. }
+            // Retrying a build preparation the host asked to retry lets the
+            // member's next wake be built.
+            | Self::ResolveMemberBuildPreparation { .. }
+            // A compaction request changes how the member's next model
+            // request is made: the authority class of driving the member.
+            | Self::RequestMemberCompaction { .. }
             // A dormant seat creates members (and spawns the fresh ones that
             // owe a kickoff): the authority class of a spawn.
             | Self::PlanDormantSeats { .. }
@@ -117,6 +123,8 @@ impl MobCommand {
             | Self::ForceCancel { .. }
             | Self::HardCancelMember { .. }
             | Self::StopMemberRun { .. }
+            // Settling a member's retained run ends that run's work.
+            | Self::SettleMemberRetainedRun { .. }
             // Revoking a capability terminalizes outstanding delegated work
             // authority without retiring any member.
             | Self::RevokeForkedParticipant { .. }
@@ -196,6 +204,10 @@ impl MobCommand {
             | Self::RotateSupervisor { .. }
             | Self::SetOperatorInstruction { .. }
             | Self::RevokeOperatorInstruction { .. } => Some(ControlScope::AdminHost),
+            // A scoped tool grant to a member identity is the host's
+            // administration of what the member may run.
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => Some(ControlScope::AdminHost),
 
             // ── SubscribeEvents: the mob event journal surface ──
             Self::PollEvents { .. } | Self::ReplayAllEvents { .. } => {
@@ -246,6 +258,7 @@ impl MobCommand {
             | Self::WakeMember { .. }
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             // An owed edge repair is the actor's own timer.
             | Self::RepairOwedEdge { .. }
             // The release of a held member is the actor's own self-send.
@@ -283,6 +296,10 @@ impl MobCommand {
             | Self::CommitFlowFrameStorePlan { .. }
             | Self::ProjectMachineInput { .. }
             | Self::ApplyMachineInputEffects { .. }
+            // A fork seat's dispatch admission: the handle's fork paths drive
+            // both after their own admission (`admit_fork_member`).
+            | Self::ObserveForkSourceDispatchLineage { .. }
+            | Self::ResolveSeatDispatchAdmission { .. }
             | Self::ValidateCommandAuthority { .. }
             | Self::PruneStaleMemberOperatorRequests { .. }
             | Self::ReserveRemoteTurnObligation { .. }
@@ -347,6 +364,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::OwedMemberWakeRetryArmedForTest { .. }
             | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
@@ -450,7 +468,9 @@ impl MobCommand {
             | Self::ReleaseMemberRunStarts { agent_identity, .. }
             | Self::ForceCancel { agent_identity, .. }
             | Self::HardCancelMember { agent_identity, .. }
-            | Self::StopMemberRun { agent_identity, .. } => {
+            | Self::StopMemberRun { agent_identity, .. }
+            | Self::SettleMemberRetainedRun { agent_identity, .. }
+            | Self::RequestMemberCompaction { agent_identity, .. } => {
                 AgentLaneAdmission::Members(vec![agent_identity])
             }
             Self::CancelAllWork { runtime_id, .. } => {
@@ -475,8 +495,15 @@ impl MobCommand {
                     .collect(),
             ),
             Self::AdmitControlScope { subject, .. } => match subject {
-                ScopeAdmissionSubject::Mob => AgentLaneAdmission::Unaddressed,
-                ScopeAdmissionSubject::Member(member) => AgentLaneAdmission::Members(vec![member]),
+                // External work addresses no member the lane rules name,
+                // as SubmitWork does: MobMachine's admission answers it.
+                ScopeAdmissionSubject::Mob | ScopeAdmissionSubject::ExternalWork(_) => {
+                    AgentLaneAdmission::Unaddressed
+                }
+                ScopeAdmissionSubject::Member(member)
+                | ScopeAdmissionSubject::MemberHost(member) => {
+                    AgentLaneAdmission::Members(vec![member])
+                }
                 ScopeAdmissionSubject::LegacyAdoption(_) | ScopeAdmissionSubject::DeclaredApply => {
                     AgentLaneAdmission::HostOnly
                 }
@@ -488,7 +515,12 @@ impl MobCommand {
             | Self::OpenDeclaredApply { .. }
             // Operator instructions are the host's; no agent writes them.
             | Self::SetOperatorInstruction { .. }
-            | Self::RevokeOperatorInstruction { .. } => AgentLaneAdmission::HostOnly,
+            | Self::RevokeOperatorInstruction { .. }
+            // The build preparation the host asked to retry is the host's.
+            | Self::ResolveMemberBuildPreparation { .. } => AgentLaneAdmission::HostOnly,
+            // No agent grants a member tools.
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { .. } => AgentLaneAdmission::HostOnly,
 
             // Spawns, seats, work, flows, objectives and forked participants.
             Self::Spawn { .. }
@@ -558,6 +590,7 @@ impl MobCommand {
             | Self::WakeMember { .. }
             | Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. }
             | Self::StartupMemberRecovered { .. }
@@ -590,6 +623,10 @@ impl MobCommand {
             | Self::CommitFlowFrameStorePlan { .. }
             | Self::ProjectMachineInput { .. }
             | Self::ApplyMachineInputEffects { .. }
+            // A fork seat's dispatch admission: the handle's fork paths drive
+            // both after their own admission (`admit_fork_member`).
+            | Self::ObserveForkSourceDispatchLineage { .. }
+            | Self::ResolveSeatDispatchAdmission { .. }
             | Self::ValidateCommandAuthority { .. }
             | Self::PruneStaleMemberOperatorRequests { .. }
             | Self::ReserveRemoteTurnObligation { .. }
@@ -647,6 +684,7 @@ impl MobCommand {
             | Self::LifecycleSnapshot { .. }
             | Self::LifecycleNotificationBurst { .. }
             | Self::ParkActorForObservationTest { .. }
+            | Self::OwedMemberWakeRetryArmedForTest { .. }
             | Self::InjectUnreadableNameAtLadderOpenForTest { .. }
             | Self::QueueRoutedEffectForTest { .. }
             | Self::WakeMemberFromEffectForTest { .. }
@@ -703,6 +741,7 @@ impl MobCommand {
             }
             Self::MemberWakeTimedOut { .. }
             | Self::RetryOwedMemberWake { .. }
+            | Self::RetryMemberBuildPreparation { .. }
             | Self::RepairOwedEdge { .. }
             | Self::ReleaseHeldMember { .. } => {}
             Self::ReloadMemberRegistration { reply_tx, .. } => {
@@ -755,6 +794,9 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ReleaseMemberRunStarts { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResolveMemberBuildPreparation { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::PlanDormantSeats { reply_tx, .. } => {
@@ -850,6 +892,12 @@ impl MobCommand {
             Self::StopMemberRun { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
+            Self::SettleMemberRetainedRun { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::RequestMemberCompaction { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
             Self::MemberHistory { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
@@ -924,6 +972,12 @@ impl MobCommand {
             | Self::RevokeOperatorInstruction { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error.into()));
             }
+            #[cfg(feature = "runtime-adapter")]
+            Self::GrantMemberTool { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(super::member_grant_gate::MemberToolGrantError::Mob(
+                    error,
+                )));
+            }
             Self::PrepareMemberInstructionDelivery { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
@@ -948,6 +1002,12 @@ impl MobCommand {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ApplyMachineInputEffects { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ObserveForkSourceDispatchLineage { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::ResolveSeatDispatchAdmission { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::ValidateCommandAuthority { reply_tx } => {
@@ -999,6 +1059,10 @@ impl MobCommand {
             }
             #[cfg(test)]
             Self::ParkActorForObservationTest { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            #[cfg(test)]
+            Self::OwedMemberWakeRetryArmedForTest { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             #[cfg(test)]

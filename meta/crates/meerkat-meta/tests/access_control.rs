@@ -43,10 +43,12 @@ restart_policy = "always"
     .to_string()
 }
 
+/// A development issuer: the console verifies HS256 tokens (see
+/// `person_token`) only from one.
 fn trusted_oidc() -> TrustedOidcRuntimeConfig {
     TrustedOidcRuntimeConfig {
         discovery_json:
-            r#"{"issuer":"https://trusted.meta.local","jwks_uri":"https://trusted.meta.local/.well-known/jwks.json"}"#
+            r#"{"issuer":"https://trusted.meta.localhost","jwks_uri":"https://trusted.meta.localhost/.well-known/jwks.json"}"#
                 .to_string(),
         jwks_json: r#"{"keys":[{"kid":"kid-current","kty":"oct","alg":"HS256","k":"cGhhc2U3LXRydXN0ZWQtY3VycmVudC1zZWNyZXQ"}]}"#
             .to_string(),
@@ -186,6 +188,56 @@ fn sidebar_identities(experience: &Value) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+/// Under enforced access each agent's affordances say whether the caller may
+/// change its console schedules (`can_manage_schedules`): `agent.send` and
+/// `schedule.manage` on it. A configuration that names no schedule action
+/// grants `schedule.manage` wherever it grants `agent.send`; one that names
+/// it is taken literally, so a caller may message an agent without changing
+/// its schedules.
+#[test]
+fn experience_affords_schedule_changes_with_send_and_schedule_manage() {
+    let snapshot = snapshot_with_members(vec![
+        member("ops-lead", "lead", &[]),
+        member("scout-1", "scout", &[]),
+    ]);
+    let affordance = |experience: &Value, identity: &str, key: &str| {
+        experience["agent_sidebar"]["live_snapshot"]["agents"]
+            .as_array()
+            .and_then(|agents| agents.iter().find(|agent| agent["identity"] == identity))
+            .map(|agent| agent["affordances"][key].clone())
+    };
+
+    let naive = AccessController::new(ops_access_config()).expect("controller");
+    let alice = experience_for(&naive, "alice@example.test", &snapshot);
+    assert_eq!(
+        affordance(&alice, "ops-lead", "can_manage_schedules"),
+        Some(json!(true))
+    );
+    assert_eq!(
+        affordance(&alice, "scout-1", "can_manage_schedules"),
+        Some(json!(false))
+    );
+
+    let mut config = ops_access_config();
+    config.rules.push(AccessRule {
+        id: "frank-schedules-lead".to_string(),
+        subjects: vec!["frank@example.test".to_string()],
+        actions: vec!["schedule.manage".to_string()],
+        agents: vec!["ops-lead".to_string()],
+        ..AccessRule::default()
+    });
+    let restricted = AccessController::new(config).expect("controller");
+    let alice = experience_for(&restricted, "alice@example.test", &snapshot);
+    assert_eq!(
+        affordance(&alice, "ops-lead", "can_send_message"),
+        Some(json!(true))
+    );
+    assert_eq!(
+        affordance(&alice, "ops-lead", "can_manage_schedules"),
+        Some(json!(false))
+    );
 }
 
 #[test]
@@ -714,6 +766,53 @@ comms = true
             .expect("spawn member");
     }
     (temp_dir, runtime)
+}
+
+/// A signed-in person's console token for `subject` (its `sub` and email).
+fn person_token(subject: &str) -> String {
+    let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    jwt_header.kid = Some("kid-current".to_string());
+    jsonwebtoken::encode(
+        &jwt_header,
+        &json!({
+            "iss": "https://trusted.meta.localhost",
+            "aud": "meerkat-console",
+            "sub": subject,
+            "email": subject,
+            "provider": "google_oauth",
+            "exp": chrono::Utc::now().timestamp() + 300,
+        }),
+        &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+    )
+    .expect("signed fixture token")
+}
+
+/// [`rpc`] with `bearer` as the request's token.
+async fn rpc_as(app: &axum::Router, bearer: &str, method: &str, params: Value) -> Value {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": "test",
+        "method": method,
+        "params": params,
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/rpc")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::from(payload.to_string()))
+                .expect("rpc request"),
+        )
+        .await
+        .expect("rpc response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("rpc body");
+    serde_json::from_slice(&body).expect("rpc json")
 }
 
 async fn rpc(app: &axum::Router, method: &str, params: Value) -> Value {
@@ -2837,7 +2936,7 @@ async fn seeded_memory_store(
         .remember_authored(
             &identity_scope("router"),
             record("Router root"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("router root");
@@ -2846,7 +2945,7 @@ async fn seeded_memory_store(
             &identity_scope("router"),
             &router_root.memory_id,
             record("Router tip"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("router tip");
@@ -2854,7 +2953,7 @@ async fn seeded_memory_store(
         .remember_authored(
             &identity_scope("delivery"),
             record("Delivery fact"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("delivery record");
@@ -2865,7 +2964,7 @@ async fn seeded_memory_store(
                 mob: "access-control-mob".to_string(),
             },
             record("Mob convention"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("mob record");
@@ -2875,12 +2974,13 @@ async fn seeded_memory_store(
                 realm: "default".to_string(),
             },
             record("Realm fact"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("realm record");
-    // Operator scope is live (P4 provisional keying) and carries cross-mob
-    // personal facts — the panel gates it on operator.memory.read.
+    // Operator scope carries a person's cross-mob facts: the panel gates it
+    // on operator.memory.read, and another person's on
+    // operator.memory.read_any as well.
     let operator_record = store
         .remember_authored(
             &MemoryScope::Operator {
@@ -2888,7 +2988,7 @@ async fn seeded_memory_store(
                 operator: "op-luka".to_string(),
             },
             record("Operator preference"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator record");
@@ -3387,6 +3487,29 @@ async fn memory_panel_enforces_scope_actions_end_to_end() {
             ..AccessRule::default()
         })
         .expect("live operator grant");
+    // `operator.memory.read` reads the caller's own operator memory; this
+    // record is another person's, so it needs `operator.memory.read_any`.
+    let other_person = rpc(
+        &app,
+        "meta/memory/panel/record",
+        json!({ "memory_id": operator_id }),
+    )
+    .await;
+    assert_eq!(
+        other_person["error"]["data"]["action"],
+        json!("operator.memory.read_any"),
+        "{other_person:#?}"
+    );
+    controller
+        .upsert_rule(AccessRule {
+            id: "operator-reader".to_string(),
+            actions: vec![
+                "operator.memory.read".to_string(),
+                "operator.memory.read_any".to_string(),
+            ],
+            ..AccessRule::default()
+        })
+        .expect("live read-any grant");
     let operator_detail = rpc(
         &app,
         "meta/memory/panel/record",
@@ -3397,6 +3520,365 @@ async fn memory_panel_enforces_scope_actions_end_to_end() {
         operator_detail["error"],
         Value::Null,
         "{operator_detail:#?}"
+    );
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// The Memory panel on a console with sign-in shows a person their own
+/// operator memory with `operator.memory.read`. Another person's operator
+/// memory needs `operator.memory.read_any` too: it is left out of listings
+/// and refused on detail without it. Admins read every person's.
+#[tokio::test]
+async fn reading_others_operator_memory_needs_read_any() {
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind};
+    use meerkat_meta::{AgentMemoryProvider, MemoryScope, NewMemoryRecord};
+
+    const ISSUER: &str = "https://trusted.meta.localhost";
+    const ADMIN: &str = "root@example.test";
+    const ALICE: &str = "alice@example.test";
+    const CAROL: &str = "carol@example.test";
+
+    async fn person_rpc(app: &axum::Router, subject: &str, method: &str, params: Value) -> Value {
+        let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        jwt_header.kid = Some("kid-current".to_string());
+        let token = jsonwebtoken::encode(
+            &jwt_header,
+            &json!({
+                "iss": ISSUER,
+                "aud": "meerkat-console",
+                "sub": subject,
+                "email": subject,
+                "provider": "google_oauth",
+                "exp": chrono::Utc::now().timestamp() + 300,
+            }),
+            &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+        )
+        .expect("signed fixture token");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/console/rpc")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({"jsonrpc": "2.0", "id": "operator-memory", "method": method, "params": params})
+                            .to_string(),
+                    ))
+                    .expect("person RPC request"),
+            )
+            .await
+            .expect("person RPC response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("person RPC body");
+        serde_json::from_slice(&body).expect("person RPC json")
+    }
+
+    async fn operator_ids(app: &axum::Router, subject: &str) -> Vec<String> {
+        let listing = person_rpc(
+            app,
+            subject,
+            "meta/memory/panel/records",
+            json!({ "scope": "operator" }),
+        )
+        .await;
+        assert_eq!(listing["error"], Value::Null, "{listing:#?}");
+        listing["result"]["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .map(|row| row["id"].as_str().expect("record id").to_string())
+            .collect()
+    }
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store =
+        meerkat_meta::SqliteAgentMemoryStore::open(memory_dir.path()).expect("memory store");
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec![ADMIN.to_string()],
+        rules: vec![AccessRule {
+            id: "people-read-operator-memory".to_string(),
+            subjects: vec![ALICE.to_string(), CAROL.to_string()],
+            actions: vec!["operator.memory.read".to_string()],
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller");
+    runtime.set_access_controller(controller.clone());
+    let mut decisions = decision_state(true);
+    decisions.trusted_oidc.discovery_json = json!({
+        "issuer": ISSUER,
+        "jwks_uri": format!("{ISSUER}/.well-known/jwks.json"),
+    })
+    .to_string();
+    let app = runtime.build_reference_app_router(decisions);
+
+    // A person's operator memory is keyed by the caller scope `whoami`
+    // reports to them.
+    let mut operator_records = BTreeMap::new();
+    for (subject, title) in [
+        (ALICE, "Alice operator fact"),
+        (CAROL, "Carol operator fact"),
+    ] {
+        let whoami = person_rpc(&app, subject, "meta/console/whoami", json!({})).await;
+        let caller_scope = whoami["result"]["caller_scope"]
+            .as_str()
+            .expect("caller scope")
+            .to_string();
+        let receipt = store
+            .remember_authored(
+                &MemoryScope::Operator {
+                    realm: "default".to_string(),
+                    operator: caller_scope,
+                },
+                NewMemoryRecord {
+                    kind: MemoryKind::Preference,
+                    title: title.to_string(),
+                    description: String::new(),
+                    body: format!("{title} body"),
+                    tags: Vec::new(),
+                    evidence: Vec::new(),
+                    verification: None,
+                },
+                MemoryAuthor::Operator { principal: None },
+            )
+            .await
+            .expect("operator record");
+        operator_records.insert(subject, receipt.memory_id);
+    }
+    let alice_record = operator_records[ALICE].clone();
+    let carol_record = operator_records[CAROL].clone();
+
+    let alice_reads = operator_ids(&app, ALICE).await;
+    assert!(
+        !alice_reads.contains(&carol_record),
+        "A's listing leaves out B's operator memory: {alice_reads:?}"
+    );
+    assert!(
+        alice_reads.contains(&alice_record),
+        "A reads their own operator memory: {alice_reads:?}"
+    );
+    let unscoped = person_rpc(&app, ALICE, "meta/memory/panel/records", json!({})).await;
+    assert!(
+        unscoped["result"]["records"]
+            .as_array()
+            .expect("records")
+            .iter()
+            .all(|row| row["id"] != json!(carol_record)),
+        "an unscoped listing leaves out B's operator memory too: {unscoped:#?}"
+    );
+    let denied = person_rpc(
+        &app,
+        ALICE,
+        "meta/memory/panel/record",
+        json!({ "memory_id": carol_record }),
+    )
+    .await;
+    assert_eq!(denied["error"]["code"], json!(-32030), "{denied:#?}");
+    assert_eq!(
+        denied["error"]["data"]["action"],
+        json!("operator.memory.read_any"),
+        "{denied:#?}"
+    );
+    let own = person_rpc(
+        &app,
+        ALICE,
+        "meta/memory/panel/record",
+        json!({ "memory_id": alice_record }),
+    )
+    .await;
+    assert_eq!(own["error"], Value::Null, "{own:#?}");
+
+    // The admin reads every person's operator memory.
+    let admin_reads = operator_ids(&app, ADMIN).await;
+    assert!(
+        admin_reads.contains(&alice_record) && admin_reads.contains(&carol_record),
+        "{admin_reads:?}"
+    );
+
+    // `operator.memory.read_any` opens another person's operator memory.
+    controller
+        .upsert_rule(AccessRule {
+            id: "alice-reads-any-operator-memory".to_string(),
+            subjects: vec![ALICE.to_string()],
+            actions: vec!["operator.memory.read_any".to_string()],
+            ..AccessRule::default()
+        })
+        .expect("live read_any grant");
+    let alice_reads = operator_ids(&app, ALICE).await;
+    assert!(
+        alice_reads.contains(&carol_record) && alice_reads.contains(&alice_record),
+        "{alice_reads:?}"
+    );
+    let detail = person_rpc(
+        &app,
+        ALICE,
+        "meta/memory/panel/record",
+        json!({ "memory_id": carol_record }),
+    )
+    .await;
+    assert_eq!(detail["error"], Value::Null, "{detail:#?}");
+
+    let _ = runtime.mob_handle().stop().await;
+}
+
+/// An `operator_said` fact the memory tool files for a person lives only in
+/// that person's operator memory, as a proposal until a steward accepts it.
+/// Another person who reads the agent's memory (`agent.memory.read` and
+/// `operator.memory.read`) is refused it until they also hold
+/// `operator.memory.read_any`; the person reads their own.
+#[tokio::test]
+async fn another_persons_operator_said_fact_needs_read_any() {
+    use meerkat_meta::memory::records::{MemoryAuthor, MemoryKind};
+    use meerkat_meta::{AgentMemoryProvider, MemoryScope, NewMemoryRecord};
+
+    const ISSUER: &str = "https://trusted.meta.localhost";
+    const ALICE: &str = "alice@example.test";
+    const CAROL: &str = "carol@example.test";
+    const FACT: &str = "Alice prefers terse status notes";
+
+    async fn person_rpc(app: &axum::Router, subject: &str, method: &str, params: Value) -> Value {
+        let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        jwt_header.kid = Some("kid-current".to_string());
+        let token = jsonwebtoken::encode(
+            &jwt_header,
+            &json!({
+                "iss": ISSUER,
+                "aud": "meerkat-console",
+                "sub": subject,
+                "email": subject,
+                "provider": "google_oauth",
+                "exp": chrono::Utc::now().timestamp() + 300,
+            }),
+            &jsonwebtoken::EncodingKey::from_secret(b"phase7-trusted-current-secret"),
+        )
+        .expect("signed fixture token");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/console/rpc")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({"jsonrpc": "2.0", "id": "operator-said", "method": method, "params": params})
+                            .to_string(),
+                    ))
+                    .expect("person RPC request"),
+            )
+            .await
+            .expect("person RPC response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("person RPC body");
+        serde_json::from_slice(&body).expect("person RPC json")
+    }
+
+    async fn proposal_titles(app: &axum::Router, subject: &str) -> Vec<String> {
+        let listing = person_rpc(app, subject, "meta/memory/panel/proposals", json!({})).await;
+        assert_eq!(listing["error"], Value::Null, "{listing:#?}");
+        listing["result"]["proposals"]
+            .as_array()
+            .expect("proposals")
+            .iter()
+            .map(|row| row["title"].as_str().expect("title").to_string())
+            .collect()
+    }
+
+    let (_temp_dir, mut runtime) = build_access_runtime_fixture().await;
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let store =
+        meerkat_meta::SqliteAgentMemoryStore::open(memory_dir.path()).expect("memory store");
+    runtime.set_memory_panel_store(Arc::new(store.clone()));
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![AccessRule {
+            id: "people-read-memory".to_string(),
+            subjects: vec![ALICE.to_string(), CAROL.to_string()],
+            actions: vec![
+                "agent.memory.read".to_string(),
+                "operator.memory.read".to_string(),
+            ],
+            ..AccessRule::default()
+        }],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller");
+    runtime.set_access_controller(controller.clone());
+    let mut decisions = decision_state(true);
+    decisions.trusted_oidc.discovery_json = json!({
+        "issuer": ISSUER,
+        "jwks_uri": format!("{ISSUER}/.well-known/jwks.json"),
+    })
+    .to_string();
+    let app = runtime.build_reference_app_router(decisions);
+
+    // What the memory tool files for Alice: a proposal to her own operator
+    // memory, keyed by the caller scope `whoami` reports to her. A shared
+    // member the console knows files it: a proposal from an agent the
+    // console does not know is withheld from every non-administrator.
+    let whoami = person_rpc(&app, ALICE, "meta/console/whoami", json!({})).await;
+    let alice_scope = whoami["result"]["caller_scope"]
+        .as_str()
+        .expect("caller scope")
+        .to_string();
+    store
+        .propose(
+            &MemoryScope::Operator {
+                realm: "default".to_string(),
+                operator: alice_scope,
+            },
+            NewMemoryRecord {
+                kind: MemoryKind::Preference,
+                title: FACT.to_string(),
+                description: String::new(),
+                body: format!("{FACT}."),
+                tags: vec!["epistemic:operator_said".to_string()],
+                evidence: Vec::new(),
+                verification: None,
+            },
+            MemoryAuthor::Agent {
+                identity: "delivery".to_string(),
+            },
+        )
+        .await
+        .expect("operator proposal");
+
+    assert!(
+        proposal_titles(&app, ALICE)
+            .await
+            .contains(&FACT.to_string()),
+        "the person reads their own operator_said fact"
+    );
+    let carol_reads = proposal_titles(&app, CAROL).await;
+    assert!(
+        !carol_reads.contains(&FACT.to_string()),
+        "another person is refused it without operator.memory.read_any: {carol_reads:?}"
+    );
+    controller
+        .upsert_rule(AccessRule {
+            id: "carol-reads-any-operator-memory".to_string(),
+            subjects: vec![CAROL.to_string()],
+            actions: vec!["operator.memory.read_any".to_string()],
+            ..AccessRule::default()
+        })
+        .expect("live read_any grant");
+    assert!(
+        proposal_titles(&app, CAROL)
+            .await
+            .contains(&FACT.to_string()),
+        "operator.memory.read_any opens it"
     );
 
     let _ = runtime.mob_handle().stop().await;
@@ -3595,7 +4077,7 @@ async fn seed_realm_level_panel_rows(
                 mob: "access-control-mob".to_string(),
             },
             proposal("Mob proposal"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("mob proposal");
@@ -3606,7 +4088,7 @@ async fn seed_realm_level_panel_rows(
                 operator: "op-owner".to_string(),
             },
             proposal("Operator proposal"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator proposal");
@@ -3898,6 +4380,7 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
         "agent.memory.read",
         "mob.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
         "memory.quarantine.review",
     ];
     for (missing, rules) in [
@@ -3922,6 +4405,7 @@ async fn memory_panel_dream_history_is_withheld_without_every_scope() {
                     "agent.view",
                     "agent.memory.read",
                     "operator.memory.read",
+                    "operator.memory.read_any",
                     "memory.quarantine.review",
                 ],
             )],
@@ -3989,6 +4473,7 @@ async fn memory_panel_dream_history_is_listed_for_a_realm_wide_reader() {
                     "agent.memory.read".to_string(),
                     "mob.memory.read".to_string(),
                     "operator.memory.read".to_string(),
+                    "operator.memory.read_any".to_string(),
                     "memory.quarantine.review".to_string(),
                 ],
                 ..AccessRule::default()
@@ -4046,7 +4531,7 @@ async fn plain_dream_store(root: &std::path::Path) -> meerkat_meta::SqliteAgentM
             .remember_authored(
                 &identity_scope(identity),
                 record(&format!("{identity} fact")),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await
             .expect("identity record");
@@ -4129,6 +4614,7 @@ async fn memory_panel_dream_history_needs_the_review_grant_while_a_record_is_qua
         "agent.memory.read",
         "mob.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
     ];
 
     runtime.set_access_controller(unscoped_reader(&every_scope));
@@ -4201,7 +4687,11 @@ async fn memory_panel_dream_history_needs_the_review_grant_after_a_quarantined_t
         "the write must land quarantined: {quarantined:?}"
     );
     let forgotten = store
-        .forget_authored(&router, &quarantined.memory_id, MemoryAuthor::Operator)
+        .forget_authored(
+            &router,
+            &quarantined.memory_id,
+            MemoryAuthor::Operator { principal: None },
+        )
         .await
         .expect("forget the quarantined write");
     assert!(
@@ -4291,7 +4781,7 @@ async fn memory_panel_reads_honour_a_label_deny_and_fail_closed_on_unknown_ident
                     evidence: Vec::new(),
                     verification: None,
                 },
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await
             .expect("identity record");
@@ -4405,7 +4895,7 @@ async fn memory_panel_dream_history_judges_every_scope_the_realm_names() {
                 evidence: Vec::new(),
                 verification: None,
             },
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator proposal");
@@ -4414,6 +4904,7 @@ async fn memory_panel_dream_history_judges_every_scope_the_realm_names() {
         "agent.view",
         "agent.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
         "memory.quarantine.review",
     ];
 
@@ -4473,6 +4964,7 @@ fn promotion_reviewer(deny_router: bool) -> AccessController {
             "agent.memory.read".to_string(),
             "mob.memory.read".to_string(),
             "operator.memory.read".to_string(),
+            "operator.memory.read_any".to_string(),
             "memory.quarantine.review".to_string(),
         ],
         ..AccessRule::default()
@@ -4627,7 +5119,7 @@ async fn memory_panel_pending_promotion_of_a_proposal_needs_its_scope() {
                 operator: "op-owner".to_string(),
             },
             record("Operator preference"),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator proposal");
@@ -4676,6 +5168,7 @@ async fn memory_panel_pending_promotion_of_a_proposal_needs_its_scope() {
         "agent.memory.read",
         "mob.memory.read",
         "operator.memory.read",
+        "operator.memory.read_any",
         "memory.quarantine.review",
     ];
     let without_operator = [
@@ -4760,6 +5253,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     .expect("controller");
     runtime.set_access_controller(controller.clone());
     let app = runtime.build_reference_app_router(decision_state(false));
+    // Only a signed-in person reviews quarantined memory; the grants below
+    // apply to every caller, this person included.
+    let reviewer = person_token("alice@example.test");
     let advertised = |capabilities: &Value| {
         capabilities["result"]["methods"]
             .as_array()
@@ -4767,8 +5263,10 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             .iter()
             .any(|method| method == "meta/memory/quarantine/decide")
     };
+    // The decide is listed only to a signed-in person, and to one only once
+    // the reviewer grant exists.
     assert!(
-        !advertised(&rpc(&app, "meta/capabilities", json!({})).await),
+        !advertised(&rpc_as(&app, &reviewer, "meta/capabilities", json!({})).await),
         "decide needs the reviewer grant before it is advertised"
     );
 
@@ -4779,7 +5277,13 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             ..AccessRule::default()
         })
         .expect("reviewer grant");
-    assert!(advertised(&rpc(&app, "meta/capabilities", json!({})).await));
+    assert!(advertised(
+        &rpc_as(&app, &reviewer, "meta/capabilities", json!({})).await
+    ));
+    assert!(
+        !advertised(&rpc(&app, "meta/capabilities", json!({})).await),
+        "a caller without a token reviews nothing, so it is never offered the decide"
+    );
 
     let decide = |verdict: &str, identity: &str, memory_id: &str, hash: &str| {
         json!({
@@ -4796,8 +5300,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     );
 
     // Reviewer grant alone: denied at the identity's view grant.
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4823,8 +5328,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     .await;
     assert_eq!(detail["error"], Value::Null, "{detail:#?}");
     assert_eq!(detail["result"]["record"]["content_hash"], json!(hash));
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4844,8 +5350,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             ..AccessRule::default()
         })
         .expect("router write grant");
-    let stale = rpc(
+    let stale = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, "0000"),
     )
@@ -4854,8 +5361,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     assert_eq!(stale["error"]["data"]["reason"], json!("content_mismatch"));
     // The refusal never reveals the stored hash to bind against.
     assert!(!stale.to_string().contains(&hash), "{stale:#?}");
-    let released = rpc(
+    let released = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4864,11 +5372,10 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     let result = &released["result"];
     assert_eq!(result["outcome"], json!("released"));
     assert_eq!(result["realm"], json!("default"));
-    // The console runs without app auth here: the decision says no
-    // principal was known instead of naming anyone.
+    // The reviewer is the signed-in person the request's token names.
     assert_eq!(
         result["decision"]["review"]["reviewer"],
-        json!({ "kind": "operator", "principal": null })
+        json!({ "kind": "operator", "principal": "alice@example.test" })
     );
     assert_eq!(result["origin"]["memory_id"], json!(reviewable_id));
     assert_eq!(result["origin"]["status"]["status"], json!("tombstoned"));
@@ -4917,8 +5424,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
     );
 
     // Replays are idempotent; a cross-verdict replay names the successor.
-    let replay = rpc(
+    let replay = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &reviewable_id, &hash),
     )
@@ -4935,8 +5443,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
 
     // Tombstone needs the identity's delete grant on top of the reviewer
     // and read grants; with it, a still-gated record is refused typed.
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("tombstone", "router", &gated_id, &hash),
     )
@@ -5007,8 +5516,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
         "Router gated claim",
         "Pages go to the mob channel.",
     );
-    let gated = rpc(
+    let gated = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "router", &live_gated, &live_hash),
     )
@@ -5021,8 +5531,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             .as_u64()
             .is_some_and(|expires| expires > now_ms)
     );
-    let invalidated = rpc(
+    let invalidated = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("tombstone", "router", &live_gated, &live_hash),
     )
@@ -5048,8 +5559,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
 
     // The seeded promotions are long past the shared expiry: a decision
     // expires them (no steward needed) and records which ones it expired.
-    let expired = rpc(
+    let expired = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("tombstone", "router", &gated_id, &gated_hash),
     )
@@ -5066,8 +5578,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
 
     // Another identity's scope never reaches a router record: denied while
     // ungranted, and reads as not_found once the grants exist.
-    let denied = rpc(
+    let denied = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "delivery", &gated_id, &gated_hash),
     )
@@ -5085,8 +5598,9 @@ async fn memory_quarantine_decide_composes_existing_grants_end_to_end() {
             ..AccessRule::default()
         })
         .expect("delivery grants");
-    let foreign = rpc(
+    let foreign = rpc_as(
         &app,
+        &reviewer,
         "meta/memory/quarantine/decide",
         decide("release", "delivery", &gated_id, &gated_hash),
     )
@@ -5270,10 +5784,12 @@ async fn memory_quarantine_decide_denies_an_anonymous_caller_under_enforced_acce
     let _ = runtime.mob_handle().stop().await;
 }
 
-/// A trusted host without app auth and without access control decides with
-/// no principal, and the decision says so rather than naming anyone.
+/// A console without sign-in reviews no quarantined record, even on a
+/// trusted host without access control: its caller sent no token, so it is
+/// not a signed-in person (`approver_unauthenticated`), and the record stays
+/// quarantined.
 #[tokio::test]
-async fn memory_quarantine_decide_on_a_trusted_host_records_no_principal() {
+async fn memory_quarantine_decide_without_a_signed_in_person_is_refused() {
     let (_temp_dir, runtime) = build_access_runtime_fixture().await;
     let memory_dir = tempfile::tempdir().expect("memory dir");
     let (store, _tip_id, _gated_id, _delivery_id, _mob_id, _operator_id) =
@@ -5282,7 +5798,7 @@ async fn memory_quarantine_decide_on_a_trusted_host_records_no_principal() {
     let record = quarantined_router_record(&store, title, body).await;
     runtime.set_memory_panel_store(Arc::new(store.clone()));
     let app = runtime.build_reference_app_router(decision_state(false));
-    let released = rpc(
+    let refused = rpc(
         &app,
         "meta/memory/quarantine/decide",
         json!({
@@ -5293,14 +5809,24 @@ async fn memory_quarantine_decide_on_a_trusted_host_records_no_principal() {
         }),
     )
     .await;
-    assert_eq!(released["error"], Value::Null, "{released:#?}");
-    assert_eq!(released["result"]["outcome"], json!("released"));
-    assert_eq!(
-        released["result"]["decision"]["review"]["reviewer"],
-        json!({ "kind": "operator", "principal": null })
-    );
+    let detail = rpc(
+        &app,
+        "meta/memory/panel/record",
+        json!({ "memory_id": record }),
+    )
+    .await;
 
     let _ = runtime.mob_handle().stop().await;
+    assert_eq!(refused["error"]["code"], json!(-32057), "{refused:#?}");
+    assert_eq!(
+        refused["error"]["data"]["kind"],
+        json!("approver_unauthenticated")
+    );
+    assert_eq!(
+        detail["result"]["record"]["status"]["status"],
+        json!("quarantined"),
+        "{detail:#?}"
+    );
 }
 
 /// Quarantined content stays reviewer-only after a review or forget
@@ -5755,7 +6281,9 @@ mod checked_v1_acceptance {
                 id: "existing-rule".to_string(),
                 description: Some(PRIVATE_CONFIG.to_string()),
                 subjects: vec![NEW_ADMIN.to_string()],
-                actions: vec!["agent.send".to_string()],
+                // Names `schedule.manage` itself, so the owner keeps this
+                // configuration exactly as written.
+                actions: vec!["agent.send".to_string(), "schedule.manage".to_string()],
                 agents: vec!["router".to_string()],
                 ..AccessRule::default()
             }],
@@ -5885,7 +6413,8 @@ mod checked_v1_acceptance {
         assert_eq!(before.audit[0].event_type, "pending_created");
 
         // Carol is authenticated and may invoke gating.decide, but does not
-        // hold this role. Caller fields cannot lend her Alice's authority.
+        // hold this role. Caller fields cannot lend her Alice's authority,
+        // and no request field names an approver.
         let refused = authenticated_rpc(
             &app,
             NEW_ADMIN,
@@ -5893,7 +6422,6 @@ mod checked_v1_acceptance {
             json!({
                 "pending_id": pending_id,
                 "decision": "approve",
-                "approver_id": ROLE,
                 "deciding_principal": ADMIN_B,
                 "held_approver_ids": [ROLE],
             }),
@@ -5909,7 +6437,6 @@ mod checked_v1_acceptance {
             json!({
                 "pending_id": pending_id,
                 "decision": "approve",
-                "approver_id": NEW_ADMIN,
                 "deciding_principal": NEW_ADMIN,
                 "held_approver_ids": ["role:forged"],
             }),
@@ -6326,13 +6853,13 @@ mod checked_v1_acceptance {
 
     /// An invalid save says what is wrong with it: `invalid_access_config`
     /// carries `reason`, a stable token, and `detail`, the text that names
-    /// the rule, action, group or approver at fault, on the checked and the
-    /// unchecked write of each method that can leave the configuration
-    /// invalid (`set`, `rules/upsert`, `rules/delete` and `groups/delete`).
-    /// The code and the fixed message stay, nothing is written, and the
-    /// refusal names nothing private.
+    /// the rule, action, group or approver at fault, on the checked write of
+    /// each method that can leave the configuration invalid (`set`,
+    /// `rules/upsert`, `rules/delete` and `groups/delete`). The code and the
+    /// fixed message stay, nothing is written, and the refusal names nothing
+    /// private.
     #[tokio::test]
-    async fn invalid_saves_name_their_reason_on_checked_and_unchecked_writes() {
+    async fn invalid_saves_name_their_reason() {
         fn strings(values: &[&str]) -> Vec<String> {
             values.iter().map(ToString::to_string).collect()
         }
@@ -6349,6 +6876,7 @@ mod checked_v1_acceptance {
             meerkat_meta::AccessApprover {
                 subjects: strings(subjects),
                 groups: strings(groups),
+                ..meerkat_meta::AccessApprover::default()
             }
         }
         /// A `meta/access/rules/upsert` payload.
@@ -6474,40 +7002,33 @@ mod checked_v1_acceptance {
             ),
         ];
         for (method, payload, reason, detail) in cases {
-            for (form, params) in [
-                (
-                    "checked",
-                    checked(&base.owner, base.revision, payload.clone()),
-                ),
-                ("unchecked", payload),
-            ] {
-                let response = authenticated_rpc(&fixture.app, ADMIN_A, method, params).await;
-                assert_eq!(
-                    response["error"]["code"],
-                    json!(-32602),
-                    "{method}, {form}: {response:#?}"
-                );
-                assert_eq!(
-                    response["error"]["message"],
-                    json!("Invalid access configuration."),
-                    "{method}, {form}: {response:#?}"
-                );
-                assert_eq!(
-                    response["error"]["data"],
-                    json!({
-                        "kind": "invalid_access_config",
-                        "reason": reason,
-                        "detail": detail,
-                    }),
-                    "{method}, {form}: {response:#?}"
-                );
-                safe_error(&response, &fixture);
-                assert_eq!(
-                    checkpoint(&fixture),
-                    initial,
-                    "{method}, {form}: nothing is written"
-                );
-            }
+            let params = checked(&base.owner, base.revision, payload);
+            let response = authenticated_rpc(&fixture.app, ADMIN_A, method, params).await;
+            assert_eq!(
+                response["error"]["code"],
+                json!(-32602),
+                "{method}: {response:#?}"
+            );
+            assert_eq!(
+                response["error"]["message"],
+                json!("Invalid access configuration."),
+                "{method}: {response:#?}"
+            );
+            assert_eq!(
+                response["error"]["data"],
+                json!({
+                    "kind": "invalid_access_config",
+                    "reason": reason,
+                    "detail": detail,
+                }),
+                "{method}: {response:#?}"
+            );
+            safe_error(&response, &fixture);
+            assert_eq!(
+                checkpoint(&fixture),
+                initial,
+                "{method}: nothing is written"
+            );
         }
     }
 

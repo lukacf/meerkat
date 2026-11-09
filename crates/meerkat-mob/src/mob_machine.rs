@@ -1406,6 +1406,10 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveMemberBuildPreparation,
+        reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::BeginMemberRotation,
         reason: MobMachineRuntimeInternalReason::MemberResidencyAuthority,
     },
@@ -1498,6 +1502,73 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
     MobMachineRuntimeInternalClassificationRecord {
         input: MobMachineCatalogInput::UnlistIdentityEntry,
         reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // A host's takeover of a declared entry (0.9.11), decided in the identity
+    // reconciler's step before it retires or materializes the member. Not a
+    // surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::TakeOverIdentityEntry,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // Owned edges (0.9.11): an identity change's declaration and end of an
+    // owned edge and a policy reload's end of one, decided in the actor's
+    // steps, and a plain unwire's admission, decided before the unwire. None
+    // is a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::DeclareOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::EndOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdmitMemberUnwire,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // Adoption into store custody (0.9.11), decided in the actor's change
+    // step for the handle's adoption. Not a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdoptIdentityIntoStore,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // The downgrade cycle (0.9.11), decided in the actor's purge and import
+    // steps for the handle's purge and import. Not surface commands.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::PurgeIdentityRows,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ImportIdentityRecord,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // An owned edge's realization, a pure verdict a seat, a spawn and a
+    // realization pass read before their wire, and the import's
+    // restoration of an owned edge its restored record holds (0.9.11),
+    // decided in the actor's steps. Not surface commands.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::AdmitOwnedEdgeRealization,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RestoreOwnedIdentityEdge,
+        reason: MobMachineRuntimeInternalReason::IdentityEntryAuthority,
+    },
+    // A member build's tool dispatch admission (0.9.11), decided by
+    // MobMachine from the raw observations of the build's lineage and of the
+    // host customizer's answer; the step that seats or rebuilds the member
+    // drives it as a build input of the member, not a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::ResolveMemberDispatchAdmission,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
+    },
+    // The record of a member incarnation whose lineage runs under a tool
+    // dispatch admission (0.9.11): the seat that requires it applies it with
+    // its seat commit, and the replay of a spawn row that carries it applies
+    // it again; neither is a surface command.
+    MobMachineRuntimeInternalClassificationRecord {
+        input: MobMachineCatalogInput::RecordMemberDispatchAdmissionLineage,
+        reason: MobMachineRuntimeInternalReason::SpawnProfileAuthority,
     },
 ];
 

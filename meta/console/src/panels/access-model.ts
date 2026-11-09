@@ -17,15 +17,21 @@ export interface AccessFamily {
  * family names lands in "Other". */
 export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   { id: "view", label: "View", actions: ["agent.view", "topology.view", "topology.audit", "mob.observe"] },
-  { id: "message", label: "Message", actions: ["agent.send"] },
+  { id: "message", label: "Message", actions: ["agent.send", "schedule.manage"] },
   { id: "lifecycle", label: "Lifecycle", actions: ["agent.spawn", "agent.respawn", "agent.retire", "agent.reset"] },
-  { id: "approvals", label: "Approvals", actions: ["gating.view", "gating.decide"] },
+  { id: "tools", label: "Tools", actions: ["agent.tool_grants.manage"] },
+  {
+    id: "approvals",
+    label: "Approvals",
+    actions: ["gating.view", "gating.decide", "decisions.view", "decisions.decide", "decisions.admin"],
+  },
   {
     id: "memory",
     label: "Memory",
     actions: [
       "agent.memory.read", "agent.memory.write", "agent.memory.delete", "agent.memory.admin",
-      "operator.memory.read", "mob.memory.read", "mob.memory.propose", "mob.memory.commit",
+      "operator.memory.read", "operator.memory.read_any", "mob.memory.read", "mob.memory.propose",
+      "mob.memory.commit",
       "memory.quarantine.review",
     ],
   },
@@ -38,7 +44,7 @@ export const ACCESS_FAMILIES: readonly AccessFamily[] = [
   {
     id: "admin",
     label: "Admin",
-    actions: ["access.admin", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
+    actions: ["access.admin", "audit.view", "mobpack.author", "mobpack.deploy", "extension.read", "extension.edit", "extension.manage"],
   },
 ];
 

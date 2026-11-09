@@ -175,8 +175,10 @@ impl ManagedGoogleOauthAuthorizer {
         cached: &ManagedGoogleOauthCredential,
         current: &meerkat_core::handles::AuthLeaseSnapshot,
     ) -> bool {
+        // The cached record's marker names the publication with the marker
+        // generation the lease records for it.
         current.credential_present
-            && cached.publication.generation == Some(current.generation)
+            && cached.publication.generation == Some(current.marker_generation())
             && Some(cached.publication.expires_at) == current.expires_at
             && cached.publication.credential_published_at_millis
                 == current.credential_published_at_millis
@@ -241,10 +243,10 @@ impl ManagedGoogleOauthAuthorizer {
                 loaded.release_prelock_lifecycle_guard();
                 let env = self.env.clone();
                 let binding = self.binding.clone();
-                let prepare: oauth::TokenPrepareFn = Box::new(move |locked, mode| {
+                let prepare: oauth::TokenPrepareFn = Box::new(move |fence, locked, mode| {
                     Box::pin(async move {
                         meerkat_auth_core::resolver::prepare_existing_managed_store_oauth_refresh_under_lock(
-                            &env, &binding, loaded, locked, mode,
+                            fence, &env, &binding, loaded, locked, mode,
                         ).await.map_err(meerkat_auth_core::resolver::refresh_error_from_provider)
                     })
                 });
@@ -830,6 +832,22 @@ fn google_code_assist_oauth_refresh_error(
     } else {
         format!("{error}{authmachine_failure}")
     };
+    // AuthMachine's verdict on a refresh failure, when it issued one: a
+    // failure that clears on its own is a credential source that cannot
+    // answer now, one that needs a new sign-in a reauthorization. The
+    // verdict is read, never derived from the provider's answer here.
+    if let oauth::GoogleCodeAssistOAuthError::Refresh(refresh) = &error
+        && let Some(verdict) = refresh.refresh_failure_disposition()
+    {
+        return ProviderAuthError::Auth(match verdict {
+            meerkat_core::auth::RefreshFailureDisposition::Transient => {
+                AuthError::SourceUnavailable { reason: detail }
+            }
+            meerkat_core::auth::RefreshFailureDisposition::ReauthRequired => {
+                AuthError::UserReauthRequired
+            }
+        });
+    }
     if authmachine_failure.is_empty() {
         match error {
             oauth::GoogleCodeAssistOAuthError::InteractiveLoginRequired
@@ -1115,9 +1133,10 @@ impl ProviderRuntime for GoogleProviderRuntime {
                             let prepare_env = env.clone();
                             let prepare_binding = binding.clone();
                             let prepare: oauth::TokenPrepareFn = Box::new(
-                                move |locked_baseline, mode| {
+                                move |fence, locked_baseline, mode| {
                                     Box::pin(async move {
                                         prepare_managed_store_oauth_refresh_under_lock(
+                                            fence,
                                             &prepare_env,
                                             &prepare_binding,
                                             managed,
@@ -1753,15 +1772,20 @@ mod tests {
             }
             async fn save(
                 &self,
+                fence: &meerkat_core::AdmissionGuard,
                 key: &TokenKey,
                 tokens: &PersistedTokens,
             ) -> Result<(), TokenStoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                self.inner.save(key, tokens).await
+                self.inner.save(fence, key, tokens).await
             }
-            async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+            async fn clear(
+                &self,
+                fence: &meerkat_core::AdmissionGuard,
+                key: &TokenKey,
+            ) -> Result<(), TokenStoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                self.inner.clear(key).await
+                self.inner.clear(fence, key).await
             }
             async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1849,7 +1873,10 @@ mod tests {
                 &transition,
             )
             .unwrap();
-            token_store.save(&key, &tokens).await.unwrap();
+            token_store
+                .save(&meerkat_core::AdmissionGuard::none(), &key, &tokens)
+                .await
+                .unwrap();
             drop(guard);
             let mut env = ResolverEnvironment::testing()
                 .with_provider_auth_persistence(persistence.clone())
@@ -2123,7 +2150,7 @@ mod tests {
         async fn authorize(
             &self,
             _req: &mut HttpAuthorizationRequest<'_>,
-        ) -> Result<(), AuthError> {
+        ) -> Result<(), meerkat_core::AuthError> {
             Ok(())
         }
 

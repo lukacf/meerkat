@@ -84,7 +84,22 @@ impl FollowupBinder {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for FollowupBinder {
-    async fn bind(
+    async fn try_bind(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        self.bind_followup(context, input).map_err(|detail| {
+            meerkat_mobkit::identity_first::GovernedBindRefusal::unavailable(detail).into()
+        })
+    }
+    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _: &str) {
+        self.unresolved.lock().unwrap().push(settlement);
+    }
+}
+
+impl FollowupBinder {
+    fn bind_followup(
         &self,
         context: &GovernedBindContext,
         input: Input,
@@ -135,9 +150,6 @@ impl GovernedInputBinder for FollowupBinder {
             input,
             entry_fence: None,
         })
-    }
-    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _: &str) {
-        self.unresolved.lock().unwrap().push(settlement);
     }
 }
 

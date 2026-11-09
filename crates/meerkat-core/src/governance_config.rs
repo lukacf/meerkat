@@ -65,9 +65,10 @@ impl GovernanceConfig {
 /// decides: those addressed to one of `operator_approver_ids`. The operator
 /// is the process's operating-system user (on a governed pipe, the
 /// composition's operator); the connection presents it the open decisions
-/// of these approver ids when its client lists them, and it decides only a
-/// decision the connection presented, while the decision's approver id is
-/// still listed here.
+/// of these approver ids when they open while the connection is open and
+/// when its client lists them, and it decides only a decision the
+/// connection presented, while the decision's approver id is still listed
+/// here.
 ///
 /// Changing the list is approver-authority administration, so it lives in
 /// the host-administered governance section: an ordinary config write can

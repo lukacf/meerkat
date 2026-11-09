@@ -822,6 +822,7 @@ async fn exercise_review(controller_server: &Server, review_server: &Server, cas
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -837,6 +838,7 @@ async fn exercise_review(controller_server: &Server, review_server: &Server, cas
     operations.resource_domains = DomainRestriction::exact([domain(), input_domain()]);
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("reviewable-operations"),
             principal("executor"),
@@ -876,6 +878,7 @@ async fn exercise_review(controller_server: &Server, review_server: &Server, cas
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

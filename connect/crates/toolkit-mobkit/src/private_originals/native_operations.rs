@@ -799,7 +799,12 @@ impl PrivateOriginals {
             let handle = tokio::runtime::Handle::current();
             let issue_selection = selection.clone();
             let reference = reference.clone();
+            // The bind attempt, for the blocking writer's issuance.
+            let attempt = meerkat_core::protected_section::effect_mark();
             tokio::task::spawn_blocking(move || {
+                let _attempt = attempt
+                    .as_ref()
+                    .map(meerkat_core::protected_section::EffectMark::enter);
                 handle.block_on(async {
                     // The task retains the source writer even if its observer
                     // drops while waiting for the member exclusion.
@@ -876,15 +881,26 @@ impl PrivateOriginals {
                                                 .map_err(grant_error)?
                                             {
                                                 Some(root) => root,
-                                                None => grants
-                                                    .issue_root(
-                                                        &context.operator,
-                                                        selected.request.issuance_id.clone(),
-                                                        context.application.clone(),
-                                                        represented.cloned(),
-                                                        bounds.clone(),
-                                                    )
-                                                    .map_err(grant_error)?,
+                                                None => {
+                                                    // A bind attempt's durable
+                                                    // effect: no "not now" may
+                                                    // follow it.
+                                                    if let Some(attempt) = &attempt {
+                                                        attempt.note(
+                                                            "original.native_operation_grant",
+                                                        );
+                                                    }
+                                                    grants
+                                                        .issue_root(
+                                                            &meerkat_core::AdmissionGuard::none(),
+                                                            &context.operator,
+                                                            selected.request.issuance_id.clone(),
+                                                            context.application.clone(),
+                                                            represented.cloned(),
+                                                            bounds.clone(),
+                                                        )
+                                                        .map_err(grant_error)?
+                                                }
                                             };
                                             if root.root_authority != context.operator {
                                                 return Err(HostLifetimeError::Denied);
@@ -910,19 +926,30 @@ impl PrivateOriginals {
                                                 .map_err(grant_error)?
                                             {
                                                 Some(child) => child,
-                                                None => grants
-                                                    .issue_child(
-                                                        &context.application,
-                                                        &root,
-                                                        id,
-                                                        issue_selection
-                                                            .caller
-                                                            .route
-                                                            .logical_executor
-                                                            .clone(),
-                                                        bounds.clone(),
-                                                    )
-                                                    .map_err(grant_error)?,
+                                                None => {
+                                                    // A bind attempt's durable
+                                                    // effect: no "not now" may
+                                                    // follow it.
+                                                    if let Some(attempt) = &attempt {
+                                                        attempt.note(
+                                                            "original.native_operation_grant",
+                                                        );
+                                                    }
+                                                    grants
+                                                        .issue_child(
+                                                            &meerkat_core::AdmissionGuard::none(),
+                                                            &context.application,
+                                                            &root,
+                                                            id,
+                                                            issue_selection
+                                                                .caller
+                                                                .route
+                                                                .logical_executor
+                                                                .clone(),
+                                                            bounds.clone(),
+                                                        )
+                                                        .map_err(grant_error)?
+                                                }
                                             };
                                             let lineage = vec![root, child];
                                             let leaf = grants

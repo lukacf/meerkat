@@ -483,6 +483,119 @@ async fn request_only_boundary_context_stays_request_local() {
     }
 }
 
+/// A durable delivery that joins the running turn carries its input's
+/// request-only context: the runner adds the values the turn does not carry
+/// yet to the turn's own, so the request that crosses the boundary and every
+/// later request of the run carry each value once, and none of it becomes a
+/// Session row.
+#[cfg(feature = "workspace-tests")]
+#[tokio::test]
+async fn a_durable_join_adds_its_request_only_context_to_every_later_request() {
+    const TURN_SECTION: &str = "TURN-SECTION-4H";
+    const JOINED_SECTION: &str = "JOINED-SECTION-8M";
+    let section =
+        |text: &str| meerkat_core::lifecycle::TurnRequestContext::new(text).expect("section");
+    let client = Arc::new(RecordingClient::new());
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut agent = gated_agent(
+        Arc::clone(&client),
+        Arc::clone(&entered),
+        Arc::clone(&release),
+    )
+    .await;
+    // The turn starts with its own request-only context, as the session
+    // service stages it from the run's batch.
+    agent.set_active_turn_request_contexts(vec![section(TURN_SECTION)]);
+    let state = agent.transient_turn_context_state();
+    let (tx, _rx) = mpsc::channel(256);
+    let run = tokio::spawn(async move {
+        let result = agent.run_with_events("start".to_string().into(), tx).await;
+        (agent, result)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the gated tool starts");
+    let run_id = state.active_run_for_test().expect("the run owns the actor");
+    let delivery = meerkat_core::lifecycle::TurnBoundaryDelivery::DurableAppends(
+        meerkat_core::lifecycle::DurableTurnBoundaryAppends::try_new(
+            meerkat_core::lifecycle::InputId::new(),
+            vec![meerkat_core::lifecycle::ConversationAppend {
+                runtime_source: None,
+                role: meerkat_core::lifecycle::ConversationAppendRole::SystemNotice,
+                content: meerkat_core::lifecycle::CoreRenderable::SystemNotice {
+                    kind: meerkat_core::types::SystemNoticeKind::Generic,
+                    body: Some(NOTICE_TOKEN.to_string()),
+                    blocks: Vec::new(),
+                },
+                identity: None,
+            }],
+            None,
+        )
+        .expect("eligible durable notice")
+        .with_request_only_context(vec![section(TURN_SECTION), section(JOINED_SECTION)]),
+    );
+    let prepare_state = state.clone();
+    let prepare = tokio::spawn(async move {
+        prepare_state
+            .prepare_active_turn_boundary(&run_id, delivery)
+            .await
+    });
+    wait_until("durable registration", || {
+        state.has_registered_durable_for_test()
+    })
+    .await;
+    release.notify_one();
+    let stage = tokio::time::timeout(std::time::Duration::from_secs(5), prepare)
+        .await
+        .expect("the runner parks at the post-tool boundary")
+        .expect("prepare task")
+        .expect("durable preparation")
+        .into_stage_output(None);
+    stage.commit().expect("publish durable appends");
+    let (agent, result) = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("run finishes")
+        .expect("run task");
+    result.expect("run succeeds");
+
+    let carried = |messages: &[Message], token: &str| {
+        messages
+            .iter()
+            .filter(
+                |message| matches!(message, Message::User(user) if user.text_content() == token),
+            )
+            .count()
+    };
+    let requests = client.requests();
+    assert_eq!(requests.len(), 3, "one run, three model requests");
+    assert_eq!(carried(&requests[0], TURN_SECTION), 1);
+    assert_eq!(carried(&requests[0], JOINED_SECTION), 0);
+    for request in &requests[1..] {
+        assert_eq!(
+            carried(request, TURN_SECTION),
+            1,
+            "a value the turn already carries is not repeated"
+        );
+        assert_eq!(
+            carried(request, JOINED_SECTION),
+            1,
+            "the joining input's request-only context reaches every later request"
+        );
+    }
+    let messages = agent.session().messages();
+    assert!(!mentions(messages, TURN_SECTION));
+    assert!(
+        !mentions(messages, JOINED_SECTION),
+        "request-only context never becomes a Session row"
+    );
+    assert_eq!(
+        messages.iter().filter(|m| carries_notice(m)).count(),
+        1,
+        "the joining input's own row is written"
+    );
+}
+
 /// Run one gated turn and deliver `delivery` at its post-tool boundary.
 /// Returns the agent after the run, the Session before the run, the delivery
 /// witness and every event the run published.

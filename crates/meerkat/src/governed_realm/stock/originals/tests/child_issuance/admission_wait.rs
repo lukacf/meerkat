@@ -41,18 +41,26 @@ impl GrantOwnerStore for GatedAppends {
         self.inner.load()
     }
 
-    fn create(&self, identity: &GrantOwnerIdentity) -> Result<(), GrantStoreError> {
-        self.inner.create(identity)
+    fn create(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        identity: &GrantOwnerIdentity,
+    ) -> Result<(), GrantStoreError> {
+        self.inner.create(guard, identity)
     }
 
-    fn append(&self, change: &GrantOwnerChange) -> Result<(), GrantStoreError> {
+    fn append(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        change: &GrantOwnerChange,
+    ) -> Result<(), GrantStoreError> {
         let gate = self.gate.lock().expect("the gate").take();
         if let Some(gate) = gate {
             gate.began.send(()).expect("the append is reported");
             // Released, or the sender dropped: `recv` returns either way.
             let _ = gate.release.recv();
         }
-        self.inner.append(change)
+        self.inner.append(guard, change)
     }
 
     fn release(&self) {
@@ -81,6 +89,7 @@ impl GatedIssuance {
         });
         let root = principal("writer-owner");
         let writer = LocalGrantAuthority::new_durable(
+            &meerkat_core::AdmissionGuard::none(),
             LocalGrantConfiguration {
                 root: root.clone(),
                 namespace: id(&format!("writer-{name}")),
@@ -99,6 +108,7 @@ impl GatedIssuance {
         let thread = std::thread::spawn(move || {
             writer
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &root,
                     grant,
                     principal("writer-grantee"),

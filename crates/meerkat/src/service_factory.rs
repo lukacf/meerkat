@@ -775,6 +775,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.cancel_dropped_run()
     }
 
+    async fn end_dropped_run_tool_grants(&mut self) {
+        self.agent.end_dropped_run_tool_grants().await;
+    }
+
     fn suspend_dropped_run(&mut self) -> Option<meerkat_core::DroppedRunSuspension> {
         self.agent.suspend_dropped_run()
     }
@@ -1876,6 +1880,83 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
         }
     }
 
+    async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &meerkat_core::SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        if projections.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(foreign) = projections
+            .iter()
+            .find(|projection| projection.session_id() != session_id)
+        {
+            return Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "finalizing the compaction stages of session {session_id} was asked for a projection of session {}",
+                    foreign.session_id()
+                )),
+            ));
+        }
+        #[cfg(all(feature = "memory-store-session", not(target_arch = "wasm32")))]
+        {
+            use meerkat_core::memory::MemoryStore;
+
+            // The canonical memory store the session's builds open: an owed
+            // projection's stage lives there, so a store that does not exist
+            // cannot hold it, and none is created for the read.
+            let memory_dir = self.factory.store_path.join("memory");
+            let memory_store_exists = memory_dir.try_exists().map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to inspect canonical memory store at {} before finalizing session {session_id}'s compaction stages: {error}",
+                    memory_dir.display()
+                )))
+            })?;
+            if !memory_store_exists {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "session {session_id} owes {} compaction projections but no canonical memory store exists at {}",
+                        projections.len(),
+                        memory_dir.display()
+                    )),
+                ));
+            }
+            let store = meerkat_memory::HnswMemoryStore::open(&memory_dir).map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to open canonical memory store at {} to finalize session {session_id}'s compaction stages: {error}",
+                    memory_dir.display()
+                )))
+            })?;
+            let mut published = Vec::with_capacity(projections.len());
+            for projection in projections {
+                published.push(
+                    store
+                        .finalize_compaction_batch_reporting(projection)
+                        .await
+                        .map_err(|error| {
+                            SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                                format!(
+                                    "failed to finalize compaction memory projection {} of session {session_id}: {error}",
+                                    projection.revision()
+                                ),
+                            ))
+                        })?,
+                );
+            }
+            return Ok(published);
+        }
+
+        #[cfg(not(all(feature = "memory-store-session", not(target_arch = "wasm32"))))]
+        {
+            // This concrete builder has no durable staged-memory backend in
+            // this build, so no stage can be owed to it.
+            Err(SessionError::Unsupported(format!(
+                "session {session_id} owes compaction projections, but this build has no durable staged memory store to finalize them"
+            )))
+        }
+    }
+
     async fn model_supports_inline_video(
         &self,
         identity: &meerkat_core::SessionLlmIdentity,
@@ -2431,6 +2512,34 @@ mod tests {
         );
     }
 
+    /// A credential source that cannot answer now (a token exchange outage)
+    /// keeps its typed kind on the session error, and its reason stays out
+    /// of the public message: a caller reads `source_unavailable`, a kind
+    /// that clears on its own, and can build again later.
+    #[test]
+    fn a_source_outage_build_failure_keeps_its_kind() {
+        let error = build_agent_error_to_session_error(
+            BuildAgentError::LlmClient(meerkat_client::FactoryError::ProviderAuth(
+                meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
+                    meerkat_core::AuthError::SourceUnavailable {
+                        reason: "sentinel-exchange-answer".to_string(),
+                    },
+                ),
+            )),
+            Some(Provider::OpenAI),
+            None,
+        );
+
+        assert!(!error.to_string().contains("sentinel-exchange-answer"));
+        let failure = error
+            .provider_auth_failure_data()
+            .expect("a typed provider-auth failure");
+        assert_eq!(failure.kind, meerkat_core::AuthErrorKind::SourceUnavailable);
+        assert!(failure.kind.clears_on_its_own());
+        let data = error.structured_data().expect("structured auth failure");
+        assert_eq!(data["kind"], "source_unavailable");
+    }
+
     struct MockLlmClient {
         delta: &'static str,
     }
@@ -2805,6 +2914,22 @@ mod tests {
         }
         async fn patch(
             &self,
+            _delta: meerkat_core::config::ConfigDelta,
+        ) -> Result<Config, meerkat_core::config::ConfigError> {
+            Err(meerkat_core::config::ConfigError::InternalError(
+                "store unavailable".to_string(),
+            ))
+        }
+        async fn set_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
+            _config: Config,
+        ) -> Result<(), meerkat_core::config::ConfigError> {
+            Ok(())
+        }
+        async fn patch_held(
+            &self,
+            _guard: &meerkat_core::AdmissionGuard,
             _delta: meerkat_core::config::ConfigDelta,
         ) -> Result<Config, meerkat_core::config::ConfigError> {
             Err(meerkat_core::config::ConfigError::InternalError(
@@ -5542,6 +5667,9 @@ mod host_store_fence_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::expect_used, clippy::panic)]
 mod interrupt_tail_tests;
+#[cfg(all(test, feature = "mcp", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used)]
+mod mcp_auth_override_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::expect_used, clippy::panic)]
 mod run_tail_host_tests;

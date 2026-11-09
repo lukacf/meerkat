@@ -161,15 +161,14 @@ RecordOperator* operator action provenance; admission and policy classifiers ove
 GrantOperator* operator grant scopes; no MobMachine audit drives them
 RevokeOperatorScopes* operator grant scopes; no MobMachine audit drives them
 ResolveCancel* work cancellation refusals; no audit drives them
-ResolveSubmit* work submission refusals; no audit drives them
-SubmitWork* work submission; no audit drives it
+ResolveSubmit* work submission refusals of a stopped, completed or destroyed mob, a runtime not live, a retiring member and a stale session binding; created_identity_audit's doors run drives the identity member, addressability, member-not-found and stale-fence refusals
 CancelAll* work cancellation; no audit drives it
 ForceCancel* forced cancellation; no audit drives it
 ResolveRuntime* runtime ingress and retire refusal feedback from MeerkatMachine; member_residency_audit drives the binding refusal and its stale twins
 ClassifyMemberWait* member wait classification over runtime material; no audit drives it
 ClassifyIdentity* identity reconciliation decisions; no audit drives them
 ConvergeRecovered* recovered roster topology convergence in a destroyed mob and the respawn topology convergence; member_residency_audit's replay-same run drives the roster convergence in Running
-ObserveRespawn* respawn topology preservation records; no audit drives them
+ObserveRespawn* respawn topology preservation records; no audit drives them but member_lifecycle_audit's replay of an abandonment after a later incarnation ended, the stale arm (ObserveRespawnTopologyAbandonedStaleEndedSuccessor), whose answer it checks against every other arm's guards
 ResolveRespawn* respawn topology restore; no audit drives it
 RecoverIdentityGeneration* generation high-water recovery; generation_highwater_audit drives it and checks its witnesses, without a coverage list
 SealIdentity* generation high-water seal; generation_highwater_audit drives it and checks its witnesses, without a coverage list
@@ -226,7 +225,6 @@ PrepareMemberInstructionDeliveryUnboundStopped the same arm in a stopped mob (th
 PrepareMemberInstructionDeliveryDeliverStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
 PrepareMemberInstructionDeliveryRetiringStopped the same arm in a stopped mob (the guards read no phase but the one per_phase prepends); operator_instruction_delivery_audit drives their Running copies
 RecoverOperatorInstruction* the epoch replay of committed records and the generation reached at the last reset, before the seal; the audit drives the live writes, and the region rows pin the replay
-PrepareMemberInstructionDeliveryPlaced* a placed member's delivery blocks member_host_unsupported; placed members are outside this audit (identity_entry_audit's placed run binds hosts), and the region rows pin the block
 PrepareMemberInstructionDeliveryMobNotRunning* deliveries of a completed or destroyed mob defer; the audit keeps the mob Running
 PrepareMemberInstructionDeliverySpawning* a member whose spawn committed its membership but not its activation defers spawn_in_flight; the audit seats members by replay, which opens no spawn ladder, and the region rows pin the deferral
 RecordMemberInstructionTarget* record feedback in a stopped, completed or destroyed mob; operator_instruction_delivery_audit drives every Running arm of the family
@@ -246,6 +244,7 @@ RemoveIdentityEntryMobNotRunning* a removal in the Completed and Destroyed phase
 ArchiveIdentityEntryMobNotRunning* an archive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
 UnarchiveIdentityEntryMobNotRunning* an unarchive in the Completed and Destroyed phases; created_identity_audit's archive run drives the Stopped arm
 UnlistIdentityEntryMobNotRunning* a one-entry unlist in the Completed and Destroyed phases; created_identity_audit's unlist run drives the Stopped arm
+TakeOverIdentityEntryMobNotRunningCompleted a host adoption's takeover in a completed mob, refused as in every phase but Running; identity_entry_audit's lifecycle run drives the Stopped and Destroyed arms
 BeginPreparationConstructionMobNotRunning* a held construction's start in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
 SettleHostPreparationMobNotRunning* a settle in the Completed and Destroyed phases; created_identity_audit's prepverdicts run drives the Stopped arm
 EndPreparationConstructionEndedCompleted an attempt's end in a completed mob; created_identity_audit's preparation and prepverdicts runs drive its Running and Stopped arms
@@ -254,8 +253,29 @@ EndPreparationConstructionNotOpenCompleted an attempt's end in a completed mob; 
 EndPreparationConstructionNotOpenDestroyed an attempt's end in a destroyed mob (the destroy clears every attempt); created_identity_audit's prepverdicts run drives its Running and Stopped arms
 EndPreparationConstructionActivationPendingCompleted an attempt's end in a completed mob; created_identity_audit's prepverdicts run drives its Running and Stopped arms
 EndPreparationConstructionActivationPendingDestroyed an attempt's end in a destroyed mob (the destroy clears every attempt); created_identity_audit's prepverdicts run drives its Running and Stopped arms
+DeclareOwnedIdentityEdgeMobNotRunning* an owned edge's declaration in the Completed and Destroyed phases; created_identity_audit's edges run drives the Stopped arm
+EndOwnedIdentityEdgeMobNotRunning* an owned edge's end in the Completed and Destroyed phases; created_identity_audit's edges run drives the Stopped arm
+AdmitMemberUnwireAdmittedCompleted a plain unwire's admission in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitMemberUnwireAdmittedDestroyed a plain unwire's admission in a destroyed mob (the destroy ends every owned edge); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitMemberUnwireOwnedEdgeCompleted a plain unwire's refusal in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitMemberUnwireOwnedEdgeDestroyed a plain unwire's refusal in a destroyed mob, which owns no edge; created_identity_audit's edges run drives its Running and Stopped arms
+AdoptIdentityIntoStoreMobNotRunning* an adoption in the Completed and Destroyed phases (a pure verdict); created_identity_audit's adoption run drives the Stopped arm
+ImportIdentityRecordMobNotRunning* an import in the Completed and Destroyed phases (a pure verdict); created_identity_audit's cycle run drives the Stopped arm
+PurgeIdentityRowsMobNotRunning* a purge in the Completed and Destroyed phases (a pure verdict); created_identity_audit's cycle run drives the Stopped arm
+AdmitOwnedEdgeRealizationRealizeCompleted an owned edge's realization in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationRealizeDestroyed an owned edge's realization in a destroyed mob, which owns no edge; created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationNotOwnedCompleted a realization of an edge no identity owns in a completed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationNotOwnedDestroyed a realization of an edge no identity owns in a destroyed mob (a pure verdict); created_identity_audit's edges run drives its Running and Stopped arms
+AdmitOwnedEdgeRealizationEndNotAnIdentityStopped a stopped mob's realization of an owned edge whose end no entry holds (a pure verdict): created_identity_audit's edges run stops the mob only once every end is a seated entry, and drives the Running arm
+AdmitOwnedEdgeRealizationEndNotAnIdentityCompleted a completed mob's realization of an owned edge whose end no entry holds (a pure verdict); created_identity_audit's edges run drives the Running arm
+AdmitOwnedEdgeRealizationEndNotAnIdentityDestroyed a destroyed mob's realization of an owned edge, which it does not own; created_identity_audit's edges run drives the Running arm
+RestoreOwnedIdentityEdgeMobNotRunning* an import's restoration of an owned edge in the Completed and Destroyed phases (a pure verdict); created_identity_audit's edges run drives the Stopped arm
 RecordMemberCustodyUnrestoredSeatedCompleted the custody deferral record in a Completed mob; member_residency_audit drives the Running and Stopped copies across the seat-ending arms, and the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs drive this copy
 RecordMemberCustodyUnrestoredNotSeated* a custody deferral record for an identity the mob does not seat changes nothing; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs
 RecordMemberCustodyUnrestoredDestroyed a late custody deferral record in a destroyed mob changes nothing; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs
 ResolveMemberCustodyRestoredRecordedCompleted the custody resolve in a Completed mob; member_residency_audit drives the Running and Stopped copies, and the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs drive this copy
 ResolveMemberCustodyRestoredUnrecorded* a custody resolve with nothing recorded changes nothing; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_custody_region.rs
+ResolveMemberDispatchAdmission* a member build's dispatch admission verdict in a stopped, completed or destroyed mob (member_dispatch_admission_audit's premise holds each copy to its Running arm's guards); member_dispatch_admission_audit drives the four Running arms, and the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_dispatch_admission_region.rs drive every copy
+RecordMemberDispatchAdmissionLineage* the record of a member incarnation's dispatch admission lineage, which no state the audits reach from the initial state enables (no member is seated there); member_dispatch_admission_audit checks with ENABLED, over every state the audit member can be in, that it is enabled exactly for the identity's current incarnation of a local member, its premise holds the Stopped copy to the Running guards, and the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_member_dispatch_admission_region.rs drive it
+EndIdentityLife* an identity's life marker moving at the end of a retirement that ends it (the shell's terminal read) or at the replay of a terminal row that recorded it; a counter no guard reads, driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_identity_life.rs and the mob's identity life rows
+RecoverIdentityLifeResets* the resets part of the life marker recovered at resume before the high-water seal; driven by the Rust rows of crates/meerkat-machine-schema/tests/mob_machine_identity_life.rs and the mob's resume rows

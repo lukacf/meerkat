@@ -209,7 +209,7 @@ fn fire_error_hook(slot: &SharedErrorHook, event: ErrorEvent) {
     }
 }
 
-const ROSTER_ROUTE_PREFIX: &str = "mob.member.";
+pub(crate) const ROSTER_ROUTE_PREFIX: &str = "mob.member.";
 const ROSTER_ROUTE_CHANNEL: &str = "notification";
 const ROSTER_ROUTE_SINK: &str = "mob_member";
 const ROSTER_ROUTE_TARGET_MODULE: &str = "delivery";
@@ -454,6 +454,12 @@ pub struct UnifiedRuntimeCore {
     // Optional ABAC enforcement shared by the console/SSE surfaces.
     access_controller: Option<crate::access::AccessController>,
 
+    // The runtime's durable decisions: the decision owner of its persistent
+    // state directory, the decision ingresses its launch declares, and its
+    // record of attested decide events. A runtime without a persistent
+    // state directory keeps none.
+    durable_decisions: crate::durable_decisions::RuntimeDecisions,
+
     // The Console's session fence record, shared by every console and SSE
     // route; it exists whether or not access control is installed.
     console_session_fences: crate::auth::session_fence::ConsoleSessionFences,
@@ -482,6 +488,11 @@ pub struct UnifiedRuntimeCore {
     /// Rebuildable detached-job health/status projection supplied by the
     /// host that owns the canonical Meerkat job service.
     job_health_projection: Arc<std::sync::RwLock<Option<serde_json::Value>>>,
+    /// The stdio gateway's realm MCP administration (`meta/realm_mcp/*`):
+    /// set once by the stdio gateway that composed it, so a runtime without
+    /// it neither serves nor advertises the methods.
+    realm_mcp_administration:
+        std::sync::OnceLock<crate::rpc::realm_mcp_methods::RealmMcpAdministration>,
     // Realm-scoped WorkGraph service backing the `meta/workgraph/*` RPC
     // group and the console experience section. Seeded from the bootstrap
     // spec and deliberately FIXED from then on: the admission guards
@@ -509,12 +520,6 @@ pub struct UnifiedRuntimeCore {
     /// channel. The control listener starts before the receiver is composed,
     /// so it re-reads this per request.
     keyed_inject_slot: crate::runtime::keyed_inject::KeyedInjectSlot,
-    /// §16 Q1 provisional operator keying: the console-principal resolver,
-    /// shared between the memory coordinator (reads) and the console send
-    /// path (notes interactions). `&self`-settable like the panel store.
-    console_operator_resolver: std::sync::RwLock<
-        Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>>,
-    >,
     /// The trusted host's governance of Console sends, shared with every
     /// Console router this runtime builds.
     console_governed_ingress: crate::console_governed_ingress::ConsoleGovernedIngressSlot,
@@ -529,6 +534,26 @@ pub struct UnifiedRuntimeCore {
     // subscription cursor). Falls back to `InMemoryMetadataStore` when not
     // explicitly configured — see `UnifiedRuntimeBuilder::persistent_metadata`.
     persistent_metadata: Arc<dyn PersistentMetadataStore>,
+
+    /// The console audit log, kept in `persistent_metadata` and shared by
+    /// every console router this runtime builds; `None` when that store
+    /// keeps no realm documents.
+    console_audit: Option<Arc<crate::console_audit::ConsoleAuditLog>>,
+    /// The console's person-addressed attention items
+    /// ([`crate::console_replies`]), kept in `persistent_metadata` and shared
+    /// by every console router this runtime builds; `None` when that store
+    /// keeps no realm documents.
+    console_attention: Option<Arc<crate::console_replies::ConsoleAttention>>,
+    /// The gating owner's state kept in `persistent_metadata`, once the
+    /// composition keeps it (`keep_gating_state_in_realm`).
+    gating_persistence: tokio::sync::Mutex<Option<GatingPersistence>>,
+}
+
+/// The gating owner's state kept in the realm's metadata store, and the task
+/// that writes it after every gating change.
+struct GatingPersistence {
+    persistence: Arc<crate::gating_persistence::GatingStatePersistence>,
+    task: Option<JoinHandle<()>>,
 }
 
 enum MobEventIngress {
@@ -855,6 +880,14 @@ impl UnifiedRuntime {
             )
             .map(|policy| Arc::new(policy) as Arc<dyn EdgeDiscovery>);
         let state_dir_claims = mob_runtime.state_dir_claim_refs();
+        let console_audit = crate::console_audit::ConsoleAuditLog::over(
+            Arc::clone(&persistent_metadata),
+            crate::console_audit::ConsoleAuditLimits::default(),
+        )
+        .map(Arc::new);
+        let console_attention =
+            crate::console_replies::ConsoleAttention::over(Arc::clone(&persistent_metadata))
+                .map(Arc::new);
         Self::assemble(
             UnifiedRuntimeCore {
                 mob_runtime,
@@ -917,6 +950,7 @@ impl UnifiedRuntime {
                 identity_first_context: None,
                 bootstrap_member_build_wiring: None,
                 access_controller: None,
+                durable_decisions: crate::durable_decisions::RuntimeDecisions::unavailable(),
                 console_session_fences: crate::auth::session_fence::ConsoleSessionFences::detached(
                 ),
                 flow_editor_host_deploy: false,
@@ -924,6 +958,7 @@ impl UnifiedRuntime {
                 topology_controller: crate::topology_control::TopologyController::default(),
                 memory_panel_store: std::sync::RwLock::new(None),
                 job_health_projection: Arc::new(std::sync::RwLock::new(None)),
+                realm_mcp_administration: std::sync::OnceLock::new(),
                 workgraph_service,
                 workgraph_fact_hub,
                 workgraph_fact_tail_task: tokio::sync::Mutex::new(WorkGraphFactTailTask(
@@ -932,11 +967,13 @@ impl UnifiedRuntime {
                 console_identity_roster: std::sync::RwLock::new(None),
                 mob_announcements: Default::default(),
                 keyed_inject_slot: crate::runtime::keyed_inject::pending_keyed_inject_slot(),
-                console_operator_resolver: std::sync::RwLock::new(None),
                 console_governed_ingress: Default::default(),
                 console_schedule_doors: Default::default(),
                 metadata_table,
                 persistent_metadata,
+                console_audit,
+                console_attention,
+                gating_persistence: tokio::sync::Mutex::new(None),
             },
             public_owner,
         )
@@ -1354,6 +1391,24 @@ impl UnifiedRuntime {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Serve the stdio gateway's realm MCP administration on this runtime's
+    /// stdio dispatcher. Set once, by the stdio gateway that composed it;
+    /// `false` when it was already set (the first stands).
+    pub(crate) fn serve_realm_mcp(
+        &self,
+        administration: crate::rpc::realm_mcp_methods::RealmMcpAdministration,
+    ) -> bool {
+        self.realm_mcp_administration.set(administration).is_ok()
+    }
+
+    /// The realm MCP administration this runtime serves, when the stdio
+    /// gateway composed one.
+    pub(crate) fn realm_mcp_administration(
+        &self,
+    ) -> Option<&crate::rpc::realm_mcp_methods::RealmMcpAdministration> {
+        self.realm_mcp_administration.get()
     }
 
     pub(crate) fn module_runtime_handle(&self) -> Arc<tokio::sync::Mutex<MetaRuntimeHandle>> {
@@ -1966,13 +2021,18 @@ impl UnifiedRuntime {
     /// one the runtime holds a record with no file, which refuses to set a
     /// fence. On a candidate launch the record writes nothing: the
     /// principals it accepts a token without `exp` for are kept in this
-    /// process only.
+    /// process only. The composition's personal accounts on MCP servers read
+    /// the same record: a revocation suspends the revoked person's accounts
+    /// in the private members opened before it.
     pub fn set_console_session_fences(
         &mut self,
         fences: crate::auth::session_fence::ConsoleSessionFences,
     ) {
         if !self.speaks_for_composition() {
             fences.keep_non_expiring_notes_in_process();
+        }
+        if let Some(accounts) = self.mob_runtime().personal_mcp_accounts() {
+            accounts.bind_session_fences(fences.clone());
         }
         self.console_session_fences = fences;
     }
@@ -2155,19 +2215,6 @@ impl UnifiedRuntime {
         self.mob_runtime.workgraph_admission()
     }
 
-    /// Wire the §16 Q1 console-principal operator resolver (set by the
-    /// gateway's memory wiring when `operator_scope = "provisional"`); the
-    /// console send path notes authenticated interactions through it.
-    pub fn set_console_operator_resolver(
-        &self,
-        resolver: Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>,
-    ) {
-        *self
-            .console_operator_resolver
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(resolver);
-    }
-
     /// Install the trusted host's governance of Console sends
     /// ([`crate::console_governed_ingress`]). A Console send to an identity
     /// it governs then reaches the member only through its binder, for the
@@ -2191,18 +2238,47 @@ impl UnifiedRuntime {
         &self.console_schedule_doors
     }
 
-    pub fn console_operator_resolver(
-        &self,
-    ) -> Option<Arc<crate::memory::coordinator::ConsolePrincipalOperatorResolver>> {
-        self.console_operator_resolver
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
     /// Borrow the shared access controller if one was installed.
     pub fn access_controller(&self) -> Option<&crate::access::AccessController> {
         self.access_controller.as_ref()
+    }
+
+    /// The runtime's durable decisions: the decision owner of its
+    /// persistent state directory (`approval_decisions.sqlite3`), and the
+    /// decision ingresses its launch declares. A runtime without a
+    /// persistent state directory, or on a host store realm, keeps none.
+    pub fn durable_decisions(&self) -> &crate::durable_decisions::RuntimeDecisions {
+        &self.durable_decisions
+    }
+
+    /// The runtime's durable decision owner. A host composition holds its
+    /// own kinds' decisions through it; a runtime that keeps none answers
+    /// every call unavailable.
+    pub fn decision_owner(&self) -> &meerkat_runtime::decision::DurableDecisionService {
+        self.durable_decisions.owner()
+    }
+
+    /// Install the runtime's durable decisions. The builder and the stdio
+    /// gateway install those of a persistent state directory at their build.
+    pub fn set_durable_decisions(&mut self, decisions: crate::durable_decisions::RuntimeDecisions) {
+        self.durable_decisions = decisions;
+    }
+
+    /// Meta's answer to whether the party that decided a decision may still
+    /// do so, for a host's decision executor: `Eligible` while the live
+    /// approver map (the access controller's `approvers`) lists the identity
+    /// that decided (this runtime's stdio operator, or a person a declared
+    /// ingress attests) for the decision's approver id, re-read when the
+    /// execution commits; `Refused` once it no longer does, and for operator
+    /// evidence whose decider is not this runtime's operator. A runtime
+    /// without an access controller has no map and refuses.
+    pub fn decision_approver_currentness(
+        &self,
+    ) -> Arc<dyn meerkat_runtime::decision::DecisionApproverCurrentness> {
+        Arc::new(crate::durable_decisions::MapApproverCurrentness::new(
+            self.access_controller.clone(),
+            self.durable_decisions.realm(),
+        ))
     }
 
     /// Optional topology control-plane policy and durable intent store.
@@ -2240,6 +2316,37 @@ impl UnifiedRuntime {
     /// persisted cursor reach through this accessor.
     pub fn persistent_metadata(&self) -> &Arc<dyn PersistentMetadataStore> {
         &self.persistent_metadata
+    }
+
+    /// The console audit log the console routers this runtime builds write
+    /// and read; `None` when the metadata store keeps no realm documents.
+    pub(crate) fn console_audit_log(&self) -> Option<Arc<crate::console_audit::ConsoleAuditLog>> {
+        self.console_audit.clone()
+    }
+
+    /// The person-addressed attention items the console routers this runtime
+    /// builds read (`meta/console/attention`); `None` when the metadata store
+    /// keeps no realm documents.
+    pub(crate) fn console_attention(
+        &self,
+    ) -> Option<Arc<crate::console_replies::ConsoleAttention>> {
+        self.console_attention.clone()
+    }
+
+    /// Person-addressed delivery of replies to console requests
+    /// ([`crate::console_replies::ConsoleReplies`]): what a host's reply route
+    /// calls for a request made on the console. `None` until the runtime's
+    /// console projection exists (its first console router is built).
+    // No caller outside tests yet: the console's requester reply route, its
+    // first caller, removes this allow.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn console_replies(&self) -> Option<crate::console_replies::ConsoleReplies> {
+        self.console_projection.get().map(|projection| {
+            crate::console_replies::ConsoleReplies::new(
+                projection.clone(),
+                self.console_attention.clone(),
+            )
+        })
     }
 
     /// Replace the label set associated with this mob.
@@ -7857,11 +7964,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::identity_first::GovernedInputBinder for RecordingRefusingBinder {
-        async fn bind(
+        async fn try_bind(
             &self,
             context: &crate::identity_first::GovernedBindContext,
             _input: meerkat_runtime::Input,
-        ) -> Result<crate::identity_first::BoundGovernedInput, String> {
+        ) -> Result<
+            crate::identity_first::BoundGovernedInput,
+            crate::identity_first::GovernedBindError,
+        > {
             self.handed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7869,7 +7979,7 @@ mod tests {
                     context.session_id.clone(),
                     context.controller.selection().clone(),
                 ));
-            Err(BIND_REFUSED.to_string())
+            Err(crate::identity_first::GovernedBindRefusal::denied(BIND_REFUSED).into())
         }
 
         fn retain_unresolved(
@@ -7952,8 +8062,8 @@ mod tests {
         assert!(
             matches!(
                 &sent,
-                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(reason)))
-                    if reason.as_str() == BIND_REFUSED
+                Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Refused(refusal)))
+                    if refusal.detail == BIND_REFUSED
             ),
             "{shape}: the input reaches the host's bind: {sent:?}"
         );
@@ -10160,13 +10270,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::identity_first::bridge::GovernedInputBinder for UnreachedBinder {
-        async fn bind(
+        async fn try_bind(
             &self,
             _context: &crate::identity_first::bridge::GovernedBindContext,
             _input: meerkat_runtime::Input,
-        ) -> Result<crate::identity_first::bridge::BoundGovernedInput, String> {
+        ) -> Result<
+            crate::identity_first::bridge::BoundGovernedInput,
+            crate::identity_first::bridge::GovernedBindError,
+        > {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err("never bound".to_string())
+            Err(crate::identity_first::bridge::GovernedBindRefusal::denied("never bound").into())
         }
         fn retain_unresolved(
             &self,

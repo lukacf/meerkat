@@ -178,6 +178,7 @@ impl OperatorSetup {
                         Some(leaf) => leaf,
                         None => grants
                             .issue_child(
+                                &meerkat_core::AdmissionGuard::none(),
                                 &self.native.grant_administrator,
                                 &root,
                                 selection.authority.leaf_issuance_id.clone(),
@@ -272,7 +273,7 @@ impl OperatorSetup {
                             route.represented_subject.as_ref(), &request.parent_issuance_id, root_bounds)?;
                         let leaf = match grants.issued_reference(&request.leaf_issuance_id).map_err(refusal)? {
                             Some(leaf) => leaf,
-                            None => grants.issue_child(&self.native.grant_administrator, &root,
+                            None => grants.issue_child(&meerkat_core::AdmissionGuard::none(), &self.native.grant_administrator, &root,
                                 request.leaf_issuance_id.clone(), route.logical_executor.clone(), request.envelope.clone()).map_err(refusal)?,
                         };
                         let lineage = vec![root, leaf];
@@ -472,6 +473,7 @@ fn issue_mcp_target(
         Some(leaf) => leaf,
         None => grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 application,
                 &root,
                 ids[1].clone(),
@@ -532,6 +534,7 @@ fn issue_root(
         Some(root) => root,
         None => grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 operator,
                 id.clone(),
                 grantee.clone(),

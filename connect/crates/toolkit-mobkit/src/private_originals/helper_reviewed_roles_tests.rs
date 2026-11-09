@@ -427,7 +427,7 @@ async fn reviewed_find_keeps_first_native_append_when_actual_report_parent_is_re
         // the same machine's controller mutation owner. No result is injected.
         {
             let mut custody = fixture.machine.try_controller_grant_mutation().unwrap();
-            fixture.source.owner.grants().revoke(&parent.root_authority, parent, &mut custody).unwrap();
+            fixture.source.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), &parent.root_authority, parent, &mut custody).unwrap();
         }
         let resolved = fixture.source.owner.grants().resolve_controller_lineage(
             &selection.report_capability.as_ref().unwrap().parent,

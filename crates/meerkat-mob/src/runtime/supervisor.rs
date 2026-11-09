@@ -47,13 +47,15 @@ impl Supervisor {
 
         // Pure candidate projection: pick the first runnable member matching the
         // configured supervisor role. MobMachine — not the shell — owns whether
-        // escalation proceeds or fails closed for "no eligible target".
+        // escalation proceeds or fails closed for "no eligible target". A
+        // member seated exempt from the definition's wiring rules is outside
+        // role-wide selection, so it never supervises.
         let escalation_target = self
             .handle
             .list_runnable_members()
             .await
             .into_iter()
-            .find(|entry| entry.role == supervisor_role);
+            .find(|entry| entry.role == supervisor_role && !entry.definition_wiring().is_exempt());
 
         let dsl_run_id = mob_dsl::RunId::from(run_id.to_string());
         let dsl_step_id = mob_dsl::StepId::from(step_id.as_str());

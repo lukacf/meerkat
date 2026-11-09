@@ -56,8 +56,9 @@ pub(crate) const CONSOLE_SCHEDULED_SEND_SCHEMA: &str = "meta.console.scheduled_s
 const CONSOLE_DOOR_WAIT: Duration = Duration::from_secs(30);
 
 /// The Console caller a console schedule fires as: the caller who last
-/// defined it (created, changed or resumed it), as `/console/send` resolves
-/// that caller. A fire is admitted as this caller
+/// defined it (created, changed or resumed it; a change by another caller
+/// is an explicit takeover, [`ConsoleScheduledSend::redefined`]), as
+/// `/console/send` resolves that caller. A fire is admitted as this caller
 /// ([`Self::admitted_now`]), judges this caller's access and is deduplicated
 /// in this caller's send scope, as a live send by it would be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +149,15 @@ impl ConsoleScheduleSender {
         }
     }
 
+    /// Whether `other` is the same Console caller as this sender: the same
+    /// send scope, so the open Console's shared account again, one verified
+    /// human by issuer and subject (whatever principal or provider its
+    /// token names now), or one other principal by principal, provider and
+    /// issuer. A change by any other caller takes the schedule over.
+    pub(crate) fn is_same_caller(&self, other: &Self) -> bool {
+        self.scope() == other.scope()
+    }
+
     /// Whether the Console admits this sender now, as it admits a live
     /// request by it: an anonymous sender only while the Console requires no
     /// sign-in; a principal only under the issuer the Console trusts now,
@@ -214,6 +224,23 @@ impl ConsoleScheduleSender {
     }
 }
 
+/// How many earlier senders a console schedule keeps: the newest, oldest
+/// first. Each one is a takeover; the console audit log keeps every change.
+pub(crate) const CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT: usize = 16;
+
+/// A sender a takeover replaced: who the schedule sent as, when that sender
+/// last defined it, and when another caller took it over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ConsoleScheduleFormerSender {
+    pub(crate) sender: ConsoleScheduleSender,
+    /// When that sender last defined the send, in whole seconds since the
+    /// epoch.
+    pub(crate) defined_at: u64,
+    /// When another caller took the schedule over, in whole seconds since
+    /// the epoch.
+    pub(crate) replaced_at: u64,
+}
+
 /// A console schedule's deferred send, held as its host-runnable params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsoleScheduledSend {
@@ -229,6 +256,12 @@ pub(crate) struct ConsoleScheduledSend {
     /// epoch. A fire refuses a verified human's send whose Console sessions
     /// were revoked after it.
     pub(crate) defined_at: u64,
+    /// The senders takeovers replaced, oldest first, at most
+    /// [`CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT`]: empty while the schedule's
+    /// first sender sends it. A build before the history reads a schedule
+    /// as if it had none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) sender_history: Vec<ConsoleScheduleFormerSender>,
 }
 
 impl ConsoleScheduledSend {
@@ -244,6 +277,41 @@ impl ConsoleScheduledSend {
             content,
             sender,
             defined_at,
+            sender_history: Vec::new(),
+        }
+    }
+
+    /// This send as `sender` defines it again at `now` (whole seconds since
+    /// the epoch), to `identity` with `content`. The same caller as this
+    /// send's sender keeps it, with a new definition time; any other caller
+    /// takes it over, and this send's sender joins the history, which keeps
+    /// its newest [`CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT`] entries.
+    pub(crate) fn redefined(
+        &self,
+        identity: String,
+        content: String,
+        sender: ConsoleScheduleSender,
+        now: u64,
+    ) -> Self {
+        let mut sender_history = self.sender_history.clone();
+        if !self.sender.is_same_caller(&sender) {
+            sender_history.push(ConsoleScheduleFormerSender {
+                sender: self.sender.clone(),
+                defined_at: self.defined_at,
+                replaced_at: now,
+            });
+            let excess = sender_history
+                .len()
+                .saturating_sub(CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT);
+            sender_history.drain(..excess);
+        }
+        Self {
+            schema: CONSOLE_SCHEDULED_SEND_SCHEMA.to_string(),
+            identity,
+            content,
+            sender,
+            defined_at: now,
+            sender_history,
         }
     }
 
@@ -310,14 +378,18 @@ pub(crate) fn refuse_reserved_runnable_name(name: &HostRunnableName) -> Result<(
 pub(crate) struct AttachedConsoleSchedules {
     pub(crate) service: ScheduleService,
     pub(crate) firing: ScheduleFiringHostBinding,
-    /// Test hook: while set, a console schedule update waits here after its
-    /// reads and before it writes.
+    /// Test hook: while set, the next console schedule update or pause waits
+    /// here after its reads and before it writes.
     #[cfg(test)]
     pub(crate) write_hold: Arc<std::sync::Mutex<Option<ScheduleWriteHold>>>,
+    /// Test hook: while set, a console schedule resume waits here after it
+    /// recorded its sender and before Core resumes the schedule.
+    #[cfg(test)]
+    pub(crate) resume_hold: Arc<std::sync::Mutex<Option<ScheduleWriteHold>>>,
 }
 
-/// Test hook: holds a console schedule update between its reads and its
-/// write until the test releases it.
+/// Test hook: holds a console schedule update or pause between its reads and
+/// its write until the test releases it.
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ScheduleWriteHold {
@@ -352,7 +424,7 @@ impl ScheduleWriteHold {
 
 #[cfg(test)]
 impl AttachedConsoleSchedules {
-    /// Hold the next update with `hold`.
+    /// Hold the next update or pause with `hold`.
     pub(crate) fn hold_writes(&self, hold: ScheduleWriteHold) {
         *self
             .write_hold
@@ -360,13 +432,27 @@ impl AttachedConsoleSchedules {
             .unwrap_or_else(PoisonError::into_inner) = Some(hold);
     }
 
-    /// Wait at the hold, when one is set.
-    pub(crate) async fn wait_at_write_hold(&self) {
-        let hold = self
-            .write_hold
+    /// Hold the next resume with `hold`, between its write and the resume.
+    pub(crate) fn hold_resumes(&self, hold: ScheduleWriteHold) {
+        *self
+            .resume_hold
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold);
+    }
+
+    /// Wait at the hold, when one is set: the first update or pause to reach
+    /// it takes it, so a change made meanwhile passes.
+    pub(crate) async fn wait_at_write_hold(&self) {
+        Self::wait_at(&self.write_hold).await;
+    }
+
+    /// Wait at the resume hold, when one is set; the first resume takes it.
+    pub(crate) async fn wait_at_resume_hold(&self) {
+        Self::wait_at(&self.resume_hold).await;
+    }
+
+    async fn wait_at(slot: &std::sync::Mutex<Option<ScheduleWriteHold>>) {
+        let hold = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let Some(hold) = hold {
             hold.reached.add_permits(1);
             if let Ok(permit) = hold.release.acquire().await {
@@ -394,6 +480,8 @@ impl ConsoleSchedules {
             firing,
             #[cfg(test)]
             write_hold: Arc::default(),
+            #[cfg(test)]
+            resume_hold: Arc::default(),
         });
     }
 
@@ -577,6 +665,29 @@ const SCHEDULE_TOOLS_BY_ID: &[&str] = &[
 /// The agent schedule tools that write a target.
 const SCHEDULE_TOOLS_WITH_TARGET: &[&str] = &["meerkat_schedule_create", "meerkat_schedule_update"];
 
+/// Which schedules beside console schedules the agent calling the schedule
+/// tools may not know of, decided per call from the turn's dispatch context
+/// (the schedules aimed at a member private to a person the agent does not
+/// act for, `crate::schedule_wiring`).
+#[async_trait]
+pub(crate) trait AgentScheduleAudience: Send + Sync {
+    /// Whether `schedule` is hidden from the agent whose turn dispatches with
+    /// `context`.
+    async fn hides(&self, schedule: &Schedule, context: &meerkat_core::ToolDispatchContext)
+    -> bool;
+}
+
+/// What [`ConsoleScheduleToolGate`] does with one call.
+enum GateVerdict {
+    /// The call reaches the tools unchanged.
+    Pass,
+    /// The call is refused.
+    Refuse(meerkat_core::ToolError),
+    /// The call names a schedule hidden from the calling agent by its id:
+    /// it is answered as a call about an id no schedule holds.
+    Absent,
+}
+
 /// Agents' schedule tools leave console schedules alone: a console schedule
 /// is a Console caller's deferred send, and only the Console, which judges
 /// that caller's access, writes it.
@@ -585,11 +696,17 @@ const SCHEDULE_TOOLS_WITH_TARGET: &[&str] = &["meerkat_schedule_create", "meerka
 /// so no agent sends as a Console caller; every verb that names a console
 /// schedule by its id (get, update, pause, resume, delete, occurrences) is
 /// refused, and so is one whose schedule cannot be read (it may be a console
-/// schedule); and `meerkat_schedule_list` leaves console schedules out. Every
-/// other call reaches the tools unchanged.
+/// schedule); and `meerkat_schedule_list` leaves console schedules out.
+///
+/// With an [`AgentScheduleAudience`], the schedules it hides from the calling
+/// agent are on no surface of its tools either: its list leaves them out,
+/// and every verb that names one by its id is answered exactly as the same
+/// call about an id no schedule holds is, and touches nothing. Every other
+/// call reaches the tools unchanged.
 pub(crate) struct ConsoleScheduleToolGate {
     inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
     service: ScheduleService,
+    audience: Option<Arc<dyn AgentScheduleAudience>>,
 }
 
 impl ConsoleScheduleToolGate {
@@ -597,53 +714,148 @@ impl ConsoleScheduleToolGate {
         inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
         service: ScheduleService,
     ) -> Self {
-        Self { inner, service }
+        Self {
+            inner,
+            service,
+            audience: None,
+        }
     }
 
-    /// Why `name` with `args` is refused, if it is.
-    async fn refusal(&self, name: &str, args: &Value) -> Option<meerkat_core::ToolError> {
+    /// The gate, also keeping the schedules `audience` hides from the calling
+    /// agent off its tools' surface.
+    pub(crate) fn with_audience(mut self, audience: Arc<dyn AgentScheduleAudience>) -> Self {
+        self.audience = Some(audience);
+        self
+    }
+
+    /// Whether `schedule` is hidden from the agent calling with `context`.
+    async fn hides(
+        &self,
+        schedule: &Schedule,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> bool {
+        match &self.audience {
+            Some(audience) => audience.hides(schedule, context).await,
+            None => false,
+        }
+    }
+
+    /// What the gate does with `name` and `args`, called with `context`.
+    async fn verdict(
+        &self,
+        name: &str,
+        args: &Value,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> GateVerdict {
         if SCHEDULE_TOOLS_WITH_TARGET.contains(&name)
             && args.get("target").is_some_and(target_value_names_console)
         {
-            return Some(meerkat_core::ToolError::execution_failed(format!(
+            return GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                 "{name} refused: the host runnable {CONSOLE_SCHEDULE_RUNNABLE} sends a \
                  console schedule as its Console caller, and only the Console schedules it"
             )));
         }
         if !SCHEDULE_TOOLS_BY_ID.contains(&name) {
-            return None;
+            return GateVerdict::Pass;
         }
         // An id that does not parse is the tools' own refusal.
-        let schedule_id = ScheduleId::parse(args.get("schedule_id")?.as_str()?).ok()?;
+        let Some(schedule_id) = args
+            .get("schedule_id")
+            .and_then(Value::as_str)
+            .and_then(|raw| ScheduleId::parse(raw).ok())
+        else {
+            return GateVerdict::Pass;
+        };
         match self.service.get(&schedule_id).await {
-            Ok(schedule) => is_console_schedule(&schedule).then(|| {
-                meerkat_core::ToolError::execution_failed(format!(
+            Ok(schedule) if is_console_schedule(&schedule) => {
+                GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                     "{name} refused: schedule {schedule_id} is a console schedule, a Console \
                      caller's deferred message to an agent; only the Console reads or changes it"
-                ))
-            }),
+                )))
+            }
+            Ok(schedule) if self.hides(&schedule, context).await => GateVerdict::Absent,
+            Ok(_) => GateVerdict::Pass,
             // No schedule has the id: the tools answer it as not found.
-            Err(ScheduleDomainError::Store(ScheduleStoreError::ScheduleNotFound { .. })) => None,
+            Err(ScheduleDomainError::Store(ScheduleStoreError::ScheduleNotFound { .. })) => {
+                GateVerdict::Pass
+            }
             // Whether it is a console schedule cannot be read now: refused,
             // since letting it through could change one.
-            Err(error) => Some(meerkat_core::ToolError::execution_failed(format!(
+            Err(error) => GateVerdict::Refuse(meerkat_core::ToolError::execution_failed(format!(
                 "{name} refused: schedule {schedule_id} cannot be read now ({error}), so it may \
                  be a console schedule; try again"
             ))),
         }
     }
 
-    /// `meerkat_schedule_list` without the console schedules: the tool's own
-    /// page of summaries over the other schedules. Core leaves the console
-    /// schedules out before it orders, pages and cuts, so the reply keeps the
-    /// tool's advertised shape (limit, cursor, bounded rows), its pages stay
-    /// full and its cursor never steps on a console schedule.
-    async fn list_without_console_schedules(
+    /// `call`, which names a schedule hidden from the calling agent by its
+    /// id, asked about a fresh id no schedule holds instead: the tools answer
+    /// it as they answer such an id (no answer of theirs about an absent
+    /// schedule names the id), and the hidden schedule is never touched.
+    async fn dispatch_as_absent(
         &self,
         call: meerkat_core::types::ToolCallView<'_>,
+        mut args: Value,
+        context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        if let Some(object) = args.as_object_mut() {
+            object.insert(
+                "schedule_id".to_string(),
+                Value::String(ScheduleId::new().to_string()),
+            );
+        }
+        let absent =
+            serde_json::value::RawValue::from_string(args.to_string()).map_err(|error| {
+                meerkat_core::ToolError::invalid_arguments(
+                    call.name,
+                    format!("failed to encode schedule arguments: {error}"),
+                )
+            })?;
+        self.inner
+            .dispatch_with_context(
+                meerkat_core::types::ToolCallView {
+                    id: call.id,
+                    name: call.name,
+                    args: &absent,
+                },
+                context,
+            )
+            .await
+    }
+
+    /// `meerkat_schedule_list` without the console schedules and the
+    /// schedules hidden from the agent calling with `context`: the tool's own
+    /// page of summaries over the other schedules. Core leaves them out
+    /// before it orders, pages and cuts, so the reply keeps the tool's
+    /// advertised shape (limit, cursor, bounded rows), its pages stay full
+    /// and its cursor never steps on a schedule left out. With an audience,
+    /// which schedules the calling agent may know of is judged first, each
+    /// at the revision read then: a schedule created or changed since is
+    /// left out of this page, so no schedule is listed that was not judged.
+    async fn list_visible_schedules(
+        &self,
+        call: meerkat_core::types::ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+        if self.audience.is_none() {
+            return meerkat::dispatch_schedule_list_where(&self.service, call, &|schedule| {
+                !is_console_schedule(schedule)
+            })
+            .await;
+        }
+        let schedules = self.service.list().await.map_err(|error| {
+            meerkat_core::ToolError::execution_failed(format!(
+                "meerkat_schedule_list failed: {error}"
+            ))
+        })?;
+        let mut visible = std::collections::HashMap::with_capacity(schedules.len());
+        for schedule in schedules {
+            if !is_console_schedule(&schedule) && !self.hides(&schedule, context).await {
+                visible.insert(schedule.schedule_id, schedule.revision);
+            }
+        }
         meerkat::dispatch_schedule_list_where(&self.service, call, &|schedule| {
-            !is_console_schedule(schedule)
+            visible.get(&schedule.schedule_id) == Some(&schedule.revision)
         })
         .await
     }
@@ -693,16 +905,19 @@ impl meerkat_core::AgentToolDispatcher for ConsoleScheduleToolGate {
         call: meerkat_core::types::ToolCallView<'_>,
         context: &meerkat_core::ToolDispatchContext,
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
-        // Every listing leaves the console schedules out; its arguments are
-        // the tool's to check.
+        // Every listing leaves the console schedules, and the schedules
+        // hidden from the calling agent, out; its arguments are the tool's to
+        // check.
         if call.name == "meerkat_schedule_list" {
-            return self.list_without_console_schedules(call).await;
+            return self.list_visible_schedules(call, context).await;
         }
         // Arguments that do not parse reach the tools, which refuse them.
-        if let Ok(args) = serde_json::from_str::<Value>(call.args.get())
-            && let Some(refusal) = self.refusal(call.name, &args).await
-        {
-            return Err(refusal);
+        if let Ok(args) = serde_json::from_str::<Value>(call.args.get()) {
+            match self.verdict(call.name, &args, context).await {
+                GateVerdict::Refuse(refusal) => return Err(refusal),
+                GateVerdict::Absent => return self.dispatch_as_absent(call, args, context).await,
+                GateVerdict::Pass => {}
+            }
         }
         self.inner.dispatch_with_context(call, context).await
     }
@@ -948,6 +1163,99 @@ mod tests {
         assert!(refuse_reserved_runnable_name(&reserved).is_err());
         let other = HostRunnableName::parse("nightly-report").unwrap();
         assert!(refuse_reserved_runnable_name(&other).is_ok());
+    }
+
+    /// One caller is one send scope: a verified human by issuer and subject,
+    /// whatever principal or provider the token names now; another principal
+    /// by principal, provider and issuer; the open Console's shared account.
+    #[test]
+    fn a_sender_is_the_same_caller_by_its_send_scope() {
+        let renamed = ConsoleScheduleSender::Human {
+            principal: "erin.new@example.test".to_string(),
+            provider: "google_oauth".to_string(),
+            issuer: ISSUER.to_string(),
+            subject: "erin-sub".to_string(),
+        };
+        assert!(sender().is_same_caller(&renamed));
+        let other_person = ConsoleScheduleSender::Human {
+            principal: "erin@example.test".to_string(),
+            provider: "generic_oidc".to_string(),
+            issuer: ISSUER.to_string(),
+            subject: "frank-sub".to_string(),
+        };
+        assert!(!sender().is_same_caller(&other_person));
+        assert!(robot().is_same_caller(&robot()));
+        assert!(!robot().is_same_caller(&sender()));
+        assert!(ConsoleScheduleSender::Anonymous.is_same_caller(&ConsoleScheduleSender::Anonymous));
+        assert!(!ConsoleScheduleSender::Anonymous.is_same_caller(&sender()));
+    }
+
+    /// A send defined again by its sender keeps the sender and its history,
+    /// with a new definition time; another caller takes it over, and the
+    /// replaced sender joins the history, which keeps its newest entries.
+    #[test]
+    fn a_takeover_adds_the_replaced_sender_to_a_bounded_history() {
+        let first = send();
+        let own = first.redefined(
+            "agent:notes".to_string(),
+            "Post the evening summary.".to_string(),
+            sender(),
+            1_700_000_100,
+        );
+        assert_eq!(own.sender, sender());
+        assert_eq!(own.defined_at, 1_700_000_100);
+        assert!(own.sender_history.is_empty());
+
+        let taken = own.redefined(
+            "agent:notes".to_string(),
+            own.content.clone(),
+            robot(),
+            1_700_000_200,
+        );
+        assert_eq!(taken.sender, robot());
+        assert_eq!(
+            taken.sender_history,
+            vec![ConsoleScheduleFormerSender {
+                sender: sender(),
+                defined_at: 1_700_000_100,
+                replaced_at: 1_700_000_200,
+            }]
+        );
+        // The history travels with the send through its target.
+        assert_eq!(
+            ConsoleScheduledSend::of_target(&taken.target().unwrap()),
+            Some(taken.clone())
+        );
+        // A send without a history reads as one with none.
+        let mut earlier = serde_json::to_value(send()).unwrap();
+        earlier.as_object_mut().unwrap().remove("sender_history");
+        assert_eq!(
+            ConsoleScheduledSend::from_params(&earlier.to_string()),
+            Some(send())
+        );
+
+        let mut handed = taken;
+        for step in 0..40_u64 {
+            let next = if step % 2 == 0 { sender() } else { robot() };
+            handed = handed.redefined(
+                "agent:notes".to_string(),
+                handed.content.clone(),
+                next,
+                1_700_001_000 + step,
+            );
+        }
+        assert_eq!(
+            handed.sender_history.len(),
+            CONSOLE_SCHEDULE_SENDER_HISTORY_LIMIT
+        );
+        assert_eq!(
+            handed
+                .sender_history
+                .last()
+                .map(|former| former.replaced_at),
+            Some(1_700_001_039),
+            "the newest takeover is kept"
+        );
     }
 
     struct RecordingDoor(std::sync::Mutex<Vec<(ConsoleScheduledSend, String)>>);

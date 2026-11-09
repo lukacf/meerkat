@@ -256,9 +256,14 @@ impl PrivateOriginals {
         let child_id = self.configured_child_id(reference)?;
         let bounds = facts.child_bounds(session);
         let grants = self.owner.grants();
+        // The bind attempt, for the blocking writer's issuance.
+        let attempt = meerkat_core::protected_section::effect_mark();
         // The blocking writer keeps the exact verified login alive if its
         // waiting binder disappears. No Python callback or mutex spans await.
         let basis = tokio::task::spawn_blocking(move || {
+            let _attempt = attempt
+                .as_ref()
+                .map(meerkat_core::protected_section::EffectMark::enter);
             super::first_input::with_controller_login(console.as_ref(), None, || {
                 facts.lifetime.with_current_setup(|| {
                     let issue = || {
@@ -279,13 +284,21 @@ impl PrivateOriginals {
                             .map_err(|_| GrantRefusal::Unavailable)?;
                         let child = match grants.issued_reference(&child_id)? {
                             Some(child) => child,
-                            None => grants.issue_child(
-                                &facts.application,
-                                &parent,
-                                child_id.clone(),
-                                facts.route.logical_executor.clone(),
-                                bounds,
-                            )?,
+                            None => {
+                                // A bind attempt's durable effect: no "not
+                                // now" may follow it.
+                                if let Some(attempt) = &attempt {
+                                    attempt.note("original.configured_setup_grant");
+                                }
+                                grants.issue_child(
+                                    &meerkat_core::AdmissionGuard::none(),
+                                    &facts.application,
+                                    &parent,
+                                    child_id.clone(),
+                                    facts.route.logical_executor.clone(),
+                                    bounds,
+                                )?
+                            }
                         };
                         let lineage = vec![parent, child];
                         let current = grants.resolve_lineage(
@@ -315,6 +328,7 @@ impl PrivateOriginals {
                         &origin,
                         &child_id,
                         &selected_targets,
+                        attempt.as_ref(),
                     )?;
                     super::setup_targets::project(lineage, targets)
                 })
@@ -396,6 +410,8 @@ impl PrivateOriginals {
                 && !matches!(&record.planning_source_evidence, Some(super::planning_source_evidence::PlanningSourceEvidence::EffectWaiter { .. }))
             { return Err(PrivateOriginalError::Denied); }
             record.configured_setup = Some(selection.clone());
+            // A bind attempt's durable effect: no "not now" may follow it.
+            meerkat_core::protected_section::note_effect("original.configured_setup");
             self.store.compare_and_swap(Transition { key, expected_revision: saved.revision,
                 expected_digest: Some(saved.content_digest), claim: None, data: encode(record)?,
                 events: vec![], effects: vec![], }).await.map_err(store_error)?;

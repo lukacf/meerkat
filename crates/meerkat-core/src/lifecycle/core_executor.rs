@@ -2340,6 +2340,15 @@ pub trait CoreExecutor: Send + Sync {
     }
 
     /// Request cancellation at the next cooperative boundary.
+    ///
+    /// This executor-wide cancel serves a boundary cancel taken while no run
+    /// was current: the runtime loop applies it between runs, never while
+    /// [`Self::apply`] runs. A cancel bound to a run reaches that run only
+    /// through [`Self::boundary_handle`]. With no run active this is a no-op
+    /// that returns `Ok`, never an error: an error here stops the runtime loop
+    /// and the session with it. An implementation that forwards to
+    /// `SessionService::cancel_after_boundary` maps
+    /// `SessionError::NotRunning` to `Ok`.
     async fn cancel_after_boundary(&mut self, reason: String) -> Result<(), CoreExecutorError>;
 
     /// Ask this runtime executor to stop accepting work.

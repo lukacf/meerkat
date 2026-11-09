@@ -139,6 +139,22 @@ pub trait LocalWorkPolicy: Send + Sync {
         None
     }
 
+    /// What the entry of the exact operation `binding` spends for
+    /// `association`, read under the same publication as its permission:
+    /// the one use of an approval-carried grant its lineage ends at. Asked
+    /// for the operation purpose only, after the permission. The prepared
+    /// decision spends it once, at the operation's entry
+    /// ([`meerkat_core::PreparedOperationAuthorization::spend_at_entry`]).
+    /// The default spends nothing.
+    fn entry_spend(
+        &self,
+        _association: &InputAuthorityAssociation,
+        _binding: &PreparedAuthorizationBinding,
+    ) -> Result<Option<crate::grant_policy::GrantUseSpend>, meerkat_core::OperationAuthorizationError>
+    {
+        Ok(None)
+    }
+
     /// Passive review material for this exact prepared operation: the action
     /// account the owner actually selected and the current mandate, read in
     /// the same publication as every other owner fact. Called only after R1

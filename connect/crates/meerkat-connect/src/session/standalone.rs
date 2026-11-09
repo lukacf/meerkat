@@ -1526,7 +1526,11 @@ fn report_grant<W: Write>(
                 "was granted and selected. This access remains until revoked, even if setup stops."
             }
         }
-        Err(StockGrantError::Refused(_)) => {
+        Err(
+            StockGrantError::Refused(_)
+            | StockGrantError::AdmissionInProgress
+            | StockGrantError::AdmissionFenceUnavailable(_),
+        ) => {
             "was refused before grant effects. No access was issued, selected or revoked by this command."
         }
         Err(StockGrantError::IssuanceUncertain { .. }) => {

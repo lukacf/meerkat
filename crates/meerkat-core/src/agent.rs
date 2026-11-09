@@ -910,6 +910,10 @@ pub struct ToolDispatchContext {
     streaming: Option<crate::ToolStreamingDispatchContext>,
     live_bridge_admission: Option<LiveBridgeToolDispatchAdmission>,
     work_authorization: Option<crate::WorkAuthorizationContext>,
+    /// The original requester of the run this dispatch belongs to: the
+    /// requester its admitted inputs share. Bound with the run by the agent
+    /// loop; never taken from tool arguments or model output.
+    requester: Option<crate::types::TurnRequester>,
     prepared_authorization: Option<crate::authorization::PreparedOperationCheck>,
     /// Trusted host review composition attached by the agent. Absence never
     /// skips a required tier: R2 then settles as local unavailable feedback.
@@ -1228,7 +1232,10 @@ impl GovernedDispatchOperation {
 
     /// [`Self::issue_child_if_current_within`], waiting out what refused it
     /// to rebuild, as [`Self::run_if_current_within_after_owner_change`]
-    /// does (site `tool_child_issuance`). The work owner validates `further`
+    /// does (site `tool_child_issuance`), and a held admission fence of the
+    /// grant owner's store
+    /// ([`crate::authorization::ChildIssuanceAdmissionInProgress`]) the same
+    /// way. The work owner validates `further`
     /// and `intent` first. Then THIS dispatch's single consuming entry is
     /// made once, its staging waiting out an owner change in progress within
     /// the dispatch attempt's own bounds (site `tool_entry`). That staging
@@ -1305,12 +1312,13 @@ impl GovernedDispatchOperation {
                 .map_err(crate::ToolError::from)
         };
         let mut wait = StepOwnerChangeWait::new(&self.context, &self.work, "tool_child_issuance");
-        if !refuses_to_rebuild(&first) || !wait.again().await {
+        if !child_issuance_waits(&first) || !wait.again().await {
             return first;
         }
-        // Only a refusal to rebuild goes on, through the entry's witness:
-        // its attempts never spend, and each is admitted by the review owner,
-        // since the dispatch may have ended during the wait.
+        // Only a refusal to rebuild, or a held admission fence, goes on,
+        // through the entry's witness: its attempts never spend, and each is
+        // admitted by the review owner, since the dispatch may have ended
+        // during the wait.
         let operation = match entering {
             Some(entering) => entering.governed_operation(call)?,
             None => self.clone(),
@@ -1633,6 +1641,7 @@ impl std::fmt::Debug for ToolDispatchContext {
             .field("streaming", &self.streaming)
             .field("live_bridge_admission", &self.live_bridge_admission)
             .field("work_authorization", &self.work_authorization)
+            .field("requester", &self.requester)
             .field("prepared_authorization", &self.prepared_authorization)
             .field("operation_review", &self.operation_review.is_some())
             .field("review_entry", &self.review_entry)
@@ -1663,6 +1672,7 @@ impl PartialEq for ToolDispatchContext {
             && self.round == other.round
             && self.streaming == other.streaming
             && self.live_bridge_admission == other.live_bridge_admission
+            && self.requester == other.requester
             && match (&self.work_authorization, &other.work_authorization) {
                 (Some(left), Some(right)) => left.same_context(right),
                 (None, None) => true,
@@ -1758,6 +1768,7 @@ impl ToolDispatchContext {
             streaming: None,
             live_bridge_admission: None,
             work_authorization: None,
+            requester: None,
             prepared_authorization: None,
             operation_review: None,
             review_entry: None,
@@ -1791,6 +1802,32 @@ impl ToolDispatchContext {
         self.review_entry = None;
         self.staging_wait = None;
         self
+    }
+
+    /// Bind the original requester of the run this dispatch belongs to (see
+    /// [`Self::requester`]). The agent loop binds it with the run.
+    #[must_use]
+    pub fn with_requester(mut self, requester: Option<crate::types::TurnRequester>) -> Self {
+        self.requester = requester;
+        self
+    }
+
+    /// The original requester of the run this dispatch belongs to: the
+    /// requester its admitted inputs share, direct or carried. `None` when
+    /// the run's inputs carry none.
+    #[must_use]
+    pub fn requester(&self) -> Option<&crate::types::TurnRequester> {
+        self.requester.as_ref()
+    }
+
+    /// The run's requester only when the requester's own ingress admitted
+    /// every input of the run. A consumer that acts for a person uses only
+    /// this, never a requester carried across a peer hop.
+    #[must_use]
+    pub fn direct_requester(&self) -> Option<&crate::PrincipalRef> {
+        self.requester
+            .as_ref()
+            .and_then(crate::types::TurnRequester::direct_principal)
     }
 
     /// Attach trusted host review composition. It only enables review; the
@@ -2278,7 +2315,11 @@ impl ToolDispatchContext {
 
     /// Spend this dispatch's retained review once for the decision staging
     /// returned (`entering`, or this context's own when staging refreshed
-    /// nothing). R1 and ungoverned entries spend nothing.
+    /// nothing). R1 and ungoverned entries spend nothing. Then the entering
+    /// decision's own entry spend, once: a use of a grant that serves a
+    /// counted number of uses, acknowledged by its owner before the effect
+    /// ([`crate::authorization::PreparedOperationAuthorization::spend_at_entry`]).
+    /// Its refusal refuses the entry.
     fn spend_review_entry(
         &self,
         entering: Option<Self>,
@@ -2289,6 +2330,9 @@ impl ToolDispatchContext {
             (Some(entry), Some(check)) => entry.consume_held(check)?,
             _ => crate::approval::review::ReviewedEntryCustody::none(),
         };
+        if let Some(check) = current.prepared_authorization() {
+            check.spend_at_entry()?;
+        }
         Ok((entering, custody))
     }
 
@@ -3490,6 +3534,17 @@ fn refuses_to_rebuild<T>(answer: &Result<T, crate::ToolError>) -> bool {
         Err(crate::ToolError::AuthorizationRefused { refusal })
             if refusal.kind() == crate::authorization::OperationRefusalKind::ReprepareRequired
     )
+}
+
+/// Whether a waiting child issuance waits after this attempt: a refusal to
+/// rebuild, or the work owner's answer that an admission holds the grant
+/// store's fence ([`crate::authorization::ChildIssuanceAdmissionInProgress`]),
+/// which it waits out the same way, within the same bounds.
+fn child_issuance_waits(answer: &Result<Box<dyn std::any::Any + Send>, crate::ToolError>) -> bool {
+    refuses_to_rebuild(answer)
+        || answer.as_ref().is_ok_and(|outcome| {
+            (**outcome).is::<crate::authorization::ChildIssuanceAdmissionInProgress>()
+        })
 }
 
 /// The owner-change waiting state of one waiting step of a dispatch's
@@ -5456,6 +5511,10 @@ where
     /// the gated names a live grant admits. The dispatch gate carries the
     /// same binding and adjudicates every gated call again.
     pub(crate) tool_grant_gate: Option<crate::tool_grant::ToolGrantGate>,
+    /// The run a dropped-run cancel ended whose run-scoped tool grants are
+    /// still to be ended: the cancel is synchronous, so its caller ends them
+    /// after it ([`Agent::end_dropped_run_tool_grants`]).
+    dropped_run_tool_grants_owed: Option<crate::RunId>,
     store: Arc<S>,
     session: Session,
     budget: Budget,
@@ -7218,6 +7277,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// The dispatch's own operation is reachable only with its actual
@@ -7321,6 +7384,10 @@ mod governed_operation_tests {
             _binding: &PreparedAuthorizationBinding,
             _event: OperationObservation,
         ) -> Result<(), OperationObservationError> {
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }
@@ -7819,6 +7886,10 @@ mod governed_operation_tests {
         ) -> Result<(), OperationObservationError> {
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     fn churn_context(work: &Arc<ChurnWork>) -> ToolDispatchContext {
@@ -8149,6 +8220,10 @@ mod governed_operation_tests {
             }
             Ok(())
         }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+            Ok(())
+        }
     }
 
     /// What one fenced call through the execution policy gate did under an
@@ -8414,6 +8489,10 @@ mod governed_operation_tests {
                 self.facts.complete_change(false);
                 self.facts.stale_reads.fetch_add(1, Ordering::SeqCst);
             }
+            Ok(())
+        }
+
+        fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
             Ok(())
         }
     }

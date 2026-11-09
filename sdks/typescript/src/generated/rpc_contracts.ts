@@ -28,6 +28,8 @@ import type {
   CommsPeersResult,
   CommsSendParams,
   CommsSendResult,
+  CompactSessionParams,
+  CompactSessionResult,
   ConfigEnvelope,
   ConfigPatchParams,
   ConfigSetParams,
@@ -138,6 +140,8 @@ import type {
   MobCancelWorkResult,
   MobClaimCallbackRouteParams,
   MobClaimCallbackRouteResult,
+  MobCompactMemberParams,
+  MobCompactMemberResult,
   MobConcludeObjectiveParams,
   MobConcludeObjectiveResult,
   MobCreateParams,
@@ -156,6 +160,8 @@ import type {
   MobFlowsResult,
   MobForceCancelResult,
   MobForkHelperParams,
+  MobForkMemberParams,
+  MobForkMemberResult,
   MobGrantScopesParams,
   MobGrantScopesResult,
   MobGrantsResult,
@@ -166,6 +172,9 @@ import type {
   MobIdParams,
   MobIngressInteractionParams,
   MobIngressInteractionResult,
+  MobInstructionStatusParams,
+  MobInstructionStatusResult,
+  MobInstructionWriteResult,
   MobLifecycleParams,
   MobLifecycleResult,
   MobListMembersMatchingParams,
@@ -201,6 +210,7 @@ import type {
   MobRetireResult,
   MobRevokeHostParams,
   MobRevokeHostResult,
+  MobRevokeInstructionParams,
   MobRevokeScopesParams,
   MobRevokeScopesResult,
   MobRotateSupervisorResult,
@@ -208,6 +218,7 @@ import type {
   MobRunParams,
   MobRunResult,
   MobRunResultParams,
+  MobSetInstructionParams,
   MobSnapshotResult,
   MobSpawnHelperParams,
   MobSpawnManyParams,
@@ -242,7 +253,10 @@ import type {
   ReadSessionTranscriptRevisionParams,
   ReadyWorkFilter,
   RealmIdParams,
+  RequestToolGrantParams,
+  RequestToolGrantResult,
   RestoreSessionTranscriptRevisionParams,
+  RevokeSessionInstructionParams,
   RevokeToolGrantParams,
   RevokeToolGrantResult,
   RewriteSessionTranscriptParams,
@@ -262,12 +276,16 @@ import type {
   SessionForkResult,
   SessionInputStateParams,
   SessionInputStateResult,
+  SessionInstructionStatusParams,
+  SessionInstructionStatusResult,
+  SessionInstructionWriteResult,
   SessionPeerResponseTerminalParams,
   SessionStreamCloseParams,
   SessionStreamCloseResult,
   SessionStreamOpenParams,
   SessionStreamOpenResult,
   SessionTranscriptRewriteResult,
+  SetSessionInstructionParams,
   SkillListResponse,
   StopRunParams,
   StopRunResult,
@@ -428,6 +446,18 @@ export interface RpcMethodContracts {
     params: ReadInstructionActivationsParams;
     result: (InstructionActivationReadPage) & Record<string, unknown>;
   };
+  "session/set_instruction": {
+    params: SetSessionInstructionParams;
+    result: (SessionInstructionWriteResult) & Record<string, unknown>;
+  };
+  "session/revoke_instruction": {
+    params: RevokeSessionInstructionParams;
+    result: (SessionInstructionWriteResult) & Record<string, unknown>;
+  };
+  "session/instruction_status": {
+    params: SessionInstructionStatusParams;
+    result: (SessionInstructionStatusResult) & Record<string, unknown>;
+  };
   "session/transcript_revision": {
     params: ReadSessionTranscriptRevisionParams;
     result: (WireSessionTranscriptRevision) & Record<string, unknown>;
@@ -455,6 +485,10 @@ export interface RpcMethodContracts {
   "turn/stop_run": {
     params: StopRunParams;
     result: (StopRunResult) & Record<string, unknown>;
+  };
+  "session/compact": {
+    params: CompactSessionParams;
+    result: (CompactSessionResult) & Record<string, unknown>;
   };
   "config/get": {
     params: Record<string, never>;
@@ -567,6 +601,10 @@ export interface RpcMethodContracts {
   "tool_grants/grant": {
     params: GrantToolParams;
     result: (GrantToolResult) & Record<string, unknown>;
+  };
+  "tool_grants/request": {
+    params: RequestToolGrantParams;
+    result: (RequestToolGrantResult) & Record<string, unknown>;
   };
   "tool_grants/revoke": {
     params: RevokeToolGrantParams;
@@ -860,6 +898,18 @@ export interface RpcMethodContracts {
     params: MobAppendSystemContextParams;
     result: (MobAppendSystemContextResult) & Record<string, unknown>;
   };
+  "mob/set_instruction": {
+    params: MobSetInstructionParams;
+    result: (MobInstructionWriteResult) & Record<string, unknown>;
+  };
+  "mob/revoke_instruction": {
+    params: MobRevokeInstructionParams;
+    result: (MobInstructionWriteResult) & Record<string, unknown>;
+  };
+  "mob/instruction_status": {
+    params: MobInstructionStatusParams;
+    result: (MobInstructionStatusResult) & Record<string, unknown>;
+  };
   "mob/flows": {
     params: MobIdParams;
     result: (MobFlowsResult) & Record<string, unknown>;
@@ -891,6 +941,10 @@ export interface RpcMethodContracts {
   "mob/fork_helper": {
     params: MobForkHelperParams;
     result: (MobHelperResult) & Record<string, unknown>;
+  };
+  "mob/fork_member": {
+    params: MobForkMemberParams;
+    result: (MobForkMemberResult) & Record<string, unknown>;
   };
   "mob/force_cancel": {
     params: MobMemberParams;
@@ -1015,6 +1069,10 @@ export interface RpcMethodContracts {
   "mob/stop_member_run": {
     params: MobStopMemberRunParams;
     result: (MobStopMemberRunResult) & Record<string, unknown>;
+  };
+  "mob/compact_member": {
+    params: MobCompactMemberParams;
+    result: (MobCompactMemberResult) & Record<string, unknown>;
   };
   "mob/member_live_open": {
     params: MobMemberLiveOpenParams;

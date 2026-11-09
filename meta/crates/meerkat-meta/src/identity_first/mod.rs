@@ -16,6 +16,8 @@ pub mod gateway_bridges;
 pub(crate) mod held_bootstrap;
 pub mod local_lease;
 pub mod local_store;
+#[cfg(test)]
+mod operator_memory_delivery_tests;
 pub mod orchestrator;
 pub mod runtime;
 mod types;
@@ -36,13 +38,18 @@ pub use bridge::{
     ActorCallObservation, ActorCommandTimeout, BoundGovernedInput, BridgeAdmissionError,
     BridgeDelivery, BridgeError, BridgeMemberReload, BridgeTurnError, BridgeTurnReceipt,
     CommittedBoundaryRecoverer, CommittedBoundaryRepair, CompactionFloorRegistry,
-    ControllerPinSource, GovernedAdmission, GovernedAdmissionRecord, GovernedBindContext,
-    GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence, GovernedEntryOutcome,
-    GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedInputError,
-    GovernedSettlement, MemberInspection, MemberLifecycleFact, MemberLifecycleFactRecord,
-    MemberLifecycleJournalHead, MemberLifecycleJournalPage, MemberRuntimeBinding, MemberStanding,
-    MobSessionBridge, NativeInputAdmissionSettlement, QueuedMemberInputs, ResumeRejectionKind,
-    ResumeSessionOutcome, SessionBridge,
+    ControllerPinSource, CoreBrokenMember, CoreIdentityEntry, CoreMember, CoreNameKind,
+    DeclaredIdentity, DeclaredIdentityAnswer, DeclaredIdentityBuild, DeclaredRosterAnswer,
+    DeclaredRosterRequest, GOVERNED_SUBMISSION_RECEIPT_VERSION, GovernedAdmission,
+    GovernedAdmissionRecord, GovernedBindContext, GovernedBindError, GovernedBindRefusal,
+    GovernedBindRefusalKind, GovernedDelivery, GovernedDeliveryCustody, GovernedEntryFence,
+    GovernedEntryOutcome, GovernedEntryPermit, GovernedEntryRefusal, GovernedHold,
+    GovernedInputBinder, GovernedInputError, GovernedNotNow, GovernedSettlement,
+    GovernedSubmissionReceipt, GovernedWaitBudget, MemberInspection, MemberLifecycleFact,
+    MemberLifecycleFactRecord, MemberLifecycleJournalHead, MemberLifecycleJournalPage,
+    MemberRuntimeBinding, MemberStanding, MobSessionBridge, NativeInputAdmissionSettlement,
+    QueuedMemberInputs, ResumeRejectionKind, ResumeSessionOutcome, SessionBridge,
+    UnlistedIdentityAnswer,
 };
 pub use build_preparer::IdentityBuildPreparer;
 pub use contracts::*;

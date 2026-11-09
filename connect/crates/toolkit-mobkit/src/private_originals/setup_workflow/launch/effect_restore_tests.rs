@@ -73,6 +73,7 @@ async fn restored_targets(revoke_first: bool) {
                 .owner
                 .grants()
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &saved.association.candidate().logical_executor,
                     &leaves[0],
                     &mut custody,

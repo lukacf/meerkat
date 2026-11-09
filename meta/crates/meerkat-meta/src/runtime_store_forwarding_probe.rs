@@ -23,11 +23,40 @@ const REFUSAL: &str = "forwarding probe: controller mutation custody";
 /// refuses the scan, and a store that does not answer it boots every member
 /// eagerly.
 const RECOVERY_WORK_RUNTIME: &str = "forwarding-probe-recovery-work";
+/// The runtime the probe's per-runtime read says holds recovery work. The
+/// probe's store-wide scan does not list it, so the trait default, which
+/// answers through that scan, says it holds none.
+const HELD_RECOVERY_WORK_RUNTIME: &str = "forwarding-probe-held-recovery-work";
 /// The runtime the probe names as unavailable in its delivery authority
 /// listing: the trait default answers through the plain listing, which names
 /// none, and a store that does not answer per runtime refuses the whole
 /// listing while one runtime scope is poisoned.
 const UNAVAILABLE_RUNTIME: &str = "forwarding-probe-unavailable";
+/// The runtime the probe refuses until a reopen: the trait default refuses
+/// none.
+const REFUSED_RUNTIME: &str = "forwarding-probe-refused";
+/// The refused runtime scope the probe cannot name by runtime id: the trait
+/// default reports none, so a decorator that keeps it hides a quarantined
+/// runtime from every boot.
+const UNNAMED_REFUSED_SCOPE: &str = "rt:hforwarding-probe-unnamed";
+
+/// The refused runtime scopes the probe cannot name by runtime id.
+fn probe_unnamed_refusals() -> Vec<RefusedScope> {
+    vec![RefusedScope::new(
+        UNNAMED_REFUSED_SCOPE,
+        "forwarding probe: refused, and named by its scope only",
+    )]
+}
+
+/// The tool grants the probe's store quarantined: the trait default reports
+/// none, so a decorator that keeps it admits nothing a quarantined grant
+/// may have admitted, and says so nowhere.
+fn probe_quarantined_grants() -> Vec<meerkat_runtime::store::QuarantinedToolGrant> {
+    vec![meerkat_runtime::store::QuarantinedToolGrant::new(
+        Some("forwarding-probe-grant".to_string()),
+        RefusedScope::new("tg:forwarding-probe-grant", "forwarding probe: quarantined"),
+    )]
+}
 
 /// The listing the probe answers per runtime: one unavailable runtime.
 fn probe_delivery_listing() -> RuntimeDeliveryAuthorityListing {
@@ -217,6 +246,23 @@ pub(crate) async fn assert_forwards_to(
         Some(SELF_FENCE_WINDOW),
         "the inner store's self-fence"
     );
+    assert!(
+        store.refuses_runtime_until_reopen(&LogicalRuntimeId::new(REFUSED_RUNTIME)),
+        "the inner store's refusal until a reopen: a decorator that keeps the default answers \
+         that no runtime is refused, so a member its store refuses reads as a failed read"
+    );
+    assert_eq!(
+        store.unnamed_refused_runtimes(),
+        probe_unnamed_refusals(),
+        "the inner store's refused runtime scopes it cannot name: a decorator that keeps the \
+         default reports none, so a boot never attributes them to their members"
+    );
+    assert_eq!(
+        store.quarantined_tool_grants(),
+        probe_quarantined_grants(),
+        "the inner store's quarantined tool grants: a decorator that keeps the default reports \
+         none, so a refused gated call never names them"
+    );
     assert_eq!(
         store
             .load_continuation_key_binding("owner", "key")
@@ -333,6 +379,14 @@ pub(crate) async fn assert_forwards_to(
         "the inner store's recovery-work scan: a decorator that keeps the refusing default makes \
          Core's boot plan restore every member"
     );
+    assert!(
+        store
+            .runtime_holds_recovery_work(&LogicalRuntimeId::new(HELD_RECOVERY_WORK_RUNTIME))
+            .await
+            .expect("the inner store's per-runtime recovery-work read"),
+        "the inner store's per-runtime recovery-work read: a decorator that keeps the default \
+         answers through the store-wide scan, which does not list this runtime"
+    );
     assert_eq!(
         store
             .list_runtime_delivery_authorities_or_unavailable()
@@ -349,6 +403,9 @@ pub(crate) async fn assert_forwards_to(
             "try_controller_mutation_custody",
             "hosting_capability",
             "self_fence",
+            "refuses_runtime_until_reopen",
+            "unnamed_refused_runtimes",
+            "quarantined_tool_grants",
             "load_continuation_key_binding",
             "compare_and_swap_runtime_delivery_authority_with_key_binding",
             "load_continuation_admission",
@@ -362,6 +419,7 @@ pub(crate) async fn assert_forwards_to(
             "read_service_call_audit",
             "import_whole_blob_session",
             "list_runtimes_with_recovery_work",
+            "runtime_holds_recovery_work",
             "list_runtime_delivery_authorities_or_unavailable",
         ],
         "each method reaches the inner store exactly once"
@@ -420,6 +478,16 @@ mod store_impl {
             Ok(vec![LogicalRuntimeId::new(RECOVERY_WORK_RUNTIME)])
         }
 
+        // The trait default answers through the store-wide scan above, which
+        // does not list this runtime.
+        async fn runtime_holds_recovery_work(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+        ) -> Result<bool, RuntimeStoreError> {
+            self.record("runtime_holds_recovery_work");
+            Ok(*runtime_id == LogicalRuntimeId::new(HELD_RECOVERY_WORK_RUNTIME))
+        }
+
         async fn list_runtime_delivery_authorities_or_unavailable(
             &self,
         ) -> Result<RuntimeDeliveryAuthorityListing, RuntimeStoreError> {
@@ -443,6 +511,21 @@ mod store_impl {
         fn self_fence(&self) -> Option<Arc<dyn meerkat_core::host_store::SelfFence>> {
             self.record("self_fence");
             Some(Arc::new(ProbeSelfFence))
+        }
+
+        fn refuses_runtime_until_reopen(&self, _runtime_id: &LogicalRuntimeId) -> bool {
+            self.record("refuses_runtime_until_reopen");
+            true
+        }
+
+        fn unnamed_refused_runtimes(&self) -> Vec<RefusedScope> {
+            self.record("unnamed_refused_runtimes");
+            probe_unnamed_refusals()
+        }
+
+        fn quarantined_tool_grants(&self) -> Vec<meerkat_runtime::store::QuarantinedToolGrant> {
+            self.record("quarantined_tool_grants");
+            probe_quarantined_grants()
         }
 
         async fn load_continuation_key_binding(

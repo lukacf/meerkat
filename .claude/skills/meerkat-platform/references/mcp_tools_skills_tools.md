@@ -209,8 +209,44 @@ and confinement still applies to a call it opens.
   is `policy_denied` with the code `tool_grant_required`,
   `tool_grant_expired`, `tool_grant_revoked` or `tool_grant_unavailable`; a
   gate that cannot read its grants stays closed.
-- `ToolGrantLifecycleMachine` owns each grant (issued, then expired or
-  revoked, both terminal). Grants and their audit rows live in the runtime
+- A grant can also be scoped to one run of its subject (0.9.11):
+  `ToolGrantRequest::run_scope`, or `scope: {"kind": "current_run"}` on
+  `tool_grants/grant` (Python `scope="current_run"`, TypeScript
+  `{ scope: "current_run" }`), which takes the run the subject is running
+  now (a mob member identity's: the run of the session its member holds on
+  the server) and is refused with the request refusal `run_not_active`
+  (`data.kind = "tool_grant_request_refused"`) when it
+  runs none.
+  Such a grant opens its names only in that run and refuses a call outside
+  any run (`tool_grant_required`); it ends (`run_ended`) when the run
+  completes, fails or is cancelled (a hard interrupt included), when
+  durable-tail recovery closes it (a member identity's grant ends at its
+  member's next run's first use instead), or at the first boundary or call
+  of a later run.
+- A host can ask for a grant a person approves instead (0.9.11):
+  `MeerkatMachine::request_tool_grant`, or `tool_grants/request` (Python
+  `request_tool_grant`, TypeScript `requestToolGrant`; `subject`, `target`,
+  `duration_ms`, optional `scope` and `reason`), holds a durable decision of
+  kind `tool_grant.issue` for the approver id `operator` and issues nothing.
+  Every gated build also mounts the ungated tool `request_tool_grant`
+  (`tool`/`family`, `duration_ms`, `reason`): the agent asks the same way,
+  never naming its session or the approver, and a replayed call answers the
+  request it held; a call for a target with an open or approved window
+  request joins it while it is open (the answer says so and gives that
+  request's `duration_ms`, which can differ from the one asked), and holds a
+  new one after it ends; the host holds it with what it takes requests with
+  (`MeerkatMachine::set_tool_grant_request_host`; `rkat-rpc` names the
+  realm's agent `rkat-agent`), or the call fails when the host takes none.
+  Once a person approved it, the kind's executor (`ToolGrantIssueExecutor`,
+  run by `rkat-rpc`) issues the grant under `ToolGrantId::approved(decision
+  id)` with issuer `approval`; the session receives a `tool_grant_request`
+  input when the request ends (a member identity's request reaches the
+  session its member holds then, through the mob's member input).
+  `tool_grants/list` shows open requests as
+  `requested` and, with `include_ended`, those ended within the grant
+  policy's maximum lifetime as `declined`.
+- `ToolGrantLifecycleMachine` owns each grant (issued, then expired, revoked
+  or ended with its run, all terminal). Grants and their audit rows live in the runtime
   store: on SQLite the `runtime-tool-grants` schema domain, created by the
   first grant or audit row; with the in-memory store, for the process. A
   binary older than 0.9.9 resumes a gated session with its gated tools

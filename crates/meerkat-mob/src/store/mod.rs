@@ -12,6 +12,8 @@ mod temporary_council;
 pub use forked_participant::{
     ForkedParticipantRecord, ForkedParticipantSidecar, ForkedParticipantStore,
 };
+#[cfg(test)]
+pub(crate) use in_memory::InMemoryEventLogForTest;
 pub use in_memory::{
     InMemoryForkedParticipantStore, InMemoryMobEventStore, InMemoryMobIdentityStatusStore,
     InMemoryMobIdentityStore, InMemoryMobRunStore, InMemoryMobRuntimeMetadataStore,
@@ -5958,6 +5960,96 @@ pub(crate) trait MobIdentityMemberStore: Send + Sync {
         let _ = (mob_id, identity);
         Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
     }
+
+    /// Purge the receipt's mob's rows of schema version 2 and later in one
+    /// store transaction (the downgrade cycle, 0.9.11): every such row (a
+    /// store-owned identity's, an archived one's, a removed name's
+    /// tombstone) is removed, and the purge's receipt inserted, only when
+    /// the digest of the rows the store holds is the export's and the
+    /// receipt lists exactly their identities. Never a host-adopted
+    /// intent's row (schema version 1), a session, a journal row or another
+    /// receipt. A receipt already under the operation's id answers the
+    /// purge replayed (the same request digest) or the id reused, and
+    /// nothing changes; so does a row this build cannot read, which no
+    /// import would restore.
+    ///
+    /// The default answers that the storage cannot make the guarantee.
+    async fn purge_created_identity_rows(
+        &self,
+        write: &CreatedRowsPurgeWrite,
+    ) -> Result<CreatedRowsPurge, MobStoreError> {
+        let _ = write;
+        Err(MobStoreError::IdentityMemberAtomicPersistenceUnavailable)
+    }
+}
+
+/// A purge's store transaction
+/// ([`MobIdentityMemberStore::purge_created_identity_rows`]): its receipt,
+/// which lists the identities whose rows it removes, and the digest of the
+/// export those rows must match.
+#[derive(Debug, Clone)]
+pub(crate) struct CreatedRowsPurgeWrite {
+    pub(crate) receipt: crate::identity::IdentityChangeReceipt,
+    pub(crate) export_digest: String,
+}
+
+/// The answer of a purge's store transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreatedRowsPurge {
+    /// The rows were removed and the receipt inserted.
+    Purged,
+    /// The purge committed before under the same request digest: nothing
+    /// changed, and its receipt answers it.
+    Replayed {
+        receipt: crate::identity::IdentityChangeReceipt,
+    },
+    /// The operation's id holds the receipt of another request: nothing
+    /// changed.
+    OperationReused {
+        receipt: crate::identity::IdentityChangeReceipt,
+    },
+    /// The rows the store holds are not the export's (`current_digest` is
+    /// theirs): nothing changed.
+    ExportMismatch { current_digest: String },
+    /// Rows this build cannot read remain: nothing changed.
+    UnreadableRows { identities: Vec<AgentIdentity> },
+}
+
+/// Decide a purge over the rows a store holds (`rows`, every row of schema
+/// version 2 and later of the receipt's mob, by identity): `None` when the
+/// purge removes them, or the answer that refuses it.
+pub(crate) fn created_rows_purge_refusal(
+    write: &CreatedRowsPurgeWrite,
+    rows: &BTreeMap<AgentIdentity, crate::identity::CreatedIdentityObservation>,
+) -> Result<Option<CreatedRowsPurge>, MobStoreError> {
+    let unreadable: Vec<AgentIdentity> = rows
+        .iter()
+        .filter(|(_, observation)| {
+            matches!(
+                observation,
+                crate::identity::CreatedIdentityObservation::Unreadable { .. }
+            )
+        })
+        .map(|(identity, _)| identity.clone())
+        .collect();
+    if !unreadable.is_empty() {
+        return Ok(Some(CreatedRowsPurge::UnreadableRows {
+            identities: unreadable,
+        }));
+    }
+    let current_digest = crate::identity::created_set_digest_of_rows(&write.receipt.mob_id, rows)
+        .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
+    let listed: std::collections::BTreeSet<&AgentIdentity> = write
+        .receipt
+        .identities
+        .iter()
+        .map(|entry| &entry.identity)
+        .collect();
+    let held: std::collections::BTreeSet<&AgentIdentity> = rows.keys().collect();
+    if current_digest != write.export_digest || listed != held {
+        return Ok(Some(CreatedRowsPurge::ExportMismatch { current_digest }));
+    }
+    Ok(None)
 }
 
 /// What an identity change expects a store-owned identity's current row to

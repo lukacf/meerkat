@@ -154,6 +154,10 @@ impl PreparedOperationAuthorization for Decision {
     ) -> Result<(), OperationObservationError> {
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), crate::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 struct OwnerWork(Arc<Owner>);

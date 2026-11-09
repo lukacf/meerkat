@@ -127,16 +127,6 @@ pub struct OpenAiImageProviderParams {
 }
 
 impl OpenAiImageProviderParams {
-    fn is_empty(&self) -> bool {
-        self.background.is_none()
-            && self.output_compression.is_none()
-            && self.moderation.is_none()
-            && self.action.is_none()
-            && self.reasoning_effort.is_none()
-            && self.web_search.is_none()
-            && !self.web_search_present
-    }
-
     fn has_hosted_only_fields(&self) -> bool {
         self.reasoning_effort.is_some() || self.web_search.is_some() || self.web_search_present
     }
@@ -215,14 +205,12 @@ pub enum OpenAiImagesApiEndpoint {
 #[serde(rename_all = "snake_case")]
 pub enum OpenAiImagesApiRequestShape {
     GptImage,
-    DallE,
 }
 
 impl From<OpenAiImageGenerationRequestShape> for OpenAiImagesApiRequestShape {
     fn from(value: OpenAiImageGenerationRequestShape) -> Self {
         match value {
             OpenAiImageGenerationRequestShape::GptImage => Self::GptImage,
-            OpenAiImageGenerationRequestShape::DallE => Self::DallE,
         }
     }
 }
@@ -239,9 +227,9 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
         Some(
             r#"OpenAI:
 - Normal requests need no provider_params: use the universal size, quality, format, count, and intent fields (format maps to output_format).
-- provider_params (advanced overrides): {"background":"auto"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}. background:"transparent" is model-dependent; gpt-image-2 rejects it.
-- Hosted Responses routes also accept {"reasoning_effort":<a level the backing text model advertises>,"web_search":true|false|null|{...}}. The gpt-image-2 default is backed by GPT-5.4 (up to xhigh); GPT-5.6 text-model routes also accept max. An object web_search becomes the hosted web_search tool with type:"web_search".
-- action applies only to the hosted Responses image tool and is usually omitted in favor of intent. Images API requests reject action, reasoning_effort, and web_search."#,
+- provider_params (advanced overrides): {"background":"auto"|"opaque"|"transparent","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}. background:"transparent" needs format png or webp; jpeg is refused.
+- Hosted Responses routes also accept {"reasoning_effort":<a level the backing text model advertises>,"web_search":true|false|null|{...}}. The gpt-image-2.6-sunburst default is backed by GPT-5.4 (up to xhigh); GPT-5.6 text-model routes also accept max. On GPT Image 2.6 models a low, medium or high reasoning_effort also sets the image model's planning complexity. An object web_search becomes the hosted web_search tool with type:"web_search".
+- action applies only to the hosted Responses image tool and is usually omitted in favor of intent."#,
         )
     }
 
@@ -259,6 +247,12 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
 
         let output = openai_image_output_options(request);
         let provider_params = openai_image_provider_params(request)?;
+        // OpenAI renders a transparent background only into png or webp.
+        if provider_params.background == Some(OpenAiImageBackground::Transparent)
+            && output.output_format == OpenAiImageOutputFormat::Jpeg
+        {
+            return Err(ImageOperationDenialReason::ProjectionUnsupported);
+        }
 
         if let ImageGenerationModelRoute::OpenAiImagesApi { request_shape } = model.route {
             if matches!(request.intent, ImageGenerationIntent::Edit { .. })
@@ -276,11 +270,6 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
                 return Err(ImageOperationDenialReason::ProjectionUnsupported);
             }
             if provider_params.has_hosted_only_fields() {
-                return Err(ImageOperationDenialReason::ProjectionUnsupported);
-            }
-            if matches!(request_shape, OpenAiImageGenerationRequestShape::DallE)
-                && !provider_params.is_empty()
-            {
                 return Err(ImageOperationDenialReason::ProjectionUnsupported);
             }
             let provider_plan = serde_json::to_value(OpenAiImagesApiPlan {
@@ -401,6 +390,7 @@ mod tests {
     use meerkat_core::image_generation::{
         ImageGenerationTargetPreference, PromptSource, PromptText, ToolCallId,
     };
+    use meerkat_core::model_profile::catalog::ModelTier;
     use meerkat_models::{default_image_generation_model, image_generation_model};
     use serde_json::json;
 
@@ -418,6 +408,13 @@ mod tests {
     fn generate_request(
         provider_params: serde_json::Value,
     ) -> Result<GenerateImageRequest, Box<dyn std::error::Error>> {
+        generate_request_in(ImageFormatPreference::Png, provider_params)
+    }
+
+    fn generate_request_in(
+        format: ImageFormatPreference,
+        provider_params: serde_json::Value,
+    ) -> Result<GenerateImageRequest, Box<dyn std::error::Error>> {
         Ok(GenerateImageRequest::with_provider_params(
             ImageGenerationIntent::Generate {
                 prompt: PromptText::new("draw a cat")?,
@@ -431,7 +428,7 @@ mod tests {
             },
             ImageSizePreference::Square1024,
             ImageQualityPreference::Auto,
-            ImageFormatPreference::Png,
+            format,
             NonZeroU32::MIN,
             Some(provider_params),
         )?)
@@ -444,6 +441,20 @@ mod tests {
     fn openai_image_profile(model: &str) -> ImageGenerationModelProfile {
         image_generation_model(Provider::OpenAI, model)
             .unwrap_or_else(|| panic!("OpenAI image profile for {model} must be cataloged"))
+    }
+
+    /// The canonical catalog has no Images API row; a catalog row on that
+    /// route resolves like this one.
+    fn images_api_profile() -> ImageGenerationModelProfile {
+        ImageGenerationModelProfile {
+            provider: Provider::OpenAI,
+            model_id: "gpt-image-2",
+            display_name: "GPT Image 2 on the Images API",
+            tier: ModelTier::Supported,
+            route: ImageGenerationModelRoute::OpenAiImagesApi {
+                request_shape: OpenAiImageGenerationRequestShape::GptImage,
+            },
+        }
     }
 
     #[test]
@@ -470,6 +481,8 @@ mod tests {
 
         let plan: OpenAiResponsesImagePlan =
             serde_json::from_value(resolution.execution_plan.provider_plan)?;
+        assert_eq!(resolution.provider_call_model, ModelId::new("gpt-5.4"));
+        assert_eq!(plan.model, ModelId::new("gpt-image-2.6-sunburst"));
         assert_eq!(
             plan.provider_params.background,
             Some(OpenAiImageBackground::Opaque)
@@ -483,6 +496,59 @@ mod tests {
             plan.provider_params.action,
             Some(OpenAiImageAction::Generate)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn default_route_carries_a_transparent_background() -> Result<(), Box<dyn std::error::Error>> {
+        let request = generate_request(json!({"background": "transparent"}))?;
+        let profile = default_image_generation_model(Provider::OpenAI)
+            .expect("OpenAI default image profile must be cataloged");
+
+        let resolution = OpenAiImageGenerationProfile
+            .resolve_execution_plan(
+                operation_id()?,
+                &profile,
+                &request,
+                capabilities(),
+                NonZeroU32::MIN,
+            )
+            .map_err(|err| std::io::Error::other(format!("resolve plan: {err:?}")))?;
+
+        let plan: OpenAiResponsesImagePlan =
+            serde_json::from_value(resolution.execution_plan.provider_plan)?;
+        assert_eq!(
+            plan.provider_params.background,
+            Some(OpenAiImageBackground::Transparent)
+        );
+        assert_eq!(plan.output.output_format, OpenAiImageOutputFormat::Png);
+        Ok(())
+    }
+
+    /// OpenAI renders a transparent background only into png or webp, so a
+    /// jpeg request is refused before any provider call.
+    #[test]
+    fn profile_rejects_transparent_background_with_jpeg() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let profile = default_image_generation_model(Provider::OpenAI)
+            .expect("OpenAI default image profile must be cataloged");
+        let request = generate_request_in(
+            ImageFormatPreference::Jpeg,
+            json!({"background": "transparent"}),
+        )?;
+
+        let result = OpenAiImageGenerationProfile.resolve_execution_plan(
+            operation_id()?,
+            &profile,
+            &request,
+            capabilities(),
+            NonZeroU32::MIN,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ImageOperationDenialReason::ProjectionUnsupported)
+        ));
         Ok(())
     }
 
@@ -516,7 +582,7 @@ mod tests {
             json!({"reasoning_effort": "xhigh"}),
         ] {
             let request = generate_request(params)?;
-            let profile = openai_image_profile("gpt-image-1");
+            let profile = images_api_profile();
 
             let result = OpenAiImageGenerationProfile.resolve_execution_plan(
                 operation_id()?,
@@ -623,10 +689,10 @@ mod tests {
     }
 
     #[test]
-    fn profile_routes_known_images_api_model_from_explicit_mapping()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn profile_routes_images_api_rows_to_the_images_api() -> Result<(), Box<dyn std::error::Error>>
+    {
         let request = generate_request(json!({}))?;
-        let profile = openai_image_profile("gpt-image-1");
+        let profile = images_api_profile();
 
         let resolution = OpenAiImageGenerationProfile
             .resolve_execution_plan(
@@ -638,7 +704,7 @@ mod tests {
             )
             .map_err(|err| std::io::Error::other(format!("resolve plan: {err:?}")))?;
 
-        assert_eq!(resolution.provider_call_model, ModelId::new("gpt-image-1"));
+        assert_eq!(resolution.provider_call_model, ModelId::new("gpt-image-2"));
         assert_eq!(
             resolution.execution_plan.backend,
             ImageGenerationBackendKind::ProviderApi

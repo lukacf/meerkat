@@ -1574,7 +1574,7 @@ async fn actual_held_class_factory_and_ordinary_route_share_one_native_owner() {
         let lineage = targets[0].lineage.clone();
         let mut mutation = fixture.machine.try_controller_grant_mutation().unwrap();
         let native_owner = fixture.lifetime.selected_policy().native_host.as_ref().unwrap().grant_administrator.clone();
-        fixture.source.owner.grants().revoke(&native_owner, lineage.last().unwrap(), &mut mutation).unwrap();
+        fixture.source.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), &native_owner, lineage.last().unwrap(), &mut mutation).unwrap();
         drop(mutation);
         for (event_id, operation, expected_calls) in [
             ("dynamic-unrelated-after-revoke", OTHER_CALLBACK, vec![CALLBACK, OTHER_CALLBACK]),

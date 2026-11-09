@@ -14,7 +14,9 @@
 //!   session's actor while it is live, store-only while it is dormant, never
 //!   waking or materializing the member. Live and dormant deliveries run in
 //!   separate bounded lanes, so a live session that holds its turn boundary
-//!   never stalls the dormant fan-out;
+//!   never stalls the dormant fan-out. A placed member's session is on its
+//!   member host, which records the snapshot there
+//!   (`runtime::placed_member_instruction`), in a third lane;
 //! - the status read.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,11 +28,14 @@ use meerkat_core::service::{SessionInstructionError, SessionInstructionRead};
 use meerkat_core::time_compat::{Duration, Instant};
 use meerkat_core::types::SessionId;
 use meerkat_core::{
-    InstructionContentDigest, InstructionRevision, InstructionSlot, InstructionTargetRecord,
-    InstructionTargetRecordSlot, InstructionWriteError,
+    InstructionContentDigest, InstructionRevision, InstructionSetErrorCode, InstructionSlot,
+    InstructionTargetRecord, InstructionTargetRecordSlot, InstructionWriteError,
 };
 
 use super::handle::MobHandle;
+use super::placed_member_instruction::{
+    PlacedInstructionFailure, PlacedMemberInstructionRoute, record_placed_member_instruction_target,
+};
 use super::state::MobCommand;
 use crate::error::MobError;
 use crate::event::{MobEvent, MobEventKind};
@@ -56,6 +61,10 @@ pub(crate) const DEFAULT_DORMANT_DELIVERY_CONCURRENCY: usize = 16;
 /// waits for its session's turn boundary, so the lane is separate from the
 /// dormant one.
 const LIVE_DELIVERY_CONCURRENCY: usize = 16;
+/// The bound on concurrent deliveries to placed members. Each one is a
+/// supervisor bridge round trip to the member's host, so a slow host never
+/// stalls the local lanes.
+const PLACED_DELIVERY_CONCURRENCY: usize = 16;
 const FIRST_RETRY_DELAY: Duration = Duration::from_millis(200);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const SCAN_DEBOUNCE: Duration = Duration::from_millis(20);
@@ -403,6 +412,12 @@ pub(crate) fn carry_member_instruction_birth(
 pub(crate) enum MemberInstructionPreparation {
     /// Record this snapshot in the member's session.
     Deliver(MemberInstructionDelivery),
+    /// Record this snapshot in a placed member's session, on its member
+    /// host over the supervisor bridge.
+    DeliverPlaced {
+        delivery: MemberInstructionDelivery,
+        route: PlacedMemberInstructionRoute,
+    },
     /// Nothing to deliver now: the member is not owed, its seat or binding
     /// has no session yet, it is retiring, its spawn has not activated yet,
     /// it is blocked, or the mob is not running.
@@ -481,11 +496,81 @@ fn classify_delivery_result(
     }
 }
 
+/// How the delivery owner reads a placed member's host's answer: as a local
+/// session's for a record or a typed refusal; a member host that does not
+/// serve the command blocks the member `member_host_unsupported`; another
+/// incarnation on the host, or a round trip that did not land, is retried.
+fn classify_placed_delivery_result(
+    agent_identity: &AgentIdentity,
+    session_id: &SessionId,
+    generation: u64,
+    result: Result<meerkat_core::InstructionRecordReceipt, PlacedInstructionFailure>,
+) -> DeliveryResult {
+    let blocked = |block| {
+        DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Blocked {
+            agent_identity: agent_identity.clone(),
+            session_id: session_id.clone(),
+            generation,
+            block,
+        })
+    };
+    match result {
+        Ok(receipt) => {
+            classify_delivery_result(agent_identity, session_id, generation, Ok(receipt))
+        }
+        Err(PlacedInstructionFailure::HostUnsupported) => {
+            blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
+        }
+        // A record that cannot fit the comms frame can never reach the
+        // member host: the member is blocked until a write changes its
+        // snapshot, not retried.
+        Err(PlacedInstructionFailure::Oversized { bytes }) => {
+            tracing::warn!(
+                member = %agent_identity,
+                bytes,
+                "a placed member's operator-instruction record is past the bridge frame budget; \
+                 the member is blocked member_host_unsupported until a write changes its snapshot"
+            );
+            blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
+        }
+        Err(PlacedInstructionFailure::Refused(code)) => match code {
+            // A governed member host takes no operator-instruction record
+            // without prepared authorization, which nothing mints for one
+            // yet: final, not retried.
+            InstructionSetErrorCode::PreparedAuthorizationRequired => {
+                blocked(mob_dsl::MemberInstructionBlock::MemberHostUnsupported)
+            }
+            InstructionSetErrorCode::DurabilityUnavailable => {
+                blocked(mob_dsl::MemberInstructionBlock::DurabilityUnavailable)
+            }
+            InstructionSetErrorCode::OwnedBySession => {
+                blocked(mob_dsl::MemberInstructionBlock::OwnedBySession)
+            }
+            InstructionSetErrorCode::OwnedByOtherMob => {
+                blocked(mob_dsl::MemberInstructionBlock::OwnedByOtherMob)
+            }
+            InstructionSetErrorCode::SlotManagedByActivation => {
+                blocked(mob_dsl::MemberInstructionBlock::SlotManagedByActivation)
+            }
+            other => DeliveryResult::Retry(format!(
+                "the member's session on its member host refused the record: {other:?}"
+            )),
+        },
+        Err(PlacedInstructionFailure::Stale) => DeliveryResult::Retry(
+            "the member host holds another incarnation of the member".to_string(),
+        ),
+        Err(PlacedInstructionFailure::Failed(error)) => DeliveryResult::Retry(format!(
+            "the record did not reach the member's host: {error}"
+        )),
+    }
+}
+
 /// One owed member's delivery, as the delivery owner schedules it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryLane {
     Live,
     Dormant,
+    Placed,
 }
 
 #[derive(Debug)]
@@ -496,10 +581,10 @@ struct RetryState {
 }
 
 /// The members a scan may deliver to now, from one published machine state:
-/// owed, in a running or stopped mob, with a born and bound session, local,
-/// not retiring and with its spawn settled (a placed member is asked once,
-/// and the machine blocks it). MobMachine decides each delivery when it is
-/// prepared; this only schedules.
+/// owed, in a running or stopped mob, with a born and bound session, not
+/// retiring and with its spawn settled, local or placed alike (a placed
+/// member's delivery goes to its member host). MobMachine decides each
+/// delivery when it is prepared; this only schedules.
 fn deliverable_members(
     state: &mob_dsl::MobMachineState,
 ) -> Vec<(AgentIdentity, u64, DeliveryLane)> {
@@ -513,23 +598,26 @@ fn deliverable_members(
         .member_instruction_owed
         .iter()
         .filter(|(identity, _)| {
-            let placed = state.member_placement.contains_key(*identity);
             !state.member_seat_session_unborn.contains(*identity)
-                && (state.member_session_bindings.contains_key(*identity) || placed)
+                && state.member_session_bindings.contains_key(*identity)
                 && state
                     .identity_to_runtime
                     .get(*identity)
                     .and_then(|runtime| state.member_state_markers.get(runtime))
                     != Some(&mob_dsl::MobMemberState::Retiring)
-                && (placed || !state.spawn_exec_phase.contains_key(*identity))
+                && !state.spawn_exec_phase.contains_key(*identity)
         })
         .map(|(identity, generation)| {
-            let lane = match state.member_materialization.get(identity) {
-                Some(
-                    mob_dsl::MemberMaterializationPhase::Live
-                    | mob_dsl::MemberMaterializationPhase::Waking,
-                ) => DeliveryLane::Live,
-                _ => DeliveryLane::Dormant,
+            let lane = if state.member_placement.contains_key(identity) {
+                DeliveryLane::Placed
+            } else {
+                match state.member_materialization.get(identity) {
+                    Some(
+                        mob_dsl::MemberMaterializationPhase::Live
+                        | mob_dsl::MemberMaterializationPhase::Waking,
+                    ) => DeliveryLane::Live,
+                    _ => DeliveryLane::Dormant,
+                }
             };
             (AgentIdentity::from(identity.0.as_str()), *generation, lane)
         })
@@ -577,6 +665,7 @@ enum DeliveryWake {
 struct DeliveryLanes {
     live: FuturesUnordered<DeliveryFuture>,
     dormant: FuturesUnordered<DeliveryFuture>,
+    placed: FuturesUnordered<DeliveryFuture>,
     feedback: FuturesUnordered<FeedbackFuture>,
     /// Members with a delivery in a lane.
     in_flight: BTreeSet<AgentIdentity>,
@@ -609,6 +698,9 @@ impl OperatorInstructionDeliveryReconciler {
                     DeliveryWake::Settled(settled)
                 }
                 Some(settled) = lanes.dormant.next(), if !lanes.dormant.is_empty() => {
+                    DeliveryWake::Settled(settled)
+                }
+                Some(settled) = lanes.placed.next(), if !lanes.placed.is_empty() => {
                     DeliveryWake::Settled(settled)
                 }
                 Some(fed) = lanes.feedback.next(), if !lanes.feedback.is_empty() => {
@@ -703,6 +795,7 @@ impl OperatorInstructionDeliveryReconciler {
             let (pool, bound) = match lane {
                 DeliveryLane::Live => (&mut lanes.live, LIVE_DELIVERY_CONCURRENCY),
                 DeliveryLane::Dormant => (&mut lanes.dormant, self.shared.dormant_concurrency),
+                DeliveryLane::Placed => (&mut lanes.placed, PLACED_DELIVERY_CONCURRENCY),
             };
             if pool.len() >= bound {
                 continue;
@@ -725,8 +818,8 @@ impl OperatorInstructionDeliveryReconciler {
     }
 
     /// One member's delivery: MobMachine prepares it, then the member's
-    /// session records the sealed snapshot. `None` when the machine had
-    /// nothing to deliver.
+    /// session records the sealed snapshot (a placed member's on its member
+    /// host). `None` when the machine had nothing to deliver.
     async fn deliver_one(
         handle: MobHandle,
         shared: Arc<OperatorInstructionDeliveryShared>,
@@ -734,11 +827,14 @@ impl OperatorInstructionDeliveryReconciler {
     ) -> DeliveryAttempt {
         let lock = shared.member_lock(&agent_identity);
         let epoch = *lock.lock().await;
-        let delivery = match handle
+        let (delivery, route) = match handle
             .prepare_member_instruction_delivery(&agent_identity)
             .await
         {
-            Ok(MemberInstructionPreparation::Deliver(delivery)) => delivery,
+            Ok(MemberInstructionPreparation::Deliver(delivery)) => (delivery, None),
+            Ok(MemberInstructionPreparation::DeliverPlaced { delivery, route }) => {
+                (delivery, Some(route))
+            }
             Ok(MemberInstructionPreparation::NotNow) => return (agent_identity, None),
             Err(error) => {
                 return (
@@ -749,20 +845,36 @@ impl OperatorInstructionDeliveryReconciler {
         };
         let session_id = delivery.session_id().clone();
         let generation = delivery.generation();
-        let result = {
-            // The member's release waits for this write; the lock is let go
-            // before the feedback goes to the actor. A release that landed
-            // since this delivery began moved the epoch on: nothing is
-            // written after it.
-            let held = lock.lock().await;
-            if *held != epoch {
-                return (agent_identity, None);
-            }
-            Arc::clone(&handle.session_service)
-                .record_member_instruction_target(delivery)
-                .await
+        // The member's release waits for this write; the lock is let go
+        // before the feedback goes to the actor. A release that landed since
+        // this delivery began moved the epoch on: nothing is written after
+        // it.
+        let held = lock.lock().await;
+        if *held != epoch {
+            return (agent_identity, None);
+        }
+        let result = match route {
+            None => classify_delivery_result(
+                &agent_identity,
+                &session_id,
+                generation,
+                Arc::clone(&handle.session_service)
+                    .record_member_instruction_target(delivery)
+                    .await,
+            ),
+            Some(route) => classify_placed_delivery_result(
+                &agent_identity,
+                &session_id,
+                generation,
+                record_placed_member_instruction_target(
+                    &handle.supervisor_bridge,
+                    &route,
+                    &delivery,
+                )
+                .await,
+            ),
         };
-        let result = classify_delivery_result(&agent_identity, &session_id, generation, result);
+        drop(held);
         (agent_identity, Some(result))
     }
 
@@ -776,6 +888,9 @@ impl OperatorInstructionDeliveryReconciler {
             settled.push(next);
         }
         while let Some(Some(next)) = lanes.dormant.next().now_or_never() {
+            settled.push(next);
+        }
+        while let Some(Some(next)) = lanes.placed.next().now_or_never() {
             settled.push(next);
         }
         let owed = self.owed_generations();
@@ -907,6 +1022,19 @@ impl MobHandle {
         .await?
     }
 
+    /// How many members are owed an operator-instruction snapshot their
+    /// sessions have not recorded, from the mob machine's published state:
+    /// no session is read. A non-authoritative composition (a host's
+    /// candidate launch) delivers none of them, so a host can say how many
+    /// it leaves to the authoritative launch.
+    #[must_use]
+    pub fn operator_instruction_owed_members(&self) -> usize {
+        self.machine_state_watch_rx
+            .borrow()
+            .member_instruction_owed
+            .len()
+    }
+
     /// The mob's operator-instruction status: its records and, for one page
     /// of members, each member's residency, delivery state, and per slot the
     /// member's desired view, its session's recorded target and the committed
@@ -983,8 +1111,8 @@ impl MobHandle {
 
     /// Read the operator-instruction state of a page's member sessions in
     /// one call, so the session service resolves each model's lowering once
-    /// for the page. An unborn seat and a member without a session binding
-    /// are not read.
+    /// for the page. An unborn seat, a member without a session binding and
+    /// a placed member (its session is on its member host) are not read.
     async fn read_page_member_instructions(
         &self,
         state: &mob_dsl::MobMachineState,
@@ -994,7 +1122,9 @@ impl MobHandle {
         let mut session_ids = Vec::new();
         for identity in page {
             let dsl_identity = mob_dsl::AgentIdentity::from_domain(identity);
-            if state.member_seat_session_unborn.contains(&dsl_identity) {
+            if state.member_seat_session_unborn.contains(&dsl_identity)
+                || state.member_placement.contains_key(&dsl_identity)
+            {
                 continue;
             }
             if let Some(session_id) = state
@@ -1075,17 +1205,30 @@ impl MobHandle {
             .member_session_bindings
             .get(&dsl_identity)
             .and_then(|session| SessionId::parse(&session.0).ok());
-        let (read, effective_read) = match (fetched, unborn) {
+        let member_host = state.member_placement.get(&dsl_identity);
+        let (read, effective_read) = match (fetched, unborn, member_host) {
             // An unborn seat has no session to read: nothing is effective.
-            (_, true) => (None, MemberInstructionEffectiveRead::Ok),
-            (Some(Ok(read)), false) => (Some(read), MemberInstructionEffectiveRead::Ok),
-            (Some(Err(error)), false) => (
+            (_, true, _) => (None, MemberInstructionEffectiveRead::Ok),
+            // A placed member's session is on its member host, which this
+            // read does not reach: its delivery facts are the mob's.
+            (_, false, Some(host)) => (
+                None,
+                MemberInstructionEffectiveRead::Unreadable {
+                    reason: format!(
+                        "the member's session is on member host {}, which this read does not \
+                         reach; the delivery state is the mob's",
+                        host.as_str()
+                    ),
+                },
+            ),
+            (Some(Ok(read)), false, None) => (Some(read), MemberInstructionEffectiveRead::Ok),
+            (Some(Err(error)), false, None) => (
                 None,
                 MemberInstructionEffectiveRead::Unreadable {
                     reason: error.to_string(),
                 },
             ),
-            (None, false) => (
+            (None, false, None) => (
                 None,
                 MemberInstructionEffectiveRead::Unreadable {
                     reason: "the member has no session binding".to_string(),
@@ -1439,6 +1582,83 @@ mod tests {
         InstructionSlot {
             namespace: InstructionNamespace::new("app.example").unwrap(),
             key: InstructionKey::new("tone").unwrap(),
+        }
+    }
+
+    /// A placed member's host answer reads like a local session's: a record
+    /// settles it, and so does a refusal no retry changes; a member host that
+    /// does not serve the record, a governed one (the record needs prepared
+    /// authorization) and a record too large for the comms frame block the
+    /// member `member_host_unsupported`; another incarnation on the host, any
+    /// other refusal and a round trip that did not land leave it owed and
+    /// are retried.
+    #[test]
+    fn a_placed_members_host_answer_settles_blocks_or_retries() {
+        let identity = AgentIdentity::from("placed");
+        let session_id = SessionId::new();
+        let classify = |result| classify_placed_delivery_result(&identity, &session_id, 3, result);
+        assert!(matches!(
+            classify(Ok(InstructionRecordReceipt {
+                disposition: InstructionRecordDisposition::Recorded,
+                target_generation: 3,
+            })),
+            DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Recorded {
+                generation: 3,
+                ..
+            })
+        ));
+        for (failure, expected) in [
+            (
+                PlacedInstructionFailure::HostUnsupported,
+                mob_dsl::MemberInstructionBlock::MemberHostUnsupported,
+            ),
+            (
+                PlacedInstructionFailure::Refused(
+                    InstructionSetErrorCode::PreparedAuthorizationRequired,
+                ),
+                mob_dsl::MemberInstructionBlock::MemberHostUnsupported,
+            ),
+            (
+                PlacedInstructionFailure::Oversized { bytes: 1_100_000 },
+                mob_dsl::MemberInstructionBlock::MemberHostUnsupported,
+            ),
+            (
+                PlacedInstructionFailure::Refused(InstructionSetErrorCode::OwnedBySession),
+                mob_dsl::MemberInstructionBlock::OwnedBySession,
+            ),
+            (
+                PlacedInstructionFailure::Refused(InstructionSetErrorCode::OwnedByOtherMob),
+                mob_dsl::MemberInstructionBlock::OwnedByOtherMob,
+            ),
+            (
+                PlacedInstructionFailure::Refused(InstructionSetErrorCode::SlotManagedByActivation),
+                mob_dsl::MemberInstructionBlock::SlotManagedByActivation,
+            ),
+            (
+                PlacedInstructionFailure::Refused(InstructionSetErrorCode::DurabilityUnavailable),
+                mob_dsl::MemberInstructionBlock::DurabilityUnavailable,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    classify(Err(failure)),
+                    DeliveryResult::Settled(MemberInstructionDeliveryOutcome::Blocked {
+                        generation: 3,
+                        block,
+                        ..
+                    }) if block == expected
+                ),
+                "{expected:?}"
+            );
+        }
+        for failure in [
+            PlacedInstructionFailure::Stale,
+            PlacedInstructionFailure::Refused(InstructionSetErrorCode::MalformedInstructionHistory),
+            PlacedInstructionFailure::Failed(MobError::Internal(
+                "the round trip timed out".to_string(),
+            )),
+        ] {
+            assert!(matches!(classify(Err(failure)), DeliveryResult::Retry(_)));
         }
     }
 

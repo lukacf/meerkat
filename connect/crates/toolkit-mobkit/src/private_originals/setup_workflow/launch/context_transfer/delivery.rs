@@ -458,7 +458,7 @@ impl DeliverySlot {
                 }
             }
             Err(IdentityRuntimeError::GovernedInput(
-                GovernedInputError::Bind(_)
+                GovernedInputError::Refused(_)
                 | GovernedInputError::Mob(_)
                 | GovernedInputError::EntryRefused(_),
             )) => {
@@ -1111,11 +1111,40 @@ struct DeliveryBinder {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for DeliveryBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, meerkat_mobkit::identity_first::GovernedBindError> {
+        self.deliver(context, input)
+            .map_err(crate::private_originals::governed_submit::BindFailure::into_error)
+    }
+
+    /// A delivery never answers "not now", so it never waits.
+    fn wait_budget(&self) -> meerkat_mobkit::identity_first::GovernedWaitBudget {
+        meerkat_mobkit::identity_first::GovernedWaitBudget::None
+    }
+
+    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _: &str) {
+        // The same attempt's removable review was installed before claim and
+        // remains through this transfer and later pending/entry/effect recovery.
+        // Poison does not permit custody loss or a later nonadmission claim.
+        self.native
+            .custody
+            .unresolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(settlement);
+    }
+}
+
+impl DeliveryBinder {
+    fn deliver(
+        &self,
+        context: &GovernedBindContext,
+        input: Input,
+    ) -> Result<BoundGovernedInput, crate::private_originals::governed_submit::BindFailure> {
+        use crate::private_originals::governed_submit::BindFailure;
         let incoming = context
             .controller
             .plain_facts()
@@ -1131,7 +1160,7 @@ impl GovernedInputBinder for DeliveryBinder {
             || context.spec.addressability != AgentAddressability::InternalOnly
             || input.id() != self.slot.input.id()
         {
-            return Err("delivery destination changed".into());
+            return Err(BindFailure::denied("delivery destination changed"));
         }
         let (input, pending) = self
             .owner
@@ -1157,7 +1186,7 @@ impl GovernedInputBinder for DeliveryBinder {
             .lock()
             .map_err(|_| "delivery custody unavailable")?;
         if custody.is_some() {
-            return Err("delivery binder was already entered".into());
+            return Err(BindFailure::denied("delivery binder was already entered"));
         }
         *custody = Some(pending);
         drop(custody);
@@ -1173,17 +1202,6 @@ impl GovernedInputBinder for DeliveryBinder {
                 custody: self.native.custody.clone(),
             })),
         })
-    }
-    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, _: &str) {
-        // The same attempt's removable review was installed before claim and
-        // remains through this transfer and later pending/entry/effect recovery.
-        // Poison does not permit custody loss or a later nonadmission claim.
-        self.native
-            .custody
-            .unresolved
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(settlement);
     }
 }
 struct DeliverySettlement {

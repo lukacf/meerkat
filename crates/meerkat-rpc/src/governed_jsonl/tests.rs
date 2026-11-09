@@ -1023,6 +1023,7 @@ async fn fixture_with(server: &Server, authentication: &str, mcp: bool) -> Fixtu
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -1032,6 +1033,7 @@ async fn fixture_with(server: &Server, authentication: &str, mcp: bool) -> Fixtu
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read"),
             principal("executor"),
@@ -1106,6 +1108,7 @@ async fn fixture_with(server: &Server, authentication: &str, mcp: bool) -> Fixtu
         Arc::new(meerkat::MemoryBlobStore::new()),
         NativeGrantWorkConfiguration {
             retained_resume: None,
+            kept_original: None,
             require_scoped_destination: mcp,
             grants,
             ingress,
@@ -3501,6 +3504,128 @@ async fn the_governed_pipe_presents_and_decides_as_its_operator() {
     finish_scenario(result, cleanup_failures);
 }
 
+/// The next decision notice the pipe writes within `wait`.
+#[cfg(feature = "mcp")]
+async fn decision_notice_within(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    wait: Duration,
+) -> Value {
+    tokio::time::timeout(wait, async {
+        loop {
+            let mut line = String::new();
+            assert!(
+                reader.read_line(&mut line).await.unwrap() > 0,
+                "server remains connected"
+            );
+            let value: Value = serde_json::from_str(&line).unwrap();
+            if value["method"] == "decision/notice" {
+                return value["params"].clone();
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the pipe presented no decision within {wait:?}"))
+}
+
+/// A decision that opens while the governed pipe is open, held for an
+/// approver id the pipe's operator acts for, is presented to the operator
+/// at once, without a list, and the operator decides it on the pipe.
+#[cfg(feature = "mcp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_governed_pipe_presents_a_decision_that_opens_to_its_operator() {
+    use meerkat::governed_realm::stock::{StockGovernance, StockPrincipals, govern_stock_realm};
+    use meerkat::governed_realm::{RealmGovernance, open_governed_realm_persistence_with_provider};
+    const REALM: &str = "stock-decisions-opened";
+    let mut http = Server::start().await;
+    let root = tempfile::tempdir().unwrap();
+    let open = |governance: RealmGovernance| {
+        open_governed_realm_persistence_with_provider(
+            &meerkat::DiskStorageProvider,
+            root.path(),
+            REALM,
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+            None,
+            governance,
+        )
+    };
+    drop(open(RealmGovernance::Ungoverned).await.unwrap());
+    let realm = RealmId::parse(REALM).unwrap();
+    let principals = StockPrincipals::for_user(&realm, 4244).unwrap();
+    govern_stock_realm(root.path(), REALM, &principals)
+        .await
+        .expect("governed");
+    let governance = StockGovernance::new(realm.clone(), principals.clone());
+    let (_, bundle) = open(RealmGovernance::Stock(Arc::clone(&governance)))
+        .await
+        .unwrap();
+    // The host's own decision owner: the pipe's runtime shares it.
+    let decisions = bundle.decision_owner();
+    let client = http_client_in(&http, REALM);
+    let selected = client.controller_model_selection().unwrap();
+    let (config, _) = governed_client_config(&http, &selected, &bundle).await;
+    let setup = stock::stock_governed_jsonl_setup_reviewed(
+        &governance,
+        config,
+        bundle,
+        client,
+        Vec::new(),
+        None,
+        &AgentFactory::minimal(),
+    )
+    .await
+    .expect("the stock host's reviewed setup");
+    let (client_io, server_io) = tokio::io::duplex(1 << 20);
+    let (r, w) = tokio::io::split(server_io);
+    let retirement = consent_retirement(&setup);
+    let (serving, _runtime) =
+        governed_serving(BufReader::new(r), w, setup, None, retirement).expect("construct");
+    let server_task = tokio::spawn(serving);
+    let (r, mut w) = tokio::io::split(client_io);
+    let mut r = BufReader::new(r);
+    let scenario = async {
+        let mut notices = Vec::new();
+        send(
+            &mut w,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        )
+        .await;
+        let initialized = response_with_decision_notices(&mut r, 1, &mut notices).await;
+        assert!(initialized.get("error").is_none(), "{initialized}");
+        assert!(notices.is_empty(), "{notices:?}");
+
+        let held = decisions
+            .hold(decision_hold("build-7", "operator"), false)
+            .expect("hold");
+        let decision_id = held.decision_id.to_string();
+        let notice = decision_notice_within(&mut r, Duration::from_secs(10)).await;
+        assert_eq!(notice["decision_id"], decision_id.as_str(), "{notice}");
+        assert_eq!(notice["event"], "presented", "{notice}");
+        assert_eq!(notice["approver_id"], "operator", "{notice}");
+
+        send(
+            &mut w,
+            json!({"jsonrpc":"2.0","id":2,"method":"decision/decide","params":{
+                "decision_id": decision_id,
+                "approve": true,
+                "presented_digest": held.descriptor.subject_digest.to_string(),
+            }}),
+        )
+        .await;
+        let decided = response_with_decision_notices(&mut r, 2, &mut notices).await;
+        assert_eq!(
+            decided["result"]["decision"]["phase"], "approved",
+            "{decided}"
+        );
+    };
+    let result =
+        std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_mins(1), scenario))
+            .catch_unwind()
+            .await;
+    let cleanup_failures = cleanup_jsonl(r, &mut w, server_task, &mut http).await;
+    finish_scenario(result, cleanup_failures);
+}
+
 /// The method names an `initialize` result lists.
 #[cfg(feature = "mcp")]
 fn listed_methods(initialized: &Value) -> Vec<String> {
@@ -4312,6 +4437,7 @@ async fn stock_governed_restart(revoke_while_down: bool, boundary_only: bool) {
         meerkat_authorization::grants::LocalGrantAuthority::restore(
             Arc::new(meerkat_authorization::grants::FileGrantOwnerStore::new(
                 meerkat_store::grant_owner_store_path(&paths.root),
+                meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
             )),
             LocalAuthorizationPublication::new(),
             Arc::new(HostAuthorizationClock),
@@ -4570,7 +4696,12 @@ async fn stock_governed_restart(revoke_while_down: bool, boundary_only: bool) {
             .try_controller_grant_mutation()
             .expect("the realm's grant custody");
         owner
-            .revoke(&principals.operator, &installation_grant, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &principals.operator,
+                &installation_grant,
+                &mut custody,
+            )
             .expect("revoked while down");
         drop(custody);
         drop(bundle);
@@ -5710,12 +5841,25 @@ async fn stock_r3_an_approved_consent_never_enters_once_its_grant_is_revoked() {
                 .expect("the open composition's grant owner");
             // The revocation never waits: it answers `Unavailable` while
             // another operation holds the owner's lock or its publication
-            // (the host's own traffic). Ask again until it is free, within
-            // a few seconds, without holding the publication meanwhile.
+            // (the host's own traffic), and the realm's grant log fence may
+            // be held a moment by a child issuance. Ask again until both are
+            // free, within a few seconds, without holding the publication
+            // meanwhile.
             tokio::task::block_in_place(|| {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 loop {
-                    match grants.revoke(&operator, &grant, &mut NoControllerWork) {
+                    let guard = match meerkat_core::AdmissionGuard::try_acquire(
+                        grants.admission_fences(),
+                    ) {
+                        Ok(guard) => guard,
+                        Err(refusal) if std::time::Instant::now() < deadline => {
+                            let _ = refusal;
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(refusal) => panic!("the realm's grant log fence: {refusal}"),
+                    };
+                    match grants.revoke(&guard, &operator, &grant, &mut NoControllerWork) {
                         Ok(()) => break,
                         Err(meerkat_authorization::grants::GrantRefusal::Unavailable)
                             if std::time::Instant::now() < deadline =>

@@ -3801,6 +3801,14 @@ mod tests {
             self.core.history()
         }
 
+        async fn identity_entry(
+            &self,
+            identity: &crate::identity_first::AgentIdentity,
+        ) -> Result<crate::identity_first::CoreIdentityEntry, crate::identity_first::BridgeError>
+        {
+            Ok(self.core.identity_entry(identity, false))
+        }
+
         async fn identity_management(
             &self,
             _identity: &AgentIdentity,
@@ -3850,6 +3858,15 @@ mod tests {
                 .await
                 .remove(&canonical_runtime_edge(a.clone(), b.clone()));
             Ok(())
+        }
+
+        async fn apply_declared_roster(
+            &self,
+            roster: crate::identity_first::DeclaredRosterRequest,
+        ) -> Result<crate::identity_first::DeclaredRosterAnswer, crate::identity_first::BridgeError>
+        {
+            crate::identity_first::core_test_bridge::apply_through_seats(self, &roster, None, None)
+                .await
         }
     }
 

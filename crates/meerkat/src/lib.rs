@@ -374,43 +374,48 @@ pub use meerkat_workgraph::{
     AttentionProjectionPolicy, AttentionProjectionRequest, AttentionProjectionResult,
     AttentionProjectionText, AttentionPruneRequest, AttentionPruneResult, AttentionReassignRequest,
     AttentionReassignResult, AttentionResumeRequest, AttentionTargetRealmResolver,
-    BreakGlassAttentionReassignRequest, CancelledChildJoinPolicy, ChildJoinDisposition,
-    ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest, DisabledWorkGraphStore,
-    ExternalWorkRef, FailedChildJoinPolicy, GoalAttentionTarget, GoalBindExistingRequest,
-    GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest, GoalCreateResult,
-    GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest, GoalStatusResult,
-    GoalTerminalStatus, LinkWorkItemsRequest, MAX_WORK_CLAIM_LEASE_SECONDS, MemoryWorkGraphStore,
-    MobAgentOwner, ObserveLeaseExpiryRequest, ObserveReadinessRequest, PolicyEscalateRequest,
-    ProjectedAttentionAuthority, PublicGoalCompletionPolicy, PublicGoalCreateRequest,
-    PublicGoalRequestCloseRequest, ReadyWorkFilter, ReleaseWorkItemRequest, UpdateWorkItemRequest,
-    WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY, WorkAdmission, WorkAdmissionKey,
-    WorkAdmissionOutcome, WorkAttentionBinding, WorkAttentionBindingId, WorkAttentionMachine,
-    WorkAttentionMachineState, WorkAttentionMode, WorkAttentionStatus, WorkAttentionTarget,
-    WorkClaim, WorkCompletionPolicy, WorkEdge, WorkEdgeKind, WorkEvidenceRef,
-    WorkExecutionAuthority, WorkExecutionBinding, WorkExecutionBindingFilter,
-    WorkExecutionBindingId, WorkExecutionBridge, WorkExecutionEvidenceKind,
-    WorkExecutionEvidenceProjection, WorkExecutionLifecycleEffect, WorkExecutionLifecycleState,
-    WorkExecutionMachine, WorkExecutionMachineState, WorkExecutionObservation, WorkExecutionTarget,
-    WorkExecutionTransition, WorkGraphError, WorkGraphEvent, WorkGraphEventFilter,
-    WorkGraphEventKind, WorkGraphEventsResponse, WorkGraphFact, WorkGraphIdParams,
-    WorkGraphItemsResponse, WorkGraphMachine, WorkGraphMachineState, WorkGraphNamespaceRead,
-    WorkGraphPublicErrorClass, WorkGraphRestRoute, WorkGraphService, WorkGraphSnapshot,
-    WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind, WorkGraphToolCapability,
-    WorkGraphToolContract, WorkGraphToolError, WorkGraphToolErrorCode, WorkGraphToolSource,
-    WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkItemRef, WorkNamespace,
-    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus,
-    handle_unscoped_workgraph_tools_call, mob_agent_owner_id_parts, unscoped_workgraph_tools_list,
-    validate_workgraph_attention_projection_current, workgraph_attention_continuation_key,
-    workgraph_attention_projection_from_overlay, workgraph_attention_supersession_key,
-    workgraph_attention_turn_append, workgraph_platform_capability_manifest,
-    workgraph_rest_path_catalog, workgraph_rest_request_response_schema, workgraph_tools_list,
+    BreakGlassAttentionReassignRequest, BreakGlassReleaseWorkItemRequest, CancelledChildJoinPolicy,
+    ChildJoinDisposition, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    DisabledWorkGraphStore, ExternalWorkRef, FailedChildJoinPolicy, GoalAttentionTarget,
+    GoalBindExistingRequest, GoalConfirmRequest, GoalConfirmResult, GoalCreateRequest,
+    GoalCreateResult, GoalRequestCloseRequest, GoalRequestCloseResult, GoalStatusRequest,
+    GoalStatusResult, GoalTerminalStatus, LinkWorkItemsRequest, MAX_WORK_CLAIM_LEASE_SECONDS,
+    MemoryWorkGraphStore, MobAgentOwner, ObserveLeaseExpiryRequest, ObserveReadinessRequest,
+    PolicyEscalateRequest, ProjectedAttentionAuthority, PublicGoalCompletionPolicy,
+    PublicGoalCreateRequest, PublicGoalRequestCloseRequest, ReadyWorkFilter,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WORKGRAPH_ATTENTION_DISPATCH_CONTEXT_KEY,
+    WorkAdmission, WorkAdmissionKey, WorkAdmissionOutcome, WorkAttentionBinding,
+    WorkAttentionBindingId, WorkAttentionMachine, WorkAttentionMachineState, WorkAttentionMode,
+    WorkAttentionStatus, WorkAttentionTarget, WorkClaim, WorkCompletionPolicy, WorkEdge,
+    WorkEdgeKind, WorkEvidenceRef, WorkExecutionAuthority, WorkExecutionBinding,
+    WorkExecutionBindingFilter, WorkExecutionBindingId, WorkExecutionBridge,
+    WorkExecutionEvidenceKind, WorkExecutionEvidenceProjection, WorkExecutionLifecycleEffect,
+    WorkExecutionLifecycleState, WorkExecutionMachine, WorkExecutionMachineState,
+    WorkExecutionObservation, WorkExecutionTarget, WorkExecutionTransition, WorkGraphError,
+    WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphEventsResponse,
+    WorkGraphFact, WorkGraphIdParams, WorkGraphItemsResponse, WorkGraphMachine,
+    WorkGraphMachineState, WorkGraphNamespaceRead, WorkGraphPublicErrorClass, WorkGraphRestRoute,
+    WorkGraphService, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore,
+    WorkGraphStoreKind, WorkGraphToolCapability, WorkGraphToolContract, WorkGraphToolError,
+    WorkGraphToolErrorCode, WorkGraphToolSource, WorkGraphToolSurface, WorkItem, WorkItemFilter,
+    WorkItemId, WorkItemRef, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority,
+    WorkStatus, handle_unscoped_workgraph_tools_call, mob_agent_owner_id_parts,
+    unscoped_workgraph_tools_list, validate_workgraph_attention_projection_current,
+    workgraph_attention_continuation_key, workgraph_attention_projection_from_overlay,
+    workgraph_attention_supersession_key, workgraph_attention_turn_append,
+    workgraph_platform_capability_manifest, workgraph_rest_path_catalog,
+    workgraph_rest_request_response_schema, workgraph_tools_list,
 };
 
 // AgentFactory and build_agent types
 #[cfg(not(target_arch = "wasm32"))]
 mod command_hook_confinement;
 #[cfg(not(target_arch = "wasm32"))]
+mod hook_source_trust;
+#[cfg(not(target_arch = "wasm32"))]
 mod host_confinement;
+#[cfg(not(target_arch = "wasm32"))]
+pub use hook_source_trust::{HookSource, HookSourceDecision, HookSourceDigest, HookSourceTrust};
 #[cfg(all(feature = "skills", not(target_arch = "wasm32")))]
 mod skill_stdio_confinement;
 #[cfg(not(target_arch = "wasm32"))]
@@ -459,11 +464,13 @@ pub use factory::{
     GrantGateBuildError, LlmIdentityPreflightError, PreparedAgent, PreparedCatalogEntry,
     PreparedToolCatalog, PreparedToolSurface, decode_llm_client_override_from_service,
     encode_llm_client_override_for_service, provider_key, resolve_create_session_default_model,
-    resolve_create_session_model, resolve_provider_catalog_default_model, tool_family_names,
+    resolve_create_session_model, resolve_grant_target, resolve_provider_catalog_default_model,
+    tool_family_names,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub use factory::{
     McpAdapterComposeRefusal, McpAdapterComposer, McpAdapterCustody, McpAdapterCustodyClosed,
+    decode_mcp_auth_resolver_override_from_service, encode_mcp_auth_resolver_override_for_service,
 };
 // The untrusted MCP target resolvers stay exported, deprecated.
 #[cfg(not(target_arch = "wasm32"))]
@@ -495,7 +502,7 @@ pub use meerkat_providers::connector_login::{
     ConnectorClientAuthProfile, ConnectorClientAuthSource, ConnectorClientSecret,
     ConnectorLoginComplete, ConnectorLoginError, ConnectorLoginStart, ConnectorOAuthAuthority,
     ConnectorOAuthCallback, ConnectorOAuthTarget, ConnectorStrategies, ConnectorVerifiedAccount,
-    clear_connector_client_secret, load_connector_client_secret, save_connector_client_secret,
+    load_connector_client_secret,
 };
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(deprecated)]
@@ -623,8 +630,8 @@ pub use meerkat_session::{
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
 pub use meerkat_session::{
-    EphemeralSessionService, LiveSessionActorWitness, RuntimeContextAdmissionGuard, SessionAgent,
-    SessionAgentBuilder,
+    EphemeralSessionService, LiveSessionActorWitness, OwedCompactionSettlement,
+    RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder, SettledCompactionProjection,
 };
 // Maintenance compositions (offline `rkat storage migrate`): a builder that
 // refuses agent construction, composed with the persistent service to drive

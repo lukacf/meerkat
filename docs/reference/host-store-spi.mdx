@@ -63,17 +63,26 @@ pub trait HostStore: Send + Sync {
 
 | Operation | What it does |
 |-----------|--------------|
-| `acquire_fence(mode)` | Answers a token higher than any acquired before in the realm, durably, and records the new holder's lease. With `AcquireMode::Exclusive`, a live holder makes it answer `Held`. With `AcquireMode::Takeover`, it supersedes any holder and reports what remained of that holder's lease in `FenceGrant::superseded_lease` (zero when no holder was live) |
+| `acquire_fence(mode)` | Answers a token higher than any acquired before in the realm, in either mode and to any caller (a takeover of the caller's own recorded lease included), durably, and records the new holder's lease. With `AcquireMode::Exclusive`, a live holder makes it answer `Held`. With `AcquireMode::Takeover`, it supersedes any holder and reports what remained of that holder's lease in `FenceGrant::superseded_lease` (zero when no holder was live) |
 | `renew_fence(token)` | Confirms that no token higher than `token` exists, and records a new lease for its holder from now, also when that holder's last lease has lapsed. Answers `FencedOut` when a higher token exists |
 | `fence_timing()` | The renew interval and the lease this store records (see [Fence Leases](#fence-leases)). Defaults to `FenceTiming::default()` |
 | `load_head(scope)` | The scope's visible head as a `VersionedHead { version, commit_id, head }`, or `None` when the scope was never created or was deleted |
-| `list_heads(kind, after, limit)` | Visible scopes of `kind` whose names sort after `after` (from the first when `None`), in name order by the bytes of their names, each with its visible head, at most `limit`. `HeadPage::next` names where to read on, and is `None` when the listing has ended. It serves listings and Core's bulk load at open |
+| `list_heads(kind, after, limit)` | Visible scopes of `kind` whose names sort after `after` (from the first when `None`), in name order by the bytes of their names, at most `limit` across the page's two lists: each scope with its visible head in `HeadPage::heads`, or, when its load answers a typed conflict (obligation 4 met at load), in `HeadPage::conflicts`, never both and never by failing the page. `HeadPage::next` names where to read on, and is `None` when the listing has ended. It serves listings and Core's bulk load at open |
 | `read_rows(scope, from, limit)` | The scope's visible rows from index `from`, in index order, at most `limit`, ending early at the scope's end. A `from` below the first visible row is `Invalid`. A scope that does not exist has no rows |
 | `commit(batch)` | Applies one batch atomically. `Ok` means durable. A commit id that already landed answers `Ok` without acting again. `Indeterminate` means the outcome is unknown |
 
 `VersionedHead::commit_id` is the commit id of the batch that wrote the
 visible version. After an indeterminate commit, Core compares it with its
 batch's commit id to tell whether the batch landed.
+
+Build a listing page with `HeadPage::new(heads, next)`, and add its
+conflicted scopes with `HeadPage::with_conflicts`. Each is a
+`ScopeConflict::new(name, version, commit_ids)`: `version` is the version
+that holds the two batches, the `current` the scope's load answers in its
+`Conflict`, and `commit_ids` are those batches' commit ids in ascending
+order, without repeats and the same each time you list an unchanged
+conflict, or empty when your store does not know them. `next` is the last
+name of either list when more remain.
 
 ## Batches
 
@@ -128,12 +137,12 @@ truncates a value and never commits part of a change.
 
 | `HostStoreError` | Meaning | Applied |
 |------------------|---------|---------|
-| `Conflict { scope, current }` | The store refused the batch at commit: `scope` is at version `current` (`None`: it does not exist), not at the update's `previous`. Only a store that meets obligation 4 at commit answers it | Nothing |
+| `Conflict { scope, current }` | The store refused the batch at commit: `scope` is at version `current` (`None`: it does not exist), not at the update's `previous`. Only a store that meets obligation 4 at commit answers it. A store that meets obligation 4 by failing the load answers it to a load: `current` is then the version that holds the two batches, the one its listing reports (see [A Conflicted Scope](#a-conflicted-scope)) | Nothing |
 | `FencedOut { current }` | A token higher than the caller's exists. Answered by `renew_fence`, and by `commit` (obligation 5) | Nothing |
 | `Indeterminate(detail)` | The outcome is unknown: the batch may or may not have landed | Unknown |
 | `Invalid(detail)` | The request breaks a limit or is malformed | Nothing |
 | `Unavailable(detail)` | The store cannot be reached or cannot serve now | Nothing |
-| `Held { holder, remaining }` | An exclusive acquire found a live holder, whose recorded lease lasts `remaining` longer | Nothing acquired |
+| `Held { holder, remaining }` | An exclusive acquire found a live holder, whose recorded lease lasts `remaining` longer. Answer it exactly, never rounded down and never beyond the lease you declared: Core waits a holder out for it | Nothing acquired |
 
 Answer `Unavailable` only when nothing was applied. When you cannot tell
 whether a commit landed, answer `Indeterminate`: Core then settles it by
@@ -155,8 +164,32 @@ once, a batch makes at most 14 within the default budget, and about 1.6% of
 batches make 13. Any other error ends the commit at once. The chunk batches
 of a large value are settled the same way.
 
-A commit that does not settle within its budget, or ends in another error,
-fails the call that made it with a write error, and every scope the batch
+Core sends a batch, the first time or again, only while the realm holds its
+fence and before the self-fence deadline of the fence token the batch
+carries: the start of the writer's last successful acquire or renew plus the
+self-fence window (see [Fence Leases](#fence-leases)). A renew of that token
+moves the deadline later; a failed renew does not move it. The store's lease
+for the token can end soon after that deadline, and another writer may then
+acquire. A commit still unsettled at the deadline stops there: its outcome
+is unknown, and it is never taken as landed (a head that shows its commit id
+still settles it). It fails with the typed
+`RuntimeStoreError::UnsettledAtFenceWindow` (`SpiError::UnsettledAtFenceWindow`
+for a layer that commits through the realm directly), its scopes are
+poisoned like those of any batch whose outcome stays unknown, and the realm
+keeps its fence. While renews fail, the retry budget is therefore cut at the
+self-fence window (20 s at the default timing). A batch sent before the
+deadline can still reach your store's commit point after the lease ended,
+since Core sets no deadline on a commit: refusing it there with `FencedOut`
+(obligation 5) is what keeps it out of the realm. No bound on the writer's
+side closes that case, a stricter one included (stopping at the first failed
+renew): obligation 5 at commit does.
+
+A commit that does not settle within its budget fails the call that made it
+with the typed `RuntimeStoreError::UnsettledPastRetryBudget`
+(`SpiError::UnsettledPastRetryBudget` for a layer that commits through the
+realm directly): its outcome is unknown, as for one stopped at its fence
+window. A commit that ends in another error fails the call with a write
+error. Either way every scope the batch
 would have changed is poisoned; `FencedOut` poisons the whole realm. A
 poisoned scope refuses every later call on it, reads included, with a typed
 refusal (`RuntimeStoreError::ScopeRefused`, naming the scope and its cause;
@@ -203,7 +236,10 @@ updates or transactions.
    (a fenced-out writer, a bug), every load must resolve them the same way.
    Valid ways:
    - refuse the second batch at commit with `Conflict`;
-   - fail the load with a typed conflict;
+   - fail the load with a typed conflict (`Conflict`, naming the version
+     that holds the two batches), answer every `read_rows` of the scope the
+     same, and report the scope in every listing of its kind as a conflict
+     (`HeadPage::conflicts`), never by failing the page;
    - pick one by a fixed rule, such as the lowest commit id, decided per
      batch, so that a batch that loses in one scope is invisible in all of
      them.
@@ -241,9 +277,88 @@ updates or transactions.
    not after its deletion.
 
 A store meets obligation 4 either at commit, answering `Conflict`, or at
-load, by the fixed rules above, and Core treats both the same way: the
-conflicting batch is not part of the realm. It meets obligation 5 at
-commit, answering `FencedOut`.
+load. Refused at commit, or losing to a fixed rule at load, the conflicting
+batch is not part of the realm. A scope whose load fails with a typed
+conflict is neither batch's: Core quarantines it and serves the rest of the
+realm (below). A store meets obligation 5 at commit, answering `FencedOut`.
+
+### A Conflicted Scope
+
+Core never sends two batches for one version of a scope, and obligation 5
+keeps a superseded writer's batch out at commit, so a conflict means a
+batch reached your store outside the contract. When your store meets
+obligation 4 by failing the load, from 0.9.11 Core quarantines the scope
+instead of failing the realm:
+
+- **At the open.** Core records each conflict a listing reports, with its
+  version and commit ids, logs it once at error level, and opens the rest
+  of the realm. A conflict a later load meets (the rows of a runtime the
+  open's recovery reads, a scope's first use, or a chunk a head refers to)
+  quarantines the scope then; a chunk's conflict quarantines the scope that
+  refers to it. When Core deleted a scope and created it again, a conflict
+  on the deleted incarnation quarantines the live one too, and the cause
+  names both.
+- **While it is quarantined.** Core holds nothing of the scope in memory.
+  Every call that needs it refuses with a typed refusal
+  (`RuntimeStoreError::ScopeRefused`, or `SpiError::ScopeQuarantined` for a
+  layer that calls the realm directly) whose cause names each conflicted
+  incarnation, its version and commit ids, and the repair. No run starts
+  or resumes on its runtime, and the inputs your store keeps for it stay
+  queued. A read across scopes treats it as it treats a poisoned scope of
+  its family (see [How Core Settles A Commit](#how-core-settles-a-commit)):
+  the recovery-work scan lists its runtime as holding work, the delivery
+  authority listing per runtime names it unavailable, and the reads that
+  cannot answer for it refuse typed while it is quarantined. Core knows a
+  runtime whose scope name keeps only a hash of its id (an id over 200
+  bytes, or with a control character) by its id only once a call names it;
+  until then those two reads answer every other runtime and report it by
+  its scope's name (`RuntimeStore::unnamed_refused_runtimes`, and the
+  listing's `unnamed`), and a mob boot plans the member it belongs to as
+  holding work, found by the member's runtime ids
+  (`RuntimeStore::refuses_runtime_until_reopen`). A quarantined tool grant's
+  subject and target are unknown: every subject's grant listing leaves it
+  out and reports it (`RuntimeStore::quarantined_tool_grants`), so the other
+  grants keep admitting, a call no known live grant admits is refused as
+  unavailable, naming it, and a list reports it among the rows it cannot
+  read. Its chunks
+  are never swept as ownerless. `SpiRealm::quarantined_scopes` lists every
+  quarantined scope, and a mob storage whose scope is quarantined is listed
+  as quarantined (`SpiStoredMob::quarantined`), never left out: a storage
+  whose key its scope names hash and that no other listed scope names is
+  listed under the quarantined scope's name, which opens to the
+  quarantine's refusal.
+- **At a re-acquire.** The scope stays conflicted in your store until it is
+  repaired, so a writer that stopped and acquires again lists it again. The
+  listing must report each recorded conflict unchanged: at the same version
+  and, where both the record and the listing name commit ids, with the same
+  ids, in any order. Any other change is a batch this writer did not write,
+  and the realm stops until it is opened again: a conflict on a scope that
+  is not quarantined, a recorded one at another version or with other
+  commit ids, or a recorded one listed among the heads or missing from both
+  lists.
+- **What still fails the open.** A listing page your store answers with
+  an error (`Unavailable` for an outage, for example) fails the open, which
+  the host retries; at a re-acquire the writer stays stopped and lists
+  again after its next acquire. A head Core cannot decode fails the open as
+  corrupt. A store that must wait before it can decide what a lower token's
+  batch shows (a pending acquire cut) answers `Unavailable` for the page,
+  never a conflict.
+
+Core never repairs a scope: the data is your store's. To repair one:
+
+1. Find it: the open's error log, `SpiRealm::quarantined_scopes`, or the
+   cause of any refusal.
+2. In your store, keep one of the two batches at that version by your fixed
+   rule, where a batch carrying a lower fence token never beats one
+   carrying a higher token (obligation 4), and remove the other.
+3. Open the realm again promptly (restart the process), then open again
+   each mob storage your host found quarantined: the realm's mob storage
+   host (`SpiMobStoreHost::stored_mobs`) lists it with
+   `SpiStoredMob::quarantined` until the reopen after the repair. An open
+   without the repair quarantines the scope again. Until the reopen, a
+   re-acquire lists the repaired scope among the heads and the realm stops
+   once, with the same end state as the reopen: the writer cannot tell your
+   repair from another writer's commit.
 
 ## Fence Leases
 
@@ -319,6 +434,60 @@ holding back the other sessions' calls: it takes the store at a moment when
 no call holds it. Under a sustained partial outage, with slow commits
 overlapping, that wait can last several retry budgets.
 
+### Core's Timeouts And The Safety Condition
+
+The host also passes `SpiRealmConfig` when it opens the realm (for a Meta
+gateway, `HostStoreMetaStorageProvider::open`):
+
+| Setting | Default | What it does |
+|---------|---------|--------------|
+| `acquire` | `AcquireMode::Exclusive` | How the open acquires the fence |
+| `renew_timeout` | 5 s | How long a renew may take before it counts as failed, held to at most the renew interval; the two acquires of a re-acquire use it as configured |
+| `commit_retry_budget` | 30 s | How long an unknown or unavailable commit is retried, never past its token's self-fence deadline ([How Core Settles A Commit](#how-core-settles-a-commit)) |
+
+A renew that does not answer within the shorter of `renew_timeout` and the
+renew interval stops the writer: it acquires again by itself at the next
+renew interval, proves with a fresh listing that nobody else wrote, renews
+once and resumes. So the tolerance of a slow renew is that shorter time,
+5 s at the defaults.
+
+The safety condition is the timing bounds Core enforces when the timing is
+built, plus one obligation of yours:
+
+- Core enforces: the renew interval `I` is at least 1 s; the lease `L` is
+  at least `3 x I` and at most 1 hour; the self-fence margin `M` is at
+  least `I` and at most `L - 2 x I`; the longest commit is above zero and at
+  most `L`.
+- Your obligation: `M >= I + 2 x V`, where `V` is your store's visibility
+  lag (the time from the start of a write until every acquire and renew
+  sees it). Size `V` for your store under load.
+
+Neither `renew_timeout` nor commit latency is a safety term. The window
+counts from the start of each acquire or renew, which your store records
+no earlier, so a slow answer only makes the writer stop earlier, and renews
+are held to the renew interval anyway: any `renew_timeout` up to the renew
+interval is safe. Commits are fenced by token at your store's commit point
+(obligation 5), and Core sends no commit attempt past its token's
+self-fence deadline.
+
+To tolerate a slower store:
+
+- set `renew_timeout` to the renew interval (10 s at the default timing):
+  this doubles the tolerance of a slow renew with no other change, and
+  gives the acquires of a re-acquire 10 s too;
+- beyond that, lengthen the timing consistently: a renew interval above
+  the slowest renew you want to tolerate, `renew_timeout` equal to it,
+  `M >= I + 2 x V` and `L >= M + 2 x I`. For example, with `V = 5 s`:
+  `I = 20 s`, `M = 30 s`, `L = 70 s`, a 40 s window. The cost is the wait
+  after a crash or a kill: the next process waits up to `L` for the old
+  lease.
+
+An acquire Core gave up on at its timeout should not take effect later:
+where your store can, give it a server-side deadline below Core's
+timeout. Core copes with one that does (see
+[Core's Writer Rules](#cores-writer-rules)) by waiting out its lease, but a
+takeover it grants after Core's next successful acquire stops the realm.
+
 ### Core's Writer Rules
 
 The store relies on Core keeping these rules:
@@ -328,7 +497,36 @@ The store relies on Core keeping these rules:
   over its own recorded lease (below), only an explicit takeover uses
   `AcquireMode::Takeover`. Core takes over its own recorded lease
   when a stopped holder re-acquires and an exclusive acquire answers `Held`
-  with its own token.
+  with its own token, or with the token of its own last grant whose listing
+  failed (Core installs a granted token only once the listing passed).
+- **Token order.** Core checks that a re-acquire's grant answers a token
+  above the one it holds, and above a grant of its own whose listing
+  failed. A grant at or below either breaks the order every
+  grant must keep (`acquire_fence` above): two writers could carry one
+  token, or a later writer a lower one. The realm stops until it is opened
+  again, and its cause names your store's broken token order, not another
+  writer. The chapter's token order row holds a store to it.
+- **Acquires Core gave up on.** Each acquire of a re-acquire runs under
+  `SpiRealmConfig::renew_timeout`, and Core records no token for one that
+  times out. If your store grants it anyway, its token holds the fence, and
+  Core meets it as the holder at its next re-acquire. While an acquire of
+  its own timed out since its last grant, Core cannot tell that token from
+  another writer's: it waits out the holder's recorded lease (the
+  `remaining` of `Held`, capped at the lease you declared), makes no
+  acquire before it ends, and then acquires exclusively again and checks
+  the listing as at any re-acquire. The realm stops until it is opened
+  again only when the same holder still holds the fence after that lease
+  ended with its lease moved later by more than one renew interval (only a
+  live writer renews it; Core reads the new end from when it sent the
+  acquire, so an answer that arrives late cannot move it), or when the
+  listing shows a batch this writer did not write. A holder whose lease
+  did not move is waited out again: a store that rounds `remaining` down
+  only makes Core's recorded end early.
+  With no acquire of its
+  own timed out, a holder Core does not know stops the realm at once. A
+  takeover your store grants after Core's next successful acquire
+  supersedes Core's live token; Core then meets `FencedOut` and the realm
+  stops until it is opened again.
 - **Renewing.** The holder renews once per renew interval. After a failed
   renew, or once its self-fence window has closed, it stops every write and
   dispatch, and goes on only through a fresh acquire, with a new token,
@@ -343,7 +541,11 @@ The store relies on Core keeping these rules:
   acquires and its renew, 35 s at the default timing), trying again once
   per renew interval while it fails, and goes on once it resumed the
   holder. A round commit refused while the holder is stopped waits the same
-  way and is written again, once, when the acquire succeeds. When no
+  way and is written again, once, when the acquire succeeds. A commit whose
+  batch is not settled, or not yet sent, at its token's self-fence deadline
+  is not refused but stopped: its scopes are poisoned (see
+  [How Core Settles A Commit](#how-core-settles-a-commit)), so writing them
+  again is refused until the realm is opened again. When no
   acquire succeeds in that time and no other process shows up (a fence
   gap), the runtime suspends the run with its inputs bound to it and
   resumes it once the fence is back; the gap may last as long as the store
@@ -420,6 +622,10 @@ reads:
   asking for 2048 heads per call (256 before 0.9.7) and at least one call
   per kind, archived sessions and chunk scopes included. A store may answer
   fewer heads per call with `HeadPage::next` set; Core reads on from there.
+  From 0.9.11 Core lists the four kinds at once, each kind's pages one after
+  another (a call's `after` is the `next` of the answer before it), so up to
+  four `list_heads` calls of one realm run concurrently, never two of one
+  kind.
 - **Head entries kept as chunks.** A head entry over 32 KiB is kept in a
   chunk scope: one `load_head` and its rows for each such entry of every
   runtime, dormant or not, and of every realm record.
@@ -555,8 +761,13 @@ on the database's clock, in a row of their own.
   their marker's commit order, collapse duplicate commit ids, keep the lowest
   commit id per version, and return the highest version's head and its rows
   minus the removed ranges.
-- **Fence.** Acquiring appends a fence row with the next token and waits
-  until it is visible. Renewing checks that no higher token exists and
+- **Fence.** Acquiring appends a fence row with the next token, and returns
+  only once every batch the store orders before it is visible to every
+  later load: each such batch shows to every load from then on, and no
+  lower-token batch ordered after it ever does (obligation 5). Its own row
+  being visible proves this only when the store's visibility follows its
+  commit order, so that a read that shows the row shows every change
+  committed before it. Renewing checks that no higher token exists and
   appends a lease row.
 - **Clock.** Commit timestamps are the store's own, and ties break by commit
   id.
@@ -585,26 +796,41 @@ realm, which starts empty:
   that holds nothing of the handles before it (for a remote backend, a new
   client over the same dataset);
 - `lapse_fence_leases` lets every recorded lease run out, by advancing the
-  store's clock or by waiting.
+  store's clock or by waiting;
+- `fold_now`, optional (by default it does nothing), runs now the fold of a
+  store that decides between two batches for one version only when it
+  folds its batches, so that the conflict row sees what such a store's
+  loads and listings show once it folded. A store that cannot fold on
+  demand proves its conflict listing in its own tests.
 
-The chapter kills a process by dropping its handle, with any commit it has in
-flight. Where an obligation can be met at commit or at load, it accepts both;
-for obligation 5, a store that fences only at load passes the chapter but is
-outside the contract.
+A process that stopped also acquires the fence again on its own handle, as
+Core's writer does after a failed renew: a handle keeps nothing it listed
+under one grant for the next. The chapter kills a process by dropping its
+handle, with any commit it has in flight. Where an obligation can be met at
+commit or at load, it accepts both, except obligation 5: a commit under a
+superseded token must answer `FencedOut`, so a store that fences only at load
+fails the chapter. Every listing it reads takes both lists of each page: at
+most `limit` entries a page across them, each list in name order, every name
+once across pages and lists, and a page with no entry ends the listing.
 Its rows run in order:
 
 | Row | What it checks |
 |-----|----------------|
 | Acquire on an empty realm | An exclusive acquire supersedes no lease |
 | Reopen | A new process loads what an earlier one committed: heads, versions, commit ids and rows |
+| Token order | Every grant answers a token above every earlier grant: two takeovers of the holder's own lease through the handle that holds it, then a takeover by a new process |
 | Kill | A writer dies before, during or after a batch over two scopes; the next writer sees it in both or neither, and settles an unknown batch the way Core does |
 | Stale fence | The current holder's first renew succeeds, even if its lease lapsed during the rows before; a superseded writer can neither keep the fence nor make a batch visible; an exclusive acquire waits out a live holder's lease and no longer |
 | Takeover with a commit in flight | The old writer's in-flight commit shows wholly or never, the same to every load |
+| An acquire decides the cut | What a new writer lists and loads right after its acquire returned is what every later load shows once the old writer's commit in flight settled: a batch ordered before the acquire shows from that first listing on, one ordered after it never does. Against a remote store a pass is necessary, not proof: the row cannot make a backend apply a request it accepted late, so the store's acquire must meet the rule of `HostStore::acquire_fence` (see the append-only recipe's fence line) by its own argument |
 | Same version twice | Every load resolves two batches for one version the same way, and the loser is invisible in all its scopes |
+| A conflicted scope is listed typed | A scope whose load answers a typed conflict is listed under `HeadPage::conflicts` with the version its load names and its commit ids (ascending, without repeats, or none), a read of its rows answers the same conflict, the other scopes of its kind are listed as usual, and listing it again reports the same version and ids. A store that refuses the second batch at commit, or picks one by a fixed rule, holds no such scope, and the row checks nothing more |
 | Retry | A commit id sent again acts once, from the same handle or a new one |
 | Rows, removal and listing | Rows keep stable indices through truncation and drops, removal takes effect with its batch, listings page every visible scope once in name order, and a batch at the size limits lands byte-exact |
+| Relisting after a re-acquire | A process that acquires again on its own handle lists every batch another process committed meanwhile (creates, updates and deletes over several kinds, a kind of several pages, the four kinds listed at once), and its next listing shows its own next commit |
 | Independence | Over 200 scopes commit concurrently without a stall |
 | Stalled commit | A commit held in flight on one scope does not hold up a commit on another |
+| Superseded token refused at commit | A commit under a superseded token answers `FencedOut` naming the current token, every time, never `Ok`, and shows nowhere |
 
 The crate's long-run and durable-worker chapters run scripted runs over a
 store, kill them at chosen points of a round, and check that each restart

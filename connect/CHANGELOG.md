@@ -19,6 +19,144 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   removal's failure as its context. Before, a failed peer close left the
   sockets behind.
 
+## [0.9.11] - 2026-11-09
+
+Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11
+and Connect 0.9.11, released together): GitHub release `connect-v0.9.11`, a
+prerelease that is never the repository's latest.
+
+### Changed
+
+- Application setup refuses a definition whose profile names
+  `auth_binding` (the profile key Meerkat 0.9.11 adds), in TOML or native
+  form, and refuses a retained setup whose definition names one when it is
+  read again: which binding a member's credentials come from is the
+  operator's choice, not the application definition's.
+
+- A reply, message or request that a member's governed work sends to another
+  member in the same process now runs under the sending work's requester.
+  Connect binds the receiving work with the sending member as its ingress
+  actor and every work of the sending work as a contributor, as Core 0.9.11
+  requires, and each operation of the receiving work is narrowed by the
+  sending work's current grants for that target. Host-triggered deliveries,
+  deliveries from members that run no governed work and deliveries over a
+  network are bound as before, under the receiving member's own standing
+  grants.
+
+- Connect refuses, before it records anything, a governed delivery it cannot
+  bind so: one whose sending work is in another realm or ingress domain, or
+  whose origin names another agent than the member that delivered it
+  (`origin_unverifiable`); one whose sending work has a host-policy or
+  service-mandate original (`sender_basis_unbounded`); one whose sending work
+  names more than 64 works (`contributor_bound_exceeded`). The delivery ends
+  rejected.
+
+- Every Toolkit binder answers Meta's typed bind contract: definite refusals
+  are typed (`denied`, `closed`, `unavailable`; the two capture doors answer
+  `withheld`). The shared original binder and the helper submission and
+  preparation answer "not now" at a held source collection only before their
+  attempt's first durable write; past it they keep their shipped outcome. The
+  helper preparation's own wait-and-bind-again loop is removed: Meta's send
+  loop waits outside the identity's lock.
+- The peer ingress binder answers a delivery whose binding is pending as
+  pending instead of waiting for it inside its bind, and records the peer
+  source record as its attempt's first durable effect. Where the shared
+  original binder still waits in place inside a bind in this release (its
+  checks after a first durable write, its custody recovery enrollment), a
+  peer bind waits there too.
+- A binder's input check answers "not now" only inside a governed bind,
+  before its attempt's first durable write; called outside one it keeps its
+  shipped outcome.
+- A workflow launch waits out its binder's "not now" answers only within its
+  dispatch's deadline (its request deadline or its remaining tool time,
+  whichever ends first, within Core's owner-change bound), as every other
+  wait of the launch.
+- A setup acquisition's admission that reads its original's source facts in
+  conflict (contention: another writer's change in flight) waits it out
+  through Core's owner-change waiter, within its deadline and the dispatch's
+  remaining tool time, and reads again; a conflict that outlasts the wait is
+  answered as unavailable (retryable). It was answered as `access_denied`
+  ("not allowed by policy"), although no policy refused it.
+- A Find's work step answers contention as unavailable (retryable), never as
+  `access_denied`: an owner change its helper's first binding check meets
+  (another original's first binding, for example) is waited out through
+  Core's owner-change waiter and the bind made again, and one that outlasts
+  the wait is unavailable. The workflow call gate, plan staging and the
+  setup report tool answer a conflict in a source's facts as unavailable too.
+  Each answered `access_denied`.
+
+- `@rkat/toolkit` accepts any `@rkat/sdk` and `@rkat/meta-sdk` from 0.9.10
+  up to, but not including, 0.10.0 as optional peers (`>=0.9.10 <0.10.0`;
+  each was one exact version), so it installs next to the 0.9.11 SDKs
+  without a peer conflict. Its development dependencies and lock keep the
+  published SDK versions it is built and tested against.
+
+### Fixed
+
+- Service finalization reads its retained documents (the receipt, the MCP
+  document, the selected configuration and the selected service inputs) only
+  from a regular file of at most 1 MiB. A symbolic link, a FIFO or another
+  special file at that path is now refused before any read, so finalization
+  no longer waits on a FIFO that has no writer.
+
+- Setup: after a reviewed setup conversation closed, the setup that
+  continued in the same process could reopen the realm with its governed
+  work and configured MCP connections unavailable, or have the realm's
+  grant owner refused when the setup finalized, while tasks of the closed
+  conversation were still ending. The close now hands the realm's grant
+  owner back, so the finalization and the continuation restore it at once.
+  An installed host's close hands its own grant owner and its originals
+  store back the same way, as its last step, once every task of the host
+  that can still use them has finished: the host's admitted work and its
+  presenters are joined first (within 30 seconds), so work admitted before
+  the close completes instead of being refused, and a host reopened in the
+  same process opens both at once instead of being refused while tasks of
+  the closed host are still ending. After a host loss the close hands both
+  back as soon as it settles, and work still running then fails.
+  `SqliteStore::release_custody` (in `toolkit-store`) ends a store's
+  physical custody for every clone, after any operation already running on
+  it, and unlocks its owner file before closing it; `SqliteStore::custody`
+  is that custody's handle. `NativeHostLifetime::bind_native_grant_custody`
+  and `NativeHostLifetime::bind_native_store_custody` (in `meerkat-toolkit`)
+  name the grant owner and the store a host's close releases, and
+  `PrivateHostLifetimeControl::release_native_custody` is that release.
+
+### Security
+
+- `zip` is updated from 2.4.2 to 9.0.4 for RUSTSEC-2026-0367,
+  RUSTSEC-2026-0368, RUSTSEC-2026-0369 and RUSTSEC-2026-0429. They affect
+  `zip`'s archive extraction functions, which Connect never calls: it reads
+  MCPB bundles with its own bounded ZIP32 reader. `zip` is linked only
+  through `toolkit-package`'s `local-artifacts` feature, which
+  `toolkit-mcpb-install` uses; `meerkat-connect` and `toolkit_gateway` do
+  not link it.
+
+### Upgrade notes
+
+- Downgrade: the source row of a governed peer delivery records the sending
+  work's requester, agent and works. A Connect without this change refuses to
+  open a source store that holds such a row. Rows written before the upgrade
+  are unchanged and read as before.
+
+### Known limitations
+
+- After a host loss, or a close that ran out of its 30-second join bound, an
+  access decision whose native issuance was still pending stays pending: the
+  next host does not settle it, and a fresh approval of the same proposal is
+  refused as a conflict. Make a new proposal for that access instead.
+
+- A member's work cannot answer a reply, message or request that another
+  member's governed work sent it in the same process. Each operation of the
+  work that such a delivery starts must also be allowed by the sending
+  work's grants, and a member's standing grants allow only replies to that
+  member's own sender and writes to its own Recorder. So the receiving work
+  runs its model, but Core refuses its replies, its other peer sends and its
+  Recorder writes. Work started by a message the host sends to a member is
+  not limited this way.
+
+- Only in-process deliveries carry the sending work. A delivery over a network
+  is bound under the receiving member's own standing grants.
+
 ## [0.9.10] - 2026-11-05
 
 Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10

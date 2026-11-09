@@ -5,6 +5,7 @@ pub mod detached_job;
 pub mod durable_decision;
 pub mod forked_participant_lifecycle;
 pub mod grant_authority;
+pub mod host_store_writer_fence;
 pub mod meerkat;
 pub mod mob;
 pub mod mob_store_restore_lifecycle;

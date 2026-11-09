@@ -923,6 +923,7 @@ pub(crate) fn controller_parent(
         let parent = match grants.issued_reference(&request.issuance_id)? {
             Some(parent) => parent,
             None => grants.issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 operator,
                 request.issuance_id.clone(),
                 application.clone(),
@@ -950,6 +951,6 @@ pub(crate) fn controller_parent(
         GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
             HostLifetimeError::Denied
         }
-        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+        GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => HostLifetimeError::Unavailable,
     })
 }

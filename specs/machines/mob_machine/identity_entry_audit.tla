@@ -38,13 +38,19 @@
 \* AuditRetireUnadoptedQualifies over its own eight. Under the VIEW every
 \* adoption arm but the two that record an entry is a self-loop, and those
 \* two (Adopted, AdoptedUnlisted) make the same update under the same guards
-\* but their observation conjunct, so each run reaches every state of the
-\* single run over all sixteen, and every adoption step is a step of the run
-\* its listing belongs to: the two runs check every state and step the
-\* single run checked (the runner checks that shape of the generated model).
+\* but their listing conjunct. Their shared guards read the observations only
+\* through the adoption's verdict rule, which answers Adopted for some
+\* observation of a listed identity exactly when it does for some
+\* observation of an unlisted one, whatever the state it reads
+\* (ListingSymmetricAdoption, an ASSUME below). So the two fire in the same
+\* states, each run reaches every state of the single run over all sixteen,
+\* and every adoption step is a step of the run its listing belongs to: the
+\* two runs check every state and step the single run checked (the runner
+\* checks that shape of the generated model).
 \*
 \* Each run explores its whole reachable space under a VIEW that leaves out
-\* model_step_count and topology_epoch, which no guard reads, with TLC
+\* model_step_count, topology_epoch and the identity life marker
+\* (identity_life_resets, identity_life_ends), which no guard reads, with TLC
 \* coverage. Properties:
 \*   every generated invariant of ci.cfg (kept), among them the entry ones:
 \*     entry_is_seated_or_has_an_unseated_cause (an entry is seated, or
@@ -86,15 +92,36 @@
 \* identity_entry_audit.sh.
 EXTENDS model
 
-\* The positions of model_step_count and topology_epoch in the generated
-\* `vars` tuple; the runner reads them from model.tla.
-CONSTANTS AuditStepIndex, AuditEpochIndex
+\* The positions of model_step_count, topology_epoch and the identity life
+\* marker (identity_life_resets, identity_life_ends) in the generated `vars`
+\* tuple; the runner reads them from model.tla.
+CONSTANTS AuditStepIndex, AuditEpochIndex, AuditLifeResetsIndex, AuditLifeEndsIndex
 
 \* The values of the roster's listing (the adoption's `listed` observation)
 \* this run drives the legacy adoption with: {TRUE} in the listed run and
 \* {FALSE} in the unlisted run, which together drive all sixteen
 \* combinations of the shell's raw observations (see the header).
 CONSTANTS AuditListings
+
+\* The premise of the split by listing (see the header): whatever the state
+\* the adoption's verdict rule reads (whether the identity is an entry, a
+\* declared one, its name reserved, its member seated, the observation
+\* current, the member hosted, bound to a session, retiring), the rule answers
+\* Adopted for some observation of a listed identity (its two legacy marks
+\* and the intent row) exactly when it does for some observation of an
+\* unlisted one. TLC checks it when it loads the module, in every run.
+ListingSymmetricAdoption ==
+    \A sym_entry, sym_declared, sym_reserved, sym_seated, sym_current,
+       sym_hosted, sym_bound, sym_retiring \in BOOLEAN :
+        (\E sym_marker, sym_label, sym_intent \in BOOLEAN :
+            legacy_adoption_verdict(sym_entry, sym_declared, sym_reserved, sym_seated,
+                sym_current, sym_marker, sym_label, TRUE, sym_intent, sym_hosted,
+                sym_bound, sym_retiring) = "Adopted")
+        <=> (\E sym_marker, sym_label, sym_intent \in BOOLEAN :
+            legacy_adoption_verdict(sym_entry, sym_declared, sym_reserved, sym_seated,
+                sym_current, sym_marker, sym_label, FALSE, sym_intent, sym_hosted,
+                sym_bound, sym_retiring) = "Adopted")
+ASSUME ListingSymmetricAdoption
 
 Id1 == "agentidentity_1"
 Id2 == "agentidentity_2"
@@ -233,8 +260,10 @@ AuditSpec == Init /\ [][AuditNext]_vars
 \* The space is finite under the VIEW: no further bound.
 AuditStateConstraint == TRUE
 
-\* Every state variable but the two counters (see the header).
-AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0]
+\* Every state variable but the counters no guard reads (see the header):
+\* the two above and the identity life marker.
+AuditView == [vars EXCEPT ![AuditStepIndex] = 0, ![AuditEpochIndex] = 0,
+                          ![AuditLifeResetsIndex] = 0, ![AuditLifeEndsIndex] = 0]
 
 (***************************************************************************)
 (* Properties.                                                             *)

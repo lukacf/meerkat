@@ -50,7 +50,10 @@ fn evidence(value: &str) -> HistoricalEvidenceRef {
     }
 }
 fn store(path: &Path) -> Arc<dyn GrantOwnerStore> {
-    Arc::new(FileGrantOwnerStore::new(path))
+    Arc::new(FileGrantOwnerStore::new(
+        path,
+        meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+    ))
 }
 pub(crate) fn initialized(path: &Path) -> Arc<ToolkitOriginalOwner> {
     initialized_with_clock(path, Arc::new(HostAuthorizationClock))
@@ -83,6 +86,7 @@ fn base(owner: &ToolkitOriginalOwner) -> GrantLineageRef {
     owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("base"),
             principal("admin"),
@@ -332,6 +336,7 @@ fn original_operation_child_cannot_be_a_sibling_controller_in_either_restore_ord
     let b_child = owner
         .grants()
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             &base,
             id("b-child"),
@@ -1519,6 +1524,7 @@ async fn standing_original_cancel_is_durable_without_revoking_shared_grant_or_co
     let controller = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("controller"),
             principal("agent"),
@@ -1776,6 +1782,7 @@ async fn durable_binding_callback_and_original_cancel_share_the_writer_mutex() {
     let standing = owner
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("admin"),
             id("standing"),
             principal("agent"),
@@ -1938,6 +1945,18 @@ pub(crate) mod cancellation_store_faults {
         }
         pub(crate) async fn wait_for_held_cancellation(&self) {
             self.entered.notified().await;
+        }
+        /// The SQLite store under the scripted faults.
+        pub(crate) fn sqlite(&self) -> &Arc<SqliteStore> {
+            &self.sqlite
+        }
+        /// Let the held cancellation's worker write, without joining it.
+        pub(crate) fn release_cancellation(&self) {
+            self.release.notify_one();
+        }
+        /// Join the released cancellation's worker.
+        pub(crate) async fn join_cancellation(&self) {
+            self.join_workers().await;
         }
         pub(crate) async fn release_and_join_cancellation(&self) {
             self.release.notify_one();
@@ -2128,6 +2147,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2138,6 +2158,7 @@ pub(crate) mod cancellation_store_faults {
             let controller = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("controller"),
                     principal("agent"),
@@ -2347,6 +2368,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2565,6 +2587,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2673,6 +2696,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2776,6 +2800,7 @@ pub(crate) mod cancellation_store_faults {
             let standing = owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("admin"),
                     id("standing"),
                     principal("agent"),
@@ -2872,6 +2897,7 @@ pub(crate) mod cancellation_store_faults {
         let standing = owner
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 id("standing"),
                 principal("agent"),
@@ -3885,6 +3911,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
         root_bounds.delegation_depth = DelegationDepth::remaining(1);
         let root = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 id("workflow-base"),
                 application.clone(),
@@ -3894,6 +3921,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
             .unwrap();
         let leaf = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 &root,
                 id("workflow-leaf"),
@@ -3908,6 +3936,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
         target_root.delegation_depth = DelegationDepth::remaining(1);
         let root = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 ids[0].clone(),
                 application.clone(),
@@ -3917,6 +3946,7 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
             .unwrap();
         let leaf = grants
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &application,
                 &root,
                 ids[1].clone(),
@@ -3985,7 +4015,12 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
             {
                 let mut custody = machine.try_controller_grant_mutation().unwrap();
                 grants
-                    .revoke(&application, &public[1], &mut custody)
+                    .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &application,
+                        &public[1],
+                        &mut custody,
+                    )
                     .unwrap();
             }
             // Historical task shape/isolation and base/MCP restoration remain
@@ -4008,7 +4043,12 @@ async fn workflow_target_binding_preserves_task_isolation_and_native_revocation(
         {
             let mut custody = machine.try_controller_grant_mutation().unwrap();
             grants
-                .revoke(&application, &target[0], &mut custody)
+                .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &application,
+                    &target[0],
+                    &mut custody,
+                )
                 .unwrap();
         }
         let after_revoke = std::fs::read(&path).unwrap();

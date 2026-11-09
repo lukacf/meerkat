@@ -744,6 +744,25 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         }
         snapshot
     }
+
+    fn consume_compaction_request(&self, run_id: RunId) -> Result<bool, DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (the check
+        // reads the consumption from its own transition)
+        let effects = self.dsl.apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::ConsumeCompactionRequest {
+                run_id: mm_dsl::RunId::from_domain(&run_id),
+            },
+            "TurnStateHandle::consume_compaction_request",
+        )?;
+        let checked = mm_dsl::RunId::from_domain(&run_id);
+        Ok(effects.iter().any(|effect| {
+            matches!(
+                effect,
+                mm_dsl::MeerkatMachineEffect::CompactionRequestConsumed { run_id }
+                    if *run_id == checked
+            )
+        }))
+    }
 }
 
 /// The scalar facts of [`project_turn_state`], from a borrowed DSL state.

@@ -4,9 +4,12 @@
 //! holds no materialization here), Core's member reads answer from there,
 //! and peer wiring is accepted and recorded nowhere. Delivery is refused: a
 //! scenario that only needs Core to seat or build members uses this double.
+//! Its declared apply is Core's, through its own seat and rotation
+//! ([`super::declared_apply`]).
 //!
 //! A test crate that uses it also declares `mod core_members` from
-//! `support/core_members.rs`.
+//! `support/core_members.rs` and `mod declared_apply` from
+//! `support/declared_apply.rs`.
 
 #![allow(dead_code)]
 
@@ -134,6 +137,16 @@ impl SessionBridge for CoreBridge {
         self.core.history()
     }
 
+    async fn identity_entry(
+        &self,
+        identity: &meerkat_meta::identity_first::AgentIdentity,
+    ) -> Result<
+        meerkat_meta::identity_first::CoreIdentityEntry,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        Ok(self.core.identity_entry(identity))
+    }
+
     async fn last_member_binding(
         &self,
         identity: &AgentIdentity,
@@ -221,5 +234,17 @@ impl SessionBridge for CoreBridge {
     /// seated, on the same session at the same generation.
     async fn release_member(&self, _identity: &AgentIdentity) -> Result<(), BridgeError> {
         Ok(())
+    }
+
+    /// Core's declared apply through this double's own seat and rotation
+    /// ([`super::declared_apply::apply_through_seats`]).
+    async fn apply_declared_roster(
+        &self,
+        roster: meerkat_meta::identity_first::DeclaredRosterRequest,
+    ) -> Result<
+        meerkat_meta::identity_first::DeclaredRosterAnswer,
+        meerkat_meta::identity_first::BridgeError,
+    > {
+        super::declared_apply::apply_through_seats(self, &roster, None).await
     }
 }

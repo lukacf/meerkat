@@ -98,6 +98,7 @@ async fn installed_review_floor_reaches_native_preparation_without_widening_perm
         f.source
             .grants()
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &f.application.native.grant_administrator,
                 targets[0].lineage.last().unwrap(),
                 &mut custody,

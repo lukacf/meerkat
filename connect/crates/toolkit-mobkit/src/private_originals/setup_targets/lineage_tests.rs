@@ -90,6 +90,7 @@ fn fixture() -> Fixture {
     };
     let parent = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &administrator,
             EvidenceId::new("parent").unwrap(),
             administrator.clone(),
@@ -99,6 +100,7 @@ fn fixture() -> Fixture {
         .unwrap();
     let child = grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &administrator,
             &parent,
             EvidenceId::new("child").unwrap(),

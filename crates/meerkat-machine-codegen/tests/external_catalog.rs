@@ -19,8 +19,11 @@ use meerkat_machine_schema::catalog::{
     canonical_composition_schemas, canonical_machine_schemas,
     workgraph_attention_bundle_composition,
 };
-use meerkat_machine_schema::identity::MachineId;
-use meerkat_machine_schema::{CompositionSchema, MachineSchema, RustTypeAtom};
+use meerkat_machine_schema::identity::{FieldId, InputVariantId, MachineId};
+use meerkat_machine_schema::{
+    CompositionSchema, InputFieldDomain, InputFieldDomainKind, MachineSchema, RustTypeAtom,
+    TlcValue,
+};
 
 fn renamed(mut machine: MachineSchema, id: &str) -> MachineSchema {
     machine.machine = MachineId::parse(id).expect("machine slug");
@@ -132,6 +135,55 @@ fn an_external_machine_renders_only_through_its_own_catalog() {
     assert!(
         render_composition_semantic_model(&composition).is_err(),
         "the built-in catalog has no ExternalAttentionMachine"
+    );
+}
+
+/// A `CiSamples` declaration narrows only its machine's own CI profile. A
+/// composition has no machine CI profile: it ranges the field over its
+/// type's whole domain, so the composition renders exactly as it does
+/// without the declaration, while the machine's own model narrows.
+#[test]
+fn ci_samples_leave_a_composition_rendering_unchanged() {
+    let (composition, catalog) = external_attention_bundle();
+    let model = render_composition_semantic_model_with_catalog(&composition, &catalog)
+        .expect("external catalog renders");
+    assert!(
+        model.contains("\\E arg_mode \\in WorkAttentionModeValues : "),
+        "the composition enumerates the attention mode"
+    );
+    let configs = [false, true].map(|deep| {
+        render_composition_ci_cfg_with_catalog(&composition, deep, &catalog)
+            .expect("external catalog config")
+    });
+
+    let mut sampled = catalog;
+    machine_mut(&mut sampled, EXTERNAL_ATTENTION)
+        .input_field_domains
+        .push(InputFieldDomain {
+            input: InputVariantId::parse("ClassifyAttentionAuthority").expect("input slug"),
+            field: FieldId::parse("mode").expect("field slug"),
+            domain: InputFieldDomainKind::CiSamples(vec![TlcValue::String("Observe".to_owned())]),
+        });
+    assert_eq!(
+        render_composition_semantic_model_with_catalog(&composition, &sampled)
+            .expect("sampled catalog renders"),
+        model,
+        "the composition model ranges the field over its whole domain"
+    );
+    for (deep, config) in [false, true].into_iter().zip(configs) {
+        assert_eq!(
+            render_composition_ci_cfg_with_catalog(&composition, deep, &sampled)
+                .expect("sampled catalog config"),
+            config,
+            "deep={deep}"
+        );
+    }
+    let machine_model =
+        render_machine_semantic_model(machine_mut(&mut sampled, EXTERNAL_ATTENTION))
+            .expect("the sampled machine renders");
+    assert!(
+        machine_model.contains(" \\in InputSamples_ClassifyAttentionAuthority_mode : "),
+        "the machine's own model ranges the field over its samples constant"
     );
 }
 

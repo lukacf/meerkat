@@ -18,6 +18,8 @@ pub(crate) mod detached_completion_sink;
 pub(crate) mod detached_completion_sink;
 pub mod detached_delivery;
 pub mod fork_relink;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod identity_entry_doors_tests;
 #[cfg(all(feature = "openai-live", not(target_arch = "wasm32")))]
 pub mod live_delegation;
 mod public_definition;
@@ -78,6 +80,16 @@ pub const MEMBER_SEND_CONTINUATION_NAMESPACE: &str = "meerkat.member_send";
 /// The prefix a caller's member-send key carries in the continuation key
 /// ledger, so it never meets another producer's key for the same member.
 pub const MEMBER_SEND_CONTINUATION_KEY_PREFIX: &str = "member_send:";
+
+/// Which door a keyed member send came through: the external door
+/// ([`MobMcpState::mob_member_send_keyed`]) or the member's host's own
+/// ([`MobMcpState::mob_member_send_keyed_as_host`]).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyedMemberSendDoor {
+    External,
+    Host,
+}
 
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
@@ -1233,10 +1245,10 @@ pub struct MobCreateRequest {
     /// [`MobMcpState::mob_create_from_mobpack`]).
     pub owner_bridge_session_id: Option<SessionId>,
     /// Whether this is the owner session's implicit delegation mob, created
-    /// by that session's own runtime path
-    /// ([`MobMcpState::ensure_implicit_mob_for_model`]) under the id it
-    /// derives from the session ([`MobDefinition::implicit`]). Never set for
-    /// a mob a caller names, whatever its id.
+    /// by that session's own runtime path (the implicit-mob ensure its
+    /// `delegate` tool runs) under the id it derives from the session
+    /// ([`MobDefinition::implicit`]). Never set for a mob a caller names,
+    /// whatever its id.
     pub implicit_delegation_mob: bool,
 }
 
@@ -6858,14 +6870,19 @@ impl MobMcpState {
     }
 
     /// Resolve the member runtime mode and private bridge session for
-    /// `mob/turn_start` only after SendCommand admission.
+    /// `mob/turn_start` only after its host door's admission: a turn start
+    /// acts on the member's session as its host, so the console principal
+    /// needs SendCommand, and AdminHost too when the member is an identity
+    /// entry or its name is reserved unreadable
+    /// ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_turn_start_target(
         &self,
         mob_id: &MobId,
         identity: &AgentIdentity,
     ) -> Result<(Option<MobRuntimeMode>, Option<SessionId>), MobError> {
-        let handle = self
-            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::SendCommand, identity)
             .await?;
         let runtime_mode = handle
             .list_members()
@@ -6877,6 +6894,11 @@ impl MobMcpState {
         Ok((runtime_mode, bridge_session_id))
     }
 
+    /// Append a system context to the member's session. The append acts on
+    /// the member's session as its host: the console principal needs
+    /// SendCommand, and AdminHost too when the member is an identity entry
+    /// or its name is reserved unreadable
+    /// ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_append_system_context(
         &self,
         mob_id: &MobId,
@@ -6886,8 +6908,9 @@ impl MobMcpState {
         // Session-control mechanics sit below a mob operator verb.  Enter the
         // serialized mob gate before resolving the member's private session
         // identity or touching its transcript.
-        let handle = self
-            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::SendCommand, identity)
             .await?;
         let bridge_session_id = handle
             .resolve_bridge_session_id(identity)
@@ -6903,6 +6926,54 @@ impl MobMcpState {
             .await
             .map_err(MobAppendSystemContextError::Session)?;
         Ok((bridge_session_id, result))
+    }
+
+    /// Write one operator instruction for the members `write.target` selects
+    /// (`mob/set_instruction`). The receipt returns once the record is in
+    /// the mob's journal; delivery to the members is asynchronous. A host
+    /// verb: the mob's actor gates it on `AdminHost`, and no agent tool
+    /// reaches it.
+    pub async fn mob_set_instruction(
+        &self,
+        mob_id: &MobId,
+        write: meerkat_mob::OperatorInstructionWrite,
+    ) -> Result<meerkat_mob::OperatorInstructionReceipt, meerkat_mob::OperatorInstructionError>
+    {
+        self.handle_for(mob_id)
+            .await?
+            .set_operator_instruction(write)
+            .await
+    }
+
+    /// Revoke one operator instruction of the mob at a higher revision
+    /// (`mob/revoke_instruction`); the record keeps its target. A host verb
+    /// (`AdminHost`).
+    pub async fn mob_revoke_instruction(
+        &self,
+        mob_id: &MobId,
+        slot: meerkat_core::InstructionSlot,
+        revision: meerkat_core::InstructionRevision,
+    ) -> Result<meerkat_mob::OperatorInstructionReceipt, meerkat_mob::OperatorInstructionError>
+    {
+        self.handle_for(mob_id)
+            .await?
+            .revoke_operator_instruction(slot, revision)
+            .await
+    }
+
+    /// The mob's operator-instruction status (`mob/instruction_status`):
+    /// its records and one page of members, read from committed state
+    /// without waking a member. A read verb (`ReadHistory`).
+    pub async fn mob_instruction_status(
+        &self,
+        mob_id: &MobId,
+        query: meerkat_mob::OperatorInstructionStatusQuery,
+    ) -> Result<meerkat_mob::OperatorInstructionStatusPage, meerkat_mob::OperatorInstructionError>
+    {
+        self.handle_for(mob_id)
+            .await?
+            .operator_instruction_status(query)
+            .await
     }
 
     pub async fn mob_resolve_bridge_session_id(
@@ -6958,8 +7029,27 @@ impl MobMcpState {
             .await
     }
 
-    /// Deliver `content` to a member under a caller idempotency key: the one
-    /// keyed member-send door for RPC, the public MCP tool and Meta.
+    /// Deliver `content` to a member under a caller idempotency key: the
+    /// keyed member-send door for RPC (`mob/member_send` with a key) and the
+    /// public MCP tool. A keyed send is external work, as the unkeyed send
+    /// ([`Self::mob_member_send`]) is: before its first commit it asks
+    /// MobMachine the same external admission
+    /// ([`MobHandle::admit_external_work`]) and answers exactly as the
+    /// unkeyed send does, for every caller: [`MobError::IdentityMember`] for
+    /// an identity entry or a member whose name is reserved unreadable,
+    /// [`MobError::NotExternallyAddressable`] for a member whose runtime
+    /// admits no external work, with nothing committed. The commit carries
+    /// the mark of external work
+    /// ([`meerkat::ContinuationOwnerService::submit_external_work_for_member_incarnation`]),
+    /// so its delivery asks again: a send committed before its member became
+    /// an entry, or before its name became reserved unreadable, settles
+    /// refused (`authority_denied`), and nothing is admitted. A member's
+    /// runtime stops admitting external work only as a new incarnation (a
+    /// respawn or a rotation, onto a profile that admits none included),
+    /// which a send committed to the earlier one never reaches: it settles
+    /// stranded, as for any replaced incarnation.
+    /// The member's host delivers its own keyed sends through
+    /// [`Self::mob_member_send_keyed_as_host`].
     ///
     /// A keyed send is committed as a member continuation, so the key is kept
     /// for the member identity in the continuation key ledger, together with
@@ -6978,7 +7068,8 @@ impl MobMcpState {
     /// # Errors
     /// [`MobError::MemberSendIdempotency`] for an invalid key, a conflict, a
     /// host without a continuation service, a governed runtime, or a status
-    /// read that cannot be made; [`MobError::MemberNotFound`] and
+    /// read that cannot be made; the external admission's refusal for a
+    /// first commit; [`MobError::MemberNotFound`] and
     /// [`MobError::DeliveryScopeUnavailable`] for a first commit to a member
     /// that does not exist or has no session binding, and
     /// [`MobError::MemberNotFound`] when the mob it was admitted against is no
@@ -6992,15 +7083,79 @@ impl MobMcpState {
         handling_mode: HandlingMode,
         idempotency_key: &str,
     ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        let handle = self
+            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        self.commit_member_send_keyed(
+            handle,
+            KeyedMemberSendDoor::External,
+            identity,
+            content,
+            handling_mode,
+            idempotency_key,
+        )
+        .await
+    }
+
+    /// The host's own keyed send to its member: [`Self::mob_member_send_keyed`]
+    /// as internal work. The host delivers to its members, its identity
+    /// entries included, through its own door: the send is never asked the
+    /// external admission, and its delivery is not asked again. It acts as
+    /// the member's host, so it reaches an identity entry, or a member whose
+    /// name is reserved unreadable, only for a console principal that holds
+    /// [`ControlScope::AdminHost`] (the owner holds every scope); any other
+    /// is refused [`MobError::IdentityMember`]
+    /// ([`MobHandle::admit_member_host_door`]). A key and its replays,
+    /// conflicts and statuses are as for [`Self::mob_member_send_keyed`]: one
+    /// key ledger serves both doors, so a key committed through either
+    /// replays through either.
+    ///
+    /// # Errors
+    /// As [`Self::mob_member_send_keyed`], without the external admission's
+    /// refusals.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn mob_member_send_keyed_as_host(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        content: ContentInput,
+        handling_mode: HandlingMode,
+        idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::SendCommand, &identity)
+            .await?;
+        self.commit_member_send_keyed(
+            handle,
+            KeyedMemberSendDoor::Host,
+            identity,
+            content,
+            handling_mode,
+            idempotency_key,
+        )
+        .await
+    }
+
+    /// The commit both keyed doors share, through `handle`, which the door
+    /// admitted already.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn commit_member_send_keyed(
+        &self,
+        handle: MobHandle,
+        door: KeyedMemberSendDoor,
+        identity: AgentIdentity,
+        content: ContentInput,
+        handling_mode: HandlingMode,
+        idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
         use meerkat_mob::MemberSendIdempotencyRefusal as Refusal;
 
+        let mob_id = handle.mob_id().clone();
         let refuse = |refusal: Refusal| MobError::MemberSendIdempotency {
             identity: identity.clone(),
             refusal,
         };
-        let handle = self
-            .admitted_handle_for(mob_id, ControlScope::SendCommand)
-            .await?;
         meerkat_runtime::validate_canonical_key_text(
             "idempotency_key",
             idempotency_key,
@@ -7044,6 +7199,11 @@ impl MobMcpState {
                 .map_err(status_error)?,
             meerkat::ContinuationStatus::NotCommitted
         ) {
+            // A first commit of external work asks MobMachine the external
+            // admission the unkeyed send gets, and answers as it does.
+            if door == KeyedMemberSendDoor::External {
+                handle.admit_external_work(&identity).await?;
+            }
             handle.capture_member_delivery_scope(&identity).await?;
         }
         let content_bytes = serde_json::to_vec(&content).map_err(|error| {
@@ -7076,29 +7236,46 @@ impl MobMcpState {
                 u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
             });
         self.pause_agent_call().await;
-        let receipt = service
-            .submit_for_member_incarnation(&owner, handle.incarnation(), delivery, committed_at_ms)
-            .await
-            .map_err(|error| match error {
-                meerkat::ContinuationSubmitError::Conflict { existing } => {
-                    refuse(Refusal::Conflict {
-                        delivery_id: existing.delivery_id.clone(),
-                        committed_at_ms: existing.committed_at_ms,
-                    })
-                }
-                meerkat::ContinuationSubmitError::OwnerRetired => {
-                    MobError::MemberNotFound(identity.clone())
-                }
-                meerkat::ContinuationSubmitError::NoAdmissibleWorkBinding => {
-                    refuse(Refusal::GovernedRuntime)
-                }
-                meerkat::ContinuationSubmitError::Invalid(detail) => {
-                    refuse(Refusal::InvalidKey { detail })
-                }
-                meerkat::ContinuationSubmitError::Unavailable(detail) => {
-                    refuse(Refusal::Unavailable { detail })
-                }
-            })?;
+        let committed = match door {
+            KeyedMemberSendDoor::External => {
+                service
+                    .submit_external_work_for_member_incarnation(
+                        &owner,
+                        handle.incarnation(),
+                        delivery,
+                        committed_at_ms,
+                    )
+                    .await
+            }
+            KeyedMemberSendDoor::Host => {
+                service
+                    .submit_for_member_incarnation(
+                        &owner,
+                        handle.incarnation(),
+                        delivery,
+                        committed_at_ms,
+                    )
+                    .await
+            }
+        };
+        let receipt = committed.map_err(|error| match error {
+            meerkat::ContinuationSubmitError::Conflict { existing } => refuse(Refusal::Conflict {
+                delivery_id: existing.delivery_id.clone(),
+                committed_at_ms: existing.committed_at_ms,
+            }),
+            meerkat::ContinuationSubmitError::OwnerRetired => {
+                MobError::MemberNotFound(identity.clone())
+            }
+            meerkat::ContinuationSubmitError::NoAdmissibleWorkBinding => {
+                refuse(Refusal::GovernedRuntime)
+            }
+            meerkat::ContinuationSubmitError::Invalid(detail) => {
+                refuse(Refusal::InvalidKey { detail })
+            }
+            meerkat::ContinuationSubmitError::Unavailable(detail) => {
+                refuse(Refusal::Unavailable { detail })
+            }
+        })?;
         let status = match service
             .continuation_status(&owner, &key)
             .await
@@ -7154,6 +7331,28 @@ impl MobMcpState {
         _idempotency_key: &str,
     ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
         self.admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        Err(MobError::MemberSendIdempotency {
+            identity,
+            refusal: meerkat_mob::MemberSendIdempotencyRefusal::NoContinuationService,
+        })
+    }
+
+    /// [`Self::mob_member_send_keyed_as_host`] on a host that binds no
+    /// continuation service (the browser runtime): refused after its host
+    /// door's admission, never dropped.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn mob_member_send_keyed_as_host(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        _content: ContentInput,
+        _handling_mode: HandlingMode,
+        _idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .admit_member_host_door(ControlScope::SendCommand, &identity)
             .await?;
         Err(MobError::MemberSendIdempotency {
             identity,
@@ -7232,6 +7431,13 @@ impl MobMcpState {
     /// mob-surface crate. Finding C4 — the work-lane Rust API
     /// (`submit_work`/`cancel_work`/`cancel_all_work`) was Rust-only;
     /// this exposes it to RPC/HTTP consumers such as meta.
+    ///
+    /// Work of [`meerkat_mob::WorkOrigin::Internal`] acts as the mob's host,
+    /// which MobMachine admits to any member, an identity entry included:
+    /// the console principal needs [`ControlScope::AdminHost`] for it (the
+    /// owner holds every scope), and one without it is refused
+    /// [`MobError::ScopeDenied`] before anything is submitted. External work
+    /// needs SendCommand, as before.
     pub async fn mob_submit_work(
         &self,
         mob_id: &MobId,
@@ -7240,8 +7446,11 @@ impl MobMcpState {
         work_ref: meerkat_mob::WorkRef,
         spec: meerkat_mob::WorkSpec,
     ) -> Result<meerkat_mob::WorkDeliveryReceipt, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        if matches!(spec.origin, meerkat_mob::WorkOrigin::Internal) {
+            handle.admit_control_scope(ControlScope::AdminHost).await?;
+        }
+        handle
             .submit_work(runtime_id, fence_token, work_ref, spec)
             .await
     }
@@ -7783,6 +7992,45 @@ impl MobMcpState {
             .await
     }
 
+    /// Fork `source_identity`'s session at a message boundary and seat the
+    /// fork as the new member `identity`, through
+    /// [`meerkat_mob::MobHandle::fork_member`]: the child holds the source's
+    /// first `message_count` messages (its committed end when `None`). The
+    /// new member takes the source member's profile and runtime mode unless
+    /// `profile` or `runtime_mode` names others.
+    ///
+    /// An `identity` the roster already holds is refused with
+    /// [`MobError::MemberAlreadyExists`] before anything is forked. A member
+    /// seated under it between that read and the fork's own seat gets the
+    /// engine's answer, [`MobError::ForkMemberProvisionFailed`]: its committed
+    /// fork session is bound to `identity`, so resume it under that identity
+    /// once the identity is free, or archive it.
+    pub async fn mob_fork_member(
+        &self,
+        mob_id: &MobId,
+        source_identity: &AgentIdentity,
+        identity: AgentIdentity,
+        profile: Option<ProfileName>,
+        runtime_mode: Option<MobRuntimeMode>,
+        message_count: Option<usize>,
+    ) -> Result<meerkat_mob::ForkMemberResult, MobError> {
+        let handle = self
+            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        let source = handle
+            .get_member(source_identity)
+            .await?
+            .ok_or_else(|| MobError::MemberNotFound(source_identity.clone()))?;
+        if handle.get_member(&identity).await?.is_some() {
+            return Err(MobError::MemberAlreadyExists(identity));
+        }
+        let spec = SpawnMemberSpec::new(profile.unwrap_or(source.role), identity)
+            .with_runtime_mode(runtime_mode.unwrap_or(source.runtime_mode));
+        handle
+            .fork_member(source_identity, spec, message_count)
+            .await
+    }
+
     /// Subscribe to mob-wide events (all members, continuously updated).
     ///
     /// (b) gate at subscription ADMISSION only: a later revoke/expiry does
@@ -7854,9 +8102,9 @@ impl MobMcpState {
     /// persisted member is rebuilt, mob tools included, inside the persistent
     /// restore, which holds the restore lock; a construction-time lookup that
     /// restored would wait on the restore it is part of. The hint is only a
-    /// hint: every use goes through [`Self::ensure_implicit_mob_for_model`],
-    /// which validates it and otherwise restores and looks the mob up under
-    /// the per-session lock before it would create one.
+    /// hint: every use goes through the implicit-mob ensure, which validates
+    /// it and otherwise restores and looks the mob up under the per-session
+    /// lock before it would create one.
     #[doc(hidden)]
     pub async fn restored_implicit_mob_for_bridge_session(
         &self,
@@ -7963,11 +8211,22 @@ impl MobMcpState {
             .is_empty()
     }
 
+    /// Whether `mob_id` is `bridge_session_id`'s implicit mob with its
+    /// `delegate` profile on `model` and, when the caller names one, on the
+    /// provider route `provider`, `self_hosted_server_id` and `auth_binding`.
+    /// A profile that names no provider (created before implicit mobs named
+    /// one) is on the route the registry resolves for its model, the same
+    /// route a session on that model resolves, so it matches any provider;
+    /// its self-hosted server and auth binding must still match, so a binding
+    /// change alone replaces the mob as a model change does.
     async fn implicit_mob_matches_session_model(
         &self,
         mob_id: &MobId,
         bridge_session_id: &str,
         model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<&str>,
+        auth_binding: Option<&meerkat_core::AuthBindingRef>,
     ) -> bool {
         let delegate_profile = ProfileName::from("delegate");
         let bridge_session_id = match SessionId::parse(bridge_session_id) {
@@ -7986,7 +8245,15 @@ impl MobMcpState {
                 })
                 && definition
                     .resolve_inline_profile(&delegate_profile)
-                    .is_some_and(|profile| profile.model == model)
+                    .is_some_and(|profile| {
+                        profile.model == model
+                            && provider.is_none_or(|provider| {
+                                profile.provider.is_none_or(|named| named == provider)
+                                    && profile.self_hosted_server_id.as_deref()
+                                        == self_hosted_server_id
+                                    && profile.auth_binding.as_ref() == auth_binding
+                            })
+                    })
         })
     }
 
@@ -7995,7 +8262,9 @@ impl MobMcpState {
     ///
     /// This is the sole owner of implicit-mob model reconciliation. Tool
     /// surfaces may provide a cached mob-id hint for the fast path, but they
-    /// must not destroy or recreate mobs themselves.
+    /// must not destroy or recreate mobs themselves. The definition names
+    /// `model` alone, so it validates only for a catalogued model; the
+    /// agent's `delegate` tool also names its session's resolved provider.
     #[doc(hidden)]
     pub async fn ensure_implicit_mob_for_model(
         &self,
@@ -8003,9 +8272,36 @@ impl MobMcpState {
         model: &str,
         cached_mob_id: Option<&MobId>,
     ) -> Result<(MobId, bool), MobError> {
+        self.ensure_implicit_mob_on_route(bridge_session_id, model, None, None, None, cached_mob_id)
+            .await
+    }
+
+    /// [`Self::ensure_implicit_mob_for_model`] whose definition's `delegate`
+    /// profile also names `provider`, `self_hosted_server_id` and
+    /// `auth_binding`: the route the owner session runs on when the caller
+    /// asks ([`MobDefinition::implicit_on_route`]). An existing implicit mob
+    /// of the session is reused while its `delegate` profile runs on `model`
+    /// over that route (see `implicit_mob_matches_session_model`), and
+    /// replaced otherwise.
+    pub(crate) async fn ensure_implicit_mob_on_route(
+        &self,
+        bridge_session_id: &str,
+        model: &str,
+        provider: Option<meerkat_core::Provider>,
+        self_hosted_server_id: Option<&str>,
+        auth_binding: Option<&meerkat_core::AuthBindingRef>,
+        cached_mob_id: Option<&MobId>,
+    ) -> Result<(MobId, bool), MobError> {
         if let Some(cached_mob_id) = cached_mob_id
             && self
-                .implicit_mob_matches_session_model(cached_mob_id, bridge_session_id, model)
+                .implicit_mob_matches_session_model(
+                    cached_mob_id,
+                    bridge_session_id,
+                    model,
+                    provider,
+                    self_hosted_server_id,
+                    auth_binding,
+                )
                 .await
         {
             return Ok((cached_mob_id.clone(), false));
@@ -8026,7 +8322,14 @@ impl MobMcpState {
             .await
         {
             if self
-                .implicit_mob_matches_session_model(&mob_id, bridge_session_id, model)
+                .implicit_mob_matches_session_model(
+                    &mob_id,
+                    bridge_session_id,
+                    model,
+                    provider,
+                    self_hosted_server_id,
+                    auth_binding,
+                )
                 .await
             {
                 return Ok((mob_id, false));
@@ -8043,7 +8346,13 @@ impl MobMcpState {
         })?;
         let mob_id = self
             .mob_create_definition_with_owner_bridge_session(
-                MobDefinition::implicit(bridge_session_id, model),
+                MobDefinition::implicit_on_route(
+                    bridge_session_id,
+                    model,
+                    provider,
+                    self_hosted_server_id.map(str::to_owned),
+                    auth_binding.cloned(),
+                ),
                 owner_bridge_session_id,
                 true,
                 true,
@@ -8422,11 +8731,28 @@ impl MobMcpState {
             .await
     }
 
+    /// Ask a member's next compaction check to compact, as the console
+    /// principal, without a respawn. Never wakes the member: a dormant
+    /// member is refused as not live.
+    pub async fn mob_compact_member(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+    ) -> Result<meerkat_runtime::CompactionRequestReceipt, MobError> {
+        self.handle_for(mob_id)
+            .await?
+            .compact_member(self.console_principal.clone(), identity)
+            .await
+    }
+
     /// Open a live realtime channel on a member (§16.4). The returned
     /// [`meerkat_contracts::wire::LiveOpenResult`] carries the owning
     /// host's bootstrap (a URL + single-use token, or a WebRTC token)
     /// VERBATIM (DEC-P6B-C7/C8): never logged, Debug-formatted, or retained
-    /// here. `Live`-gated at chokepoint (a).
+    /// here. `Live`-gated at chokepoint (a). The open acts on the member's
+    /// session as its host, so an identity entry, or a member whose name is
+    /// reserved unreadable, needs `AdminHost` too
+    /// ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_member_live_open(
         &self,
         mob_id: &MobId,
@@ -8434,8 +8760,11 @@ impl MobMcpState {
         turning_mode: Option<meerkat_contracts::wire::RealtimeTurningMode>,
         transport: Option<meerkat_contracts::wire::LiveOpenTransport>,
     ) -> Result<meerkat_contracts::wire::LiveOpenResult, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_open(
                 self.console_principal.clone(),
                 identity,
@@ -8451,7 +8780,8 @@ impl MobMcpState {
     /// authority. The result's pending receipt is what the surface answering
     /// the channel's WebRTC offer registers its playback owner against; like
     /// the bootstrap token it is never logged or retained here. `Live`-gated
-    /// at chokepoint (a).
+    /// at chokepoint (a), and `AdminHost` too for an identity entry, as
+    /// [`Self::mob_member_live_open`].
     pub async fn mob_member_live_open_with_execution_identity(
         &self,
         mob_id: &MobId,
@@ -8460,8 +8790,11 @@ impl MobMcpState {
         turning_mode: Option<meerkat_contracts::wire::RealtimeTurningMode>,
         transport: Option<meerkat_contracts::wire::LiveOpenTransport>,
     ) -> Result<meerkat_runtime::member_live::MemberLiveExecutionOpen, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_open_with_execution_identity(
                 self.console_principal.clone(),
                 identity,
@@ -8473,15 +8806,22 @@ impl MobMcpState {
     }
 
     /// Close one NAMED live channel (close-what-you-name, DEC-P6B-C9).
-    /// `Live`-gated at chokepoint (a).
+    /// `Live`-gated at chokepoint (a). The close ends a channel on the
+    /// member's session as its host, so an identity entry, or a member whose
+    /// name is reserved unreadable, needs `AdminHost` too
+    /// ([`MobHandle::admit_member_host_door`]), as the open and the control
+    /// verbs do.
     pub async fn mob_member_live_close(
         &self,
         mob_id: &MobId,
         identity: AgentIdentity,
         channel_id: String,
     ) -> Result<meerkat_contracts::wire::LiveCloseStatus, MobError> {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_close(self.console_principal.clone(), identity, channel_id)
             .await
     }
@@ -8502,7 +8842,9 @@ impl MobMcpState {
 
     /// Drive one DL10 live control verb (commit_input / interrupt /
     /// truncate / refresh — closed vocabulary). `Live`-gated at
-    /// chokepoint (a).
+    /// chokepoint (a). The verb acts on the member's session as its host,
+    /// so an identity entry, or a member whose name is reserved unreadable,
+    /// needs `AdminHost` too ([`MobHandle::admit_member_host_door`]).
     pub async fn mob_member_live_control(
         &self,
         mob_id: &MobId,
@@ -8511,8 +8853,11 @@ impl MobMcpState {
         verb: meerkat_contracts::wire::supervisor_bridge::BridgeLiveControlVerb,
     ) -> Result<meerkat_contracts::wire::supervisor_bridge::BridgeLiveControlOutcome, MobError>
     {
-        self.handle_for(mob_id)
-            .await?
+        let handle = self.handle_for(mob_id).await?;
+        handle
+            .admit_member_host_door(ControlScope::Live, &identity)
+            .await?;
+        handle
             .member_live_control(self.console_principal.clone(), identity, channel_id, verb)
             .await
     }
@@ -16410,6 +16755,162 @@ mod tests {
         );
     }
 
+    /// The delegate's implicit mob for a model outside the catalog names the
+    /// owner session's resolved provider, so its definition validates. The
+    /// provider-less form still refuses such a model, and creates nothing.
+    #[tokio::test]
+    async fn an_implicit_mob_on_an_uncatalogued_model_names_the_owners_provider() {
+        let state = MobMcpState::new_in_memory();
+        let model = "realm-gateway-model";
+        let refused = SessionId::new().to_string();
+        let error = state
+            .ensure_implicit_mob_for_model(&refused, model, None)
+            .await
+            .expect_err("a model outside the catalog does not validate without its provider");
+        assert!(error.to_string().contains(model), "{error}");
+        assert!(
+            state
+                .find_implicit_mob_for_bridge_session(&refused)
+                .await
+                .is_none()
+        );
+
+        let sid = SessionId::new().to_string();
+        let (mob_id, created) = state
+            .ensure_implicit_mob_on_route(
+                &sid,
+                model,
+                Some(meerkat_core::Provider::OpenAI),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the owner's provider makes the definition validate");
+        assert!(created);
+        let handle = state
+            .handle_for(&mob_id)
+            .await
+            .expect("implicit mob handle");
+        assert_eq!(
+            *handle.definition(),
+            MobDefinition::implicit_with_provider(
+                &sid,
+                model,
+                Some(meerkat_core::Provider::OpenAI),
+                None
+            )
+        );
+    }
+
+    /// An implicit mob is reused while its `delegate` profile runs the
+    /// requested model over the requested provider route, and replaced when
+    /// the route changes, a change of auth binding alone included. A mob
+    /// whose profile names no provider, as every implicit mob did before they
+    /// named one, runs on the provider its model resolves to and is reused.
+    #[tokio::test]
+    async fn an_implicit_mob_is_reused_on_its_route_and_replaced_when_the_route_changes() {
+        use meerkat_core::Provider;
+
+        let state = MobMcpState::new_in_memory();
+        let delegate = ProfileName::from("delegate");
+
+        let earlier = SessionId::new().to_string();
+        let (provider_less, created) = state
+            .ensure_implicit_mob_for_model(&earlier, "claude-sonnet-4-5", None)
+            .await
+            .expect("a provider-less implicit mob");
+        assert!(created);
+        let before = state
+            .handle_for(&provider_less)
+            .await
+            .expect("handle")
+            .incarnation();
+        let (reused, created) = state
+            .ensure_implicit_mob_on_route(
+                &earlier,
+                "claude-sonnet-4-5",
+                Some(Provider::Anthropic),
+                None,
+                None,
+                Some(&provider_less),
+            )
+            .await
+            .expect("reuse the provider-less mob");
+        assert_eq!(reused, provider_less);
+        assert!(!created, "a provider-less mob is not replaced");
+        assert_eq!(
+            state
+                .handle_for(&reused)
+                .await
+                .expect("handle")
+                .incarnation(),
+            before
+        );
+
+        let binding = |name: &str| meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("global").expect("realm id"),
+            binding: meerkat_core::BindingId::parse(name).expect("binding id"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        };
+        let (one, two) = (binding("one"), binding("two"));
+        let sid = SessionId::new().to_string();
+        let model = "realm-gateway-model";
+        let mut previous = None;
+        for (provider, server, auth_binding, replaced) in [
+            (Provider::OpenAI, None, None, true),
+            (Provider::OpenAI, None, None, false),
+            (Provider::OpenAI, None, Some(&one), true),
+            (Provider::OpenAI, None, Some(&one), false),
+            (Provider::OpenAI, None, Some(&two), true),
+            (Provider::OpenAI, None, None, true),
+            (Provider::Anthropic, None, None, true),
+            (Provider::SelfHosted, Some("local"), None, true),
+            (Provider::SelfHosted, Some("local"), None, false),
+            (Provider::SelfHosted, Some("other"), None, true),
+        ] {
+            let (mob_id, created) = state
+                .ensure_implicit_mob_on_route(
+                    &sid,
+                    model,
+                    Some(provider),
+                    server,
+                    auth_binding,
+                    None,
+                )
+                .await
+                .expect("ensure the implicit mob on the route");
+            assert_eq!(
+                created, replaced,
+                "{provider:?} {server:?} {auth_binding:?}"
+            );
+            let handle = state.handle_for(&mob_id).await.expect("handle");
+            let profile = handle
+                .definition()
+                .resolve_inline_profile(&delegate)
+                .cloned()
+                .expect("delegate profile");
+            assert_eq!(
+                (
+                    profile.provider,
+                    profile.self_hosted_server_id.as_deref(),
+                    profile.auth_binding.as_ref()
+                ),
+                (Some(provider), server, auth_binding)
+            );
+            let incarnation = handle.incarnation();
+            if let Some(previous) = previous {
+                assert_eq!(
+                    incarnation != previous,
+                    replaced,
+                    "{provider:?} {server:?} {auth_binding:?}"
+                );
+            }
+            previous = Some(incarnation);
+        }
+    }
+
     #[tokio::test]
     async fn test_is_implicit_mob_true_for_implicit_false_for_explicit() {
         let state = MobMcpState::new_in_memory();
@@ -16441,6 +16942,7 @@ mod tests {
                 model: "claude-sonnet-4-5".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -16728,6 +17230,7 @@ mod tests {
             model: model.to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -22991,7 +23494,11 @@ mod tests {
                     "definition": {
                         "id": mob_id.as_str(),
                         "profiles": {
-                            "worker": { "model": "gpt-5.4", "tools": {"comms": true} }
+                            "worker": {
+                                "model": "gpt-5.4",
+                                "external_addressable": true,
+                                "tools": {"comms": true}
+                            }
                         }
                     }
                 }),

@@ -21,6 +21,7 @@ export const CONSOLE_RPC_PATHS = {
 
 export const CONSOLE_RPC_METHODS = {
   capabilities: "meta/capabilities",
+  whoami: "meta/console/whoami",
   send: "meta/console/send",
   recoverSend: "meta/console/recover_send",
   listIdentities: "meta/console/list_identities",
@@ -43,6 +44,10 @@ export const CONSOLE_RPC_METHODS = {
   gatingPending: "meta/gating/pending",
   gatingAudit: "meta/gating/audit",
   gatingDecide: "meta/gating/decide",
+  decisionsList: "meta/decisions/list",
+  decisionsRendering: "meta/decisions/rendering",
+  consoleAttention: "meta/console/attention",
+  consoleAttentionDismiss: "meta/console/attention/dismiss",
   accessStatus: "meta/access/status",
   accessGet: "meta/access/get",
   accessSet: "meta/access/set",

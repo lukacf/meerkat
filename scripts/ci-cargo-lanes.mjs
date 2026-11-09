@@ -54,9 +54,9 @@
 // so no pull request fits the 20-minute cap from the start of the pre-push
 // hook to a green CI gate with them. The plan lists what a pull request left
 // to the push (deferred_to_push), and the push plan runs all of it.
-// The workspace rustdoc (`doc --workspace --no-deps` with rustdoc's lints
-// denied) is left to the push the same way: it documents meerkat-mob and
-// every crate built on it.
+// The workspace rustdoc (`doc --no-deps` with rustdoc's lints denied, over
+// Core's members and the products' packages the change reaches) is left to
+// the push the same way: it documents meerkat-mob and every crate built on it.
 //
 // A push runs no unit lane of its own: the rows a pull request's unit lane
 // would run (the same shards, so the same `-p` sets, because Cargo unifies
@@ -143,9 +143,10 @@
 // current estimates require comparison with hosted results. On d1dda1482 the
 // runtime unit lane models 15.1 minutes, not a measured completion guarantee.
 // The pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES, a
-// surrogate packing cap and not a measured timing. It is 20, since the
-// runtime lane models 18.3 minutes at 8ef2d8b939 (17.1 when the cap became
-// 18). Measured, the runtime lane alone took 790 and 839 s on the green
+// surrogate packing cap and not a measured timing. It is 21, since the
+// runtime lane models 20.1 minutes on the 0.9.11 release line (18.3 at
+// 8ef2d8b939, when the cap became 20, and 17.1 when it became 18). Measured,
+// the runtime lane alone took 790 and 839 s on the green
 // release pull-request runs 40055499505 and 40073579948, about 0.78 of its
 // modelled time at a model of about 18 minutes; earlier pull-request runs
 // took 359-715 s (39337274765, 39360046041, 39388235216 and 39394366439).
@@ -155,7 +156,9 @@
 // 1114 and 1173 s at a model of 18.3 minutes (a ratio of 1.01-1.07),
 // 448-488 s of it running tests the model does not count, and its execution
 // path reached 1146 and 1207 s. Runtime's lane therefore runs as two hash
-// partitions (PARTITIONED_UNIT_PACKAGES below). The cap sits above the
+// partitions (PARTITIONED_UNIT_PACKAGES below). Every partition's row builds
+// the whole crate, so each row models the lane's whole build, and another
+// partition would not lower it. The cap sits above the
 // gate's 18-minute execution budget because it is a model threshold; the
 // gate itself is unchanged.
 // The enforced limits are the CI gate's: 1080 s of lane execution and 1200 s
@@ -312,7 +315,7 @@ const NULL_SHA = "0000000000000000000000000000000000000000";
 const LINK_COST_PER_DEP = 8000;
 const COST_UNITS_PER_MINUTE = 35000;
 const LANE_SETUP_MINUTES = 1;
-export const PR_UNIT_BUDGET_MINUTES = 20;
+export const PR_UNIT_BUDGET_MINUTES = 21;
 // Packages whose unit tests run long get a unit lane of their own, so their
 // test time does not stack on other crates' builds; the line-and-closure
 // model counts only the build. xtask's lib and bin tests (the governance
@@ -374,8 +377,9 @@ export const HOSTED_RUNNER_EXCLUDED_BINARIES = [
   },
 ];
 // Tests no hosted runner can run, in a binary whose other tests run: each
-// needs an environment only its product's own lane provides. Keyed by the
-// binary (package::test-target) and listed by exact name, with the reason.
+// needs an environment no CI lane provides, and its reason says what that is
+// and that no lane runs it. Keyed by the binary (package::test-target) and
+// listed by exact name, with the reason.
 // The closure-tests row that holds the binary runs it without them (the
 // row's `filter`, ci-hook-coverage's excludedTestsFilter), the plan names them with the reason
 // in `hosted_runner_excluded_tests`, and scripts/ci-verify-row-binaries.mjs
@@ -385,8 +389,9 @@ export const HOSTED_RUNNER_EXCLUDED_TESTS = [
   {
     binary: "meerkat-connect::cli_paired_host",
     reason:
-      "needs the assembled pin-built synthetic resource prefix (CONNECT_LAZY_SERVICES_FIXTURE_PREFIX), " +
-      "which only Connect's native lane provides",
+      "needs CONNECT_LAZY_SERVICES_FIXTURE_PREFIX, an assembled synthetic Connect resource prefix with a " +
+      "meerkat-connect built against its resource pin; no workflow of this repository assembles one, so no " +
+      "CI lane runs these tests and their acceptance stays owed",
     tests: [
       "actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval",
       "actual_cli_configured_browser_login_precedes_pairing_and_uses_same_native_session",
@@ -477,7 +482,6 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source", STALE],
   ["private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper", STALE],
   ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
-  ["private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder", "governed-origin-requester"],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
@@ -489,15 +493,19 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
 // the row excludes them without requiring them to fail.
 export const CONNECT_CONSOLE_TEST_DEBT = "connect/crates/meerkat-connect/CONSOLE-TEST-DEBT.md";
 const SETUP_CONTENTION = "setup-contention";
+const CONSENT_LEASE_HELD = "consent-lease-held";
 export const CONNECT_CONSOLE_KNOWN_REDS = [
   ["resources::shared_setup::native_case::two_sdk_children_share_one_preparation_and_cancel_independently", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::observe_controls::owner_change_at_a_finds_helper_observation_is_waited_out_and_observed_again", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::two_sdk_originals_admit_one_fresh_dedicated_planning_input", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::planning_admission::console_consent_case::installed_console_consent_rechecks_human_login_and_selected_policy", CONSENT_LEASE_HELD, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::console_consent_case::entered_operation::registered_r2_find_enters_once_per_call_and_commits_real_context_graphs", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::closed_workflow_refuses_context_replay_after_automatic_admission", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_delivery_tests::committed_waiter_context_is_delivered_automatically_once_and_survives_departure", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_survives_a_departure_and_refuses_closed_recipient", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::planning_admission::context_transfer_tests::sdk_completed_context_validates_mutable_payload_without_replaying_find", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::a_fresh_install_pending_at_its_members_cancel_keeps_its_proofs", SETUP_CONTENTION, { intermittent: true }],
+  ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_join_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_check_after_the_release_is_waited_out_once", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::post_effect_controls::owner_change_at_the_install_check_is_refused_certified_and_installed_fresh", SETUP_CONTENTION, { intermittent: true }],
   ["resources::shared_setup::native_case::post_effect_controls::owner_change_outlasting_the_check_after_the_join_ends_typed_without_replay", SETUP_CONTENTION, { intermittent: true }],
@@ -3130,12 +3138,62 @@ function plan(args) {
   // Every crate's documentation, with rustdoc's lints denied: the push
   // runs it on a Rust change, like the closure check.
   result.rustdoc = result.rust_changed && !deferToPush;
-  // What the rustdoc lane documents: Core's members (every workspace member
-  // but the products') when the plan reaches Core, the changed products'
-  // packages otherwise. Products keep their own rustdoc rules.
-  result.rustdoc_flags = result.core_changed
-    ? selections.selections.get(CORE).flags
-    : result.packages.map((name) => `-p ${name}`).join(" ");
+  // What the rustdoc lane documents (rustdoc_rows; no row mixes products,
+  // as one cargo invocation unifies features across its packages): Core's
+  // members (every workspace member but the products') when the plan
+  // reaches Core, and each product's packages in the reverse-dependency
+  // closure. A product's docs link into Core's crates, so a Core change that
+  // renames, removes or hides an item they link to breaks the product's
+  // documentation: the product's rows document exactly the packages the
+  // change reaches, and a product it does not reach gets no row. Cargo
+  // documents each bin into a directory named after it and refuses two bins
+  // of one name in one invocation ("document output filename collision"),
+  // and the all-features leg builds every bin (Connect's two
+  // toolkit_gateway bins, in meerkat-connect and toolkit-mobkit), so a
+  // product's packages fill as few rows as hold no bin name twice, in
+  // order. `key` names a row's artifacts and `features` its legs: Core's
+  // members are documented with default features and with --all-features,
+  // a product's rows with --all-features only, which compiles every
+  // feature-gated doc of the product and so every link it makes into Core
+  // (a doc that only a build without some feature compiles is outside it).
+  const binNames = (name) =>
+    byName.get(name).targets.filter((target) => target.kind.includes("bin")).map((target) => target.name);
+  const docGroups = (names) => {
+    const groups = [];
+    for (const name of names) {
+      const bins = binNames(name);
+      const group = groups.find((candidate) => bins.every((bin) => !candidate.bins.has(bin)));
+      if (group) {
+        group.names.push(name);
+        for (const bin of bins) group.bins.add(bin);
+      } else {
+        groups.push({ names: [name], bins: new Set(bins) });
+      }
+    }
+    return groups.map((group) => group.names);
+  };
+  result.rustdoc_rows = !result.rustdoc
+    ? []
+    : [
+      ...(result.core_changed
+        ? [{ name: CORE, key: CORE, product: CORE, flags: selections.selections.get(CORE).flags, features: ["default", "all"] }]
+        : []),
+      ...byProduct(result.closure)
+        .filter(([product]) => product !== CORE)
+        .flatMap(([product, names]) => {
+          const groups = docGroups(names);
+          return groups.map((group, index) => {
+            const part = groups.length > 1 ? ` ${index + 1}/${groups.length}` : "";
+            return {
+              name: `${product}${part}, ${group.length} ${group.length === 1 ? "crate" : "crates"}`,
+              key: groups.length > 1 ? `${product}-${index + 1}` : product,
+              product,
+              flags: group.map((name) => `-p ${name}`).join(" "),
+              features: ["all"],
+            };
+          });
+        }),
+    ];
   result.governed_jsonl = guardRuns("governed_jsonl");
   result.mcp_confinement_positive = guardRuns("mcp_confinement_positive");
   deferred.closure_check = result.rust_changed && deferToPush;
@@ -3565,7 +3623,19 @@ function githubOutput(result) {
     }),
   );
   scalar("rustdoc", String(result.rustdoc));
-  scalar("rustdoc_flags", result.rustdoc_flags ?? "");
+  // The rustdoc job's matrix: one entry per row and leg. A placeholder keeps
+  // fromJSON well-formed for a plan without rustdoc, whose job `if:` skips
+  // it.
+  const rustdocLegs = (result.rustdoc_rows ?? []).flatMap(({ features, ...row }) =>
+    features.map((leg) => ({ ...row, features: leg })));
+  scalar(
+    "rustdoc_matrix",
+    JSON.stringify({
+      include: rustdocLegs.length > 0
+        ? rustdocLegs
+        : [{ name: "none", key: "none", product: "none", flags: "", features: "default" }],
+    }),
+  );
   scalar("core_changed", String(result.core_changed));
   scalar("core_paths_changed", String(result.core_paths_changed));
   scalar("governed_jsonl", String(result.governed_jsonl));

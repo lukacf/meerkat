@@ -280,6 +280,7 @@ async fn native_issuance_ack_gap_reconciles_existing_exact_reference_after_cold_
         .source
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &owner.operator,
             native_id.clone(),
             decision.intent.collector.clone(),
@@ -328,6 +329,7 @@ async fn same_id_with_another_native_grantee_is_not_reinterpreted() {
         .source
         .grants()
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &owner.operator,
             EvidenceId::new(&saved.key.id).unwrap(),
             crate::installed_host::tests::principal("unrelated-agent"),

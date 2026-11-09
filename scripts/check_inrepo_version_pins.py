@@ -468,7 +468,7 @@ class Scanner:
     def scan_text(self, path: str, text: str, name: str) -> None:
         manifest = name in NPM_MANIFESTS
         code = name.endswith(CODE_SUFFIXES)
-        # One pass of the cheap pattern finds the candidate lines; the pin patterns
+        # A scan with the cheap pattern finds the candidate lines; the pin patterns
         # run on those lines only, numbered by counting newlines forward.
         last_start, number = 0, 1
         for hit in self.cheap_re.finditer(text):

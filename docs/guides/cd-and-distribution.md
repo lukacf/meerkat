@@ -75,7 +75,9 @@ build of the same commit, in a release the same release's artifacts. A pin of
 an in-repo package is a same-commit reference (a path, `file:` or workspace
 dependency) or names exactly that package's version in the tree; only
 upgrade-test fixtures and recorded history keep an older version, each listed
-with its reason in `ci/inrepo-version-pins.json`. `make verify-version-parity`
+with its reason in `ci/inrepo-version-pins.json` (an entry that names, in
+`removed_by`, the change that moves its pins is temporary and goes with that
+change). `make verify-version-parity`
 (CI's format and governance job, and the release hook) refuses any other pin
 below the version in the tree with `scripts/check_inrepo_version_pins.py`, and
 a version bump moves the pins on the packages it bumps in the same commit: the

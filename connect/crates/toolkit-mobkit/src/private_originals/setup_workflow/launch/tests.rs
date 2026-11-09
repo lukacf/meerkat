@@ -108,6 +108,47 @@ async fn event(
     }
 }
 
+/// Submits a fixture original to native admission until it is answered.
+///
+/// A bind that cannot resolve or issue its controller grant at that instant
+/// (an owner answers unavailable, for example while an owner change is in
+/// progress or published during its read) refuses fail-closed, and the
+/// submission answers `NativeOutcomeUnavailable`: nothing was admitted. On
+/// that answer the fixture checks that its session's native input count did
+/// not move, then submits the same original again after a short backoff, for
+/// up to 30 s. Any other answer is returned as it came. The fixture's
+/// originals share its route, so they target the session
+/// `FirstFixture::inputs` reads.
+async fn submit_until_answered(
+    f: &FirstFixture,
+    submission: &PrivateOriginalSubmit,
+) -> PrivateOriginalSubmission {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut backoff = Duration::from_millis(10);
+    loop {
+        let inputs = f.inputs().await.unwrap();
+        let answer = f
+            .source
+            .submit_authenticated_original(submission.clone())
+            .await
+            .unwrap();
+        if !matches!(answer, PrivateOriginalSubmission::NativeOutcomeUnavailable) {
+            return answer;
+        }
+        assert_eq!(
+            f.inputs().await.unwrap(),
+            inputs,
+            "an unavailable native outcome admitted nothing"
+        );
+        assert!(
+            tokio::time::Instant::now() + backoff < deadline,
+            "native admission of the fixture original stayed unavailable"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_millis(200));
+    }
+}
+
 struct Case {
     planning: Arc<InstalledWorkflowPlanning>,
     membership: SetupWorkflowWaiter,
@@ -130,11 +171,7 @@ async fn prepare_with_waiter_options(f: &FirstFixture, lifecycle: Option<(u64, b
     // P is a separate actual admitted input. A is never G's parent and its
     // cancellation cannot revoke the independently selected planning lineage.
     let parent = event(f, "planning-parent", vec![]).await;
-    let admitted_parent = f
-        .source
-        .submit_authenticated_original(parent.clone())
-        .await
-        .unwrap();
+    let admitted_parent = submit_until_answered(f, &parent).await;
     f.finish(&Ok::<_, String>(admitted_parent)).await.unwrap();
     let parent_binding = f
         .source

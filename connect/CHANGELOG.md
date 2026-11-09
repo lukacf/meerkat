@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `toolkit_installed_service_candidates` no longer returns run after run of
+  pages with no candidate. A list call now reads on from its cursor until
+  its page holds a candidate or the list ends, and starts no new read after
+  20 seconds; a page that stops there without a candidate carries
+  `scan_incomplete: true` and a notice to call again with `next`, so it no
+  longer looks like the end of the list. Reading the list also no longer
+  lengthens it: the package owner's readback keeps its private files in a
+  `readback-` directory beside the setup attempts, where the list does not
+  look.
 - The shared setup owner names each peer whose close failed: one stderr
   line per peer, `local_setup_connection_diagnostic phase=peer_close
   peer=<n> exception=<class> errno=<code>`, in the closed categories of its

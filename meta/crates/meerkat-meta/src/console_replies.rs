@@ -651,10 +651,10 @@ impl ConsoleReplies {
 
     /// How long the attention list keeps its items, and with them the
     /// receipts of the replies delivered as items; `None` when the console
-    /// keeps no attention list. A list kept for the process (`meta_gateway`
-    /// keeps its metadata in memory) forgets its deliveries at a restart: a
-    /// route that must stay exactly-once across restarts holds no reply
-    /// there.
+    /// keeps no attention list. A list kept for the process (a runtime whose
+    /// metadata store lasts for the process only, as on a gateway launch
+    /// without persistent state) forgets its deliveries at a restart: a route
+    /// that must stay exactly-once across restarts holds no reply there.
     pub(crate) fn attention_retention(&self) -> Option<RecordRetention> {
         self.attention
             .as_ref()
@@ -809,11 +809,12 @@ impl ConsoleReplies {
     /// id `interaction_id`, if it was delivered: what a host's committed
     /// check reads. `None` also when the console no longer knows the request
     /// or its delivery. A console whose console log and metadata store last
-    /// for the process only (as `meta_gateway`'s do) forgets both at a
-    /// restart: every earlier reply then reads as not delivered, and a
-    /// delivery of it is refused ([`ConsoleReplyError::UnknownThread`]), so
-    /// no reply reaches its person twice. [`Self::attention_retention`] says
-    /// how long the attention list keeps its items.
+    /// for the process only (a gateway launch without persistent state)
+    /// forgets both at a restart: every earlier reply then reads as not
+    /// delivered, and a delivery of it is refused
+    /// ([`ConsoleReplyError::UnknownThread`]), so no reply reaches its person
+    /// twice. [`Self::attention_retention`] says how long the attention list
+    /// keeps its items.
     pub(crate) async fn delivered(
         &self,
         interaction_id: &str,

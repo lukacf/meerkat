@@ -552,6 +552,26 @@ async fn narrow_original_report_scope_refuses_locally_and_helper_turn_completes(
     }
 }
 
+/// The helper rows' production shape: the installed host starts the source's
+/// custody recovery, its live task, when it binds the runtime
+/// (`host_gateway.rs`, `host_gateway/prepared_runtime.rs`). The row stops and
+/// joins it after its fixture shuts down.
+fn start_custody_recovery(fixture: &Fixture) {
+    fixture
+        .source
+        .start_custody_recovery(fixture.native.mob_runtime().continuation_source_announcer())
+        .unwrap();
+    assert_custody_recovery_runs(fixture);
+}
+
+/// Once the source's custody recovery runs, another start is refused.
+fn assert_custody_recovery_runs(fixture: &Fixture) {
+    assert!(
+        fixture.source.start_custody_recovery(None).is_err(),
+        "the source's custody recovery runs"
+    );
+}
+
 // The configured producer control separately supplies A's correlated targets.
 #[path = "helper_report_producer_tests.rs"]
 mod configured_parent;

@@ -139,56 +139,11 @@ impl Fixture {
         failure: CoreApplyFailureCause,
         attempts: usize,
     ) -> (Vec<InputId>, RunId, Arc<RuntimeLoopTeardownSlot>) {
-        let mut inputs = Vec::new();
-        for body in ["first independent input", "second independent input"] {
-            let mut header = PromptInput::new("", None).header;
-            header.source = InputOrigin::Peer {
-                peer_id: "completion-fixture".into(),
-                display_identity: None,
-                runtime_id: None,
-            };
-            let input = Input::Peer(PeerInput {
-                header,
-                directed_interaction_id: None,
-                objective_id: None,
-                system_prompts: Vec::new(),
-                injected_context: Vec::new(),
-                sender_taint: None,
-                convention: Some(PeerConvention::Message),
-                content: body.into(),
-                payload: None,
-                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
-                in_reply_to: None,
-            });
-            inputs.push(input.id().clone());
-            assert!(
-                driver
-                    .lock()
-                    .await
-                    .as_driver_mut()
-                    .accept_input(input)
-                    .await
-                    .unwrap()
-                    .is_accepted()
-            );
-        }
+        let inputs = Self::accept_independent_inputs(driver).await;
         let mut last_run = None;
         let carrier = RuntimeLoopTeardownSlot::pending();
         for attempt in 0..attempts {
-            let batch = owner::machine_authorize_runtime_loop_batch(&*driver.lock().await).unwrap();
-            assert_eq!(batch.input_ids().len(), 2);
-            let run_id = RunId::new();
-            assert!(matches!(
-                owner::prepare_runtime_loop_batch_start(
-                    driver,
-                    run_id.clone(),
-                    batch,
-                    crate::meerkat_machine::RunlessTerminalAnnouncement::default()
-                )
-                .await
-                .unwrap(),
-                owner::RuntimeLoopBatchStart::Started
-            ));
+            let run_id = Self::start_run(driver, inputs.len()).await;
             if attempt + 1 == attempts {
                 let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
                 let waited = realize_runtime_loop_terminal_owned(
@@ -226,6 +181,288 @@ impl Fixture {
             last_run = Some(run_id);
         }
         (inputs, last_run.unwrap(), carrier)
+    }
+
+    /// Accept two independent queued peer inputs.
+    async fn accept_independent_inputs(driver: &owner::SharedDriver) -> Vec<InputId> {
+        let mut inputs = Vec::new();
+        for body in ["first independent input", "second independent input"] {
+            let mut header = PromptInput::new("", None).header;
+            header.source = InputOrigin::Peer {
+                peer_id: "completion-fixture".into(),
+                display_identity: None,
+                runtime_id: None,
+            };
+            let input = Input::Peer(PeerInput {
+                header,
+                directed_interaction_id: None,
+                objective_id: None,
+                system_prompts: Vec::new(),
+                injected_context: Vec::new(),
+                sender_taint: None,
+                convention: Some(PeerConvention::Message),
+                content: body.into(),
+                payload: None,
+                handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+                in_reply_to: None,
+            });
+            inputs.push(input.id().clone());
+            assert!(
+                driver
+                    .lock()
+                    .await
+                    .as_driver_mut()
+                    .accept_input(input)
+                    .await
+                    .unwrap()
+                    .is_accepted()
+            );
+        }
+        inputs
+    }
+
+    /// Start one run of two independent inputs and cancel it: the owned
+    /// terminalization writes both rows `Abandoned { Cancelled }` with their
+    /// terminal completion pending, and the run's teardown carrier holds the
+    /// persisted non-directed terminal.
+    async fn cancelled_run() -> Self {
+        let (fixture, recorded) = Self::cancelled_run_recording(0).await;
+        assert!(recorded.is_empty());
+        fixture
+    }
+
+    /// [`Self::cancelled_run`] where an operation of the run stages
+    /// `recorded` refusals on the first input's live row before the owned
+    /// terminalization, which writes them to the stored row. Returns their
+    /// operation ids in order.
+    async fn cancelled_run_recording(recorded: usize) -> (Self, Vec<meerkat_core::OperationId>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteRuntimeStore::new(dir.path().join("runtime.sqlite")).unwrap());
+        let session_id = SessionId::new();
+        let runtime_id = crate::identifiers::LogicalRuntimeId::for_session(&session_id);
+        let driver = Arc::new(crate::tokio::sync::Mutex::new(
+            owner::DriverEntry::Persistent(PersistentRuntimeDriver::new(
+                runtime_id.clone(),
+                store.clone(),
+                Arc::new(meerkat_store::MemoryBlobStore::new()),
+            )),
+        ));
+        let inputs = Self::accept_independent_inputs(&driver).await;
+        let run_id = Self::start_run(&driver, inputs.len()).await;
+        let mut operations = Vec::with_capacity(recorded);
+        {
+            let entry = driver.lock().await;
+            let live = &entry
+                .shell_driver()
+                .ledger()
+                .get(&inputs[0])
+                .expect("live staged row")
+                .authorization_audit;
+            for _ in 0..recorded {
+                operations.push(crate::input_audit::tests::stage_refusal_after_row_write(
+                    live,
+                    &inputs[0],
+                    &session_id,
+                    &run_id,
+                ));
+            }
+        }
+        let carrier = RuntimeLoopTeardownSlot::pending();
+        let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
+        let waited = realize_runtime_loop_terminal_owned(
+            gate.lock_owned().await,
+            carrier.clone(),
+            driver.clone(),
+            run_id.clone(),
+            inputs.clone(),
+            false,
+            OwnedRuntimeLoopTerminalization::Cancelled,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            waited,
+            OwnedRuntimeLoopChildWait::Settled(
+                _,
+                OwnedRuntimeLoopTerminalizationOutcome::Persisted
+            )
+        ));
+        let fixture = Self {
+            _dir: dir,
+            store,
+            driver,
+            runtime_id,
+            session_id,
+            inputs,
+            run_id,
+            carrier,
+        };
+        assert_eq!(
+            crate::input_audit::tests::audit_operation_ids(
+                &fixture
+                    .stored_row(&fixture.inputs[0])
+                    .await
+                    .state
+                    .authorization_audit
+            ),
+            operations,
+            "the terminal write stores the records staged before it"
+        );
+        (fixture, operations)
+    }
+
+    /// Authorize the next runtime-loop batch, which must hold `inputs`
+    /// inputs, and start its run.
+    async fn start_run(driver: &owner::SharedDriver, inputs: usize) -> RunId {
+        let batch = owner::machine_authorize_runtime_loop_batch(&*driver.lock().await).unwrap();
+        assert_eq!(batch.input_ids().len(), inputs);
+        let run_id = RunId::new();
+        assert!(matches!(
+            owner::prepare_runtime_loop_batch_start(
+                driver,
+                run_id.clone(),
+                batch,
+                crate::meerkat_machine::RunlessTerminalAnnouncement::default()
+            )
+            .await
+            .unwrap(),
+            owner::RuntimeLoopBatchStart::Started
+        ));
+        run_id
+    }
+
+    /// An operation of the cancelled run stages a refusal on the first
+    /// input's live row after the owned terminalization wrote that row.
+    async fn stage_refusal_after_terminal_write(&self) -> meerkat_core::OperationId {
+        let before = self.raw_row(&self.inputs[0]);
+        let entry = self.driver.lock().await;
+        let observed = crate::input_audit::tests::stage_refusal_after_row_write(
+            &entry
+                .shell_driver()
+                .ledger()
+                .get(&self.inputs[0])
+                .expect("live terminal row")
+                .authorization_audit,
+            &self.inputs[0],
+            &self.session_id,
+            &self.run_id,
+        );
+        drop(entry);
+        assert_eq!(
+            before,
+            self.raw_row(&self.inputs[0]),
+            "staging writes no row"
+        );
+        observed
+    }
+
+    /// Both rows finalized as the cancelled run, no pending terminal owner
+    /// left, and the first row's durable audit holding exactly `first_audit`,
+    /// in order.
+    async fn assert_cancelled_finalized(&self, first_audit: &[meerkat_core::OperationId]) {
+        for input_id in &self.inputs {
+            let row = self
+                .store
+                .load_input_state(&self.runtime_id, input_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.seed.terminal_outcome,
+                Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::Cancelled
+                })
+            );
+            let completion = row.state.terminal_completion.as_ref().unwrap();
+            assert_eq!(completion.batch_key.run_id(), Some(&self.run_id));
+            assert!(matches!(
+                completion.phase,
+                InputTerminalCompletionPhase::Finalized { .. }
+            ));
+            if completion.owner_input_id == *input_id {
+                assert!(matches!(
+                    completion.outcome,
+                    Some(crate::completion::CompletionOutcome::Cancelled)
+                ));
+            } else {
+                assert!(completion.outcome.is_none());
+            }
+            let expected_audit = if *input_id == self.inputs[0] {
+                first_audit.to_vec()
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                crate::input_audit::tests::audit_operation_ids(&row.state.authorization_audit),
+                expected_audit,
+                "the finalization commits every observation staged before it"
+            );
+        }
+        let pending_owners: usize = rusqlite::Connection::open(self.store.path())
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM runtime_pending_terminal_owners WHERE runtime_id=?1",
+                rusqlite::params![self.runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_owners, 0);
+    }
+
+    async fn stored_row(&self, input_id: &InputId) -> crate::input_state::StoredInputState {
+        self.store
+            .load_input_state(&self.runtime_id, input_id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Write the first input's stored row as another writer does. Returns
+    /// the bytes written.
+    fn replace_first_stored_row(&self, row: &crate::input_state::StoredInputState) -> Vec<u8> {
+        let bytes = serde_json::to_vec(row).unwrap();
+        rusqlite::Connection::open(self.store.path())
+            .unwrap()
+            .execute(
+                "UPDATE runtime_input_states SET state_json=?3 WHERE runtime_id=?1 AND input_id=?2",
+                rusqlite::params![
+                    self.runtime_id.to_string(),
+                    self.inputs[0].to_string(),
+                    &bytes
+                ],
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// Teardown's recovery of the run refuses the first stored row the other
+    /// writer left as `written`, writes neither row, and keeps the carrier.
+    async fn assert_teardown_refuses_changed_first_row(&self, written: &[u8]) {
+        let second = self.raw_row(&self.inputs[1]);
+        let recovery = RuntimeLoopRecoveryContext {
+            authority_binding: RuntimeLoopAuthorityBinding::detached_for_test(),
+            completions: Some(Arc::new(crate::tokio::sync::Mutex::new(
+                crate::completion::CompletionRegistry::new(),
+            ))),
+        };
+        let error = recover_committed_runtime_projections_before_teardown(
+            &self.driver,
+            &mut NoExecution,
+            &self.carrier,
+            &recovery,
+        )
+        .await
+        .expect_err("a stored row that differs beyond the live audit suffix stays stale");
+        assert!(
+            error
+                .to_string()
+                .contains("terminal completion finalization lost the exact durable CAS"),
+            "{error}"
+        );
+        assert_eq!(written, self.raw_row(&self.inputs[0]).as_slice());
+        assert_eq!(second, self.raw_row(&self.inputs[1]));
+        assert!(self.carrier.pending_nondirected_run_terminal().is_some());
     }
 
     fn raw_row(&self, input_id: &InputId) -> Vec<u8> {
@@ -963,6 +1200,211 @@ async fn teardown_recovery_delivers_the_carried_apply_failure_reason() {
             "teardown recovery delivers the carried typed reason"
         );
     }
+}
+
+/// Abnormal teardown settles a cancelled run's terminal when an operation of
+/// the run staged an audit observation after the owned terminalization wrote
+/// the run's rows. The observation waits on the live row for the row's next
+/// update; the finalization is that update: it compares against the rows as
+/// last written and commits the observation with the receipt.
+#[tokio::test]
+async fn teardown_recovery_finalizes_a_cancelled_run_after_a_late_audit_observation() {
+    let fixture = Fixture::cancelled_run().await;
+    fixture.pending().await;
+    let observed = fixture.stage_refusal_after_terminal_write().await;
+    let completions = Arc::new(crate::tokio::sync::Mutex::new(
+        crate::completion::CompletionRegistry::new(),
+    ));
+    let mut handles = Vec::new();
+    for id in &fixture.inputs {
+        handles.push(completions.lock().await.register(id.clone()));
+    }
+    let recovery = RuntimeLoopRecoveryContext {
+        authority_binding: RuntimeLoopAuthorityBinding::detached_for_test(),
+        completions: Some(Arc::clone(&completions)),
+    };
+    recover_committed_runtime_projections_before_teardown(
+        &fixture.driver,
+        &mut NoExecution,
+        &fixture.carrier,
+        &recovery,
+    )
+    .await
+    .expect("teardown settles the cancelled run's terminal");
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    for handle in handles {
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(10), handle.wait_authorized())
+                .await
+                .expect("teardown resolves every waiter of the cancelled run");
+        assert!(
+            matches!(outcome, crate::completion::CompletionOutcome::Cancelled),
+            "expected the cancelled run, got {outcome:?}"
+        );
+    }
+    fixture
+        .assert_cancelled_finalized(std::slice::from_ref(&observed))
+        .await;
+}
+
+/// The live path settles the same way: the runtime loop's cancelled-run
+/// finalization commits an observation staged after the terminal write,
+/// clears the run's teardown carrier, and the runtime starts its next run.
+#[tokio::test]
+async fn live_cancelled_finalization_commits_a_late_audit_observation_and_runs_on() {
+    let fixture = Fixture::cancelled_run().await;
+    let observed = fixture.stage_refusal_after_terminal_write().await;
+    let completions = Arc::new(crate::tokio::sync::Mutex::new(
+        crate::completion::CompletionRegistry::new(),
+    ));
+    let gate = Arc::new(crate::tokio::sync::Mutex::new(()));
+    finalize_publish_and_resolve_runtime_terminals(
+        &fixture.driver,
+        &Arc::new(meerkat_core::PostCommitHookDispatcher::new(
+            fixture.session_id.clone(),
+        )),
+        Some(&completions),
+        gate.lock_owned().await,
+        &fixture.carrier,
+        &mut NoExecution,
+        &fixture.inputs,
+        &[],
+        &fixture.run_id,
+        mm::RuntimeCompletionTerminalObservation::MachineTerminal,
+        None,
+        mm::RuntimeCompletionFinalizationObservation::Succeeded,
+        None,
+    )
+    .await
+    .expect("the live cancelled path finalizes the run's terminal");
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    fixture
+        .assert_cancelled_finalized(std::slice::from_ref(&observed))
+        .await;
+    let next = Fixture::accept_independent_inputs(&fixture.driver).await;
+    Fixture::start_run(&fixture.driver, next.len()).await;
+}
+
+/// Expecting each row as it was last written accepts only the live audit
+/// suffix: with an observation waiting on the live row, the finalization
+/// still refuses a stored row another writer changed, and leaves that row as
+/// the writer left it.
+#[tokio::test]
+async fn late_audit_observation_does_not_excuse_a_changed_stored_row() {
+    let fixture = Fixture::cancelled_run().await;
+    fixture.stage_refusal_after_terminal_write().await;
+    let mut changed = fixture.stored_row(&fixture.inputs[0]).await;
+    changed.state.updated_at += chrono::Duration::seconds(1);
+    let written = fixture.replace_first_stored_row(&changed);
+    fixture
+        .assert_teardown_refuses_changed_first_row(&written)
+        .await;
+}
+
+/// The same for a stored audit that is no prefix of the live one: a record
+/// the live row never held stays a difference.
+#[tokio::test]
+async fn late_audit_observation_does_not_excuse_a_divergent_stored_audit() {
+    let fixture = Fixture::cancelled_run().await;
+    fixture.stage_refusal_after_terminal_write().await;
+    let mut divergent = fixture.stored_row(&fixture.inputs[0]).await;
+    let other = crate::input_audit::InputAuthorizationAudit::default();
+    crate::input_audit::tests::stage_refusal_after_row_write(
+        &other,
+        &fixture.inputs[0],
+        &fixture.session_id,
+        &fixture.run_id,
+    );
+    divergent.state.authorization_audit = other;
+    let written = fixture.replace_first_stored_row(&divergent);
+    fixture
+        .assert_teardown_refuses_changed_first_row(&written)
+        .await;
+}
+
+/// A stored audit shorter than the live one that is no prefix of it (a
+/// record the live row never held, in place of the one the row was written
+/// with) stays a difference: only the live row's own stored records are
+/// expected.
+#[tokio::test]
+async fn late_audit_observation_does_not_excuse_a_shorter_stored_audit_that_is_no_prefix() {
+    let (fixture, recorded) = Fixture::cancelled_run_recording(1).await;
+    assert_eq!(recorded.len(), 1);
+    fixture.stage_refusal_after_terminal_write().await;
+    let mut shorter = fixture.stored_row(&fixture.inputs[0]).await;
+    let other = crate::input_audit::InputAuthorizationAudit::default();
+    crate::input_audit::tests::stage_refusal_after_row_write(
+        &other,
+        &fixture.inputs[0],
+        &fixture.session_id,
+        &fixture.run_id,
+    );
+    shorter.state.authorization_audit = other;
+    let written = fixture.replace_first_stored_row(&shorter);
+    fixture
+        .assert_teardown_refuses_changed_first_row(&written)
+        .await;
+}
+
+/// A stored audit longer than the live one (the live records plus one the
+/// live row lacks, as if another writer extended it) stays a difference: the
+/// rewrite would drop that record.
+#[tokio::test]
+async fn late_audit_observation_does_not_excuse_a_longer_stored_audit() {
+    let (fixture, recorded) = Fixture::cancelled_run_recording(1).await;
+    assert_eq!(recorded.len(), 1);
+    fixture.stage_refusal_after_terminal_write().await;
+    let extended = {
+        let entry = fixture.driver.lock().await;
+        entry
+            .shell_driver()
+            .ledger()
+            .get(&fixture.inputs[0])
+            .expect("live terminal row")
+            .authorization_audit
+            .freeze_for_persistence()
+            .unwrap()
+            .restore_observations_for_owner()
+            .unwrap()
+    };
+    crate::input_audit::tests::stage_refusal_after_row_write(
+        &extended,
+        &fixture.inputs[0],
+        &fixture.session_id,
+        &fixture.run_id,
+    );
+    let mut longer = fixture.stored_row(&fixture.inputs[0]).await;
+    longer.state.authorization_audit = extended;
+    let written = fixture.replace_first_stored_row(&longer);
+    fixture
+        .assert_teardown_refuses_changed_first_row(&written)
+        .await;
+}
+
+/// The field shape: the stored row already holds records an operation of the
+/// run staged before the terminal write, and one more waits on the live row.
+/// Teardown expects the stored records, settles the run, and commits every
+/// record in order.
+#[tokio::test]
+async fn teardown_recovery_finalizes_over_a_stored_audit_prefix() {
+    let (fixture, mut records) = Fixture::cancelled_run_recording(3).await;
+    records.push(fixture.stage_refusal_after_terminal_write().await);
+    let recovery = RuntimeLoopRecoveryContext {
+        authority_binding: RuntimeLoopAuthorityBinding::detached_for_test(),
+        completions: Some(Arc::new(crate::tokio::sync::Mutex::new(
+            crate::completion::CompletionRegistry::new(),
+        ))),
+    };
+    recover_committed_runtime_projections_before_teardown(
+        &fixture.driver,
+        &mut NoExecution,
+        &fixture.carrier,
+        &recovery,
+    )
+    .await
+    .expect("teardown settles the cancelled run over the stored records");
+    assert!(fixture.carrier.pending_nondirected_run_terminal().is_none());
+    fixture.assert_cancelled_finalized(&records).await;
 }
 
 #[tokio::test]

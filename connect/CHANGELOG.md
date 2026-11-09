@@ -23,6 +23,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   lengthens it: the package owner's readback keeps its private files in a
   `readback-` directory beside the setup attempts, where the list does not
   look.
+- The shared setup owner names each peer whose close failed: one stderr
+  line per peer, `local_setup_connection_diagnostic phase=peer_close
+  peer=<n> exception=<class> errno=<code>`, in the closed categories of its
+  other peer diagnostics and never with exception text or paths. Before, a
+  failed peer close left no trace of the peer or of what failed.
+- The shared setup owner removes its private sockets and their directory in
+  `/tmp` even when a peer's close fails, still each only while it is the
+  socket the owner bound. A removal it refuses or that fails no longer
+  replaces the failure the owner reports: that failure is raised with the
+  removal's failure as its context. Before, a failed peer close left the
+  sockets behind.
+
+- Resource packaging pins the Linux library Connect 0.9.11 ships,
+  `toolkit-library-20261109-connect-ad31c1fd`, in
+  `scripts/package-connect-resources.py` and the product's
+  `release-manifest.json`, and the starter exported with it is the Linux
+  default starter. They pinned
+  `toolkit-library-20261009-installed-entry-recovery`, whose bootstrap
+  refuses `--enable-public-github-research`, an argument product
+  preparation always forwards, so every first-run setup on a Linux prefix
+  packaged from those pins ended `owner_refused` at the bootstrap.
+
+- Under sustained heavy CPU load, attaching a native service no longer
+  stalls before all of its members are attached. A readiness check's 250 ms
+  budget now bounds only its waits for the member and the optional read of
+  a failure's detail; its currentness checks run outside the budget and
+  still refuse what they refused before. A member that is ready is seen
+  ready even while one currentness check takes longer than the whole
+  budget, so the members after it are attached.
 
 ## [0.9.11] - 2026-11-09
 

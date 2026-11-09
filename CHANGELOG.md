@@ -35,6 +35,16 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
+  identity applies to the member's running build (a grant's `applies`), and
+  `wire_member_tool_grant_gate`, the member's gate as a grant list answers
+  it (`gate`). `tool_grants/grant` and `tool_grants/list` answer through
+  them, as Meta's `meta/tool_grants/grant` and `meta/tool_grants/list` now
+  do, so every grant surface answers both the same way. Core's answers do
+  not change.
+
 ### Fixed
 
 - `meerkat-core`, `meerkat-contracts`: the Claude effort `xhigh` is now
@@ -46,6 +56,23 @@ them.
   accepted only `xhigh`, the spelling the model catalog advertises. Requests
   to Claude send `xhigh` either way. The spellings Meerkat writes and the
   published schemas are unchanged.
+
+- `meerkat-runtime`: a run whose operation records an authorization audit
+  observation after the run's terminal input rows were written now settles
+  in the same process. The observation waits on the live input row for the
+  row's next update, and the run's terminal completion finalization is that
+  update, but its exact compare-and-swap expected the live row, observation
+  included, which never matched the stored row: the finalization failed with
+  "terminal completion finalization lost the exact durable CAS", every retry
+  in the process failed the same way, unregistering the session (a mob
+  teardown included) failed with it, and the input's receipt stayed pending
+  until a restart settled it. Every exact terminal rewrite of input rows (the
+  terminal completion finalization and payload retirement, the interaction
+  terminal outbox adoption, finalization and publication receipt, and the
+  normalization of the terminal carriers 0.8.31 wrote) now expects each row
+  as it was last written and commits the observations staged before the
+  rewrite with its replacement; any other difference from the stored row
+  still refuses the rewrite. Affects 0.8.52 through 0.9.11.
 
 ## [0.9.11] - 2026-11-09
 

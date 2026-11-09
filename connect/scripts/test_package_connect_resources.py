@@ -215,24 +215,26 @@ class PackagingTargetTests(unittest.TestCase):
                         PACKAGE.main()
                 self.assertEqual(build.call_args.kwargs, {"target": expected})
 
-    def test_preflight_selects_exact_target_inputs_and_same_starter(self):
+    def test_preflight_selects_exact_target_inputs_and_starter(self):
         expected = {
             "macos-arm64": ("cpython-3.11.16+20260901-aarch64-apple-darwin-pgo+lto-full.tar.zst",
                 "node-v24.19.0-darwin-arm64.tar.gz", "toolkit-library-20261009-library-support-selection-macos-arm64",
                 "toolkit-library-20261009-library-support-selection-macos-arm64.tar.gz",
-                "49482af8016a76de90826a1362030319f27063b92f9ee0c87de970801f04cb6b"),
+                "49482af8016a76de90826a1362030319f27063b92f9ee0c87de970801f04cb6b",
+                "toolkit-setup-20261010-resource-selection-export"),
             "linux-x86_64": ("cpython-3.11.16+20260901-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst",
-                "node-v22.23.2-linux-x64.tar.gz", "toolkit-library-20261009-installed-entry-recovery-linux-x86_64",
-                "toolkit-library-20261009-installed-entry-recovery-linux-x86_64.tar.gz",
-                "50b5ee1e384ae24f7a4a0511efaca781025eeaa8489414d71fd825557e48f146"),
+                "node-v22.23.2-linux-x64.tar.gz", "toolkit-library-20261109-connect-ad31c1fd-linux-x86_64",
+                "toolkit-library-20261109-connect-ad31c1fd-linux-x86_64.tar.gz",
+                "de622a11f8789592fec5f5c5959be7692a57b8d7eb688a9c9e3ecc63516d3bd4",
+                "toolkit-setup-20261109-connect-ad31c1fd-export"),
         }
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
-            starter = root / "dist/toolkit-setup-20261010-resource-selection-export"
-            starter.mkdir(parents=True)
-            for name in PACKAGE.STARTER:
-                (starter / name).write_bytes(b"inert fixture, never executed")
-            for target, (python, node, directory, library, library_sha) in expected.items():
+            for *_, export in expected.values():
+                (root / "dist" / export).mkdir(parents=True)
+                for name in PACKAGE.STARTER_FILES:
+                    (root / "dist" / export / name).write_bytes(b"inert fixture, never executed")
+            for target, (python, node, directory, library, library_sha, export) in expected.items():
                 with self.subTest(target=target), mock.patch.object(PACKAGE, "ROOT", root):
                     with mock.patch.object(PACKAGE, "pin") as pin, mock.patch.object(
                             PACKAGE.runpy, "run_path", side_effect=BeforeMaterialization), mock.patch.object(
@@ -251,10 +253,23 @@ class PackagingTargetTests(unittest.TestCase):
                     self.assertEqual(pin.call_args_list[2].args[1:], (PACKAGE.PIP[1], PACKAGE.PIP[2]))
                     self.assertEqual(pin.call_args_list[3].args[1], library_sha)
                     self.assertEqual([row.args for row in pin.call_args_list[4:-1]],
-                        [(starter / name, sha) for name, sha in PACKAGE.STARTER.items()])
+                        [(root / "dist" / export / name, PACKAGE.STARTERS[export][name])
+                         for name in PACKAGE.STARTER_FILES])
                     self.assertEqual(pin.call_args_list[-1].args,
                         (PACKAGE.PREPARE.parent / "notices/pip-LICENSE.txt", PACKAGE.PIP_LICENSE))
                     self.assertFalse((root / "output").exists())
+
+    def test_product_release_manifest_names_each_target_default_library(self):
+        # The product's private package inputs and the packager's default
+        # library pins are one selection: one row per target, the same bytes.
+        manifest = json.loads((PACKAGE.ROOT / "sdk/consumer-setup/product/release-manifest.json").read_bytes())
+        self.assertEqual({row["upload_name"]: (row["sha256"], row["bytes"]) for row in manifest["assets"]},
+                         {row["library"][0]: row["library"][1:] for row in PACKAGE.TARGETS.values()})
+        for target, row in PACKAGE.TARGETS.items():
+            with self.subTest(target=target):
+                self.assertTrue(row["library"][0].endswith("-" + target + ".tar.gz"))
+                self.assertEqual(row["library_dir"] + ".tar.gz", row["library"][0])
+                self.assertEqual(set(PACKAGE.STARTERS[row["starter"]]), set(PACKAGE.STARTER_FILES))
 
     def test_missing_changed_or_linked_pip_refuses_before_materialization(self):
         for kind in ("missing", "changed", "symlink"):
@@ -469,7 +484,7 @@ class ExplicitResourceSelectionTests(unittest.TestCase):
         self.assertEqual({row["name"] for row in manifest["sources"]}, {
             "pip-26.2.1.pyz", selected["macos-arm64"]["python"][0], selected["macos-arm64"]["node"][0]})
         self.assertEqual((resources / manifest["archive"]).read_bytes(), self.archive.read_bytes())
-        for name in PACKAGE.STARTER:
+        for name in PACKAGE.STARTER_FILES:
             self.assertEqual((resources / "starter" / name).read_bytes(), (self.starter / name).read_bytes())
         # A changed selected copy remains a hard closure failure.
         changed = resources / "starter/start.py"; changed.chmod(0o644); changed.write_bytes(b"changed copy")
@@ -1098,13 +1113,14 @@ class RuntimeCompatibilityTests(unittest.TestCase):
                 path.write_bytes(("inert selected " + kind).encode())
                 selected[kind] = (path.name, PACKAGE.digest(path), path.stat().st_size)
             pip = upstream / "pip.pyz"; pip.write_bytes(b"inert pip")
-            starter = root / "dist/toolkit-setup-20261010-resource-selection-export"
+            starter = root / "dist" / selected["starter"]
             starter.mkdir()
-            for name in PACKAGE.STARTER:
+            for name in PACKAGE.STARTER_FILES:
                 (starter / name).write_bytes(b"inert input")
             destination = root / "output"
             with mock.patch.object(PACKAGE, "ROOT", root), mock.patch.object(PACKAGE, "TARGETS", targets), \
-                    mock.patch.object(PACKAGE, "STARTER", {p.name: PACKAGE.digest(p) for p in starter.iterdir()}), \
+                    mock.patch.object(PACKAGE, "STARTERS",
+                        {selected["starter"]: {p.name: PACKAGE.digest(p) for p in starter.iterdir()}}), \
                     mock.patch.object(PACKAGE, "PIP", (pip.name, PACKAGE.digest(pip), pip.stat().st_size)), \
                     mock.patch.object(PACKAGE, "require_case_sensitive"), \
                     mock.patch.object(PACKAGE.subprocess, "run") as decompress, \

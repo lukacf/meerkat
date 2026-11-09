@@ -24,6 +24,16 @@ starter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(starter)
 
 
+class BootstrapCommandCaptured(Exception):
+    """Stops a product preparation at the archived bootstrap, before it runs."""
+
+
+def pinned_libraries():
+    """The library archive each target's Connect resources pin, with its digest and size."""
+    manifest = json.loads((SOURCE / "product/release-manifest.json").read_bytes())
+    return {row["upload_name"]: (row["sha256"], row["bytes"]) for row in manifest["assets"]}
+
+
 class StarterTests(unittest.TestCase):
     publish_release = fixture.BootstrapTests.publish_release
     installer = fixture.BootstrapTests.installer
@@ -816,6 +826,81 @@ class StarterTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "bootstrap_cancelled"):
             starter.start(self.options, stopped=stopped)
         self.assertFalse(self.destination.exists())
+
+    def product_bootstrap_arguments(self):
+        # Actual product preparation with every optional resource it forwards
+        # (the npm group, a Node prebuilt policy, a Node build profile and a
+        # native realm's recipes), stopped at the archived bootstrap: the
+        # exact arguments the actual starter hands it. The bootstrap never runs.
+        self.recipe_owner_fixture()
+        product, root, _ = self.npm_product()
+        entries = []
+        for name in ("node-prebuilt-policy.json", "node-build-profile.json"):
+            raw = b'{ "scope": "transport_fixture" }\n'
+            (root / name).write_bytes(raw)
+            entries.append({"path": name, "kind": "file", "mode": 0o644,
+                            "size": len(raw), "sha256": fixture.sha(raw)})
+        product.verify_resources.return_value[0]["entries"] = entries
+        captured = []
+        load = product.exec.side_effect
+        def stop_at_bootstrap(code, namespace):
+            load(code, namespace)
+            run_owner = namespace["runner"].run_owner
+            def owner(command, *args, **kwargs):
+                if len(command) < 4 or Path(command[3]).name != "bootstrap_host.py":
+                    return run_owner(command, *args, **kwargs)
+                captured.append([str(part) for part in command[4:]])
+                raise BootstrapCommandCaptured
+            namespace["runner"].run_owner = owner
+        product.exec.side_effect = stop_at_bootstrap
+        state = self.base / "state"
+        attempt = state / ".meerkat-connect/work/setup-one"
+        attempt.mkdir(parents=True)
+        with self.assertRaises(BootstrapCommandCaptured):
+            product.prepare(root, attempt / "prepared", threading.Event(),
+                            realm_state_root=str(state), realm="work")
+        self.assertEqual(len(captured), 1)
+        return captured[0]
+
+    def test_pinned_library_bootstrap_accepts_every_argument_product_preparation_forwards(self):
+        # Opt-in: the packaging owner supplies the exact library archive the
+        # Connect resources pin for a target. Only its own bootstrap's argument
+        # check runs, never its bootstrap or installer.
+        selected = os.environ.get("CONNECT_PINNED_LIBRARY_ARCHIVE")
+        if selected is None:
+            self.skipTest("requires the exact library archive the Connect resources pin")
+        archive = Path(selected)
+        self.assertTrue(archive.is_absolute())
+        pins = pinned_libraries()
+        self.assertIn(archive.name, pins, "the supplied archive is not a library the Connect resources pin")
+        raw = archive.read_bytes()
+        self.assertEqual((fixture.sha(raw), len(raw)), pins[archive.name])
+        setup = self.base / "pinned-library-setup"
+        setup.mkdir()
+        wanted = {archive.name.removesuffix(".tar.gz") + "/setup/" + name: name
+                  for name in ("bootstrap_host.py", "prepare_host.py")}
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r|gz") as library:
+            for member in library:
+                if member.name in wanted:
+                    self.assertTrue(member.isfile())
+                    (setup / wanted.pop(member.name)).write_bytes(library.extractfile(member).read())
+                    if not wanted:
+                        break
+        self.assertEqual(wanted, {})
+        spec = importlib.util.spec_from_file_location("pinned_library_bootstrap", setup / "bootstrap_host.py")
+        pinned = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pinned)
+        arguments = self.product_bootstrap_arguments()
+        accepted, refused = [], io.StringIO()
+        with patch.object(pinned, "bootstrap", side_effect=lambda args, **_: accepted.append(args) or {}), \
+                redirect_stdout(io.StringIO()), redirect_stderr(refused):
+            try:
+                pinned.main(arguments)
+            except SystemExit:
+                self.fail("the pinned library's bootstrap refuses what product preparation forwards:\n"
+                          + refused.getvalue())
+        self.assertEqual(len(accepted), 1)
+        self.assertIs(accepted[0].enable_public_github_research, True)
 
 
 class SelectionTests(unittest.TestCase):

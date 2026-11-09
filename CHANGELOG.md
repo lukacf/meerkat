@@ -38,20 +38,20 @@ them.
 ### Added
 
 - `meerkat-models`, `meerkat-anthropic`: Claude Fable 5.2
-  (`claude-fable-5-2`, recommended tier) and Claude Mythos 5.2
-  (`claude-mythos-5-2`, supported tier; Anthropic serves it only to
-  organizations it has verified) are catalog models: a 1M context window,
+  (`claude-fable-5-2`) is a recommended catalog model: a 1M context window,
   128K output, adaptive thinking that is always on (`enabled` and
   `disabled` thinking are refused locally), effort `low` to `max`, no
   sampling parameters, and a forced tool choice refused locally with the
-  typed `ToolChoiceUnsupported` refusal. Both check every replayed thinking
-  block against its prefix on every account, whatever its age, so their
+  typed `ToolChoiceUnsupported` refusal. It checks every replayed thinking
+  block against its prefix on every account, whatever its age, so its
   requests carry the `drop_block` control and the
   `thinking-binding-controls-2026-08-01` beta, as Claude Fable 5.1's do,
   and a session that moves onto Fable 5.2 keeps sending its earlier turns'
-  thinking. Anthropic serves neither model on Amazon Bedrock, and Mythos
-  5.2 is not served on Claude Platform on AWS (see the providers page). The
-  Anthropic default model stays `claude-opus-5-5`.
+  thinking. Anthropic does not serve it on Amazon Bedrock (see the
+  providers page). Claude Mythos 5.2 (`claude-mythos-5-2`), which
+  Anthropic serves only to organizations it has verified, is not a catalog
+  model, as Claude Mythos 5.1 is not. The Anthropic default model stays
+  `claude-opus-5-5`.
 
 ## [0.9.11] - 2026-11-09
 

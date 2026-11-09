@@ -124,9 +124,9 @@ JSON-RPC `turn/start` (SDK `Session.turn`) accepts:
   that turn boundary (since 0.8.11). It does not replace earlier System
   messages. From the second turn on it sits mid-conversation, which only
   models with `supports_mid_conversation_system_messages` accept:
-  claude-fable-5-2, claude-mythos-5-2, claude-fable-5-1, claude-fable-5,
-  claude-opus-5-5, claude-opus-5, claude-opus-4-8, claude-sonnet-5-5,
-  claude-haiku-5-5 (0.9.1), and OpenAI
+  claude-fable-5-2, claude-fable-5-1, claude-fable-5, claude-opus-5-5,
+  claude-opus-5, claude-opus-4-8, claude-sonnet-5-5, claude-haiku-5-5
+  (0.9.1), and OpenAI
   API models except
   `gpt-live-1` and `gpt-live-1-codex`. Gemini, other Anthropic models and the
   ChatGPT-account backend refuse the request as a non-retryable invalid

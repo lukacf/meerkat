@@ -1,7 +1,7 @@
 //! Thinking-block binding (Anthropic "preserved thinking"), driven against a
 //! mock Messages endpoint that enforces the documented rules for an account
-//! created on or after 2026-08-31, which Claude Fable 5.2 and Mythos 5.2
-//! apply to every account, whatever its age.
+//! created on or after 2026-08-31, which Claude Fable 5.2, Mythos 5.2 and
+//! Mythos 5.1 apply to every account, whatever its age.
 //!
 //! Claude Fable 5.2, Mythos 5.2, Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5
 //! and Haiku 5.5 accept a replayed thinking block only while the top-level
@@ -56,7 +56,6 @@ const PREFIX_CHECKED: &[&str] = &[
 /// The prefix-checked models Meerkat's catalog carries.
 const CATALOGUED_PREFIX_CHECKED: &[&str] = &[
     "claude-fable-5-2",
-    "claude-mythos-5-2",
     "claude-fable-5-1",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
@@ -646,46 +645,39 @@ async fn default_config_survives_a_tools_change_on_an_enforcing_account() {
     assert!(sent.carries_binding_beta(), "{:?}", sent.betas);
 }
 
-/// Claude Fable 5.2 and Mythos 5.2 run the prefix check on every account,
-/// whatever its age, so the enforcing account is every account for them.
-/// With thinking omitted, every request of a session names the always-on
-/// adaptive default beside the control and carries the beta, the history is
-/// replayed whole, and the turn after an MCP server connects completes: the
-/// API drops the earlier turn's thinking instead of refusing the request.
+/// Claude Fable 5.2 runs the prefix check on every account, whatever its
+/// age, so the enforcing account is every account for it. With thinking
+/// omitted, every request of a session names the always-on adaptive default
+/// beside the control and carries the beta, the history is replayed whole,
+/// and the turn after an MCP server connects completes: the API drops the
+/// earlier turn's thinking instead of refusing the request.
 /// <https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2>
 #[tokio::test]
-async fn fable_5_2_and_mythos_5_2_with_thinking_omitted_survive_a_tools_change() {
+async fn fable_5_2_with_thinking_omitted_survives_a_tools_change() {
     let (account, client, server) = spawn_account().await;
-    for model in ["claude-fable-5-2", "claude-mythos-5-2"] {
-        let before = account.all().len();
-        let (_, second) = session_across_a_tools_change(&client, model, unchanged).await;
-        let sent = account.all().split_off(before);
-        assert!(
-            second.succeeded(),
-            "{model}: the turn after the tools change completes: {second:?}"
-        );
-        assert_eq!(sent.len(), 2, "{model}: one request a turn: {sent:#?}");
-        for request in &sent {
-            assert_eq!(
-                request.body["thinking"],
-                expected_binding(),
-                "{model}: {}",
-                request.body
-            );
-            assert!(
-                request.carries_binding_beta(),
-                "{model}: {:?}",
-                request.betas
-            );
-        }
-        assert_eq!(
-            replayed_thinking_blocks(&sent[1].body),
-            1,
-            "{model}: the completed turn's thinking is replayed: {}",
-            sent[1].body
-        );
-    }
+    let (_, second) = session_across_a_tools_change(&client, "claude-fable-5-2", unchanged).await;
+    let sent = account.all();
     server.abort();
+    assert!(
+        second.succeeded(),
+        "the turn after the tools change completes: {second:?}"
+    );
+    assert_eq!(sent.len(), 2, "one request a turn: {sent:#?}");
+    for request in &sent {
+        assert_eq!(
+            request.body["thinking"],
+            expected_binding(),
+            "{}",
+            request.body
+        );
+        assert!(request.carries_binding_beta(), "{:?}", request.betas);
+    }
+    assert_eq!(
+        replayed_thinking_blocks(&sent[1].body),
+        1,
+        "the completed turn's thinking is replayed: {}",
+        sent[1].body
+    );
 }
 
 /// A session that moves from Claude Fable 5.1 onto Claude Fable 5.2 keeps

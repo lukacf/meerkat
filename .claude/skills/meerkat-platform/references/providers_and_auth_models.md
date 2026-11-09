@@ -120,7 +120,6 @@ recommended, S = supported):
 | Anthropic | Tier | Context / output | Thinking | Effort |
 |---|---|---|---|---|
 | `claude-fable-5-2` (0.9.12), `claude-fable-5-1`, `claude-fable-5` | R | 1M / 128K | adaptive only | low, medium, high, xhigh, max |
-| `claude-mythos-5-2` (0.9.12; organizations Anthropic verifies) | S | 1M / 128K | adaptive only | low..max |
 | `claude-opus-5-5` (default) | R | 1M / 128K | adaptive only | low..max |
 | `claude-opus-5` | R | 1M / 128K | adaptive or `disabled` (effort `high` or below) | low..max |
 | `claude-opus-4-8` | R | 1M / 128K | adaptive or `disabled` | low..max |
@@ -136,9 +135,11 @@ recommended, S = supported):
 The catalog keeps no per-platform model list and the client sends the model
 id unchanged on every Anthropic backend. Anthropic serves `claude-fable-5-2`
 on the Claude API, Claude Platform on AWS, Claude Models on Google Cloud and
-Microsoft Foundry, not on Amazon Bedrock; `claude-mythos-5-2` only to
-organizations it has verified, on the Claude API, Claude Models on Google
-Cloud and Microsoft Foundry, not on Claude Platform on AWS or Amazon Bedrock.
+Microsoft Foundry, not on Amazon Bedrock. Claude Mythos 5.2
+(`claude-mythos-5-2`) is a model the catalog does not list, as Claude Mythos
+5.1 is: Anthropic serves it only to organizations it has verified, on the
+Claude API, Claude Models on Google Cloud and Microsoft Foundry, not on
+Claude Platform on AWS or Amazon Bedrock.
 
 | OpenAI | Tier | Context / output | Reasoning effort |
 |---|---|---|---|
@@ -202,16 +203,15 @@ Capability flags come from the catalog row, never from the model name:
   `gpt-realtime-2`; not the GPT-6 rows.
 - Provider-native web search: every text row except `gpt-5.3-codex`.
 - Forced tool choice (`required` or a named tool) is refused locally on
-  `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2`,
-  `claude-mythos-5-2` and `claude-fable-5-1`
-  (`ModelDoesNotSupportForcedToolChoice`).
+  `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-fable-5-2` and
+  `claude-fable-5-1` (`ModelDoesNotSupportForcedToolChoice`).
 - Sampling: the Claude 5 family (including `claude-haiku-5-5`), Claude Opus
   4.8/4.7, all GPT-5.x and GPT-6 rows, `gemini-4-argon`, `gemini-3.8-flash`,
   `gemini-3.7-flash`, `gemini-3.6-flash` and `gemini-3.5-flash-lite` take no
   `temperature`, `top_p` or `top_k` (`supports_temperature: false`). The Anthropic and
   OpenAI clients drop a generic `temperature` for them.
 - Default per-call timeout (catalog `call_timeout_secs`): 300 s for Claude
-  Opus, Fable and Mythos rows, 120 s for Sonnet rows, `claude-haiku-5-5` and the
+  Opus and Fable rows, 120 s for Sonnet rows, `claude-haiku-5-5` and the
   Gemini Flash and Flash-Lite rows, 60 s for Haiku 4.5, 600 s for OpenAI rows
   and `gemini-3.1-pro-preview`, 900 s for `gemini-4-argon`, 7200 s for
   `gpt-5.5-pro`. Custom and self-hosted entries set their own.

@@ -403,11 +403,11 @@ fn thinking_block_binding(
 /// Claude Fable 5.2, Mythos 5.2, Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet 5.5
 /// and Haiku 5.5 check every replayed thinking block against the system
 /// prompt, the tools and the earlier messages it was produced under, and
-/// refuse the request once any of them changed: Fable 5.2 and Mythos 5.2 on
-/// every account, the others on an account created on or after 2026-08-31.
-/// A request that carries the binding control has the API drop such blocks
-/// instead. A request that cannot carry it (the backend does not document
-/// it, as Amazon Bedrock and the Copilot route do not, or
+/// refuse the request once any of them changed: Fable 5.2, Mythos 5.2 and
+/// Mythos 5.1 on every account, the others on an account created on or after
+/// 2026-08-31. A request that carries the binding control has the API drop
+/// such blocks instead. A request that cannot carry it (the backend does not
+/// document it, as Amazon Bedrock and the Copilot route do not, or
 /// [`thinking_block_binding`] does not place it) replays the thinking of the
 /// turn in progress only. Anthropic allows that ("Allowed: outside tool use,
 /// omit prior turns' thinking"), and removing the oldest blocks leaves the
@@ -1705,8 +1705,8 @@ impl AnthropicClient {
     /// whose bound prefix (the system prompt, the tools and the earlier
     /// messages) changed: Meerkat changes the tools mid-session as MCP
     /// servers connect, and accounts created on or after 2026-08-31 (every
-    /// account, on Claude Fable 5.2 and Mythos 5.2) refuse such a request
-    /// with a 400 unless it sets the control.
+    /// account, on Claude Fable 5.2, Mythos 5.2 and Mythos 5.1) refuse such
+    /// a request with a 400 unless it sets the control.
     ///
     /// Only where it is valid: the backend documents the beta, the model's
     /// catalog row lists it (the prefix-checked models, each thinking by
@@ -8582,9 +8582,8 @@ mod thinking_binding_unit_tests {
     use super::*;
     use meerkat_core::UserMessage;
 
-    const BINDING_ROWS: [&str; 6] = [
+    const BINDING_ROWS: [&str; 5] = [
         "claude-fable-5-2",
-        "claude-mythos-5-2",
         "claude-fable-5-1",
         "claude-opus-5-5",
         "claude-sonnet-5-5",

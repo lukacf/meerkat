@@ -330,8 +330,8 @@ multiplier = 2.0
   drop text deltas buffered for it. Exhaustion fails the run (class `llm`,
   cause `retry_exhausted`); retry waits never exceed the remaining time budget.
 - Call timeout: a hard deadline on one model call, from `[retry]
-  call_timeout`, else the catalog's `call_timeout_secs` (Claude Opus, Fable
-  and Mythos 300s, Sonnet, `claude-haiku-5-5` and Gemini Flash 120s, Haiku 4.5 60s, most
+  call_timeout`, else the catalog's `call_timeout_secs` (Claude Opus and Fable
+  300s, Sonnet, `claude-haiku-5-5` and Gemini Flash 120s, Haiku 4.5 60s, most
   OpenAI models and `gemini-3.1-pro-preview` 600s, `gemini-4-argon` 900s;
   custom models: `[models.<id>] call_timeout_secs`). No per-request setting.
 - Stream watchdog: a stream silent for the window is aborted as a retryable
@@ -447,9 +447,9 @@ A `system_prompt` after the first turn, or `session/inject_context`, adds a
 System message mid-conversation. The catalog flag
 `supports_mid_conversation_system_messages` (`rkat models`) shows which
 models accept one: the OpenAI GPT text models and, among Anthropic models,
-only claude-fable-5-2, claude-mythos-5-2, claude-fable-5-1, claude-fable-5,
-claude-opus-5-5, claude-opus-5, claude-opus-4-8, claude-sonnet-5-5 and
-(0.9.1) claude-haiku-5-5. On Gemini and
+only claude-fable-5-2, claude-fable-5-1, claude-fable-5, claude-opus-5-5,
+claude-opus-5, claude-opus-4-8, claude-sonnet-5-5 and (0.9.1)
+claude-haiku-5-5. On Gemini and
 other Anthropic models
 (and on the ChatGPT backend, which takes one leading System message) the
 request fails with a non-retryable `invalid_request` (`InvalidInputShape`);

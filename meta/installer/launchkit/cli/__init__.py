@@ -212,7 +212,7 @@ def add_global_options(parser, prefix):
     group.add_argument("--timeout", dest=prefix + "timeout", metavar="DURATION", type=duration, default=hidden,
                        help="upper bound on waiting, such as 15m; the work continues (exit 87)")
     group.add_argument("--no-input", dest=prefix + "no_input", action="store_true", default=hidden,
-                       help="never prompt (implied when stdin is not a terminal)")
+                       help="never prompt (implied when stdin or stderr is not a terminal)")
     group.add_argument("--approve", dest=prefix + "approve", metavar="DIGEST", action="append", default=hidden,
                        help="approve the review with this digest (repeatable)")
     group.add_argument("-v", "--verbose", dest=prefix + "verbose", action="count", default=hidden,

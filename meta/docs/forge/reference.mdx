@@ -204,8 +204,8 @@ These options go before or after the command name.
 | `--home DIR` | The state folder, for `serve` and `doctor`. Default: as for `start.sh`. |
 | `-o text`, `-o json`, `-o jsonl` | Output mode; `--json` is the same as `-o json`. Default `text`. |
 | `--wait`, `--no-wait` | Whether to wait for a long step to finish. Default: wait when text output goes to a terminal. |
-| `--timeout DURATION` | Upper bound on waiting, such as `90s` or `15m`. The work continues in Forge. |
-| `--no-input` | Never prompt; implied when standard input is not a terminal. |
+| `--timeout DURATION` | Upper bound on waiting, each request to Forge included, such as `90s` or `15m`. The work continues in Forge. |
+| `--no-input` | Never prompt; implied when standard input or standard error is not a terminal. |
 | `--approve DIGEST` | Approves the review with this digest; repeatable. |
 | `-v`, `-q` | More or less progress detail. |
 
@@ -219,7 +219,9 @@ document, also on failure: `format` (`meta-forge-cli/1`), `ok`, `command`,
 must do; and `next`, the commands to run next, each with its reason. `-o
 jsonl` prints one event per line while the command waits and ends with exactly
 one `result` or `error` event. Scripts should read `error.code`, not only the
-exit code.
+exit code. Control characters in Forge's text, such as an escape sequence or a
+carriage return, are shown escaped (`\x1b`, `\r`), never sent to the terminal;
+JSON output carries them as JSON escapes.
 
 | Exit code | `error.code` | Meaning |
 | --- | --- | --- |
@@ -241,8 +243,11 @@ exit code.
 Accepting a plan, adopting workplace guidance, installing, and starting,
 restarting or retrying an installation need a person's approval, as in the
 browser. The command first shows a review of what will happen, built from
-Forge's own records, and its digest (`sha256:` and 64 hex digits). At a
-terminal, answer `y` to approve. Otherwise the command stops with exit code 84
+Forge's own records, and its digest (`sha256:` and 64 hex digits). The review
+shows every value of the document its digest covers; a value that could read
+as something else is quoted, with its control characters escaped. At a
+terminal, answer `y` to approve; keys typed before the question appeared are
+discarded. Otherwise the command stops with exit code 84
 and prints the review and the command to run with `--approve` and that digest.
 If anything has changed since, such as the setup's version, the folder, the
 port or the mode, the digest changes and the command stops again with exit
@@ -261,15 +266,25 @@ it: `--reuse-forge-keys` lets Forge copy its own saved provider keys into the
 installation, and other secret settings are entered by a person in Forge's
 installation form in the browser.
 
+`setup send --attach` and `--text-file`, the chat's `/attach` and
+`plan validate` never read Forge's private files (its state folder,
+`provider-settings.json`, an installation's `.env` and `.mobkit` folder) or
+Meerkat's configuration folders that hold its credential store and user
+configuration (`~/.config/meerkat` and `~/.rkat`), also through a link. An
+argument error names the option and never repeats the value given, in case a
+secret was typed in its place.
+
 ### Interrupted and lost steps
 
 Ctrl+C and `--timeout` stop only the waiting, never Forge's work; the command
 prints the one that continues waiting. A turn continues with
 `setup show SETUP --wait`. An installation action prints its request ID first,
-and `installation request SETUP ID --wait` reads that action's own record.
+and keeps it in the JSON `request` field when it is interrupted;
+`installation request SETUP ID --wait` reads that action's own record.
 When an answer is lost, the commands read Forge's records instead of sending
 the step again: a lost guide turn or installation answer is followed by the
-setup's or installation's own record. `setup new` prints its request ID
+setup's or installation's own record, and an install counts as done only when
+its request changed that record. `setup new` prints its request ID
 first; after a lost answer, `setup new --request-id ID` with that ID returns
 the setup the request created, or creates it if the request never arrived.
 

@@ -9,7 +9,8 @@
 //   - core: Core's rows and the downstream type-check rows (rows the planner
 //     marks downstream: a pull request's `downstream <product>` Clippy rows
 //     and, when the plan reaches Core, the products' closure-check rows,
-//     which then check every target, and their rustdoc rows);
+//     which then check every target with every feature and with the
+//     product's default features, and their rustdoc rows);
 //   - meta: Core's and Meta's rows;
 //   - connect: every row, i.e. only a run whose validation_result is success.
 // A green run needs no judgment: the gates take it as before, and a failed
@@ -23,9 +24,14 @@
 // A run of commit R is judged by R's first parent's copy of this file, as
 // reused CI evidence is (release.yml and meta-release.yml read it with `git
 // show`, and so does meta/scripts/release-candidate.py): R cannot certify its
-// own red run with an edited job-to-product table. That copy is told the
-// paths R changes against its parent, and refuses when they are unknown or
-// include one of EVIDENCE_INPUTS, which decide what the record says.
+// own red run with an edited job-to-product table. That copy is told R's
+// changes against its parent (`git diff --name-status --no-renames`, so a
+// rename counts under both names), and refuses when they are unknown or
+// unreadable, include one of EVIDENCE_INPUTS, which decide what the record
+// says, or add, delete or retype a package manifest: a package's location
+// decides its product, and one that moves takes its rows along.
+// The copy runs alone, from a temporary directory: it imports no file of the
+// repository.
 //
 // Products of jobs: a matrix row's from the planner's `row_products` output
 // (scripts/ci-cargo-lanes.mjs), joined to the job by the lane's display name
@@ -39,10 +45,10 @@
 //       GITHUB_RUN_ID's attempt GITHUB_RUN_ATTEMPT through `gh api`,
 //       retrying a server error after each of API_RETRY_DELAYS seconds.
 //   ci-product-evidence.mjs accepts --product core|meta|connect --changed-paths FILE ATTESTATION
-//       FILE lists the paths the judged commit changes against its first
-//       parent, one per line (`git diff --name-only PARENT COMMIT`); run the
-//       parent's copy of this file. Exit 0 accepted, 1 refused (the reasons
-//       are printed), 2 usage.
+//       FILE lists the judged commit's changes against its first parent,
+//       one status, a tab and a path a line (`git diff --name-status
+//       --no-renames PARENT COMMIT`); run the parent's copy of this file.
+//       Exit 0 accepted, 1 refused (the reasons are printed), 2 usage.
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -54,16 +60,30 @@ export const PRODUCTS = ["core", "meta", "connect"];
 export const GATE_JOB = "CI gate";
 
 // What decides a run's product evidence: this file (the tables and the
-// rule), the planner and the products file (each row's product), and ci.yml
-// (its jobs, the gate's lane check and the record step). A commit that
-// changes one of them gets no product-scoped acceptance of its own run.
+// rule), the planner and every module it imports (each row's product and
+// packages: scripts/ci-hook-coverage.mjs picks the packages of each
+// product's closure-tests rows), the data they read (the products file, the
+// non-Rust reader inventory), and ci.yml (its jobs, the gate's lane check and
+// the record step). A commit that changes one of them gets no product-scoped
+// acceptance of its own run. scripts/ci-product-evidence-selftest.mjs
+// derives the planner's imports and checks that each is listed.
 export const EVIDENCE_INPUTS = [
   ".github/workflows/ci.yml",
   "ci/products.json",
   "scripts/ci-cargo-lanes.mjs",
+  "scripts/ci-hook-coverage.mjs",
+  "scripts/ci-non-rust-readers.json",
+  "scripts/ci-non-rust-readers.mjs",
   "scripts/ci-product-evidence.mjs",
   "scripts/ci-products.mjs",
+  "scripts/ci-release-evidence.mjs",
+  "scripts/release-projection-only.mjs",
+  "scripts/release-version-pins.mjs",
+  "scripts/rust-test-selector.mjs",
 ];
+
+// A package manifest, whose location decides its package's product.
+const MANIFEST = /(^|\/)Cargo\.toml$/;
 
 // Each planned lane of row_products: the ci.yml jobs that run its rows and the
 // display name GitHub gives a row's job (the jobs' `name:` with the matrix
@@ -217,8 +237,9 @@ function laneJobs(lane, jobs) {
 // Whether `attestation` of a FAILED run lets a release of `product` proceed,
 // and why (a green run needs no judgment, and a failed run whose attestation
 // says every lane succeeded contradicts itself).
-// `changedPaths`: the paths the judged commit changes against its first
-// parent (see EVIDENCE_INPUTS); without them nothing is accepted on scope.
+// `changedPaths`: the judged commit's changes against its first parent, one
+// `git diff --name-status --no-renames` line each (a status letter, a tab,
+// the path; see EVIDENCE_INPUTS); without them nothing is accepted on scope.
 export function acceptance(attestation, product, { changedPaths } = {}) {
   if (!PRODUCTS.includes(product)) return { accepted: false, reasons: [`unknown product ${product}`] };
   if (attestation?.validation_result === "success") {
@@ -229,8 +250,20 @@ export function acceptance(attestation, product, { changedPaths } = {}) {
   if (!Array.isArray(changedPaths)) {
     reasons.push("the judged commit's changes against its first parent are unknown");
   } else {
-    for (const input of EVIDENCE_INPUTS.filter((path) => changedPaths.includes(path))) {
-      reasons.push(`the judged commit changes ${input}, which decides the evidence: only a green run counts`);
+    for (const line of changedPaths) {
+      const fields = String(line).split("\t");
+      const [status, path] = fields;
+      // A rename or copy (two paths), or a path git had to quote: unreadable.
+      if (fields.length !== 2 || !/^[A-Z]$/.test(status) || !path || path.startsWith('"')) {
+        reasons.push(`the judged commit's change ${JSON.stringify(String(line))} is no status and path the reader can read`);
+      } else if (EVIDENCE_INPUTS.includes(path)) {
+        reasons.push(`the judged commit changes ${path}, which decides the evidence: only a green run counts`);
+      } else if (status !== "M" && MANIFEST.test(path)) {
+        const what = { A: "adds", D: "deletes", T: "retypes" }[status] ?? `changes (status ${status})`;
+        reasons.push(
+          `the judged commit ${what} the package manifest ${path}, and a package's location decides its product: only a green run counts`,
+        );
+      }
     }
   }
   const evidence = attestation?.product_evidence;

@@ -447,11 +447,13 @@ depend on, and verifies every required field
 before tag-triggered publication starts. Its `validation_result` is `success`
 only when every step of the CI gate before the attestation succeeded. The
 failed run is judged by the release commit's first parent's copy of
-`scripts/ci-product-evidence.mjs`, told the paths the commit changes against
-that parent; a commit that changes that script, the planner,
-`ci/products.json`, `scripts/ci-products.mjs` or `ci.yml` needs a green run,
-and so does every release whose product is Connect. Meta's gate and its
-candidate collection, promotion and recovery apply the same reader for Meta.
+`scripts/ci-product-evidence.mjs`, told the commit's changes against that
+parent (a renamed path under both names); a commit that changes that script,
+the planner or a module it imports, `ci/products.json`, the non-Rust reader
+inventory or `ci.yml`, or that adds or deletes a package manifest, needs a
+green run, and so does every release whose product is Connect. Meta's gate
+and its candidate collection, promotion and recovery apply the same reader
+for Meta, each on the CI attempt it bound.
 A release-projection run (plan mode
 `release-projection`) also records `reused_test_evidence`: the first-parent
 commit and tree and the CI run and attempt it reused. The release gate then

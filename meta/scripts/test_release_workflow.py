@@ -2376,10 +2376,86 @@ def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None,
                     'export * from "./ci-product-evidence-real.mjs";\n'
                     'export function acceptance() { return { accepted: false, reasons: ["this copy refuses"] }; }\n')
         if changed is not None:
-            (parent / "changed-paths.txt").write_text("".join(f"{path}\n" for path in changed))
+            # As the parent-reader step lists them (`git diff --name-status
+            # --no-renames`): a bare path here is a modified one.
+            (parent / "changed-paths.txt").write_text(
+                "".join(f"{path}\n" if "\t" in path else f"M\t{path}\n" for path in changed))
         subprocess.run(["node", str(tmp / "harness.js"), str(tmp / "gate.js"), str(tmp / "scenario.json"),
                         str(tmp / "result.json")], check=True, capture_output=True, text=True, cwd=tmp)
         return json.loads((tmp / "result.json").read_text())
+
+
+# The copies of the evidence reader in the parent-reader step's scratch
+# history, and the git identity it commits with.
+PARENT_READER_COPIES = {
+    "first parent's": "// the release commit's first parent's reader\n",
+    "release commit's own": "// the release commit's own reader\n",
+    "second parent's": "// the release commit's second parent's reader\n",
+}
+SCRATCH_GIT_ENV = {"GIT_AUTHOR_NAME": "parent-reader", "GIT_AUTHOR_EMAIL": "parent-reader@example.invalid",
+                   "GIT_COMMITTER_NAME": "parent-reader", "GIT_COMMITTER_EMAIL": "parent-reader@example.invalid",
+                   "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def parent_reader_history(root):
+    """A scratch history for the parent-reader step, by commit name: `base`
+    has no reader and `no-reader` is its child; `parent` adds the reader to
+    `base`; `linear`, a child of `parent`, edits the reader, the planner and
+    a Core file; `rename`, another child, renames ci/products.json; `side`,
+    another child, edits the reader and the planner, and `merge` merges it
+    into `parent` (first parent `parent`)."""
+    reader = "scripts/ci-product-evidence.mjs"
+    env = {"PATH": os.environ["PATH"], "HOME": str(root), **SCRATCH_GIT_ENV}
+    commits = {}
+
+    def git(*args):
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", *args], cwd=root, env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit(name, files, removed=()):
+        for path in removed:
+            (root / path).unlink()
+        for path, text in files.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_text(text)
+        git("add", "-A")
+        git("commit", "-q", "-m", name)
+        commits[name] = git("rev-parse", "HEAD")
+
+    git("init", "-q", "-b", "main")
+    commit("base", {"crates/core/src/lib.rs": "pub fn f() {}\n", "ci/products.json": "{}\n",
+                    "scripts/ci-cargo-lanes.mjs": "// 1\n"})
+    commit("no-reader", {"crates/core/src/lib.rs": "pub fn g() {}\n"})
+    git("checkout", "-q", "--detach", commits["base"])
+    commit("parent", {reader: PARENT_READER_COPIES["first parent's"]})
+    commit("linear", {reader: PARENT_READER_COPIES["release commit's own"], "scripts/ci-cargo-lanes.mjs": "// 2\n",
+                      "crates/core/src/lib.rs": "pub fn h() {}\n"})
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit("rename", {"ci/products-moved.json": "{}\n"}, removed=("ci/products.json",))
+    git("checkout", "-q", "--detach", commits["parent"])
+    commit("side", {reader: PARENT_READER_COPIES["second parent's"], "scripts/ci-cargo-lanes.mjs": "// 3\n"})
+    git("checkout", "-q", "--detach", commits["parent"])
+    git("merge", "-q", "--no-ff", "-m", "merge", commits["side"])
+    commits["merge"] = git("rev-parse", "HEAD")
+    return commits
+
+
+def run_parent_reader_step(checkout, release_sha, runner_temp):
+    """Run require_ci_green's parent-reader step, verbatim, in `checkout`
+    for the release commit `release_sha`: its result, the judge it wrote
+    (None: none) and the paths of the changes it listed (None: no list)."""
+    script = step_script("Read the CI evidence reader of the release commit's parent", "require_ci_green",
+                         META_RELEASE_WORKFLOW)
+    runner_temp.mkdir()
+    result = subprocess.run(["bash", "-c", script], cwd=checkout, capture_output=True, text=True,
+                            env={"PATH": os.environ["PATH"], "HOME": str(checkout), **SCRATCH_GIT_ENV,
+                                 "RUNNER_TEMP": str(runner_temp), "RELEASE_SHA": release_sha})
+    parent = runner_temp / "ci-evidence-parent"
+    judge, changes = parent / "ci-product-evidence.mjs", parent / "changed-paths.txt"
+    # One path a line, or a status and a tab before it.
+    listed = ([line.split("\t")[-1] for line in changes.read_text().splitlines() if line.strip()]
+              if changes.exists() else None)
+    return result, judge.read_text() if judge.exists() else None, listed
 
 
 class MetaCiGateTests(unittest.TestCase):
@@ -2554,7 +2630,10 @@ class MetaCiGateTests(unittest.TestCase):
                 ("the commit changes the reader",
                  {"changed": ("crates/meerkat-core/src/lib.rs", "scripts/ci-product-evidence.mjs")}),
                 ("the commit changes the planner", {"changed": ("scripts/ci-cargo-lanes.mjs",)}),
+                ("the commit changes a module the planner imports", {"changed": ("scripts/ci-hook-coverage.mjs",)}),
                 ("the commit changes ci.yml", {"changed": (".github/workflows/ci.yml",)}),
+                ("the commit moves a Core package under Meta's root",
+                 {"changed": ("D\tcrates/meerkat-moved/Cargo.toml", "A\tmeta/crates/meerkat-moved/Cargo.toml")}),
                 ("the commit's changes are unknown", {"changed": None})):
             with self.subTest(case=case):
                 result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True, **options)
@@ -2564,6 +2643,32 @@ class MetaCiGateTests(unittest.TestCase):
         result = self.gate([[red]], attestations=((42, 1, self.scoped(connect)),), reader=True,
                            changed=("meta/README.md", "connect/README.md"))
         self.accepted(result)
+
+    def test_the_parent_reader_step_writes_the_first_parents_reader_and_the_commits_changes(self):
+        """The step before the gate, run verbatim in a scratch history: it
+        writes the release commit's FIRST PARENT's copy of the reader (never
+        the commit's own, which it could edit, nor a merge's second
+        parent's) and lists every path the commit changes against that
+        parent, a renamed path under both its names, the inputs that decide
+        the evidence included; for a commit whose parent has no reader it
+        writes no judge, so only a green run counts."""
+        with fixture_directory() as tmp:
+            checkout = tmp / "checkout"
+            checkout.mkdir()
+            commits = parent_reader_history(checkout)
+            reader = "scripts/ci-product-evidence.mjs"
+            for name, judge, changed in (
+                    ("linear", "first parent's", {reader, "scripts/ci-cargo-lanes.mjs", "crates/core/src/lib.rs"}),
+                    ("merge", "first parent's", {reader, "scripts/ci-cargo-lanes.mjs"}),
+                    ("rename", "first parent's", {"ci/products.json", "ci/products-moved.json"}),
+                    ("no-reader", None, None)):
+                with self.subTest(commit=name):
+                    result, written, listed = run_parent_reader_step(checkout, commits[name], tmp / f"runner-{name}")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(written, PARENT_READER_COPIES[judge] if judge else None,
+                                     f"the judge of {name} is not the {judge or 'missing'} copy")
+                    if changed is not None:
+                        self.assertLessEqual(changed, set(listed or []), f"the changes of {name}: {listed}")
 
 
 def run_floor_wait(crates, index, *, version="0.8.31", appear_after=None):

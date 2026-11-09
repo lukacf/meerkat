@@ -652,8 +652,11 @@ and its CI must be green before a release tag (`require_ci_green`):
   job per product's part of it (`closure_check_rows`), the parts in parallel
   and with the first wave. When the plan reaches Core, a product's part
   checks every target (`--all-targets`): a Core change can break a
-  product's test code alone, and these are the downstream rows Core's
-  product-scoped evidence depends on (with the products' rustdoc rows).
+  product's test code alone. A second job then checks that part again with
+  the product's default features: `--all-features` never compiles the code
+  a product builds only without one of its features, and that code can
+  call Core too. These are the downstream rows Core's product-scoped
+  evidence depends on (with the products' rustdoc rows).
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
   `RUSTDOCFLAGS=-Dwarnings` for each row of the plan's `rustdoc_rows`:
   Core's members (`--workspace` excluding the products' packages) when the
@@ -756,9 +759,12 @@ and its CI must be green before a release tag (`require_ci_green`):
   lanes and plan errors), so a release whose product depends on none of the
   failed rows can still use a failed run (see `require_ci_green` below). A
   release gate judges that evidence with the release commit's first parent's
-  copy of the script, told the paths the commit changes against that parent;
-  a commit that changes the script, the planner, `ci/products.json`,
-  `scripts/ci-products.mjs` or `ci.yml` gets no product-scoped acceptance.
+  copy of the script, told the commit's changes against that parent (`git
+  diff --name-status --no-renames`: a renamed path counts under both names);
+  a commit that changes the script, the planner or a module it imports,
+  `ci/products.json`, the non-Rust reader inventory or `ci.yml`, or that
+  adds or deletes a package manifest (a package's location decides its
+  product), gets no product-scoped acceptance.
   For a `release-projection` plan
   it re-verifies the reused parent
   attempt with the parent's copies of the scripts (`ci-release-evidence.mjs

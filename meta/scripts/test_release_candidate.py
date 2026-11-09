@@ -53,6 +53,13 @@ META_ORDER = ("meta-extension-state", "meerkat-meta")
 META_SHA256 = {"meta-extension-state": "e" * 64, "meerkat-meta": "f" * 64}
 
 
+def attempt_endpoint(run_id, attempt):
+    """The record of one attempt of a workflow run, which every stage reads
+    for the attempt it bound (never the run's own record, which answers its
+    latest attempt)."""
+    return helper.repo_endpoint(f"actions/runs/{run_id}/attempts/{attempt}")
+
+
 FAKE_GH = r'''
 import hashlib
 import json
@@ -266,9 +273,10 @@ class CandidateProtocolTests(unittest.TestCase):
         self.unreadable = set()
         self.toolchain = TOOLCHAIN
         # The release commit's first parent holds the CI evidence reader, and
-        # the commit changes these paths against it.
+        # the commit changes these paths against it (`git diff --name-status
+        # --no-renames` lines).
         self.parent_reader = True
-        self.changed_paths = ("meta/crates/meerkat-meta/src/lib.rs",)
+        self.changed_paths = ("M\tmeta/crates/meerkat-meta/src/lib.rs",)
         # Root build inputs whose id differs from the default, by "REV:PATH".
         self.root_inputs = {}
         for name, effect in (("index_entries", self.index_response),
@@ -287,8 +295,8 @@ class CandidateProtocolTests(unittest.TestCase):
         self.addCleanup(self.git_patch.stop)
         self.state["api"][helper.repo_endpoint(f"git/ref/tags/{TAG}")] = {
             "object": {"type": "commit", "sha": SHA}}
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")] = self.run_info()
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")] = self.run_info(ci=True)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)] = self.run_info()
+        self.state["api"][attempt_endpoint(CI, 1)] = self.run_info(ci=True)
         self.target_files = {}
         self.artifact_ids = []
         listing = []
@@ -327,7 +335,7 @@ class CandidateProtocolTests(unittest.TestCase):
                 raise helper.ProtocolError("git show failed: fatal: path 'scripts/ci-product-evidence.mjs' "
                                            f"does not exist in '{PARENT_SHA}'")
             return EVIDENCE_READER.read_text().strip()
-        if args == ("diff", "--name-only", PARENT_SHA, SHA):
+        if args == ("diff", "--name-status", "--no-renames", PARENT_SHA, SHA):
             return "\n".join(self.changed_paths)
         if args[:3] == ("rev-parse", "--verify", "--quiet"):
             # A root build input's id: the same at every revision unless a
@@ -465,7 +473,7 @@ class CandidateProtocolTests(unittest.TestCase):
         packed = self.root / "candidate.zip"
         self.pack(packed, directory, [helper.MANIFEST, helper.PROVENANCE, "index.json", "checksums.sha256"])
         metadata = self.add_artifact(300, f"meta-candidate-manifest-{ATTEMPT}", packed)
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(status="completed", conclusion="success")
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(status="completed", conclusion="success")
         self.save()
         stdout, _ = self.command("selection", "--manifest-file", str(directory / helper.MANIFEST),
                                 "--artifact-id", "300", "--artifact-digest", metadata["digest"][7:])
@@ -499,7 +507,7 @@ class CandidateProtocolTests(unittest.TestCase):
         """A tiered candidate run in progress whose artifact listing holds
         only that tier's targets, each archive attested by that run."""
         run = dict(self.run_info(), id=run_id)
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")] = run
+        self.state["api"][attempt_endpoint(run_id, ATTEMPT)] = run
         listing = []
         for offset, target in enumerate(helper.assets.TIER_TARGETS[tier]):
             extension = dict(helper.assets.TARGET_ARCHIVES)[target]
@@ -548,8 +556,7 @@ class CandidateProtocolTests(unittest.TestCase):
         packed = self.root / f"candidate-{tier}-{run_id}.zip"
         self.pack(packed, directory, [manifest_name, helper.PROVENANCE, *helper.assets.metadata_names(tier)])
         metadata = self.add_artifact(manifest_aid, f"meta-candidate-manifest-{ATTEMPT}", packed, run_id)
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")].update(
-            status="completed", conclusion="success")
+        self.state["api"][attempt_endpoint(run_id, ATTEMPT)].update(status="completed", conclusion="success")
         self.save()
         stdout, _ = self.command("selection", "--manifest-file", str(directory / manifest_name),
                                  "--artifact-id", str(manifest_aid), "--artifact-digest", metadata["digest"][7:])
@@ -867,7 +874,7 @@ class CandidateProtocolTests(unittest.TestCase):
         self.assertIn("every present file verified", stdout)
         reads = [call["args"][1] for call in self.state["calls"] if call["args"][0] == "api"]
         self.assertIn(helper.repo_endpoint("actions/artifacts/301/zip"), reads)
-        self.assertIn(helper.repo_endpoint(f"actions/runs/{TRAILING_RUN}"), reads)
+        self.assertIn(attempt_endpoint(TRAILING_RUN, ATTEMPT), reads)
 
     def test_a_planted_manifest_bundle_beside_a_receipt_fails(self):
         trailing = self.partial_trailing("candidate-manifest-trailing.json")
@@ -897,10 +904,10 @@ class CandidateProtocolTests(unittest.TestCase):
             f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1&per_page=100")] = [
             {"artifacts": [], "total_count": 0}]
         for endpoint, change, message in (
-            (f"actions/runs/{TRAILING_RUN}", {"conclusion": "failure"}, "not completed-success"),
-            (f"actions/runs/{RUN}", {"conclusion": "cancelled"}, "not completed-success"),
-            (f"actions/runs/{CI}", {"conclusion": "failure"}, "exact-tree attestation"),
-            (f"actions/runs/{CI}", {"conclusion": "cancelled"}, "not completed-success"),
+            (f"actions/runs/{TRAILING_RUN}/attempts/{ATTEMPT}", {"conclusion": "failure"}, "not completed-success"),
+            (f"actions/runs/{RUN}/attempts/{ATTEMPT}", {"conclusion": "cancelled"}, "not completed-success"),
+            (f"actions/runs/{CI}/attempts/1", {"conclusion": "failure"}, "exact-tree attestation"),
+            (f"actions/runs/{CI}/attempts/1", {"conclusion": "cancelled"}, "not completed-success"),
         ):
             with self.subTest(endpoint=endpoint, change=change):
                 original = dict(self.state["api"][helper.repo_endpoint(endpoint)])
@@ -1330,7 +1337,7 @@ class CandidateProtocolTests(unittest.TestCase):
         must already be green (or red only in rows Meta does not depend on,
         which its attestation shows); an unfinished run is refused at once,
         and so is a failed run without an attestation."""
-        endpoint = helper.repo_endpoint(f"actions/runs/{CI}")
+        endpoint = attempt_endpoint(CI, 1)
         listing = helper.repo_endpoint(f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1&per_page=100")
         self.state["api"][listing] = [{"artifacts": [], "total_count": 0}]
         for status, conclusion, reason in (("in_progress", None, "not completed-success"),
@@ -1352,7 +1359,7 @@ class CandidateProtocolTests(unittest.TestCase):
         """Main CI run CI attempt 1 failed, and left an exact-tree attestation
         whose product evidence shows only the `failed` jobs (name: product)
         red; `overrides` replace attestation fields."""
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")].update(conclusion="failure")
+        self.state["api"][attempt_endpoint(CI, 1)].update(conclusion="failure")
         jobs = [{"name": "Change classification", "conclusion": "success", "product": "core", "downstream": False},
                 {"name": "Main unit tests (core)", "conclusion": "success", "product": "core", "downstream": False},
                 {"name": "Main unit tests (meta)", "conclusion": "success", "product": "meta", "downstream": False},
@@ -1403,11 +1410,19 @@ class CandidateProtocolTests(unittest.TestCase):
                 ("the parent has no reader", connect, lambda: setattr(self, "parent_reader", False),
                  "ci-product-evidence.mjs"),
                 ("the commit changes the reader", connect,
-                 lambda: setattr(self, "changed_paths", ("scripts/ci-product-evidence.mjs",)),
+                 lambda: setattr(self, "changed_paths", ("M\tscripts/ci-product-evidence.mjs",)),
                  "changes scripts/ci-product-evidence.mjs"),
+                # Both names of a rename count: renaming an input away too.
+                ("the commit renames the products file", connect,
+                 lambda: setattr(self, "changed_paths", ("D\tci/products.json", "A\tci/products-renamed.json")),
+                 "changes ci/products.json"),
+                ("the commit moves a Core package under Meta's root", connect,
+                 lambda: setattr(self, "changed_paths", ("D\tcrates/meerkat-moved/Cargo.toml",
+                                                         "A\tmeta/crates/meerkat-moved/Cargo.toml")),
+                 "deletes the package manifest crates/meerkat-moved/Cargo.toml"),
                 ("the attestation names another commit", connect, None, "attestation")):
             with self.subTest(case=case):
-                self.parent_reader, self.changed_paths = True, ("meta/crates/meerkat-meta/src/lib.rs",)
+                self.parent_reader, self.changed_paths = True, ("M\tmeta/crates/meerkat-meta/src/lib.rs",)
                 if setup:
                     setup()
                 overrides = {"commit_sha": OTHER_SHA} if case == "the attestation names another commit" else {}
@@ -1416,9 +1431,41 @@ class CandidateProtocolTests(unittest.TestCase):
                                         "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)
                 self.assertIn(reason, error)
 
+    def test_a_candidate_stays_bound_to_the_ci_attempt_it_judged_when_the_run_is_re_run(self):
+        """The shape of ci.yml run 42570473155: once re-run, the run's own
+        record answers its latest attempt (2, green) while attempt 1 failed.
+        A candidate bound to attempt 1, red only in a Connect row, is judged
+        on attempt 1 wherever the bound run is read again (collection,
+        promotion, the published-release check), so the re-run that Connect's
+        own release asks for changes nothing a stage reads. A stage that
+        wants attempt 2 binds it explicitly."""
+        self.red_ci({"Main unit tests (connect[console])": "connect"})
+        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")] = {**self.run_info(ci=True), "run_attempt": 2}
+        for attempt, conclusion in ((1, "failure"), (2, "success")):
+            self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}/attempts/{attempt}")] = {
+                **self.run_info(ci=True), "run_attempt": attempt, "conclusion": conclusion}
+        self.save()
+        core, manifest = self.promote_core()
+        self.assertEqual((manifest["ci"]["run_id"], manifest["ci"]["run_attempt"]), (CI, 1))
+        self.assertFalse(self.state["release"]["draft"])
+        os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
+        stdout, _ = self.command("verify-published")
+        self.assertIn("trailing tier not added yet", stdout)
+        reads = [c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"]
+        self.assertIn(helper.repo_endpoint(f"actions/runs/{CI}/attempts/1"), reads)
+        self.assertNotIn(helper.repo_endpoint(f"actions/runs/{CI}"), reads,
+                         "a stage read the run's latest attempt instead of the bound one")
+        # Attempt 2, bound explicitly, is a green run: no attestation needed.
+        self.state["calls"] = []
+        self.save()
+        self.assertEqual(helper.verify_run(CI, 2, SHA, ci=True)["conclusion"], "success")
+        self.load()
+        self.assertEqual([c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"],
+                         [helper.repo_endpoint(f"actions/runs/{CI}/attempts/2")])
+
     def collect_with_own_run_reads(self, script, *, success=True, name="re-read"):
         """collect() with a scripted sequence of reads of its own run record."""
-        endpoint = helper.repo_endpoint(f"actions/runs/{RUN}")
+        endpoint = attempt_endpoint(RUN, ATTEMPT)
         self.state["api_script"] = {endpoint: script}
         self.state["calls"] = []
         self.save()
@@ -1430,11 +1477,11 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_collect_re_reads_its_own_run_until_github_reports_it_in_progress(self):
         """GitHub reported a running candidate as queued, then waiting, for a while."""
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         reads, sleep, error = self.collect_with_own_run_reads(
             [{"update": {"status": "queued"}}, {"update": {"status": "waiting"}},
              {"update": {"status": "in_progress"}}])
-        self.assertEqual(reads[:4], [run, run, run, helper.repo_endpoint(f"actions/runs/{CI}")])
+        self.assertEqual(reads[:4], [run, run, run, attempt_endpoint(CI, 1)])
         self.assertEqual(sleep.call_args_list, [mock.call(helper.RUN_REREAD_DELAY)] * 2)
         self.assertIn("read 1/40 missed", error)
         self.assertIn("status=queued", error)
@@ -1443,7 +1490,7 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_collect_re_reads_its_own_run_after_a_transient_api_failure(self):
         """GitHub answered 502, then dropped the connection, then answered."""
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         reads, sleep, error = self.collect_with_own_run_reads(
             [{"fail": "gh: HTTP 502: Bad Gateway"}, {"fail": "error connecting to api.github.com"}])
         self.assertEqual(reads[:3], [run, run, run])
@@ -1453,7 +1500,7 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_collect_refuses_at_once_when_its_own_run_is_wrong_or_the_read_fails_for_good(self):
         """Only a lagging status or a transient failure is read again."""
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         cases = {
             "identity": ([{"update": {"head_sha": OTHER_SHA, "status": "queued"}}],
                          "run source/workflow/event/ref mismatch"),
@@ -1470,7 +1517,7 @@ class CandidateProtocolTests(unittest.TestCase):
                 self.assertFalse((self.root / f"refused-{label}").exists())
 
     def test_collect_refuses_once_its_own_run_never_reports_in_progress(self):
-        run = helper.repo_endpoint(f"actions/runs/{RUN}")
+        run = attempt_endpoint(RUN, ATTEMPT)
         reads, sleep, error = self.collect_with_own_run_reads(
             [{"update": {"status": "queued"}}], success=False, name="never")
         self.assertEqual(reads, [run] * 40)
@@ -1702,7 +1749,7 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_stage_refuses_wrong_run_attempt_source_workflow_event_repository_or_failure(self):
         self.candidate()
-        endpoint = helper.repo_endpoint(f"actions/runs/{RUN}")
+        endpoint = attempt_endpoint(RUN, ATTEMPT)
         original = copy.deepcopy(self.state["api"][endpoint])
         changes = [
             ("id", 102), ("run_attempt", 3), ("head_sha", OTHER_SHA),
@@ -1755,8 +1802,8 @@ class CandidateProtocolTests(unittest.TestCase):
             self.command("stage", "--output-dir", str(self.root / "out"),
                          "--proof-dir", str(self.root / "proof"), success=False)
         changed = {**selected, "run_id": 102}
-        self.state["api"][helper.repo_endpoint("actions/runs/102")] = {
-            **self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")], "id": 102}
+        self.state["api"][attempt_endpoint(102, ATTEMPT)] = {
+            **self.state["api"][attempt_endpoint(RUN, ATTEMPT)], "id": 102}
         self.save()
         os.environ["ARTIFACT_SELECTION"] = json.dumps(changed)
         self.command("stage", "--output-dir", str(self.root / "out"),
@@ -2124,8 +2171,9 @@ class CandidateProtocolTests(unittest.TestCase):
         reads = [call["args"][1] for call in self.state["calls"] if call["args"][0] == "api"]
         self.assertFalse([read for read in reads if read.endswith("/zip")])
         # The receipt's run, its manifest artifact record and the CI run are read.
-        for endpoint in (f"actions/runs/{RUN}", "actions/artifacts/300", f"actions/runs/{CI}"):
-            self.assertIn(helper.repo_endpoint(endpoint), reads)
+        for endpoint in (attempt_endpoint(RUN, ATTEMPT), helper.repo_endpoint("actions/artifacts/300"),
+                         attempt_endpoint(CI, 1)):
+            self.assertIn(endpoint, reads)
 
     def test_deleted_receipt_does_not_downgrade_candidate_era_to_legacy(self):
         self.staged()
@@ -2204,7 +2252,7 @@ class CandidateProtocolTests(unittest.TestCase):
         receipt = {key: manifest[key] for key in (
             "schema_version", "repository", "source_sha", "version", "tag", "run_id", "run_attempt", "metadata")}
         receipt.update(kind="original-assets", artifacts=[{**item, "archives": [record]}])
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(event="push", head_branch=TAG)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(event="push", head_branch=TAG)
         self.state["verification"][record["name"]] = verified_fixture(
             record["name"], record["sha256"], ref=f"refs/tags/{TAG}", event="push")
         self.save()
@@ -2236,7 +2284,7 @@ class CandidateProtocolTests(unittest.TestCase):
         self.command("recover", success=False)
         self.assertFalse(self.writes())
         self.seed_release([p for p in paths if p.name != record["name"]])
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(event="push", head_branch=TAG)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(event="push", head_branch=TAG)
         self.state["api"][helper.repo_endpoint(f"actions/artifacts/{item['id']}")]["expired"] = True
         self.save()
         self.command("recover", success=False)
@@ -2256,7 +2304,7 @@ class CandidateProtocolTests(unittest.TestCase):
         receipt = {key: manifest[key] for key in (
             "schema_version", "repository", "source_sha", "version", "tag", "run_id", "run_attempt", "metadata")}
         receipt.update(kind="original-assets", artifacts=[{**item, "archives": [record]}])
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")].update(event="push", head_branch=TAG)
+        self.state["api"][attempt_endpoint(RUN, ATTEMPT)].update(event="push", head_branch=TAG)
         self.state["verification"][record["name"]] = verified_fixture(
             record["name"], record["sha256"], ref=f"refs/tags/{TAG}", event="push")
         paths = list((self.root / "release-assets").iterdir())
@@ -2608,7 +2656,7 @@ class CandidateProtocolTests(unittest.TestCase):
     def test_source_checkout_and_ci_failure_refuse_collection_before_archives(self):
         for key, value in (("head_sha", OTHER_SHA), ("conclusion", "failure"), ("event", "workflow_dispatch"),
                            ("head_branch", "feature"), ("path", helper.WORKFLOW), ("run_attempt", 2)):
-            self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")] = {**self.run_info(ci=True), key: value}
+            self.state["api"][attempt_endpoint(CI, 1)] = {**self.run_info(ci=True), key: value}
             self.save()
             self.command("collect", "--output-dir", str(self.root / "candidate"),
                          "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)

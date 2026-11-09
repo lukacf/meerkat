@@ -886,7 +886,12 @@ def source_context():
 
 
 def verify_run(run_id, attempt, sha, *, ci=False, collecting=False, legacy_tag=None):
-    value = api(repo_endpoint(f"actions/runs/{integer(run_id, 'run ID')}"))
+    """The record of exactly the bound attempt of a workflow run: the
+    attempt's own endpoint, never the run's, which answers its latest
+    attempt. Re-running the run (as a paired release re-runs a red CI run
+    for Connect) changes nothing a stage bound to an earlier attempt reads;
+    a stage that wants the newer attempt binds it."""
+    value = api(repo_endpoint(f"actions/runs/{integer(run_id, 'run ID')}/attempts/{integer(attempt, 'run attempt')}"))
     expected_path = ".github/workflows/ci.yml" if ci else WORKFLOW
     expected_event = "push" if ci or legacy_tag else "workflow_dispatch"
     expected_branch = legacy_tag if legacy_tag else "main"
@@ -911,7 +916,7 @@ def verify_run(run_id, attempt, sha, *, ci=False, collecting=False, legacy_tag=N
 
 # The root's product-scoped CI evidence reader. A failed exact-main CI run
 # counts for Meta only when the release commit's FIRST PARENT's copy of it,
-# told the paths the commit changes against that parent, accepts the run's
+# told the commit's changes against that parent, accepts the run's
 # exact-tree attestation for Meta: the rule and job-to-product table that
 # meta-release.yml's gate applied, never the commit's own copy.
 EVIDENCE_READER = "scripts/ci-product-evidence.mjs"
@@ -954,7 +959,9 @@ def require_meta_scoped(value, sha):
     except ProtocolError as error:
         raise ProtocolError(f"the release commit's parent {parent} has no CI evidence reader ({EVIDENCE_READER}): "
                             f"only a green CI run counts ({error})") from None
-    changed = git("diff", "--name-only", parent, sha)
+    # The commit's changes as the parent-reader steps list them: a status and
+    # a path a line, a rename as a deletion and an addition.
+    changed = git("diff", "--name-status", "--no-renames", parent, sha)
     with workspace() as work:
         (work / "ci-product-evidence.mjs").write_text(reader + "\n")
         (work / "changed-paths.txt").write_text(changed + "\n" if changed else "")

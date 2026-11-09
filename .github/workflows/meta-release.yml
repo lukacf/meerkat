@@ -155,10 +155,11 @@ jobs:
       # by the release commit's FIRST PARENT's copy of
       # scripts/ci-product-evidence.mjs, as release.yml judges it for Core:
       # the commit cannot certify its own red run with an edited
-      # job-to-product table. The reader also gets the paths the commit
-      # changes against that parent, and refuses a commit that changes what
-      # decides the evidence. A parent without the reader, or a failure to
-      # list the changes, leaves only a green run counting.
+      # job-to-product table. The reader also gets the commit's changes
+      # against that parent, with their status and a rename as a deletion and
+      # an addition, and refuses a commit that changes what decides the
+      # evidence or moves a package. A parent without the reader, or a
+      # failure to list the changes, leaves only a green run counting.
       - name: Checkout the release commit and its parent
         if: ${{ needs.resolve_release.outputs.ci_bypass != 'true' }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -184,7 +185,7 @@ jobs:
             echo "${parent} has no product-scoped CI evidence reader: only a green CI run counts."
             exit 0
           fi
-          git diff --name-only "${parent}" "${RELEASE_SHA}" > "${parent_reader}/changed-paths.txt"
+          git diff --name-status --no-renames "${parent}" "${RELEASE_SHA}" > "${parent_reader}/changed-paths.txt"
           echo "A failed CI run of ${RELEASE_SHA} is judged by ${parent}'s reader; the commit changes $(wc -l < "${parent_reader}/changed-paths.txt") path(s)."
       - name: Wait for green exact-main CI and Meta CI at this commit
         id: ci_run

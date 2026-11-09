@@ -99,3 +99,57 @@ excludes them without requiring them to fail.
   settlement signals may race the delivery owner. First decide which
   answer a promoted row awaiting its restore owes, then let the signals
   drain before the owner arms.
+
+## Observation budget
+
+Status: open. Kind: product timing defect under load, present since 0.9.10.
+The row excludes these without requiring them to fail.
+
+One readiness observation of an accepted attachment
+(`service_attachment_ready` in `private_originals/service_approved_input/attachment.rs`)
+starts its 250 ms deadline (`OBSERVATION_BUDGET`) before the first
+currentness fence, and checks it again before each operation's wait. While
+one fence costs more than the budget, as it does on a loaded 4 vCPU runner
+(about 300 ms a fence), every observation returns Pending before any wait:
+the member is never observed ready, and `ensure_service_attachment` never
+starts the next member. Fix: start the deadline after the fence, or give
+each operation a guaranteed wait window, with a test that injects a slow
+fence and fails without the fix.
+
+- `private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets`:
+  the second follow-up's first member is never observed ready, so the
+  second member's endpoint never receives `tools/list`, and the test's
+  10 s wait for it ends in `Elapsed`.
+- `private_originals::service_approved_input::attachment::tests::complete_reviewed_raw_operation_set_must_belong_to_one_attempt_generation`:
+  the budget runs out in the fence before `search`'s wait, so the one step
+  the test drives observes only `read`. Driving more steps does not help:
+  under a steady load every step ends after `read` (on one loaded core, 20
+  runs of 18 to 24 steps each never reached `search`). The class fix above
+  lets each operation's wait run.
+
+## Refusal after prepared
+
+Status: open. Kind: not yet determined, seen on the 0.9.10 tree too. The
+row excludes it without requiring it to fail.
+
+- `private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::fresh_host_restores_governed_peer_binding_and_replays_it_exactly`:
+  the restored peer binding's `reply_to_peer` operation is refused
+  `reprepare_required` after its `Prepared` audit entry, and
+  `tool_succeeded_in` accepts that refusal only before the preparation, so
+  the check at `peer_ingress_tests.rs:344` fails. It failed in 1 of 20 runs
+  alone on the 0.9.10 tree. Next: capture the refusal's read basis, then
+  decide whether a refusal after the preparation is a re-preparation the
+  check should accept, or a defect.
+
+## Slow runner timeouts
+
+Status: open. Kind: test-side bound. The row excludes it without requiring
+it to fail.
+
+- `private_originals::setup_workflow::launch::context_transfer::metadata::worker_stdio::actual_stdio_ready_runs_retained_metadata_page_and_joins_shutdown`:
+  on a 4 vCPU hosted runner the child's 60 s wait for the second selected
+  source's effect (`worker_stdio.rs`, after the held first source has been
+  polled twice) ended in `Elapsed` in 2 of its first 3 runs, and the
+  parent's 180 s bound ended the run; the child shut down cleanly each
+  time. Fix: per-step diagnostics in the child, then bounds sized from the
+  measured progress.

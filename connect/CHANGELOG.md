@@ -157,6 +157,13 @@ prerelease that is never the repository's latest.
 - Only in-process deliveries carry the sending work. A delivery over a network
   is bound under the receiving member's own standing grants.
 
+- Under sustained heavy CPU load, attaching a native service can stall
+  before all of its members are attached. Each readiness check spends its
+  250 ms budget on a currentness check before it waits for the member, so
+  while that check alone takes longer than the budget, the member is not
+  seen as ready and the members after it are not attached until a later
+  check fits within the budget. This behavior is not new in 0.9.11.
+
 ## [0.9.10] - 2026-11-05
 
 Meerkat Connect 0.9.10 is part of Meerkat 0.9.10 (Core 0.9.10, Meta 0.9.10

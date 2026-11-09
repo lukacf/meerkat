@@ -753,6 +753,7 @@ bench:
 
 # Hard gate: Rust workspace, Python SDK, TypeScript SDK, and contract versions must match
 verify-version-parity:
+	@$(PYTHON) scripts/test_check_inrepo_version_pins.py
 	@scripts/verify-version-parity.sh
 
 # Verify committed schema artifacts match freshly emitted ones

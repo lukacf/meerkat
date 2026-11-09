@@ -153,10 +153,12 @@ def test_the_launcher_never_imports_from_the_callers_directory_or_pythonpath(tmp
     assert "planted" not in result.stdout + result.stderr and "usage: meta-forge" in result.stdout
 
 
-def test_a_forge_folder_whose_path_holds_a_colon_is_refused(tmp_path):
-    """macOS Finder writes a "/" typed in a folder name as ":". PYTHONPATH would split the Forge folder's path
-    there and look the part after it up in the caller's directory, where a planted launchkit waits."""
-    forge = tmp_path / "Forge:lib"
+@pytest.mark.parametrize("layout", ["Forge:lib", "Projects:2026/Forge:lib"])
+def test_a_forge_folder_whose_path_holds_a_colon_is_refused(tmp_path, layout):
+    """macOS Finder writes a "/" typed in a folder name as ":". PYTHONPATH would split the Forge folder's path at
+    each ":" and look the parts after one up in the caller's directory, where a planted launchkit waits. The refusal
+    never repeats the path: a folder name may hold anything, control characters included."""
+    forge = tmp_path / layout
     (forge / ".venv" / "bin").mkdir(parents=True)
     shutil.copyfile(LAUNCHER, forge / "meta-forge")
     (forge / "meta-forge").chmod(0o755)
@@ -165,12 +167,18 @@ def test_a_forge_folder_whose_path_holds_a_colon_is_refused(tmp_path):
     python.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
     python.chmod(0o755)
     caller = tmp_path / "caller"
-    planted = caller / "lib" / "launchkit"
-    planted.mkdir(parents=True)
-    (planted / "__init__.py").write_text("import sys\nsys.stderr.write('planted launchkit imported\\n')\n"
-                                         "raise SystemExit(99)\n")
+    for entry in str(forge).split(":")[1:]:
+        planted = caller / entry / "launchkit"
+        planted.mkdir(parents=True)
+        (planted / "__init__.py").write_text("import sys\nsys.stderr.write('planted launchkit imported\\n')\n"
+                                             "raise SystemExit(99)\n")
     result = subprocess.run([str(forge / "meta-forge"), "--help"], cwd=caller, capture_output=True, text=True,
                             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)}, timeout=60)
     assert result.returncode == 86, (result.returncode, result.stderr)
-    assert "planted" not in result.stdout + result.stderr and result.stdout == ""
+    output = result.stdout + result.stderr
+    assert "planted" not in output and result.stdout == ""
     assert "contains ':'" in result.stderr and "Move or rename the folder" in result.stderr
+    for path in (forge, forge.resolve()):
+        named = [str(path), *(part for part in path.parts if ":" in part)]
+        assert len(named) == 1 + layout.count(":")
+        assert not [text for text in named if text in output], (named, result.stderr)

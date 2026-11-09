@@ -6,6 +6,7 @@ the command's own environment, as an agent's shell would hold it. Every
 command then runs in text, json and jsonl output with -v. An audit hook
 records the files the command opens and the child processes it starts.
 """
+import argparse
 import ast
 import asyncio
 import json
@@ -22,7 +23,7 @@ import pytest
 
 from cli_support import Recording, Terminal, cli
 from launchkit import server
-from launchkit.cli import cli_version
+from launchkit.cli import build_parser, cli_version, usage_message
 from launchkit.deployment import materialize
 from launchkit.guide import GuideService
 from launchkit.guide_operations import GuideOperations
@@ -409,6 +410,24 @@ async def test_an_unknown_option_is_never_named(argv, mode):
     assert "unknown option" in shown, shown
     for part in (OPTION_SHAPED_CANARY, OPTION_SHAPED_CANARY[:12], OPTION_SHAPED_CANARY[-12:]):
         assert part not in result.stdout + result.stderr, shown
+
+
+@pytest.mark.parametrize("mode", ["text", "json"])
+async def test_an_option_shaped_key_in_another_argparse_wording_is_never_shown(monkeypatch, mode):
+    """Another Python release or a translation may word argparse's messages so that the first check keeps a typed
+    token as an argument's name; the second check, against the command line, still keeps the key out."""
+    reworded = "argument %s: not recognized"
+    assert OPTION_SHAPED_CANARY in usage_message(build_parser(), reworded % f"--{OPTION_SHAPED_CANARY}"), (
+        "in this wording the first check keeps the token, so the second check alone keeps it out")
+    original = argparse._
+    monkeypatch.setattr(argparse, "_", lambda text: reworded if text == "unrecognized arguments: %s" else original(text))
+    result = await cli(["provider", "status", f"--{OPTION_SHAPED_CANARY}", *(["--json"] if mode == "json" else [])],
+                       environ={"META_FORGE_PORT": "8787", "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+    assert result.code == 2, result.text
+    if mode == "json":
+        assert json.loads(result.stdout)["error"]["code"] == "usage"
+    for part in (OPTION_SHAPED_CANARY, OPTION_SHAPED_CANARY[:12], OPTION_SHAPED_CANARY[-12:]):
+        assert part not in result.stdout + result.stderr, result.text
 
 
 UPPER_CANARY = "CANARY_6F1D0C2A_SECRET_VALUE"

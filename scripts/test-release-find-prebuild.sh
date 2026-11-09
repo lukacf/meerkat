@@ -358,6 +358,27 @@ while IFS= read -r pattern; do
 done <<<"${patterns}"
 echo "ok: critical-job-names"
 
+# 12b. Every TRAILING_JOBS pattern names a job of release.yml too: a renamed
+#      trailing job would let the lookup take an earlier commit's prebuild
+#      whose trailing lanes already failed.
+trailing_patterns="$(sed -n '/^TRAILING_JOBS=(/,/^)/s/^  "\(.*\)"$/\1/p' "${LOOKUP}")"
+[[ -n "${trailing_patterns}" ]] || fail "trailing-job-names: no TRAILING_JOBS patterns in ${LOOKUP}"
+trailing_lines="$(sed -n '/^TRAILING_JOBS=(/,/^)/p' "${LOOKUP}" | grep -vc -e '^TRAILING_JOBS=(' -e '^)$')"
+[[ "$(grep -c '' <<<"${trailing_patterns}")" == "${trailing_lines}" ]] ||
+  fail "trailing-job-names: read $(grep -c '' <<<"${trailing_patterns}") of the ${trailing_lines} TRAILING_JOBS lines"
+while IFS= read -r pattern; do
+  matched=false
+  while IFS= read -r job_name; do
+    # shellcheck disable=SC2053 # the pattern is a glob
+    if [[ "${job_name}" == ${pattern} ]]; then
+      matched=true
+      break
+    fi
+  done <<<"${job_names}"
+  [[ "${matched}" == true ]] || fail "trailing-job-names: TRAILING_JOBS pattern '${pattern}' names no job of release.yml"
+done <<<"${trailing_patterns}"
+echo "ok: trailing-job-names"
+
 # 13. A prebuild of another commit serves the release only through
 #     scripts/release-prebuild-equivalent: that commit is an ancestor of the
 #     release commit, and every path changed since is under another product's
@@ -478,12 +499,44 @@ listing "${others_url}" "$(run_json 803 completed "" "" "" "${BASE_SHA}")" "$(ru
 usable 802 803
 lookup_for exact-commit-first "${FIX_SHA}" "802 2" 0
 
+# An exact-commit prebuild still under way is preferred: the lookup waits for
+# it rather than take an earlier commit's ready one, and takes the earlier
+# one only once the exact one can no longer pass.
 reset
 listing "$(exact_url "${FIX_SHA}")" "$(run_json 804 in_progress "" "" "" "${FIX_SHA}")"
 listing "${others_url}" "$(run_json 805 completed "" "" "" "${BASE_SHA}")" "$(run_json 804 in_progress "" "" "" "${FIX_SHA}")"
-jobs 804 pending
+jobs 804 pending ".1"
+jobs 804 success ".2"
+complete_artifacts 804
 usable 805
-lookup_for usable-ancestor-while-exact-runs "${FIX_SHA}" "805 2" 0
+lookup_for waits-for-exact-while-ancestor-ready "${FIX_SHA}" "804 2" 0
+reset
+listing "$(exact_url "${FIX_SHA}")" "$(run_json 806 in_progress "" "" "" "${FIX_SHA}")"
+listing "${others_url}" "$(run_json 807 completed "" "" "" "${BASE_SHA}")" "$(run_json 806 in_progress "" "" "" "${FIX_SHA}")"
+jobs 806 pending "" '"name": "Build Web SDK package", "conclusion": "failure"'
+usable 807
+lookup_for ancestor-once-exact-cannot-pass "${FIX_SHA}" "807 2" 0
+
+# An earlier commit's prebuild whose trailing lanes (or its full binary build
+# gate) already failed is never taken: its tag run would publish the critical
+# archives and then stop without the trailing ones. An older one whose
+# trailing lanes did not fail still serves.
+for ended in '"name": "Cross-compile and package Windows surface binaries on Linux", "conclusion": "failure"' \
+  '"name": "Verify Windows binaries on a Windows runner", "conclusion": "cancelled"' \
+  '"name": "Cross-compile and package Intel macOS surface binaries on Apple silicon (rkat-rpc)", "conclusion": "timed_out"' \
+  '"name": "Release binary build gate", "conclusion": "failure"'; do
+  reset
+  listing "$(exact_url "${FIX_SHA}")"
+  listing "${others_url}" "$(run_json 823 completed "" "" "" "${BASE_SHA}")"
+  jobs 823 success "" "${ended}"
+  complete_artifacts 823
+  lookup_for ancestor-trailing-failed "${FIX_SHA}" "" 0
+  grep -Fq "run 823: " "${TEST_ROOT}/ancestor-trailing-failed.err" ||
+    fail "ancestor-trailing-failed: the refusal is not named (${ended})" "$(cat "${TEST_ROOT}/ancestor-trailing-failed.err")"
+  listing "${others_url}" "$(run_json 823 completed "" "" "" "${BASE_SHA}")" "$(run_json 822 completed "" "" "" "${BASE_SHA}")"
+  usable 822
+  lookup_for older-ancestor-serves "${FIX_SHA}" "822 2" 0
+done
 
 for case in "core-change ${CORE_SHA} ${BASE_SHA} ${FIX_SHA}" "manifest-change ${MANIFEST_SHA} ${FIX_SHA}" \
   "sibling ${FIX_SHA} ${SIBLING_SHA}" "descendant ${FIX_SHA} ${CORE_SHA}"; do

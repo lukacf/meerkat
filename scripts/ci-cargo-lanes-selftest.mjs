@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   CI_ROW_STEPS,
   rowStepBindings,
@@ -1173,6 +1174,36 @@ for (const path of [
   const plan = planFor([path]);
   assert.equal(plan.mode, "workspace", `${path} escalates to the workspace`);
   assertLanes(plan, path);
+}
+
+// The other setup inputs of the Rust lanes are build configuration like the
+// Rust setup action: the sccache, mold and cargo tool setup actions, and the
+// release download script the mold and cargo tool actions run. A change to
+// any one of them alone escalates to the workspace and plans what a change
+// to setup-rust-ci plans, on a pull request and on a push: the Rust lanes a
+// ci.yml change plans, without the lanes ci.yml also selects as their
+// definition (isLaneDefinitionPath, scripts/machine-authority-changed).
+{
+  const reference = ".github/actions/setup-rust-ci/action.yml";
+  const unlike = [];
+  for (const event of ["pull_request", "push"]) {
+    const expected = planFor([reference], ["--event", event]);
+    for (const path of [
+      ".github/actions/setup-sccache-ci/action.yml",
+      ".github/actions/setup-mold-ci/action.yml",
+      ".github/actions/setup-cargo-tool-ci/action.yml",
+      "scripts/ci-release-asset-download",
+    ]) {
+      const plan = planFor([path], ["--event", event]);
+      const differing = Object.keys({ ...expected, ...plan }).filter(
+        (key) => key !== "changed_paths" && key !== "reason" && !isDeepStrictEqual(expected[key], plan[key]),
+      );
+      if (plan.mode !== "workspace" || plan.reason !== `global build configuration changed: ${path}` || differing.length > 0) {
+        unlike.push(`${path} (${event}): mode ${plan.mode}, reason "${plan.reason}", ${differing.length} other plan fields differ`);
+      }
+    }
+  }
+  assert.deepEqual(unlike, [], `every setup input of the Rust lanes plans what ${reference} plans`);
 }
 
 // Pull request versus push (--event): one change, two plans. The pull

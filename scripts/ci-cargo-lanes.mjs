@@ -461,7 +461,6 @@ export const TOOLKIT_MOBKIT_TEST_DEBT = "connect/crates/toolkit-mobkit/NATIVE-HO
 const COLD_RESTORE = "cold-restore-refusals";
 const STALE = "stale-expectations";
 const INTERMITTENT = "intermittent-races";
-const OBSERVATION_BUDGET = "observation-budget";
 const REFUSAL_AFTER_PREPARED = "refusal-after-prepared";
 const SLOW_RUNNER = "slow-runner-timeouts";
 export const TOOLKIT_MOBKIT_KNOWN_REDS = [
@@ -488,8 +487,6 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],
-  ["private_originals::governed_submit::tests::first_input_tests::helper_report::warm_reacquisition::warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets", OBSERVATION_BUDGET, { intermittent: true }],
-  ["private_originals::service_approved_input::attachment::tests::complete_reviewed_raw_operation_set_must_belong_to_one_attempt_generation", OBSERVATION_BUDGET, { intermittent: true }],
   ["private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::fresh_host_restores_governed_peer_binding_and_replays_it_exactly", REFUSAL_AFTER_PREPARED, { intermittent: true }],
   ["private_originals::setup_workflow::launch::context_transfer::metadata::worker_stdio::actual_stdio_ready_runs_retained_metadata_page_and_joins_shutdown", SLOW_RUNNER, { intermittent: true }],
 ].map(([test, anchor, flags]) => ({ test, anchor, intermittent: flags?.intermittent === true }));
@@ -1650,6 +1647,7 @@ function isGlobalPath(path) {
     path === "scripts/rust-test-selector.mjs" ||
     path === "scripts/ci-pin-rust-toolchain-env" ||
     path === "scripts/ci-clippy-sccache-wrapper" ||
+    path === "scripts/ci-release-asset-download" ||
     path === ".github/workflows/ci.yml" ||
     path === PRODUCTS_PATH ||
     path === "scripts/ci-products.mjs"
@@ -1659,7 +1657,13 @@ function isGlobalPath(path) {
   return (
     path.startsWith(".cargo/") ||
     path.startsWith("scripts/cargo-") ||
-    path.startsWith(".github/actions/setup-rust-ci/")
+    // The setup every Rust lane runs: the toolchain, sccache, the mold linker
+    // and the cargo tools (the last two fetch their releases with
+    // scripts/ci-release-asset-download, above).
+    path.startsWith(".github/actions/setup-rust-ci/") ||
+    path.startsWith(".github/actions/setup-sccache-ci/") ||
+    path.startsWith(".github/actions/setup-mold-ci/") ||
+    path.startsWith(".github/actions/setup-cargo-tool-ci/")
   );
 }
 

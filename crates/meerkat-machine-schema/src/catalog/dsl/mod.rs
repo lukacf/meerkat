@@ -863,6 +863,37 @@ pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
         ],
     )
     .with_ci_step_limit(3)
+    // A restore's last_refresh and refresh_attempt set only the state fields
+    // of the same names, and nothing reads those: no guard, no update of
+    // another field and no invariant (a failed refresh only adds one to
+    // refresh_attempt). Their other values reach only states that differ
+    // from one the sample reaches in those two fields alone, yet they made
+    // every restore arm enumerate six times the inputs, and the
+    // source-credential publication audit, which derives its config from
+    // ci.cfg, generate 140 million states instead of 13 million. The CI
+    // profile samples a restore that observed no refresh and counts no
+    // failed attempt; the Deep profile and every composition keep the whole
+    // domains.
+    .with_input_field_domain(
+        input_variant_id("RestoreAuthoritySnapshot"),
+        crate::identity::FieldId::from_trusted_catalog_literal("last_refresh"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::None]),
+    )
+    .with_input_field_domain(
+        input_variant_id("RestoreAuthoritySnapshot"),
+        crate::identity::FieldId::from_trusted_catalog_literal("refresh_attempt"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::U64(0)]),
+    )
+    .with_input_field_domain(
+        input_variant_id("RestoreCredentialLifecycleSnapshot"),
+        crate::identity::FieldId::from_trusted_catalog_literal("last_refresh"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::None]),
+    )
+    .with_input_field_domain(
+        input_variant_id("RestoreCredentialLifecycleSnapshot"),
+        crate::identity::FieldId::from_trusted_catalog_literal("refresh_attempt"),
+        crate::InputFieldDomainKind::CiSamples(vec![crate::TlcValue::U64(0)]),
+    )
 }
 
 pub fn dsl_meerkat_machine() -> MachineSchema {

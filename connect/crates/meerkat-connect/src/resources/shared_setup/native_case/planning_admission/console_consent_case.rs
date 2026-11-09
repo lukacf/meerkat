@@ -2,7 +2,9 @@
 //! Meta resolver. The model barrier coordinates the test only; it is never an
 //! authentication or eligibility input. No Domain work or authored receipts.
 use super::*;
-use crate::application_consent::{ApplicationConsentOwner, ConsentApplicationIdentity};
+use crate::application_consent::{
+    ApplicationConsentOwner, ConsentApplicationIdentity, ConsentOwnerError,
+};
 use crate::application_gateway::console_consent::{
     ConsoleConsentRoute, ConsoleConsentRule, ConsoleConsentSelection, tests as route_tests,
 };
@@ -875,10 +877,16 @@ async fn exercise(
             )
             .await;
         let refusal = attempted.expect_err("B cannot resume A's actual persisted session");
+        // A's session stays durably bound to A's member. With the declared role
+        // migration the durable identity check reports that binding as the
+        // migration's typed rejection; an entry or custody gate would refuse
+        // before it with an error of its own.
         assert!(
-            refusal
-                .to_string()
-                .contains("requested mob/member identity"),
+            matches!(
+                &refusal,
+                meerkat_mob::MobError::MemberRoleMigrationRejected { reason, .. }
+                    if reason.contains("is bound to member 'original-a'")
+            ),
             "the actual durable identity check must refuse, not an earlier gate: {refusal}"
         );
         assert_eq!(
@@ -971,7 +979,21 @@ fn run(changes: &[Change]) {
                 let selection = owner.selection().clone();
                 let identity = owner.identity().clone();
                 drop(owner);
-                let reopened = ApplicationConsentOwner::reopen(selection, &identity).unwrap();
+                // The issuer lease is a flock, released when the last
+                // descriptor of its file closes. The lease's file can stay
+                // locked for a moment after the owner is dropped: another
+                // in-process reference to it is released asynchronously.
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let reopened = loop {
+                    match ApplicationConsentOwner::reopen(selection.clone(), &identity) {
+                        Err(ConsentOwnerError::OwnerHeld)
+                            if std::time::Instant::now() < deadline =>
+                        {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        reopened => break reopened.unwrap(),
+                    }
+                };
                 assert!(route_tests::issuer_gone(control.route.get().unwrap()));
                 drop(reopened);
             });

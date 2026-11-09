@@ -392,8 +392,13 @@ enum Unadmitted {
 enum Unanswered {
     /// Its last attempt that was made failed, with this error.
     Failed(String),
-    /// The budget did not admit its run within its wait.
-    Busy(BudgetDenied),
+    /// The budget did not admit its run within its wait: the budget's
+    /// denial, and the error of its last attempt that was made and failed
+    /// before it, when one was.
+    Busy {
+        denied: BudgetDenied,
+        failed: Option<String>,
+    },
     /// The projection stopped while it waited for the budget.
     Stopped,
 }
@@ -404,7 +409,8 @@ enum Unanswered {
 /// made: it does not count, and the side effect waits until the budget
 /// admits a run (`admits`, at most until `wait_until`), which the wait
 /// takes for its next attempt (`attempt` is handed it). When the budget did
-/// not admit one by then, it ends with the budget's denial
+/// not admit one by then, it ends with the budget's denial and the error of
+/// the last attempt that was made and failed before it, if one was
 /// ([`Unanswered::Busy`]), and at once when the projection stops
 /// ([`Unanswered::Stopped`]); an attempt that was made and failed counts, as
 /// in [`bounded`].
@@ -423,6 +429,8 @@ where
     let allowed = limits.attempts.max(1);
     let mut attempts = 0;
     let mut reserved = None;
+    // The error of the last attempt that was made and failed.
+    let mut failed = None;
     loop {
         let failure = match tokio::time::timeout(limits.deadline, attempt(reserved.take())).await {
             Ok(Ok(answer)) => {
@@ -447,7 +455,7 @@ where
                     Err(Unadmitted::Busy(denied)) => {
                         return Bounded {
                             attempts,
-                            outcome: Err(Unanswered::Busy(denied)),
+                            outcome: Err(Unanswered::Busy { denied, failed }),
                         };
                     }
                     Err(Unadmitted::Stopped) => {
@@ -471,6 +479,7 @@ where
                 outcome: Err(Unanswered::Failed(failure)),
             };
         }
+        failed = Some(failure);
         tokio::time::sleep(limits.pause).await;
     }
 }
@@ -2756,8 +2765,9 @@ impl IdentityRuntime {
                 match batch.outcome {
                     Ok(()) => return Ok(()),
                     // The budget did not admit it within the harvest's
-                    // wait, which leaves its fallback none.
-                    Err(Unanswered::Busy(denied)) => {
+                    // wait, which leaves its fallback none. Attempted once,
+                    // no attempt of it failed before.
+                    Err(Unanswered::Busy { denied, .. }) => {
                         let unrun = harvest_failure(
                             batch.attempts,
                             format!(
@@ -2819,12 +2829,28 @@ impl IdentityRuntime {
                 self.record_lifecycle_effect_failure(owed, &failed).await?;
                 self.report_lifecycle_effect_failure(&failed);
             }
-            (Err(Unanswered::Busy(denied)), _) => {
-                let unrun = format!(
-                    "the realm's background budget did not admit the fallback harvest of the \
-                     compactions the session's memory holds within {} ms: {denied}",
-                    limits.budget_wait.as_millis()
-                );
+            (
+                Err(Unanswered::Busy {
+                    denied,
+                    failed: fallback_failed,
+                }),
+                _,
+            ) => {
+                let within = limits.budget_wait.as_millis();
+                let unrun = match fallback_failed {
+                    // An attempt of the fallback ran and failed before the
+                    // budget kept its next one from running: the record
+                    // names that failure too.
+                    Some(error) => format!(
+                        "the fallback harvest of the compactions the session's memory holds \
+                         failed ({error}), and the realm's background budget did not admit its \
+                         next attempt within {within} ms: {denied}"
+                    ),
+                    None => format!(
+                        "the realm's background budget did not admit the fallback harvest of the \
+                         compactions the session's memory holds within {within} ms: {denied}"
+                    ),
+                };
                 // The record replaces the batch's failure, when there was
                 // one: it says so, and counts the batch's attempt.
                 let (attempts, error) = match earlier.as_deref() {
@@ -4456,7 +4482,8 @@ impl IdentityRuntime {
                             self.record_lifecycle_effect_failure(owed, &failed).await?;
                             self.report_lifecycle_effect_failure(&failed);
                         }
-                        Err(Unanswered::Busy(denied)) => {
+                        // Attempted once, no attempt of it failed before.
+                        Err(Unanswered::Busy { denied, .. }) => {
                             let unrun = distillation(
                                 distilled.attempts,
                                 format!(
@@ -5311,7 +5338,13 @@ mod tests {
         )
         .await;
         assert_eq!(ended.attempts, 0);
-        assert_eq!(ended.outcome, Err(Unanswered::Busy(ceiling())));
+        assert_eq!(
+            ended.outcome,
+            Err(Unanswered::Busy {
+                denied: ceiling(),
+                failed: None
+            })
+        );
 
         let waits = std::sync::atomic::AtomicU32::new(0);
         let waits = &waits;
@@ -5326,7 +5359,13 @@ mod tests {
         )
         .await;
         assert_eq!(spent.attempts, 0);
-        assert_eq!(spent.outcome, Err(Unanswered::Busy(ceiling())));
+        assert_eq!(
+            spent.outcome,
+            Err(Unanswered::Busy {
+                denied: ceiling(),
+                failed: None
+            })
+        );
         assert_eq!(waits.load(Ordering::SeqCst), 0, "a spent wait asks nothing");
 
         let stopped = bounded_admitted(

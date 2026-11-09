@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Under sustained heavy CPU load, attaching a native service no longer
+  stalls before all of its members are attached. A readiness check's 250 ms
+  budget now bounds only its waits for the member and the optional read of
+  a failure's detail; its currentness checks run outside the budget and
+  still refuse what they refused before. A member that is ready is seen
+  ready even while one currentness check takes longer than the whole
+  budget, so the members after it are attached.
+
 ## [0.9.11] - 2026-11-09
 
 Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11

@@ -258,6 +258,19 @@ expectRule(
   attestation({ jobs: fail("Clippy (core)", "cancelled"), failedLanes: ["Clippy"] }),
   { core: false, meta: false },
 );
+// Each job is judged on its own too, not only through the lanes the gate
+// flagged: a Core row that failed in a lane the gate did not name still
+// refuses, beside a flagged Connect row.
+expectRule(
+  "a Core row red in a lane the gate did not flag",
+  attestation({
+    jobs: GREEN.map((entry) =>
+      ["Format + governance", "Main unit tests (connect[console])"].includes(entry.name) ? { ...entry, conclusion: "failure" } : entry,
+    ),
+    failedLanes: ["Main unit tests"],
+  }),
+  { core: false, meta: false },
+);
 expectRule(
   "a repository-wide job red",
   attestation({ jobs: fail("Format + governance"), failedLanes: ["Format + governance"] }),

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   effect that did not run, after the attempts that failed before it when
   there were any.
 
+- For Rust hosts that compose a gateway: the console profile's plan takes
+  a metadata store as the stdio profile's does
+  (`GatewayRuntimeBootstrapPlan::with_persistent_metadata`), and
+  `gateway_wiring::keep_identity_records_in_runtime_metadata` keeps an
+  identity runtime's records in its runtime's metadata store, as both stock
+  gateways and `UnifiedRuntimeBuilder` keep them.
+
 ### Fixed
 
 - Meta's grant answers report `applies` and the member's gate, as Meerkat's
@@ -74,6 +81,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   so in a wave of retirements most retired sessions were never distilled.
   One the budget still did not admit within its wait is recorded
   (`lifecycle_effect_failed`, effect `distillation`, cause `budget_busy`).
+
+- `meta_gateway` launched with `persistent_sessions: true` keeps its
+  metadata and its console log in its state directory
+  (`meta_metadata.sqlite3` and `meta_console.sqlite3`, the stores
+  `rpc_gateway` keeps there with `persistent_state`), so a restart keeps
+  them. It kept both in memory, and a restart forgot them:
+  - a console request made before a restart stays known: its send and its
+    answer stay in the timeline, and a resend with the same idempotency key
+    is answered from the first send and not run again (the Console offers to
+    send an uncertain request again);
+  - the attention list, the console audit log and the gating state (pending
+    approvals and the gating audit) survive a restart, and their reads
+    report `retention: durable`;
+  - an identity's tool record (`meta/identity/warm` writes it) survives a
+    restart, so `meta/identity/resolved_tools` still answers a Dormant
+    member's tools from it.
+  The storage census reports the `console` and `metadata` slots
+  persistent. A store that does not open refuses `meta/init` with `-32014`.
+  The first start after the upgrade begins with both stores empty, as every
+  start of an earlier release did. A launch without persistent sessions
+  keeps both in memory, as before.
 
 ## [0.9.11] - 2026-11-09
 

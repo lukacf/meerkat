@@ -1491,8 +1491,9 @@ store is slower. Nothing reads the log to decide anything, and each owner's
 own record stays the authority for what happened. A row that cannot be
 written is logged and dropped, and the change stands as its owner answered
 it. The log is kept in the realm's metadata store: durable for
-`rpc_gateway` over a state directory or a host store realm, and for the
-process on `meta_gateway`, which keeps its metadata in memory; a console
+`rpc_gateway` over a state directory or a host store realm and for
+`meta_gateway` with persistent sessions, and for the process on a launch
+that keeps its metadata in memory; a console
 without a local runtime keeps none. Each record set keeps at most 20000
 rows, none older than 365 days, each bound give or take one page of 64
 rows; an embedder sets other bounds with

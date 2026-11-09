@@ -27508,6 +27508,71 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
             }
         }
 
+        /// Two unkeyed steers with identical content to one runtime-backed
+        /// member: each answer names the input the member's runtime admitted
+        /// for that send, so two callers can tell their sends apart, and
+        /// `session/input_status` reads each named input.
+        #[cfg(feature = "mob")]
+        #[tokio::test]
+        async fn member_send_unkeyed_answers_name_each_admitted_input() {
+            let (router, _runtime, _temp) = keyed_router(true).await;
+            let mob_id = create_mob_with_worker(&router, "mob-unkeyed-admission").await;
+            let mut answers = Vec::new();
+            for _ in 0..2 {
+                let sent = router
+                    .dispatch(make_request(
+                        "mob/member_send",
+                        serde_json::json!({
+                            "mob_id": mob_id,
+                            "agent_identity": "worker-1",
+                            "content": "The same words from two callers.",
+                            "handling_mode": "steer",
+                        }),
+                    ))
+                    .await
+                    .unwrap();
+                answers.push(result_value(&sent));
+            }
+            assert_ne!(
+                answers[0], answers[1],
+                "two sends of the same content get two different answers"
+            );
+            for sent in &answers {
+                assert!(
+                    sent.get("continuation").is_none(),
+                    "an unkeyed send answers no keyed receipt: {sent}"
+                );
+                let admission = &sent["admission"];
+                assert!(
+                    admission["session_id"].is_string() && admission["input_id"].is_string(),
+                    "an unkeyed send names the input its member admitted: {sent}"
+                );
+            }
+            assert_ne!(
+                answers[0]["admission"]["input_id"], answers[1]["admission"]["input_id"],
+                "each answer names its own input"
+            );
+            for sent in &answers {
+                let admission = &sent["admission"];
+                let followed = result_value(
+                    &router
+                        .dispatch(make_request(
+                            "session/input_status",
+                            serde_json::json!({
+                                "session_id": admission["session_id"],
+                                "selector": { "by": "input_id", "value": admission["input_id"] },
+                            }),
+                        ))
+                        .await
+                        .unwrap(),
+                );
+                assert_eq!(
+                    followed["state"]["input_id"], admission["input_id"],
+                    "session/input_status reads the input an unkeyed send names: {followed}"
+                );
+            }
+        }
+
         /// other content under a used key is the typed conflict, naming
         /// the first delivery.
         #[cfg(feature = "mob")]

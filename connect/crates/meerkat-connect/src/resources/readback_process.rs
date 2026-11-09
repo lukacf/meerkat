@@ -59,7 +59,7 @@ impl InstalledResources {
         };
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
         readback_diagnostic("process_prepare", "entered");
-        let directory = reserve_setup_artifacts(storage)?
+        let directory = reserve_readback_artifacts(storage)?
             .canonicalize()
             .map_err(|_| readback_unavailable())?;
         let request_path = directory.join("readback-request.json");

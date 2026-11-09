@@ -1073,6 +1073,13 @@ class RetainedListingScanTests(unittest.TestCase):
                         "a page is empty only at the end of the listing")
         self.assertFalse(any(page["unconfirmed"] for page in pages))
 
+    def test_zero_scan_budget_reads_one_position_per_call_and_still_returns_each_match(self):
+        with patch.object(product, "RETAINED_SCAN_SECONDS", 0):
+            pages = self.pages()
+        self.assertEqual(len(pages), 12)
+        self.assertEqual([number for number, page in enumerate(pages) if page["candidates"]], [3, 9])
+        self.assertEqual(self.found(pages), list(self.MATCHES))
+
 
 if __name__ == "__main__":
     unittest.main()

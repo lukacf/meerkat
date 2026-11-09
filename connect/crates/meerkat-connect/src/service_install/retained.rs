@@ -259,9 +259,18 @@ impl CheckedInstalls {
         }
         state.returning.bytes += bytes;
         state.returning.entries.extend(added);
+        // No candidate but a next handle is not the end of the list: the
+        // owner stopped reading at its bound before it found one.
+        let scan_incomplete = public.is_empty() && next.is_some();
+        let continues = if scan_incomplete {
+            "This read stopped before it found a retained candidate, and the list continues: call again with next as after before concluding that there is none. "
+        } else {
+            ""
+        };
         Ok(
-            json!({"state":"retained_requests", "candidates":public, "next":next, "unconfirmed":page["unconfirmed"],
-            "notice":"These are retained package requests, not verified installations or configured services. Select one candidate for current package verification; no previous approval or install permission is restored."}),
+            json!({"state":"retained_requests", "candidates":public, "next":next, "scan_incomplete":scan_incomplete,
+            "unconfirmed":page["unconfirmed"],
+            "notice":format!("{continues}These are retained package requests, not verified installations or configured services. Select one candidate for current package verification; no previous approval or install permission is restored.")}),
         )
     }
     pub(crate) fn retained_select_request(

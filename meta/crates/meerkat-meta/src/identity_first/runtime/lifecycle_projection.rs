@@ -60,9 +60,9 @@
 //! [`LifecycleEffectFailureCause::BudgetBusy`]. While it waits, the
 //! side effects after it on its lane wait too, every identity's. A shutdown
 //! ends such a wait at once: nothing is recorded for the side effect, and
-//! its page runs again at the next start. An answer
-//! the host gives (an error of the hook or of `after_create`) is final. A
-//! side effect that failed is recorded durably
+//! over a durable metadata store its page runs again at the next start. An
+//! answer the host gives (an error of the hook or of `after_create`) is
+//! final. A side effect that failed is recorded durably
 //! ([`crate::runtime::LifecycleEffectFailure`]) and reported on the error
 //! hook (`retired_member_release_failed` for the retirement hook,
 //! `lifecycle_effect_failed` for the others), and the projection moves on:
@@ -486,11 +486,13 @@ where
 
 /// What a side effect the projection's stop ended while it waited for the
 /// realm's background budget fails its page with: nothing is recorded or
-/// reported for it, and its page runs again at the next start.
+/// reported for it, and over a durable metadata store its page runs again at
+/// the next start.
 fn stopped_waiting(effect: LifecycleEffectKind) -> String {
     format!(
         "the projection stopped while the {} waited for the agent memory background budget; \
-         nothing is recorded for it, and its page runs again at the next start",
+         nothing is recorded for it, and over a durable metadata store its page runs again at \
+         the next start",
         effect.as_str()
     )
 }
@@ -2704,7 +2706,8 @@ impl IdentityRuntime {
     /// failure), and one that harvested the discards removes it, so no
     /// record stands for a harvest that was made good. Only a failure to
     /// record, or the projection's stop while the harvest waits for the
-    /// budget (the page then runs again at the next start), fails the page.
+    /// budget (over a durable metadata store the page then runs again at the
+    /// next start), fails the page.
     #[allow(clippy::too_many_arguments)]
     async fn harvest_owed_compaction(
         &self,
@@ -4496,9 +4499,10 @@ impl IdentityRuntime {
                             self.give_up_on_a_busy_budget(owed, &unrun, memory, &denied)
                                 .await?;
                         }
-                        // The identity's later side effects (a delete's
-                        // scope drop among them) wait for the next start
-                        // with it.
+                        // The identity's later side effects (its exit
+                        // interview, its retirement hook) wait with it for
+                        // the next start, which runs them over a durable
+                        // metadata store.
                         Err(Unanswered::Stopped) => {
                             return Err(stopped_waiting(LifecycleEffectKind::Distillation));
                         }

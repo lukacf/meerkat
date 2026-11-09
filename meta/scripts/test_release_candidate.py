@@ -34,6 +34,11 @@ RUN = 101
 TRAILING_RUN = 102
 ATTEMPT = 2
 CI = 99
+# The Core release the root Cargo.toml pins, and the tree of crates/ that
+# both the source commit and Core's tag carry unless a test changes one.
+CORE = "0.8.31"
+CORE_TAG = f"refs/tags/v{CORE}"
+CRATES_TREE = "c" * 40
 
 
 FAKE_GH = r'''
@@ -231,6 +236,13 @@ class CandidateProtocolTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, self.environment)
         self.env_patch.start()
         self.protocol = True
+        # git as the release jobs' checkouts answer it: the crates/ trees by
+        # revision, the root manifest's Core pin, and whether origin has
+        # Core's tag. Every git call is recorded in order.
+        self.crates_trees = {f"{SHA}:crates": CRATES_TREE, f"{CORE_TAG}^{{commit}}:crates": CRATES_TREE}
+        self.core_pin = f'"={CORE}"'
+        self.core_tag_on_origin = True
+        self.git_calls = []
         self.git_patch = mock.patch.object(helper, "git", side_effect=self.git_response)
         self.git_patch.start()
         self.addCleanup(self.env_patch.stop)
@@ -268,12 +280,24 @@ class CandidateProtocolTests(unittest.TestCase):
         self.save()
 
     def git_response(self, *args):
+        self.git_calls.append(args)
+        if args[:2] == ("rev-parse", "--verify") and args[2].endswith(":crates"):
+            if args[2] not in self.crates_trees:
+                raise helper.ProtocolError(f"git rev-parse failed: fatal: invalid object name '{args[2]}'")
+            return self.crates_trees[args[2]]
         if args[:2] == ("rev-parse", "HEAD"):
             return SHA
         if args[:2] == ("rev-parse", "--verify"):
             return SHA
+        if args == ("show", f"{SHA}:Cargo.toml"):
+            return f'[workspace.dependencies]\nmeerkat-core = {{ version = {self.core_pin}, path = "crates/meerkat-core" }}\n'
         if args[0] == "show":
             return f'[package]\nname = "meerkat-meta"\nversion = "{VERSION}"\n'
+        if args[0] == "fetch":
+            self.assertEqual(args, ("fetch", "--no-tags", "origin", f"+{CORE_TAG}:{CORE_TAG}"))
+            if not self.core_tag_on_origin:
+                raise helper.ProtocolError(f"git fetch failed: fatal: couldn't find remote ref {CORE_TAG}")
+            return ""
         if args[0] == "ls-tree":
             return "meta/scripts/release-candidate.py\n" if self.protocol else "Cargo.toml\n"
         self.fail(f"unexpected git command: {args}")
@@ -363,12 +387,14 @@ class CandidateProtocolTests(unittest.TestCase):
             })
         self.save()
 
-    def tier_candidate(self, tier, run_id, manifest_aid):
-        """A schema 2 candidate run that built and binds exactly one tier.
+    def tier_candidate(self, tier, run_id, manifest_aid, *, schema=None):
+        """A tiered candidate run that built and binds exactly one tier.
 
         The run's artifact listing holds only that tier's targets, each
         archive attested by that run; collection, the manifest artifact and
         the emitted selection follow meta-release.yml's candidate jobs.
+        schema=2 rewrites the collected manifest as an earlier workflow wrote
+        it (no core_crates_tree), before it is attested and selected.
         """
         run = dict(self.run_info(), id=run_id)
         self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")] = run
@@ -397,6 +423,10 @@ class CandidateProtocolTests(unittest.TestCase):
                          "--ci-run-attempt", "1", "--tier", tier)
         _, manifest_name, _ = helper.tier_proof_names(tier)
         manifest = helper.read_json(directory / manifest_name)
+        if schema == 2:
+            manifest = {key: value for key, value in manifest.items() if key != "core_crates_tree"}
+            manifest["schema_version"] = 2
+            (directory / manifest_name).write_bytes(helper.json_bytes(manifest))
         self.state["verification"][manifest_name] = verified_fixture(
             manifest_name, helper.assets.sha256(directory / manifest_name), run_id=run_id)
         (directory / helper.PROVENANCE).write_text(f'{{"manifest":{run_id}}}\n')
@@ -429,8 +459,8 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_schema2_core_promotion_publishes_only_the_core_tier(self):
         core, manifest = self.promote_core()
-        self.assertEqual((core["schema_version"], core["tier"]), (2, "core"))
-        self.assertEqual((manifest["schema_version"], manifest["tier"]), (2, "core"))
+        self.assertEqual((core["schema_version"], core["tier"]), (helper.TIERED_SCHEMA, "core"))
+        self.assertEqual((manifest["schema_version"], manifest["tier"]), (helper.TIERED_SCHEMA, "core"))
         self.assertEqual({item["target"] for item in manifest["artifacts"]},
                          set(helper.assets.TIER_TARGETS["core"]))
         self.assertFalse(self.state["release"]["draft"])
@@ -450,7 +480,7 @@ class CandidateProtocolTests(unittest.TestCase):
         self.promote_core()
         before = self.release_files()
         trailing, manifest = self.tier_candidate("trailing", TRAILING_RUN, 301)
-        self.assertEqual((trailing["schema_version"], trailing["tier"]), (2, "trailing"))
+        self.assertEqual((trailing["schema_version"], trailing["tier"]), (helper.TIERED_SCHEMA, "trailing"))
         self.state["calls"] = []
         self.save()
         self.assets_mode(trailing)
@@ -832,18 +862,110 @@ class CandidateProtocolTests(unittest.TestCase):
             ({"tier": "core"}, "schema 1 has no tier"),
             ({"schema_version": 2}, "schema 2 requires tier"),
             ({"schema_version": 2, "tier": "everything"}, "schema 2 requires tier"),
-            ({"schema_version": 3}, "unsupported schema version"),
+            ({"schema_version": 3}, "schema 3 requires tier"),
+            ({"schema_version": 4}, "unsupported schema version"),
         ):
             with self.subTest(change=change):
                 with self.assertRaisesRegex(helper.ProtocolError, message):
                     helper.validate_manifest(dict(v1_manifest, **change))
                 with self.assertRaisesRegex(helper.ProtocolError, message):
                     helper.validate_selection(dict(v1_selection, **change))
-        # A schema 2 manifest must hold exactly its tier's targets.
+        # A tiered manifest must hold exactly its tier's targets.
         core, core_manifest = self.tier_candidate("core", 103, 302)
         widened = dict(core_manifest, artifacts=v1_manifest["artifacts"])
         with self.assertRaisesRegex(helper.ProtocolError, "target outside the candidate tier|invalid target"):
             helper.validate_manifest(widened)
+
+    def test_collection_binds_the_core_crates_tree_the_legs_built(self):
+        """A candidate may build before Core's tag exists: collection reads no
+        tag, and binds the tree of crates/ at the source commit (the in-tree
+        Core the gateways embed) in the attested schema 3 manifest."""
+        core, manifest = self.tier_candidate("core", RUN, 300)
+        self.assertEqual((core["schema_version"], manifest["schema_version"]), (3, 3))
+        self.assertEqual(manifest["core_crates_tree"], CRATES_TREE)
+        self.assertIn(("rev-parse", "--verify", f"{SHA}:crates"), self.git_calls)
+        self.assertFalse([call for call in self.git_calls if call[0] == "fetch" or CORE_TAG in " ".join(call)])
+        for value in (None, "C" * 40, "c" * 64, "c" * 39, 7):
+            with self.subTest(value=value), self.assertRaisesRegex(helper.ProtocolError, "invalid Core crates tree"):
+                helper.validate_manifest(dict(manifest, core_crates_tree=value))
+        unbound = {key: value for key, value in manifest.items() if key != "core_crates_tree"}
+        with self.assertRaisesRegex(helper.ProtocolError, "invalid candidate manifest fields"):
+            helper.validate_manifest(unbound)
+        # Schema 2 manifests carry no tree, and accept none.
+        helper.validate_manifest(dict(unbound, schema_version=2))
+        with self.assertRaisesRegex(helper.ProtocolError, "invalid candidate manifest fields"):
+            helper.validate_manifest(dict(manifest, schema_version=2))
+
+    def stage_core(self, selected, name, *, success=True):
+        os.environ.update(RELEASE_MODE="promote", SOURCE_SHA="", ARTIFACT_SELECTION=json.dumps(selected))
+        self.state["calls"] = []
+        self.save()
+        self.git_calls.clear()
+        return self.command("stage", "--output-dir", str(self.root / f"assets-{name}"),
+                            "--proof-dir", str(self.root / f"proofs-{name}"), success=success)
+
+    def test_promotion_compares_the_bound_core_with_cores_tag_after_fetching_it(self):
+        core, _ = self.tier_candidate("core", RUN, 300)
+        self.stage_core(core, "match")
+        fetch = self.git_calls.index(("fetch", "--no-tags", "origin", f"+{CORE_TAG}:{CORE_TAG}"))
+        self.assertLess(self.git_calls.index(("show", f"{SHA}:Cargo.toml")), fetch)
+        self.assertLess(fetch, self.git_calls.index(("rev-parse", "--verify", f"{CORE_TAG}^{{commit}}:crates")))
+        self.assertTrue((self.root / "assets-match").is_dir())
+
+    def test_promotion_refuses_a_candidate_whose_core_is_not_cores_tag(self):
+        """The check the legs made before schema 3 (git diff --quiet v<Core>
+        HEAD -- crates/), moved to promotion: it refuses before any target
+        artifact is read and writes nothing."""
+        core, _ = self.tier_candidate("core", RUN, 300)
+        trees = dict(self.crates_trees)
+        cases = (
+            ("differs", lambda: self.crates_trees.update({f"{CORE_TAG}^{{commit}}:crates": "d" * 40}),
+             f"crates/ differs from Core's v{CORE}: this candidate embeds unreleased Core"),
+            ("no-tag", lambda: setattr(self, "core_tag_on_origin", False), "couldn't find remote ref"),
+            ("no-pin", lambda: setattr(self, "core_pin", f'"{CORE}"'), "pins no exact meerkat-core version"),
+            ("moved-source", lambda: self.crates_trees.update({f"{SHA}:crates": "e" * 40}),
+             "candidate Core crates tree does not match its source commit"),
+        )
+        for name, change, message in cases:
+            with self.subTest(case=name):
+                self.crates_trees, self.core_tag_on_origin, self.core_pin = dict(trees), True, f'"={CORE}"'
+                change()
+                _, error = self.stage_core(core, name, success=False)
+                self.assertIn(message, error)
+                self.assertFalse((self.root / f"assets-{name}").exists())
+                zips = [call["args"][1] for call in self.state["calls"]
+                        if call["args"][0] == "api" and call["args"][1].endswith("/zip")]
+                self.assertEqual(zips, [helper.repo_endpoint("actions/artifacts/300/zip")])
+                self.assertFalse(self.writes())
+
+    def test_trailing_recovery_refuses_a_candidate_whose_core_is_not_cores_tag(self):
+        """The trailing tier's legs build the same commit; its recovery stages
+        it the same way, so its gateways are held to Core's tag too."""
+        self.promote_core()
+        before = self.release_files()
+        trailing, _ = self.tier_candidate("trailing", TRAILING_RUN, 301)
+        self.crates_trees[f"{CORE_TAG}^{{commit}}:crates"] = "d" * 40
+        self.state["calls"] = []
+        self.save()
+        self.assets_mode(trailing)
+        _, error = self.command("recover", success=False)
+        self.assertIn(f"crates/ differs from Core's v{CORE}", error)
+        self.assertFalse(self.writes())
+        self.assertEqual(self.release_files(), before)
+
+    def test_schema_2_candidates_stage_without_the_core_tag_check(self):
+        """Schema 2 candidates built in this repository compared crates/ with
+        Core's tag in their build legs, so staging reads no tag for them; a
+        selection must still name its manifest's schema."""
+        core, manifest = self.tier_candidate("core", RUN, 300, schema=2)
+        self.assertEqual((core["schema_version"], manifest["schema_version"]), (2, 2))
+        self.assertNotIn("core_crates_tree", manifest)
+        del self.crates_trees[f"{CORE_TAG}^{{commit}}:crates"]
+        self.core_tag_on_origin = False
+        self.stage_core(core, "schema2")
+        self.assertFalse([call for call in self.git_calls if call[0] == "fetch" or call[-1].endswith(":crates")])
+        _, error = self.stage_core(dict(core, schema_version=3), "relabelled", success=False)
+        self.assertIn("candidate schema/tier mismatch", error)
 
     def test_collection_refuses_rather_than_waits_while_main_ci_is_not_green(self):
         """Builds start right after the merge, so collection is where main CI

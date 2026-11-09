@@ -18,6 +18,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
+# The workflow GitHub runs for Meta's releases: the monorepo root's
+# meta-release.yml. RELEASE_WORKFLOW above is Meta's earlier workflow, which
+# GitHub no longer runs (nothing under meta/.github runs); the helpers below
+# read it unless a test hands them this path.
+META_RELEASE_WORKFLOW = ROOT.parent / ".github/workflows/meta-release.yml"
 _CANDIDATE_SPEC = importlib.util.spec_from_file_location("release_candidate", ROOT / "scripts/release-candidate.py")
 release_candidate = importlib.util.module_from_spec(_CANDIDATE_SPEC)
 _CANDIDATE_SPEC.loader.exec_module(release_candidate)
@@ -54,7 +59,7 @@ def typescript_publish_script() -> str:
     return "\n".join(script_lines)
 
 
-def job_block(name: str) -> str:
+def job_block(name: str, workflow: Path | None = None) -> str:
     """The workflow text for exactly one job, bounded by the next job header.
 
     Slicing to end-of-file is only safe for the last job. `publish_sdk_packages`
@@ -62,7 +67,7 @@ def job_block(name: str) -> str:
     strings this file asserts about the SDK gate, so an unbounded slice would
     pass against unmodified code.
     """
-    lines = RELEASE_WORKFLOW.read_text().splitlines()
+    lines = (workflow or RELEASE_WORKFLOW).read_text().splitlines()
     start = lines.index(f"  {name}:")
     for offset, line in enumerate(lines[start + 1 :], start=start + 1):
         if re.fullmatch(r"  [A-Za-z_][A-Za-z0-9_-]*:", line):
@@ -70,9 +75,9 @@ def job_block(name: str) -> str:
     return "\n".join(lines[start:])
 
 
-def job_condition(name: str) -> str:
+def job_condition(name: str, workflow: Path | None = None) -> str:
     """The raw `if:` expression of one job, with block scalar folding undone."""
-    block = job_block(name).splitlines()
+    block = job_block(name, workflow).splitlines()
     matches = [i for i, line in enumerate(block) if line.startswith("    if:")]
     if not matches:
         return "true"
@@ -138,8 +143,8 @@ def evaluate_condition(expression: str, *, statuses=(), run_cancelled=False, **c
     return bool(eval("".join(translated).strip(), {"__builtins__": {}}, {**context, **functions}))
 
 
-def job_needs(name: str) -> list[str]:
-    lines = [line for line in job_block(name).splitlines() if line.startswith("    needs:")]
+def job_needs(name: str, workflow: Path | None = None) -> list[str]:
+    lines = [line for line in job_block(name, workflow).splitlines() if line.startswith("    needs:")]
     if not lines:
         return []
     if len(lines) != 1 or not re.fullmatch(r"    needs: \[[a-z_, ]+\]", lines[0]):
@@ -147,7 +152,7 @@ def job_needs(name: str) -> list[str]:
     return [value.strip() for value in lines[0].split("[", 1)[1][:-1].split(",")]
 
 
-def job_ancestors(name: str) -> list[str]:
+def job_ancestors(name: str, workflow: Path | None = None, jobs: tuple | None = None) -> list[str]:
     """Every job upstream of `name` through `needs`, transitively, in workflow order.
 
     GitHub evaluates a job's status functions over this whole chain, not only
@@ -159,28 +164,30 @@ def job_ancestors(name: str) -> list[str]:
     skipped outside candidate mode) is an ancestor, although both of
     release_validate's own needs succeeded.
     """
+    order = jobs or JOBS
     seen: set[str] = set()
-    pending = list(job_needs(name))
+    pending = list(job_needs(name, workflow))
     while pending:
         job = pending.pop()
         if job not in seen:
             seen.add(job)
-            pending.extend(job_needs(job))
+            pending.extend(job_needs(job, workflow))
     if name in seen:
         raise AssertionError(f"{name} depends on itself")
-    return sorted(seen, key=lambda job: (JOBS.index(job) if job in JOBS else len(JOBS), job))
+    return sorted(seen, key=lambda job: (order.index(job) if job in order else len(order), job))
 
 
-def job_runs(name: str, *, run_cancelled=False, **context) -> bool:
+def job_runs(name: str, *, run_cancelled=False, workflow: Path | None = None, jobs: tuple | None = None,
+             **context) -> bool:
     """Apply GitHub's status semantics: status functions, explicit or the
     implicit success() of a condition without one, read every ancestor."""
-    expression = job_condition(name)
-    dependencies = job_needs(name)
+    expression = job_condition(name, workflow)
+    dependencies = job_needs(name, workflow)
     references = set(re.findall(r"\bneeds\.([A-Za-z_][A-Za-z0-9_]*)\.", expression))
     if references - set(dependencies):
         raise AssertionError(f"{name} references undeclared needs: {references - set(dependencies)}")
     statuses = []
-    for dependency in job_ancestors(name):
+    for dependency in job_ancestors(name, workflow, jobs):
         key = f"needs_{dependency}_result"
         if key not in context:
             raise AssertionError(f"unsupplied dependency status: {key}")
@@ -204,10 +211,21 @@ WORK_JOBS = (
     "build_binaries", "collect_candidate", "verify_release_assets", "publish_github_release",
     "publish_sdk_packages", "verify_crate_packages", "publish_registries",
 )
+# meta-release.yml's jobs in dependency order: the published-floor check
+# needs the CI gate, and the GitHub release and the crates need it.
+META_JOBS = (
+    "resolve_release", "build_binaries", "require_ci_green", "release_validate", "floor_check",
+    "collect_candidate", "verify_release_assets", "publish_github_release",
+    "publish_sdk_packages", "verify_crate_packages", "publish_registries",
+)
+# Its jobs that publish something (to GitHub or a registry).
+META_PUBLICATION_JOBS = (
+    "publish_github_release", "publish_sdk_packages", "publish_registries",
+)
 
 
 def protocol_context(mode="promote", publish=True, dry=False, *, event="workflow_dispatch",
-                     tag="v0.8.31"):
+                     tag="v0.8.31", jobs: tuple | None = None):
     return {
         "github_event_name": event,
         "github_ref": "refs/tags/v0.8.31" if event == "push" else "refs/heads/main",
@@ -222,19 +240,30 @@ def protocol_context(mode="promote", publish=True, dry=False, *, event="workflow
         "needs_resolve_release_outputs_publish_packages": str(publish).lower(),
         "needs_resolve_release_outputs_dry_run": str(dry).lower(),
         "needs_resolve_release_outputs_tag": tag,
-        **{f"needs_{job}_result": "success" for job in JOBS},
+        **{f"needs_{job}_result": "success" for job in (jobs or JOBS)},
     }
 
 
-def release_results(context, failures=None):
+def release_results(context, failures=None, *, workflow: Path | None = None, jobs: tuple | None = None):
     """Run the actual job DAG with successful steps unless explicitly refused."""
     context = dict(context)
     results = {}
-    for job in JOBS:
-        result = (failures or {}).get(job, "success") if job_runs(job, **context) else "skipped"
+    for job in jobs or JOBS:
+        ran = job_runs(job, workflow=workflow, jobs=jobs, **context)
+        result = (failures or {}).get(job, "success") if ran else "skipped"
         results[job] = result
         context[f"needs_{job}_result"] = result
     return results
+
+
+def meta_context(mode="promote", publish=True, dry=False, *, event="workflow_dispatch"):
+    """protocol_context for meta-release.yml's jobs and its meta-v tags."""
+    return protocol_context(mode, publish, dry, event=event, tag="meta-v0.8.31", jobs=META_JOBS)
+
+
+def meta_results(context, failures=None):
+    """release_results over meta-release.yml."""
+    return release_results(context, failures, workflow=META_RELEASE_WORKFLOW, jobs=META_JOBS)
 
 
 def ci_gate_script() -> str:
@@ -340,9 +369,9 @@ DYNAMIC_OPENSSL = DYNAMIC_RUSTLS + (
 )
 
 
-def step_block(step_name: str, job: str = "build_binaries") -> str:
+def step_block(step_name: str, job: str = "build_binaries", workflow: Path | None = None) -> str:
     """The text of exactly one step, bounded by the next `- name:`."""
-    lines = job_block(job).splitlines()
+    lines = job_block(job, workflow).splitlines()
     start = lines.index(f"      - name: {step_name}")
     for offset, line in enumerate(lines[start + 1 :], start=start + 1):
         if line.startswith("      - name: "):
@@ -350,9 +379,9 @@ def step_block(step_name: str, job: str = "build_binaries") -> str:
     return "\n".join(lines[start:])
 
 
-def step_script(step_name: str, job: str = "build_binaries") -> str:
+def step_script(step_name: str, job: str = "build_binaries", workflow: Path | None = None) -> str:
     """One step's `run: |` body, de-indented, verbatim."""
-    lines = step_block(step_name, job).splitlines()
+    lines = step_block(step_name, job, workflow).splitlines()
     run = lines.index("        run: |")
     body: list[str] = []
     for line in lines[run + 1 :]:
@@ -1988,6 +2017,106 @@ class ReleaseCacheReuseTests(unittest.TestCase):
         for step in ("Publish extension document crate", "Publish Rust crate"):
             script = step_script(step, "publish_registries")
             self.assertEqual(script.count("--locked --no-verify"), 2, step)
+
+
+class MetaReleaseJobGraphTests(unittest.TestCase):
+    """meta-release.yml, the workflow GitHub runs for Meta's releases, under
+    GitHub's status semantics: candidates build before Core's tag and run no
+    floor check, and a promotion publishes nothing before the floor check
+    succeeded."""
+
+    TRACKED = ("build_binaries", "floor_check", "collect_candidate", "verify_release_assets",
+               "publish_github_release", "publish_sdk_packages", "verify_crate_packages", "publish_registries")
+
+    def needs(self, job):
+        return job_needs(job, META_RELEASE_WORKFLOW)
+
+    def condition(self, job):
+        return job_condition(job, META_RELEASE_WORKFLOW)
+
+    def test_every_event_and_mode_runs_exactly_its_jobs(self):
+        for event, mode, publish, dry in itertools.product(
+            ("push", "workflow_dispatch"), ("tag", "candidate", "promote", "existing", "assets"),
+            (False, True), (False, True),
+        ):
+            with self.subTest(event=event, mode=mode, publish=publish, dry=dry):
+                results = meta_results(meta_context(mode, publish, dry, event=event))
+                expected = set()
+                if event == "push":
+                    if mode in ("promote", "existing"):
+                        expected = {"floor_check"}
+                elif mode == "candidate":
+                    expected = {"build_binaries", "collect_candidate"}
+                elif mode == "promote":
+                    expected = {"floor_check", "verify_release_assets"}
+                    if not dry:
+                        expected.add("publish_github_release")
+                    if publish:
+                        expected.update(("publish_sdk_packages", "verify_crate_packages", "publish_registries"))
+                elif mode == "existing":
+                    expected = {"floor_check"}
+                    if publish:
+                        expected.update(("publish_sdk_packages", "verify_crate_packages", "publish_registries"))
+                        if not dry:
+                            expected.add("verify_release_assets")
+                elif mode == "assets" and not publish and not dry:
+                    expected = {"publish_github_release"}
+                self.assertEqual({job for job in self.TRACKED if results[job] == "success"}, expected)
+
+    def test_a_candidate_runs_no_floor_check_and_collects_without_one(self):
+        """A candidate may build at the release merge, before Core's tag or
+        crates exist."""
+        self.assertNotIn("floor_check", self.needs("collect_candidate"))
+        self.assertNotIn("floor_check", self.condition("collect_candidate"))
+        results = meta_results(meta_context("candidate", False, False))
+        self.assertEqual(results["floor_check"], "skipped")
+        self.assertEqual(results["collect_candidate"], "success")
+        for gate in ("require_ci_green", "release_validate", "build_binaries"):
+            for status in ("failure", "cancelled", "skipped"):
+                with self.subTest(gate=gate, status=status):
+                    refused = meta_results(meta_context("candidate", False, False), {gate: status})
+                    self.assertEqual(refused["collect_candidate"], "skipped")
+
+    def test_the_build_legs_no_longer_read_cores_tag(self):
+        """The comparison of crates/ with Core's tag moved to promotion
+        (release-candidate.py stage), so the legs need no tag."""
+        legs = job_block("build_binaries", META_RELEASE_WORKFLOW)
+        for text in ("refs/tags/v", "git diff", "git fetch", "Require the in-tree Core"):
+            with self.subTest(text=text):
+                self.assertNotIn(text, legs)
+
+    def test_every_publication_of_a_promotion_waits_for_the_floor_check(self):
+        self.assertIn("floor_check", self.needs("publish_github_release"))
+        self.assertIn("needs.floor_check.result == 'success'", self.condition("publish_github_release"))
+        published = meta_results(meta_context("promote", True, False))
+        for job in (*META_PUBLICATION_JOBS, "verify_crate_packages"):
+            self.assertEqual(published[job], "success", job)
+        for status in ("failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                results = meta_results(meta_context("promote", True, False), {"floor_check": status})
+                self.assertEqual(results["verify_release_assets"], "success")
+                for job in (*META_PUBLICATION_JOBS, "verify_crate_packages"):
+                    self.assertEqual(results[job], "skipped", job)
+
+    def test_asset_recovery_adds_to_a_published_release_without_a_floor_check(self):
+        results = meta_results(meta_context("assets", False, False))
+        self.assertEqual((results["floor_check"], results["publish_github_release"]), ("skipped", "success"))
+
+    def test_promotion_stages_through_a_checkout_that_can_fetch_cores_tag(self):
+        """stage fetches Core's tag of the declared version from origin and
+        compares the candidate's bound crates/ tree with it, in both jobs
+        that stage a promotion; their source checkout keeps its credentials
+        and full history for that fetch."""
+        for job, step in (("verify_release_assets", "Verify selected candidate"),
+                          ("publish_github_release", "Reverify original candidate before publication")):
+            with self.subTest(job=job):
+                block = step_block(step, job, META_RELEASE_WORKFLOW)
+                self.assertIn("release-candidate.py stage --output-dir release-assets --proof-dir release-proofs",
+                              block)
+                self.assertIn("if: needs.resolve_release.outputs.mode == 'promote'", block)
+                checkout = step_block("Checkout immutable source", job, META_RELEASE_WORKFLOW)
+                self.assertIn("fetch-depth: 0", checkout)
+                self.assertNotIn("persist-credentials", checkout)
 
 
 if __name__ == "__main__":

@@ -17,14 +17,18 @@ name: Meta release
 #     version from meta/crates/meerkat-meta/Cargo.toml, --latest=false);
 #   - floor_check: Meta's published-floor check (the packaged Meta crates
 #     resolve and build, libraries and binaries, against crates.io Core at
-#     the versions they declare) gates candidates and publication; it
-#     replaces the old cold `cargo package` verify build (11.6 min of the
-#     0.9.5 promote run), which built the same targets;
-#   - artifacts build on the FAST PATH only: from the workspace, when the
-#     in-tree Core equals the published Core it declares (`git diff --quiet
-#     v<Core> <commit> -- crates/`), so a lockstep release from one commit
-#     always qualifies. Registry mode (building in the floor-check scratch
-#     workspace) is not wired in this draft: the leg refuses instead;
+#     the versions they declare) gates every publication of a promotion and
+#     the crates of a registry retry; a candidate runs none (it may build
+#     before Core's crates exist). It replaces the old cold `cargo package`
+#     verify build (11.6 min of the 0.9.5 promote run), which built the same
+#     targets;
+#   - artifacts build from the workspace at the candidate's commit, so the
+#     gateways embed its in-tree Core: the candidate manifest binds the tree
+#     of crates/ at that commit, and promotion refuses unless it equals the
+#     tree of Core's tag of the version Meta declares (`v<Core>:crates`). A
+#     candidate may therefore build before Core's tag exists, and a lockstep
+#     release from one commit always qualifies. Registry mode (building in
+#     the floor-check scratch workspace) is not wired in this draft;
 #   - the gateways build with the named profile `release-meta` (Meta's former
 #     [profile.release]: opt-level 1, opt-level 0 for the mega crates), which
 #     the root Cargo.toml defines; the old step that appended overrides to
@@ -274,7 +278,10 @@ jobs:
   # Meta's own crates, resolve every Core crate from crates.io at the declared
   # version and build. In a lockstep release Core publishes first: this job
   # waits (bounded) until the declared Core version is in the sparse index,
-  # so no separate orchestration orders the two releases.
+  # so no separate orchestration orders the two releases. A candidate runs
+  # none: it may build at the release merge, before Core's crates exist.
+  # Promotion publishes nothing (GitHub release, SDK packages, crates) until
+  # this job succeeded.
   floor_check:
     name: Meta published-floor check
     needs: [resolve_release, require_ci_green]
@@ -283,6 +290,7 @@ jobs:
       needs.resolve_release.result == 'success' &&
       needs.require_ci_green.result == 'success' &&
       needs.resolve_release.outputs.mode != 'tag' &&
+      needs.resolve_release.outputs.mode != 'candidate' &&
       needs.resolve_release.outputs.mode != 'assets'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -362,30 +370,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Fast path only (plan-v2 section 3.5): the gateways may embed in-tree
-      # Core only when it equals the published Core that Meta declares, so a
-      # Meta gateway never ships unreleased Core code. Every lockstep release
-      # from one commit qualifies (Core's tag is on the same commit).
-      - name: Require the in-tree Core to equal the published Core
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          # No Python here: the Linux legs run in a Bullseye container
-          # (Python 3.9, no tomllib). [workspace.dependencies] pins Core as
-          # `meerkat-core = { version = "=X.Y.Z", path = ... }`.
-          core_version="$(sed -nE 's/^meerkat-core *= *\{ *version *= *"=([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' Cargo.toml)"
-          if [[ ! "${core_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Cargo.toml [workspace.dependencies] pins no exact meerkat-core version" >&2
-            exit 1
-          fi
-          git fetch --no-tags origin "+refs/tags/v${core_version}:refs/tags/v${core_version}"
-          if ! git diff --quiet "v${core_version}" HEAD -- crates/; then
-            echo "::error::crates/ differs from Core's v${core_version}: this commit would embed unreleased Core. Release Core first, or release in lockstep from one commit. (Registry-mode builds are not wired in this draft.)" >&2
-            exit 1
-          fi
-          echo "fast path: crates/ equals v${core_version}"
-
+      # The legs build exactly the candidate's commit, Core's tag or not:
+      # collection binds the tree of crates/ they embed, and promotion
+      # refuses unless it equals Core's tag of the declared version, so a
+      # Meta gateway never ships unreleased Core code.
       - name: Prepare Linux release container
         if: runner.os == 'Linux'
         shell: bash
@@ -561,16 +549,17 @@ jobs:
           overwrite: false
           retention-days: 90
 
+  # Collection binds no floor check: the candidate may build before Core's
+  # crates exist, and promotion runs the floor check before any publication.
   collect_candidate:
     name: Bind immutable candidate artifacts
-    needs: [resolve_release, require_ci_green, release_validate, floor_check, build_binaries]
+    needs: [resolve_release, require_ci_green, release_validate, build_binaries]
     if: >-
       !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
       needs.resolve_release.result == 'success' &&
       needs.require_ci_green.result == 'success' &&
       needs.release_validate.result == 'success' &&
-      needs.floor_check.result == 'success' &&
       needs.build_binaries.result == 'success' &&
       needs.resolve_release.outputs.mode == 'candidate'
     runs-on: ubuntu-24.04
@@ -667,6 +656,8 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           path: .release-tools
+      # stage also fetches Core's tag of the declared version and refuses a
+      # candidate whose bound crates/ tree differs from that tag's.
       - name: Verify selected candidate
         if: needs.resolve_release.outputs.mode == 'promote'
         run: python3 .release-tools/meta/scripts/release-candidate.py stage --output-dir release-assets --proof-dir release-proofs
@@ -674,9 +665,13 @@ jobs:
         if: needs.resolve_release.outputs.mode == 'existing'
         run: python3 .release-tools/meta/scripts/release-candidate.py verify-published
 
+  # A promotion publishes only after the floor check succeeded; the SDK
+  # packages and the crates wait for this job, so every Meta publication of a
+  # promotion does too. Assets-mode recovery adds to a published release and
+  # runs no floor check.
   publish_github_release:
     name: Add original release assets without replacement
-    needs: [resolve_release, release_validate, verify_release_assets]
+    needs: [resolve_release, release_validate, verify_release_assets, floor_check]
     if: >-
       !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
@@ -684,7 +679,8 @@ jobs:
       needs.release_validate.result == 'success' &&
       needs.resolve_release.outputs.dry_run == 'false' &&
       ((needs.resolve_release.outputs.mode == 'promote' &&
-        needs.verify_release_assets.result == 'success') ||
+        needs.verify_release_assets.result == 'success' &&
+        needs.floor_check.result == 'success') ||
        (needs.resolve_release.outputs.mode == 'assets' &&
         needs.resolve_release.outputs.publish_packages == 'false'))
     runs-on: ubuntu-24.04

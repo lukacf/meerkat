@@ -7,12 +7,17 @@ TIER_TARGETS): every candidate run builds and binds exactly one tier, both
 tiers come from the same source SHA, promotion publishes only a core
 selection, and the trailing tier is added afterwards, add-only, by assets-mode
 recovery bound to the published core receipt. Verification and registry
-retry require the core tier only.
+retry require the core tier only. Schema 3 is schema 2 whose manifest also
+binds core_crates_tree, the tree of crates/ (the in-tree Core the gateways
+embed) at source_sha: a schema 3 candidate may build before Core's tag
+exists, and staging refuses it unless that tree equals the tree of Core's tag
+of the version the workspace declares. Schema 2 candidates built in this
+repository made that comparison in their build legs.
 
 Selections are strict JSON objects (all hashes are lowercase SHA-256 hex):
   accepted-candidate: schema_version=1, kind, repository, run_id, run_attempt,
-    manifest_artifact={id, digest, manifest_sha256}; schema_version=2 adds
-    tier ("core" or "trailing").
+    manifest_artifact={id, digest, manifest_sha256}; schema_version=2 and 3
+    add tier ("core" or "trailing"), and match their manifest's schema.
   original-assets: schema_version=1, kind, repository, source_sha, version, tag,
     run_id, run_attempt, metadata={"index.json": hash, "checksums.sha256": hash},
     artifacts=[{id, name, digest, target, archives=[archive_record, ...]}, ...].
@@ -24,6 +29,7 @@ Candidate manifests have schema_version=1, kind="candidate-manifest", repository
 source_sha, version, tag, run_id, run_attempt, workflow={path, sha, ref},
 ci={run_id, run_attempt}, artifacts (the complete matrix), and metadata.
 Schema 2 manifests add tier, and their artifacts and metadata are that tier's.
+Schema 3 manifests add core_crates_tree (40 lowercase hex) to schema 2.
 The external selection identifies the manifest artifact, avoiding a self-hash.
 Neither a selection nor decoded provenance alone authorizes publication:
 original attestations must pass gh's cryptographic verifier and strict policy.
@@ -76,10 +82,19 @@ RELEASE_NOTES = (
     "macOS x86_64 and Windows archives may arrive later, listed in index-trailing.json and "
     "checksums-trailing.sha256."
 )
-SCHEMAS = (1, 2)
-# Every release build leg. A schema 2 candidate run builds one tier's legs;
-# the resolver emits them as the build_binaries matrix. Each leg names its
-# runner image (scripts/test_ci_workflow.py refuses a -latest label).
+SCHEMAS = (1, 2, 3)
+# The newest schema: collection writes it for every tiered candidate.
+TIERED_SCHEMA = 3
+# Meta's gateways build from the one workspace, so they embed the in-tree Core
+# under CORE_CRATES. A schema 3 manifest binds that tree; staging requires it
+# to equal the tree of Core's tag (CORE_TAG_PREFIX + the meerkat-core version
+# the root Cargo.toml pins), so a Meta release never ships unreleased Core.
+CORE_CRATES = "crates"
+CORE_TAG_PREFIX = "v"
+CORE_MANIFEST = "Cargo.toml"
+# Every release build leg. A tiered (schema 2 or 3) candidate run builds one
+# tier's legs; the resolver emits them as the build_binaries matrix. Each leg
+# names its runner image (scripts/test_ci_workflow.py refuses a -latest label).
 BUILD_LEGS = (
     {"runs-on": "ubuntu-24.04", "target": "x86_64-unknown-linux-gnu", "archive_ext": "tar.gz"},
     {"runs-on": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "archive_ext": "tar.gz"},
@@ -267,6 +282,41 @@ def version_at(sha):
     return value
 
 
+def declared_core_version(sha):
+    """The Core release the workspace pins at sha: the root Cargo.toml's
+    [workspace.dependencies] meerkat-core = { version = "=X.Y.Z", ... }."""
+    dependencies = tomllib.loads(git("show", f"{sha}:{CORE_MANIFEST}")).get("workspace", {}).get("dependencies", {})
+    spec = dependencies.get("meerkat-core")
+    version = spec.get("version") if isinstance(spec, dict) else None
+    require(isinstance(version, str) and re.fullmatch(r"=[0-9]+\.[0-9]+\.[0-9]+", version),
+            f"{CORE_MANIFEST} [workspace.dependencies] pins no exact meerkat-core version")
+    return version[1:]
+
+
+def core_crates_tree(revision):
+    """The id of the crates/ tree (the in-tree Core) at a revision."""
+    return digest(git("rev-parse", "--verify", f"{revision}:{CORE_CRATES}"), "Core crates tree", 40)
+
+
+def require_released_core(manifest, sha):
+    """A schema 3 candidate embeds only released Core: the crates/ tree its
+    attested manifest binds is its source commit's, and equals the tree of
+    Core's tag of the version the workspace declares. The tag is fetched from
+    origin first; a missing tag refuses. Earlier schemas bind no tree: their
+    candidates built against published Core, or, in this repository,
+    compared crates/ with that tag in their build legs."""
+    if manifest["schema_version"] < 3:
+        return
+    bound = manifest["core_crates_tree"]
+    require(core_crates_tree(sha) == bound, "candidate Core crates tree does not match its source commit")
+    core = declared_core_version(sha)
+    tag = f"refs/tags/{CORE_TAG_PREFIX}{core}"
+    git("fetch", "--no-tags", "origin", f"+{tag}:{tag}")
+    require(core_crates_tree(f"{tag}^{{commit}}") == bound,
+            f"{CORE_CRATES}/ differs from Core's {CORE_TAG_PREFIX}{core}: this candidate embeds unreleased Core. "
+            "Release Core first, or release in lockstep from one commit.")
+
+
 def valid_tag(tag):
     require(isinstance(tag, str)
             and re.fullmatch(re.escape(TAG_PREFIX) + r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag),
@@ -302,13 +352,14 @@ def tier_targets(tier):
 
 
 def schema_tier(value):
-    """None for schema 1; the validated tier for schema 2."""
+    """None for schema 1; the validated tier for schemas 2 and 3."""
     require(type(value.get("schema_version")) is int and value["schema_version"] in SCHEMAS,
             "unsupported schema version")
     if value["schema_version"] == 1:
         require("tier" not in value, "schema 1 has no tier")
         return None
-    require(value.get("tier") in assets.TIERS, "schema 2 requires tier core or trailing")
+    require(value.get("tier") in assets.TIERS,
+            f"schema {value['schema_version']} requires tier core or trailing")
     return value["tier"]
 
 
@@ -414,9 +465,12 @@ def validate_manifest(value):
     require(isinstance(value, dict), "candidate manifest must be an object")
     tier = schema_tier(value)
     exact_keys(value, "schema_version kind repository source_sha version tag run_id run_attempt workflow ci artifacts metadata"
-               + ("" if tier is None else " tier"), "candidate manifest")
+               + ("" if tier is None else " tier")
+               + (" core_crates_tree" if value["schema_version"] >= 3 else ""), "candidate manifest")
     validate_identity(value)
     validate_source(value, tier)
+    if value["schema_version"] >= 3:
+        digest(value["core_crates_tree"], "Core crates tree", 40)
     require(value["kind"] == "candidate-manifest", "invalid manifest kind")
     exact_keys(value["workflow"], "path sha ref", "workflow")
     require(value["workflow"] == {"path": WORKFLOW, "sha": value["source_sha"], "ref": MAIN},
@@ -729,8 +783,8 @@ def collect(args):
         prepared = work / "prepared"
         assets.prepare_assets(downloaded, prepared, tag, tier)
         manifest = {
-            "schema_version": 1 if tier is None else 2, "kind": "candidate-manifest", "repository": repository(),
-            "source_sha": sha, "version": version, "tag": tag,
+            "schema_version": 1 if tier is None else TIERED_SCHEMA, "kind": "candidate-manifest",
+            "repository": repository(), "source_sha": sha, "version": version, "tag": tag,
             "workflow": {"path": WORKFLOW, "sha": sha, "ref": MAIN},
             "run_id": run_id, "run_attempt": attempt,
             "ci": {"run_id": args.ci_run_id, "run_attempt": args.ci_run_attempt},
@@ -739,6 +793,9 @@ def collect(args):
         }
         if tier is not None:
             manifest["tier"] = tier
+            # The legs built exactly this commit, so its crates/ is the Core
+            # they embed; staging compares it with Core's tag.
+            manifest["core_crates_tree"] = core_crates_tree(sha)
         validate_manifest(manifest)
         args.output_dir.mkdir()
         write_new(args.output_dir / tier_proof_names(tier)[1], json_bytes(manifest))
@@ -830,6 +887,8 @@ def stage_candidate(selected, output_dir, proof_dir, work):
     manifest = read_json(folder / manifest_name)
     match_manifest_selection(manifest, selected, folder / manifest_name, sha, version, tag)
     verify_provenance(folder / manifest_name, folder / PROVENANCE, sha, selected["run_id"], selected["run_attempt"])
+    # Bound by the verified attestation: the Core this candidate embeds.
+    require_released_core(manifest, sha)
     verify_run(manifest["ci"]["run_id"], manifest["ci"]["run_attempt"], sha, ci=True)
     check_metadata(manifest, folder)
     prepared, proofs = work / "verified-assets", work / "verified-proofs"

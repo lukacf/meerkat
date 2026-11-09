@@ -666,7 +666,11 @@ tag line, independent of Core's `vX.Y.Z`) and invokes
 `release-assets-recover` and `release-registry-retry` refuse it (unset it if
 the shell still exports it from the candidate step).
 Promotion accepts only the core selection and verifies and publishes the
-original bytes without rebuilding or signing again. The trailing tier is added
+original bytes without rebuilding or signing again. It refuses a candidate
+whose bound `crates/` tree differs from Core's tag of the version the
+workspace pins (candidates may build before that tag exists), and publishes
+nothing until Meta's published-floor check against crates.io Core succeeded.
+The trailing tier is added
 afterwards, add-only, with
 `make release-assets-recover RELEASE_TAG=meta-vX.Y.Z ARTIFACT_SELECTION=<trailing json-file>`. Assets precede the Python and TypeScript SDKs, then the crates
 (`meta-extension-state`, then `meerkat-meta`) and an exact registry readback.

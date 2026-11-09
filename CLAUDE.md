@@ -911,6 +911,10 @@ publishes those artifacts after the `assets_run_id` verification (each
 archive and its source stamp attested by `release.yml` at that commit on
 `refs/heads/main`, the run's binary build gate green, every binary embedding
 the release version); without a complete prebuild it builds as before.
+The same command then dispatches Meta's two candidate tiers of that commit
+(`make -C meta release-candidate`, core then trailing; printed, not
+dispatched, in a dry run): they build before Core's tag exists, and Meta's
+promotion refuses a candidate whose `crates/` tree differs from that tag's.
 
 ### Pre-commit Hooks
 

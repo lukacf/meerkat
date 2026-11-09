@@ -204,9 +204,10 @@ Save it unchanged outside the repository, for example as
 `accepted-core.json` and `accepted-trailing.json`. It binds the repository, run
 and attempt, tier, immutable manifest artifact ID and ZIP digest, and manifest
 file hash. The attested manifest binds the exact source, version, CI evidence,
-the tier's target artifact identities, and its archive and inner-executable
-hashes. The manifest's own artifact identity is outside the manifest to avoid a
-self-referential hash.
+the tier's target artifact identities, its archive and inner-executable
+hashes, and the tree of `crates/` at the source commit (the in-tree Core the
+gateways embed). The manifest's own artifact identity is outside the manifest
+to avoid a self-referential hash.
 
 Inner members follow the producer: Unix archives contain the executable
 basename, and Windows ZIPs contain exactly
@@ -220,9 +221,9 @@ not placeholders). IDs are integers; digests are 64 lowercase hex characters:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "kind": "accepted-candidate",
-  "repository": "lukacf/meerkat-meta",
+  "repository": "lukacf/meerkat",
   "run_id": 123,
   "run_attempt": 1,
   "tier": "core",
@@ -282,8 +283,13 @@ the candidate step: make reads `TIER` from the environment too.
 
 Promotion verifies the original signed provenance, including the certificate's
 source digest and workflow identity, run/attempt, artifact ZIP digests, archive
-hashes, and every inner executable hash. It copies the original archives, index,
-and checksums without rebuilding, signing, stripping, or recompressing anything.
+hashes, and every inner executable hash. It also fetches Core's tag of the
+version the workspace pins (`v<Core>`) and refuses a candidate whose bound
+`crates/` tree differs from that tag's, so a candidate may build before Core's
+tag exists but never publishes unreleased Core; promotion then publishes
+nothing until Meta's published-floor check against crates.io Core succeeded.
+It copies the original archives, index, and checksums without rebuilding,
+signing, stripping, or recompressing anything.
 A tag mismatch, missing/expired artifact, changed attempt, or failed verification
 refuses publication; there is no fallback build. Do not rerun an accepted
 candidate's jobs and assume the old selection still applies.

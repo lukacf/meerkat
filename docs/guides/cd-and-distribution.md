@@ -365,7 +365,11 @@ verified on a Windows runner) and the Web SDK package from exactly the
 dispatched commit, stamps each archive with that commit, attests and uploads
 everything, and publishes nothing. Its `Release prebuild gate` job passes
 once the critical binaries and the Web SDK package succeeded; the trailing
-Intel macOS and Windows lanes keep running in the same run.
+Intel macOS and Windows lanes keep running in the same run. The command then
+dispatches Meta's two candidate tiers of the same commit
+(`make -C meta release-candidate`, core then trailing; a dry run prints
+them): they build before Core's tag exists, and Meta's promotion refuses a
+candidate whose `crates/` tree differs from the tree of that tag.
 
 The tag run looks the prebuild up after `require_ci_green`
 (`release_prebuild`, `scripts/release-find-prebuild`): a `release.yml`

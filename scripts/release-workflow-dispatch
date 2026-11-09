@@ -24,7 +24,10 @@ run of exactly that commit then publishes those artifacts instead of
 rebuilding them. Dispatch it as soon as the release commit lands on main. It
 builds with the backend the tag run selects (auto reads the repository's
 MEERKAT_RELEASE_BUILDBUDDY, never the local MEERKAT_BUILDBUDDY), and
-release.yml refuses a prebuild on any other backend.
+release.yml refuses a prebuild on any other backend. It then dispatches
+Meta's two candidate tiers of the same commit, core then trailing
+(make -C meta release-candidate): they build before Core's tag exists, and
+Meta's promotion compares the Core they embed with that tag.
 
 Environment equivalents:
   VERSION or RELEASE_TAG     Release tag, for example v0.6.1.
@@ -324,9 +327,11 @@ esac
 
 # A prebuild builds main's commit at dispatch time; it must be the release
 # commit, or the tag run will not find it.
+prebuild_commit=""
 if [[ "${mode}" == "prebuild" && "${dry_run}" != "1" ]]; then
   git fetch --quiet origin main
-  main_version="$(git show FETCH_HEAD:Cargo.toml | awk '
+  prebuild_commit="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+  main_version="$(git show "${prebuild_commit}:Cargo.toml" | awk '
     /^\[workspace.package\]/ { in_workspace_package = 1; next }
     /^\[/ { in_workspace_package = 0 }
     in_workspace_package && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
@@ -335,13 +340,24 @@ if [[ "${mode}" == "prebuild" && "${dry_run}" != "1" ]]; then
     echo "origin/main carries workspace version ${main_version:-unknown}, not ${version}: land the release commit on main before prebuilding" >&2
     exit 1
   fi
-  printf 'release workflow prebuild commit: %s\n' "$(git rev-parse FETCH_HEAD)"
+  printf 'release workflow prebuild commit: %s\n' "${prebuild_commit}"
+fi
+
+# After Core's prebuild (so Core's jobs queue first), Meta's two candidate
+# tiers of the same commit, core first. A word list, not an array: an empty
+# array is unbound under set -u in the bash 3.2 macOS ships.
+meta_tiers=""
+if [[ "${mode}" == "prebuild" ]]; then
+  meta_tiers="core trailing"
 fi
 
 if [[ "${dry_run}" == "1" ]]; then
   printf 'DRY-RUN '
   printf '%q ' "${args[@]}"
   printf '\n'
+  for tier in ${meta_tiers}; do
+    printf 'DRY-RUN make -C meta release-candidate SOURCE_SHA=<the prebuild commit> TIER=%s\n' "${tier}"
+  done
   exit 0
 fi
 
@@ -350,4 +366,11 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 127
 fi
 
-exec "${args[@]}"
+if [[ -z "${meta_tiers}" ]]; then
+  exec "${args[@]}"
+fi
+"${args[@]}"
+for tier in ${meta_tiers}; do
+  printf 'release workflow prebuild: dispatching Meta candidate tier %s of %s\n' "${tier}" "${prebuild_commit}"
+  make --no-print-directory -C meta release-candidate SOURCE_SHA="${prebuild_commit}" TIER="${tier}"
+done

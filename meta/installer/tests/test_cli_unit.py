@@ -16,7 +16,7 @@ from launchkit.cli.client import server_url
 from launchkit.cli.commands.host import child_environment, provider_variable
 from launchkit.cli.commands.setup import chat_answer, option_ids, turn_body
 from launchkit.cli.errors import EXIT_CODES, CliError, from_response
-from launchkit.cli.render import identities, plan_summary, tool_labels
+from launchkit.cli.render import identities, plan_summary, review_lines, tool_labels
 from launchkit.cli.review import canonical, plan_document, review_digest, sha256_of
 from launchkit.projects import fingerprint
 
@@ -332,6 +332,20 @@ def test_plan_review_document_and_digest_are_stable():
     changed = reviewable_state()
     changed["version"] = 8
     assert review_digest(plan_document(changed)) != review_digest(document)
+
+
+def test_distinct_review_documents_read_distinctly():
+    # The review a person reads stands for exactly one document: list boundaries, null, empty values and
+    # escaped characters stay distinguishable from the text that looks like them.
+    documents = [{"items": ["a, b"]}, {"items": ["a", "b"]}, {"items": "a, b"}, {"items": ["a"]}, {"items": "a"},
+                 {"value": None}, {"value": "None"}, {"value": "null"}, {"value": []}, {"value": "[]"},
+                 {"value": {}}, {"value": ""}, {"value": "none"}, {"value": True}, {"value": "true"},
+                 {"value": 1}, {"value": "1"}, {"value": "x\ny"}, {"value": "x\\ny"}, {"value": "x\x1by"},
+                 {"value": "x\\x1by"}, {"value": " padded"}, {"value": "padded"}, {"a_b": 1}, {"a b": 1}]
+    readings = [tuple(review_lines({"title": "t", **document}, None)) for document in documents]
+    assert len(set(readings)) == len(documents), [reading for reading in readings if readings.count(reading) > 1]
+    for reading in readings:
+        assert all(line.isprintable() for line in reading), reading
 
 
 def question():

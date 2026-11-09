@@ -570,8 +570,9 @@ the behavior of retained packages and receipts.
 
 The installed Forge (the packaged product) and the developer source entry both
 offer the agent-team path. An agent team package, downloaded or installed,
-installs the published Meta release it pins, that of the Meerkat release this
-Forge is built from (0.9.11): the `meerkat-meta` SDK from PyPI by its fixed SHA-256, and the
+installs the published Meta release it pins (`VERSION` in
+`launchkit/public_meta_runtime.py`, the Meta release a packaged Forge's guide
+runs): the `meerkat-meta` SDK from PyPI by its fixed SHA-256, and the
 official `meta-rpc-gateway` and `meta-gateway` archives from the monorepo's
 `meta-v<version>` release, each checked against the release's published
 SHA-256 checksums. It does not use the runtime an installed Forge selected for its own

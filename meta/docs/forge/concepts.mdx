@@ -144,14 +144,14 @@ does not.
 
 ## Runtimes
 
-Forge is built from one Meerkat release, whose Meta, Core and Connect share a
-version and are released together, and it runs that release:
+Forge keeps three runtime selections apart. The release inputs a Forge package
+is built with select each of them:
 
 | Runtime | Used for | Release |
 | --- | --- | --- |
-| Guide runtime | Forge's own setup team | That release's Meta and Core |
-| Application runtime | Custom applications built by this Forge package | That release's Meta and Toolkit |
-| Agent team runtime | Every agent team package | That release's published Meta |
+| Guide runtime | Forge's own setup team | The Meta and Core release the inputs select for the guide: the Meerkat release the package is built from |
+| Application runtime | Custom applications built by this Forge package | The Meta and Toolkit release of the product the inputs select, which can be an earlier release |
+| Agent team runtime | Every agent team package | The guide's Meta release, installed from its published assets |
 
 Toolkit is Connect's Python SDK. Applications without a connection setup
 helper use the Meta RPC gateway included in the package. Updating Forge does

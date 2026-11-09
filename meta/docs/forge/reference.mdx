@@ -28,9 +28,11 @@ gh attestation verify meta-forge-0.3.0-linux-x86_64.zip --repo lukacf/meerkat-me
 On macOS, use `shasum -a 256 -c` in place of `sha256sum -c`.
 
 Each package's `README.md` names the destination it supports and its exact
-runtime selections. A package runs the Meerkat release it is built from: its
-guide runs that release's Meta and Core, its applications that release's Meta
-and Toolkit, and its agent teams install that release's published Meta.
+runtime selections. The release inputs a package is built with select them:
+its guide runs the Meta and Core release they select for it, the Meerkat
+release the package is built from, and its agent teams install that Meta
+release from its published assets; its applications run the Meta and Toolkit
+release of the product the inputs select, which can be an earlier release.
 
 | Package | Supported destination |
 | --- | --- |

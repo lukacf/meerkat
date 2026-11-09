@@ -80,8 +80,10 @@ Use `rkat models` for every supported ID and its current limits.
     |----------------|---------|------------|-------------|
     | `claude-opus-5-5` | 1M | 128K | Default Anthropic model; thinking always on, effort default `medium` |
     | `claude-opus-5` | 1M | 128K | Previous Opus generation |
-    | `claude-fable-5-1` | 1M | 128K | Recommended Fable model |
-    | `claude-fable-5` | 1M | 128K | Recommended previous Fable generation |
+    | `claude-fable-5-2` | 1M | 128K | Recommended Fable model; thinking always on, effort default `high`, no forced tool choice, no sampling parameters |
+    | `claude-mythos-5-2` | 1M | 128K | Claude Fable 5.2 for organizations Anthropic verifies (supported tier) |
+    | `claude-fable-5-1` | 1M | 128K | Previous Fable generation |
+    | `claude-fable-5` | 1M | 128K | Earlier Fable generation |
     | `claude-opus-4-8` | 1M | 128K | Recommended previous Opus generation |
     | `claude-sonnet-5-5` | 1M | 128K | Recommended Sonnet model; adaptive thinking, effort default `high`, no sampling parameters |
     | `claude-sonnet-5` | 1M | 128K | Legacy Sonnet generation (still available upstream; prefer `claude-sonnet-5-5`); accepts forced tool choice, no mid-conversation system messages |
@@ -354,17 +356,20 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     thinking off on the models that accept it: Claude Opus 4.8, Opus 4.7,
     Sonnet 5, Sonnet 4.6, Sonnet 4.5, Haiku 4.5 and Opus 4.5 at any effort,
     and Claude Opus 5 and Haiku 5.5 at `high` effort or below; Claude
-    Fable 5.1, Fable 5, Opus 5.5 and Sonnet 5.5 refuse it. A thinking type or
+    Fable 5.2, Mythos 5.2, Fable 5.1, Fable 5, Opus 5.5 and Sonnet 5.5
+    refuse it. A thinking type or
     budget (`thinking_budget_tokens`) the model does not accept, `top_k` on a
     model without top-k support, and `between_tools` or a capped `disabled`
     above `high` effort are refused when the agent is built and again before
     each request, never sent to Anthropic. A generic `temperature` is omitted
     for models that reject sampling parameters.
 
-    Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 accept a replayed
-    thinking block only while the system prompt, the tools and the earlier
-    messages it was produced under are unchanged, and accounts created on or
-    after 2026-08-31 refuse a request that replays one after a change.
+    Claude Fable 5.2, Mythos 5.2, Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku
+    5.5 accept a replayed thinking block only while the system prompt, the
+    tools and the earlier messages it was produced under are unchanged, and
+    refuse a request that replays one after a change: Claude Fable 5.2 and
+    Mythos 5.2 on every account, the others on accounts created on or after
+    2026-08-31.
     Meerkat changes the tools mid-session as MCP servers connect, so it asks
     Anthropic to drop such blocks instead
     (`thinking.block_binding.prefix_mismatch_behavior: "drop_block"`, with

@@ -36,6 +36,14 @@
   },
   "allow": [
     {
+      "path": "scripts/check_inrepo_version_pins.py",
+      "reason": "The check's own description quotes example pins of each shape it finds."
+    },
+    {
+      "path": "scripts/test_check_inrepo_version_pins.py",
+      "reason": "The check's tests feed synthetic pins of each shape to it."
+    },
+    {
       "path": "specs/**",
       "reason": "Generated TLA+ models and their configurations; the machine sources they come from are read."
     },

@@ -1414,6 +1414,14 @@ impl DistillerEngine {
         self
     }
 
+    /// Take a run of the realm's background budget, as a run of the engine
+    /// does, and hold it until the answer is dropped: rows that need the
+    /// budget busy hold it so.
+    #[cfg(test)]
+    pub(crate) fn hold_budget(&self) -> Result<crate::memory::guards::BudgetPermit, BudgetDenied> {
+        self.budget.try_admit(&self.realm)
+    }
+
     /// The credential authority the engine's model-client handle resolves
     /// with.
     #[cfg(test)]

@@ -366,6 +366,56 @@ mod tests {
         assert_eq!(sink.types(), vec!["memory.budget.denied"]);
     }
 
+    /// One run's end lets one waiting run through: the first waiter to read
+    /// the budget free takes the run, and the others read it taken and wait
+    /// on, so no other waiter goes on to read its evidence again for it.
+    ///
+    /// RED before a waiter took the run it waited for: every run's end let
+    /// every waiter through, and each read its evidence again only for all
+    /// but one to find the budget taken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_s_end_lets_one_waiting_run_through() {
+        const WAITERS: usize = 8;
+        let budget = BackgroundBudget::new(config(100, 1));
+        let holder = budget.try_admit("realm-a").expect("the holder");
+        let through = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut waiters = Vec::new();
+        for _ in 0..WAITERS {
+            waiters.push(tokio::spawn({
+                let budget = budget.clone();
+                let through = Arc::clone(&through);
+                async move {
+                    let answer = budget
+                        .until_admissible("realm-a", Duration::from_secs(30))
+                        .await;
+                    if answer.is_ok() {
+                        through.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    // Whatever the wait answered stays held until the row
+                    // ends.
+                    let _held = answer;
+                    std::future::pending::<()>().await;
+                }
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            through.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the holder holds the budget: every run waits"
+        );
+        drop(holder);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            through.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one run's end lets one waiting run through"
+        );
+        for waiter in waiters {
+            waiter.abort();
+        }
+    }
+
     /// A wait for the concurrency ceiling ends as soon as the run that holds
     /// it ends: its dropped permit wakes the wait.
     #[tokio::test]

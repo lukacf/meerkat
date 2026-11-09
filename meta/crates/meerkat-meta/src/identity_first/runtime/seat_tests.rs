@@ -7542,6 +7542,173 @@ async fn a_distillation_the_budget_keeps_busy_past_its_wait_ends_unrun_with_its_
     holder.await.expect("the budget holder's run");
 }
 
+/// A live identity, alice, whose memory has a distiller that reads one
+/// compaction discard for every session and no transcript, with the
+/// projection prepared over it and the realm's background budget held by
+/// another run for the whole row.
+struct BusyBudgetRow {
+    runtime: Arc<IdentityRuntime>,
+    /// Alice's session, which her reset retires.
+    session: SessionId,
+    discards: Arc<OneDiscardEach>,
+    errors: Arc<StdMutex<Vec<crate::unified_runtime::types::ErrorEvent>>>,
+    /// The customizer told of each seat.
+    customizer: Arc<ToldSeats>,
+    /// The other run's hold of the budget, until the row ends.
+    _held: crate::memory::guards::BudgetPermit,
+    _memory_dir: tempfile::TempDir,
+}
+
+async fn alice_with_a_busy_budget() -> BusyBudgetRow {
+    let alice = identity("personal:alice");
+    let session = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    let customizer = ToldSeats::answering();
+    runtime
+        .set_agent_customizer(Some(Arc::clone(&customizer) as Arc<dyn AgentCustomizer>))
+        .await;
+    runtime.bind_lifecycle_projection(None);
+    register_live(&runtime, &core.core, spec(&alice), 0, session.clone())
+        .await
+        .expect("registered live");
+    let errors = Arc::new(StdMutex::new(Vec::new()));
+    runtime.set_error_hook(Some(keeping_errors(&errors)));
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let discards = Arc::new(OneDiscardEach::default());
+    let model = Arc::new(GatedModel::new());
+    let (memory, distiller) = memory_harvesting(memory_dir.path(), &reads, &discards, &model);
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+    let held = distiller
+        .hold_budget()
+        .expect("the budget admits the holder");
+    BusyBudgetRow {
+        runtime,
+        session,
+        discards,
+        errors,
+        customizer,
+        _held: held,
+        _memory_dir: memory_dir,
+    }
+}
+
+/// Wait, bounded, until the retirement's harvest of `session` has read the
+/// session's discards: it then waits for the budget.
+async fn harvest_waits_for_the_budget(discards: &OneDiscardEach, session: &SessionId) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while discards.reads_of(session) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retirement's harvest never read the session's discards"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A retirement whose harvest waits for a busy agent memory background
+/// budget holds back the side effects Core journaled after it, another
+/// identity's `after_create` among them, only briefly: the harvest is given
+/// up at the end of its short wait (recorded `budget_busy`), and the seat
+/// Core journaled after the retirement is told while the budget is still
+/// busy.
+///
+/// RED before the wait was short: the harvest waited for the budget up to
+/// five minutes, and the projection's lane, every identity's later side
+/// effects with it, waited with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_budget_wait_holds_another_identity_s_after_create_only_briefly() {
+    let alice = identity("personal:alice");
+    let bob = identity("personal:bob");
+    let row = alice_with_a_busy_budget().await;
+    row.runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset rotates the identity");
+    harvest_waits_for_the_budget(&row.discards, &row.session).await;
+
+    // Core journals bob's seat after alice's retirement.
+    let outcomes = roster_pass(&row.runtime, &[spec(&bob)], None).await;
+    assert!(pass_binding(&outcomes[&bob]).is_some(), "bob is seated");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !row.customizer.told().iter().any(|(told, _)| *told == bob) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "bob's seat waited out alice's budget wait: told {:?}",
+            row.customizer.told()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let failures = row
+        .runtime
+        .lifecycle_effect_failures(0, 16)
+        .await
+        .expect("the recorded failures read");
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.identity == alice.as_str()
+                && failure.effect == crate::runtime::LifecycleEffectKind::CompactionHarvest
+                && failure.cause == crate::runtime::LifecycleEffectFailureCause::BudgetBusy),
+        "alice's harvest is given up, recorded budget_busy: {failures:?}"
+    );
+}
+
+/// A shutdown while a retirement's harvest waits for a busy budget ends the
+/// wait at once: the projection stops well within its share of the
+/// shutdown, and nothing is recorded or reported for the harvest, which its
+/// page still owes at the next start.
+///
+/// RED before the wait watched the projection's stop: the shutdown waited
+/// out its whole share for the wait, and then aborted the projection.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_ends_a_budget_wait_at_once_and_records_nothing() {
+    let alice = identity("personal:alice");
+    let row = alice_with_a_busy_budget().await;
+    row.runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset rotates the identity");
+    harvest_waits_for_the_budget(&row.discards, &row.session).await;
+
+    let started = tokio::time::Instant::now();
+    row.runtime
+        .stop_lifecycle_projection(started + Duration::from_secs(10))
+        .await;
+    let stopped_in = started.elapsed();
+    assert!(
+        stopped_in < Duration::from_secs(3),
+        "the shutdown waited {stopped_in:?} for the budget wait"
+    );
+    let failures = row
+        .runtime
+        .lifecycle_effect_failures(0, 16)
+        .await
+        .expect("the recorded failures read");
+    assert!(
+        failures.is_empty(),
+        "nothing is recorded for the stopped wait: {failures:?}"
+    );
+    let reported = lock(&row.errors)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        reported.is_empty(),
+        "nothing is reported for the stopped wait: {reported:?}"
+    );
+}
+
 /// The retirement hook of an incarnation a Meta step ended is called only
 /// once that step answered. The projection takes what the step kept for the
 /// hook (the registration it read before Core was asked, settled after Core

@@ -5220,4 +5220,330 @@ mod tests {
             .len();
         assert!(kept <= MOST, "the run kept {kept} failures");
     }
+
+    /// The sessions of the rows whose harvest meets a busy background
+    /// budget: each holds one compaction discard and no transcript, and
+    /// whether a session is private fails to read the first
+    /// `privacy_failures` times it is asked.
+    #[derive(Default)]
+    struct BudgetRowSessions {
+        privacy_failures: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::memory::distiller::TranscriptSource for BudgetRowSessions {
+        async fn read(
+            &self,
+            _session_key: &str,
+            _from_index: u64,
+        ) -> Result<
+            Option<crate::memory::distiller::TranscriptSlice>,
+            crate::memory::distiller::DistillerError,
+        > {
+            Ok(None)
+        }
+
+        async fn private_to_a_person(
+            &self,
+            _session_key: &str,
+        ) -> Result<bool, crate::memory::distiller::DistillerError> {
+            let failing = self
+                .privacy_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+            if failing {
+                return Err(crate::memory::distiller::DistillerError::Transcript(
+                    "the session's labels did not read".to_string(),
+                ));
+            }
+            Ok(false)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::memory::distiller::CompactionDiscardSource for BudgetRowSessions {
+        async fn read_discards(
+            &self,
+            session_key: &str,
+            _limit: usize,
+        ) -> Result<Vec<DiscardEntry>, crate::memory::distiller::DistillerError> {
+            Ok(vec![discard_of(session_key)])
+        }
+    }
+
+    /// The compaction discard the memory of `session_key` holds.
+    fn discard_of(session_key: &str) -> DiscardEntry {
+        DiscardEntry {
+            content: format!("DISCARD of {session_key}"),
+            range: Some((0, 1)),
+        }
+    }
+
+    /// The distiller's model client: never asked, since the budget is busy
+    /// or the session's privacy does not read.
+    struct UnaskedModel;
+
+    #[async_trait::async_trait]
+    impl crate::memory::distiller::DistillerClientHandle for UnaskedModel {
+        async fn client(
+            &self,
+        ) -> Result<Arc<dyn meerkat_client::LlmClient>, crate::memory::distiller::DistillerError>
+        {
+            Ok(Arc::new(meerkat_client::TestClient::default()))
+        }
+
+        fn invalidate(&self) {}
+    }
+
+    /// An identity runtime with no session bridge, over an in-memory record
+    /// store, and agent memory over a store in `dir` whose distiller reads
+    /// `sessions` and emits its timeline events to `events`; and that
+    /// distiller.
+    fn runtime_with_budgeted_memory(
+        dir: &std::path::Path,
+        sessions: Arc<BudgetRowSessions>,
+        events: &Arc<crate::memory::events::CollectingEventSink>,
+    ) -> (
+        IdentityRuntime,
+        crate::identity_first::AgentMemoryRuntimeInjector,
+        Arc<crate::memory::distiller::DistillerEngine>,
+    ) {
+        let runtime = IdentityRuntime::new(crate::identity_first::IdentityRuntimeConfig {
+            continuity_store: Arc::new(
+                crate::identity_first::LocalContinuityStore::in_memory().expect("store"),
+            ),
+            lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+            runtime_instance_id: "budget-rows".to_string(),
+            has_runtime_store: true,
+            durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+            bridge: None,
+            default_timeout: None,
+        });
+        runtime.set_identity_records(
+            Arc::new(crate::runtime::InMemoryMetadataStore::new()),
+            "budget-rows".to_string(),
+        );
+        let store =
+            Arc::new(crate::SqliteAgentMemoryStore::open(dir).expect("open the memory store"));
+        let distiller = Arc::new(crate::memory::distiller::DistillerEngine::new(
+            crate::memory::distiller::DistillerProfile::embedded_default(),
+            crate::memory::distiller::DistillerConfig {
+                enabled: true,
+                ..crate::memory::distiller::DistillerConfig::default()
+            },
+            Arc::new(UnaskedModel),
+            store.clone(),
+            store.clone(),
+            Arc::clone(&sessions) as Arc<dyn crate::memory::distiller::TranscriptSource>,
+            Some(sessions as Arc<dyn crate::memory::distiller::CompactionDiscardSource>),
+            None,
+            "default",
+        ));
+        distiller.set_event_sink(Arc::clone(events) as Arc<dyn crate::memory::MemoryEventSink>);
+        let memory = crate::identity_first::AgentMemoryRuntimeInjector::new(
+            store,
+            crate::identity_first::AgentMemoryConfig::default(),
+        )
+        .with_distiller(Arc::clone(&distiller));
+        (runtime, memory, distiller)
+    }
+
+    /// The bounds of a harvest in the rows that wait a busy budget out.
+    fn short_budget_limits() -> EffectLimits {
+        EffectLimits {
+            deadline: Duration::from_secs(10),
+            attempts: 2,
+            pause: Duration::from_millis(1),
+            budget_wait: Duration::from_millis(200),
+        }
+    }
+
+    /// The reset of alpha's incarnation 0, which ended `session`.
+    fn reset_of(session: &SessionId) -> Retirement {
+        Retirement {
+            member: alpha(),
+            generation: 0,
+            session: Some(session.clone()),
+            cause: RetiredIdentityCause::Reset,
+            retired_at_ms: None,
+            hook_role: None,
+        }
+    }
+
+    /// A harvest the realm's background budget does not admit within its
+    /// wait is given up, recorded with the cause `budget_busy`, and the
+    /// denial that gave it up is reported as a run the budget skipped
+    /// (`memory.budget.denied`), once: the denials it waited through are
+    /// not.
+    ///
+    /// RED before a harvest given up reported its denial: no denial of the
+    /// budget reached the timeline.
+    #[tokio::test]
+    async fn a_harvest_given_up_on_a_busy_budget_reports_the_denial() {
+        let dir = tempfile::tempdir().expect("memory dir");
+        let events = Arc::new(crate::memory::events::CollectingEventSink::new());
+        let (runtime, memory, distiller) = runtime_with_budgeted_memory(
+            dir.path(),
+            Arc::new(BudgetRowSessions::default()),
+            &events,
+        );
+        let _held = distiller
+            .hold_budget()
+            .expect("the budget admits the holder");
+        let identity = AgentIdentity::parse("personal:alpha").expect("identity");
+        let session = SessionId::new();
+
+        runtime
+            .harvest_owed_compaction(
+                &identity,
+                &reset_of(&session),
+                &session.to_string(),
+                &memory,
+                OwedCompaction::Fallback {
+                    failed: None,
+                    published: None,
+                },
+                Owed {
+                    incarnation: "budget-rows",
+                    cursor: 1,
+                },
+                short_budget_limits(),
+            )
+            .await
+            .expect("the harvest is given up and recorded");
+
+        let failures = runtime
+            .lifecycle_effect_failures(0, 16)
+            .await
+            .expect("the recorded failures read");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(
+            failures[0].cause,
+            LifecycleEffectFailureCause::BudgetBusy,
+            "{failures:?}"
+        );
+        assert_eq!(
+            events.types(),
+            vec!["memory.budget.denied"],
+            "the denial that gave the harvest up is reported once"
+        );
+    }
+
+    /// A step Core refused hands the batch it settled back to the session
+    /// and harvests it before the refusal is answered: a harvest the budget
+    /// does not admit is reported as a run the budget skipped
+    /// (`memory.budget.denied`), and the session's memory keeps the batch.
+    ///
+    /// RED before such a harvest reported its denial: it was only logged.
+    #[tokio::test]
+    async fn a_handed_back_harvest_the_budget_does_not_admit_reports_the_denial() {
+        let dir = tempfile::tempdir().expect("memory dir");
+        let events = Arc::new(crate::memory::events::CollectingEventSink::new());
+        let (runtime, memory, distiller) = runtime_with_budgeted_memory(
+            dir.path(),
+            Arc::new(BudgetRowSessions::default()),
+            &events,
+        );
+        runtime.set_agent_memory(Some(memory)).await;
+        let _held = distiller
+            .hold_budget()
+            .expect("the budget admits the holder");
+        let identity = AgentIdentity::parse("personal:alpha").expect("identity");
+        let session_key = SessionId::new().to_string();
+        runtime.lifecycle_projection.stash_owed_compaction(
+            &identity,
+            0,
+            OwedCompaction::Batch {
+                discards: vec![discard_of(&session_key)],
+                session_key,
+            },
+        );
+
+        runtime.hand_back_owed_compaction(&identity, 0, true).await;
+
+        assert_eq!(
+            events.types(),
+            vec!["memory.budget.denied"],
+            "the handed-back harvest's denial is reported"
+        );
+    }
+
+    /// A harvest whose settled batch failed, and whose fallback the budget
+    /// then does not admit within its wait, keeps one record that says
+    /// both: the attempt the batch made counts, and the error names its
+    /// failure beside the budget's denial.
+    ///
+    /// RED before the record counted the batch: the fallback's record
+    /// replaced the batch's failure and counted no attempt.
+    #[tokio::test]
+    async fn a_failed_batch_then_a_fallback_the_budget_keeps_busy_records_both() {
+        let dir = tempfile::tempdir().expect("memory dir");
+        let events = Arc::new(crate::memory::events::CollectingEventSink::new());
+        let (runtime, memory, distiller) = runtime_with_budgeted_memory(
+            dir.path(),
+            Arc::new(BudgetRowSessions {
+                privacy_failures: std::sync::atomic::AtomicUsize::new(1),
+            }),
+            &events,
+        );
+        let _held = distiller
+            .hold_budget()
+            .expect("the budget admits the holder");
+        let identity = AgentIdentity::parse("personal:alpha").expect("identity");
+        let session = SessionId::new();
+        let session_key = session.to_string();
+
+        runtime
+            .harvest_owed_compaction(
+                &identity,
+                &reset_of(&session),
+                &session_key,
+                &memory,
+                OwedCompaction::Batch {
+                    session_key: session_key.clone(),
+                    discards: vec![discard_of(&session_key)],
+                },
+                Owed {
+                    incarnation: "budget-rows",
+                    cursor: 1,
+                },
+                short_budget_limits(),
+            )
+            .await
+            .expect("the harvest is given up and recorded");
+
+        let failures = runtime
+            .lifecycle_effect_failures(0, 16)
+            .await
+            .expect("the recorded failures read");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let ended = &failures[0];
+        assert_eq!(
+            (ended.cause, ended.attempts),
+            (LifecycleEffectFailureCause::BudgetBusy, 1),
+            "{ended:?}"
+        );
+        assert!(
+            ended
+                .error
+                .contains("the harvest of the settled compaction batch failed")
+                && ended.error.contains("did not admit"),
+            "{ended:?}"
+        );
+    }
+
+    /// A side effect whose run the realm's background budget admits waits
+    /// for it, by default, at most as long as one run of the distiller's
+    /// may take within a step (its pre-rotation bound, 15 seconds): the
+    /// bound the deployment guide states.
+    #[test]
+    fn the_budget_wait_defaults_to_one_distiller_run_s_bound() {
+        assert_eq!(
+            EffectLimits::default().budget_wait,
+            crate::memory::distiller::PRE_ROTATION_TIMEOUT
+        );
+        assert_eq!(EffectLimits::default().budget_wait, Duration::from_secs(15));
+    }
 }

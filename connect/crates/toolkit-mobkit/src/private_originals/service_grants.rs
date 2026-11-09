@@ -93,7 +93,15 @@ enum IssuanceObservation {
     PendingNativeIssuance,
     ApprovalDenied,
     NativeRefused,
-    Issued { lineage: Vec<GrantLineageRef> },
+    Issued {
+        lineage: Vec<GrantLineageRef>,
+    },
+    /// Settled at an installed host's cold start: the host that admitted this
+    /// decision was lost while its native issuance was pending, and the
+    /// native owner recorded no grant for it. Nothing was issued, and the lost
+    /// host can no longer issue it; an approval of the same decision replaces
+    /// this row and issues once.
+    NotIssued,
 }
 
 // Keep a typed application currentness failure distinct from native issuance.
@@ -113,7 +121,7 @@ fn observe_progress(record: &AccessRecord, progress: Option<&ServiceOperationPro
             IssuanceObservation::Issued { .. } => progress.effect(),
             IssuanceObservation::PendingNativeIssuance => progress.uncertain(),
             IssuanceObservation::NativeRefused => progress.native_refused(),
-            IssuanceObservation::ApprovalDenied => {}
+            IssuanceObservation::ApprovalDenied | IssuanceObservation::NotIssued => {}
         }
     }
 }
@@ -287,7 +295,12 @@ impl PrivateOriginals {
             (IssuanceObservation::PendingNativeIssuance, _) => {}
             (IssuanceObservation::Issued { lineage }, Some(leaf))
                 if lineage.last() == Some(leaf) => {}
-            (IssuanceObservation::NativeRefused | IssuanceObservation::ApprovalDenied, None) => {}
+            (
+                IssuanceObservation::NativeRefused
+                | IssuanceObservation::ApprovalDenied
+                | IssuanceObservation::NotIssued,
+                None,
+            ) => {}
             _ => return Err(PrivateOriginalError::Unavailable),
         }
         Ok(leaf.map(|leaf| (record.caller, leaf)))
@@ -317,11 +330,17 @@ impl PrivateOriginals {
         reference: &PrivateServiceGrantRef,
     ) -> Result<StoreKey, PrivateOriginalError> {
         self.route(&reference.route)?;
+        self.access_row_key(&reference.route, &reference.decision)
+    }
+
+    /// The key of the row of the decision `decision` on `route`, whether or
+    /// not that route is selected now.
+    fn access_row_key(&self, route: &Id, decision: &Id) -> Result<StoreKey, PrivateOriginalError> {
         Ok(StoreKey {
             realm: self.scope.realm.clone(),
             owner: self.scope.owner.clone(),
             id: digest(
-                &canonical_json(&(SCHEMA, &reference.route, &reference.decision))
+                &canonical_json(&(SCHEMA, route, decision))
                     .map_err(|_| PrivateOriginalError::Denied)?,
             ),
         })
@@ -332,8 +351,34 @@ impl PrivateOriginals {
         stored: &StoredRecord,
         reference: &PrivateServiceGrantRef,
     ) -> Result<AccessRecord, PrivateOriginalError> {
-        if stored.key != self.access_key(reference)?
-            || stored.data.schema != SCHEMA
+        if stored.key != self.access_key(reference)? {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        let record = self.decode_access_row(stored)?;
+        if record.decision.route() != &reference.route
+            || record.decision.id() != &reference.decision
+            || decision_digest(&record.decision, record.mcp.as_ref())? != reference.decision_sha256
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
+        if let (Some(mcp), AccessDecision::Mcp(decision)) = (&record.mcp, &record.decision) {
+            let route = self.route(&reference.route)?;
+            mcp.validate(route.as_ref(), decision)?;
+            if let Some(evidence) = &record.application_policy {
+                evidence.validate(route.as_ref(), decision, &self.scope.owner)?;
+            }
+        }
+        Ok(record)
+    }
+
+    /// The checks of a saved access row that need no selected route: its
+    /// schema, version, digest and canonical bytes, its key, which the
+    /// decision it names derives, and the shape of its recorded issuance.
+    fn decode_access_row(
+        &self,
+        stored: &StoredRecord,
+    ) -> Result<AccessRecord, PrivateOriginalError> {
+        if stored.data.schema != SCHEMA
             || !matches!(stored.data.version, 2..=6)
             || stored.data.digest().ok().as_deref() != Some(stored.content_digest.as_str())
         {
@@ -363,18 +408,9 @@ impl PrivateOriginals {
             || record.parent.is_empty()
             || record.parent.len()
                 >= meerkat_authorization_contracts::work_association::MAX_ASSOCIATION_REFERENCES
-            || record.decision.route() != &reference.route
-            || record.decision.id() != &reference.decision
-            || decision_digest(&record.decision, record.mcp.as_ref())? != reference.decision_sha256
+            || stored.key != self.access_row_key(record.decision.route(), record.decision.id())?
         {
             return Err(PrivateOriginalError::Conflict);
-        }
-        if let (Some(mcp), AccessDecision::Mcp(decision)) = (&record.mcp, &record.decision) {
-            let route = self.route(&reference.route)?;
-            mcp.validate(route.as_ref(), decision)?;
-            if let Some(evidence) = &record.application_policy {
-                evidence.validate(route.as_ref(), decision, &self.scope.owner)?;
-            }
         }
         if let IssuanceObservation::Issued { lineage } = &record.issuance
             && (record.decision.choice() != PrivateAccessChoice::Approve
@@ -394,7 +430,9 @@ impl PrivateOriginals {
     /// observe saved evidence and current native state; they never issue again.
     /// If the process loses the native result before saving its lineage, this
     /// decision remains pending reconciliation. No native journal is parsed and
-    /// no second grant is silently minted for an uncertain first issuance.
+    /// no second grant is silently minted for an uncertain first issuance. The
+    /// next installed host settles such a decision at its cold start from the
+    /// native owner's record (`reconcile_pending_access`).
     pub(crate) async fn apply_service_access_decision(
         &self,
         decision: PrivateServiceAccessDecision,
@@ -550,10 +588,22 @@ impl PrivateOriginals {
             decision_sha256: decision_digest(&decision, mcp.as_ref())?,
         };
         let key = self.access_key(&reference)?;
+        let saved = self.store.get(&key).await.map_err(store_error)?;
+        // A decision whose host was lost while its issuance was pending, and
+        // which the next host's cold start ended because the native owner
+        // recorded no grant for it, issued nothing under this key's grant id:
+        // this approval of the same decision replaces it.
+        let not_issued = match &saved {
+            Some(stored) => matches!(
+                self.decode_access_row(stored)?.issuance,
+                IssuanceObservation::NotIssued
+            ),
+            None => false,
+        };
         // Exact saved decisions remain observable after their proposed access
         // expires. Observation re-resolves issued grants but never reissues.
-        if let Some(stored) = self.store.get(&key).await.map_err(store_error)? {
-            let record = self.decode_access(&stored, &reference)?;
+        if let Some(stored) = saved.as_ref().filter(|_| !not_issued) {
+            let record = self.decode_access(stored, &reference)?;
             if reviewed_parent
                 .as_ref()
                 .is_some_and(|parent| parent != &record.parent)
@@ -598,28 +648,48 @@ impl PrivateOriginals {
             mcp,
             application_policy,
         };
-        let admitted = self
-            .store
-            .admit(AdmissionRequest {
-                key: key.clone(),
-                admission_key: key.id.clone(),
-                data: encode_access(&initial)?,
-                events: vec![],
-                effects: vec![],
-            })
-            .await
-            .map_err(store_error)?;
-        let stored = admitted.record();
-        let mut record = self.decode_access(stored, &reference)?;
+        let (stored, created) = match saved {
+            // Only that exact ended row is replaced: a concurrent approval
+            // that replaced it first wins, and this one is refused.
+            Some(ended) => (
+                self.store
+                    .compare_and_swap(Transition {
+                        key: key.clone(),
+                        expected_revision: ended.revision,
+                        expected_digest: Some(ended.content_digest),
+                        claim: None,
+                        data: encode_access(&initial)?,
+                        events: vec![],
+                        effects: vec![],
+                    })
+                    .await
+                    .map_err(store_error)?,
+                true,
+            ),
+            None => {
+                let admitted = self
+                    .store
+                    .admit(AdmissionRequest {
+                        key: key.clone(),
+                        admission_key: key.id.clone(),
+                        data: encode_access(&initial)?,
+                        events: vec![],
+                        effects: vec![],
+                    })
+                    .await
+                    .map_err(store_error)?;
+                let created = matches!(&admitted, AdmissionOutcome::Created(_));
+                (admitted.record().clone(), created)
+            }
+        };
+        let mut record = self.decode_access(&stored, &reference)?;
         if ((initial.mcp.is_some() || matches!(initial.decision, AccessDecision::Catalog(_)))
             && record.parent != initial.parent)
             || record.application_policy != initial.application_policy
         {
             return Err(PrivateOriginalError::Conflict.into());
         }
-        if !matches!(&admitted, AdmissionOutcome::Created(_))
-            || record.decision.choice() == PrivateAccessChoice::Deny
-        {
+        if !created || record.decision.choice() == PrivateAccessChoice::Deny {
             observe_progress(&record, progress.as_deref());
             if progress.is_some() {
                 presented()?;
@@ -786,7 +856,9 @@ impl PrivateOriginals {
                 PrivateServiceGrantState::PendingReconciliation
             }
             IssuanceObservation::ApprovalDenied => PrivateServiceGrantState::ApprovalDenied,
-            IssuanceObservation::NativeRefused => PrivateServiceGrantState::GrantUnavailable,
+            IssuanceObservation::NativeRefused | IssuanceObservation::NotIssued => {
+                PrivateServiceGrantState::GrantUnavailable
+            }
             IssuanceObservation::Issued { lineage } => match self.owner.grants().resolve_lineage(
                 lineage,
                 &route.logical_executor,
@@ -869,6 +941,83 @@ impl PrivateOriginals {
             grant: reference,
             state,
         })
+    }
+
+    /// Settle, at an installed host's cold start, each access decision whose
+    /// native issuance its host left pending: a host loss, or a close that ran
+    /// out of its join bound, ended that host's custody of the native grant
+    /// owner and of this store before the decision's row recorded the native
+    /// outcome. The installed openers call this once they hold the pair under
+    /// the exclusive native grant lease, before any decision is applied or
+    /// read: no earlier host can still issue or record, so the native owner's
+    /// record is final for each pending attempt. A grant it recorded settles
+    /// the row as issued; none ends the row as not issued, which an approval
+    /// of the same decision then replaces. Nothing is issued here, and a row
+    /// that cannot be settled now stays pending.
+    pub(crate) async fn reconcile_pending_access(&self) -> Result<(), PrivateOriginalError> {
+        if !self
+            .owner
+            .has_installed_pair_recovery()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        let mut after: Option<String> = None;
+        loop {
+            let rows = self
+                .store
+                .list_records(&self.scope, after.as_deref(), 256)
+                .await
+                .map_err(store_error)?;
+            let Some(last) = rows.last() else {
+                return Ok(());
+            };
+            if after.as_ref().is_some_and(|prior| prior >= &last.key.id) {
+                return Err(PrivateOriginalError::Unavailable);
+            }
+            after = Some(last.key.id.clone());
+            for stored in rows.iter().filter(|row| row.data.schema == SCHEMA) {
+                let _ = self.settle_pending_access(stored).await;
+            }
+        }
+    }
+
+    async fn settle_pending_access(
+        &self,
+        stored: &StoredRecord,
+    ) -> Result<(), PrivateOriginalError> {
+        let mut record = self.decode_access_row(stored)?;
+        if !matches!(record.issuance, IssuanceObservation::PendingNativeIssuance) {
+            return Ok(());
+        }
+        let grant = EvidenceId::new(format!("access-{}", stored.key.id))
+            .map_err(|_| PrivateOriginalError::Conflict)?;
+        record.issuance = match self
+            .owner
+            .grants()
+            .issued_reference(&grant)
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+        {
+            Some(leaf) => {
+                let mut lineage = record.parent.clone();
+                lineage.push(leaf);
+                IssuanceObservation::Issued { lineage }
+            }
+            None => IssuanceObservation::NotIssued,
+        };
+        self.store
+            .compare_and_swap(Transition {
+                key: stored.key.clone(),
+                expected_revision: stored.revision,
+                expected_digest: Some(stored.content_digest.clone()),
+                claim: None,
+                data: encode_access(&record)?,
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .map_err(store_error)?;
+        Ok(())
     }
 
     /// Retain the exact app-selected permission and immutable source binding.
@@ -1485,6 +1634,130 @@ pub(crate) mod tests {
                 .await,
             Err(PrivateOriginalError::Unavailable)
         ));
+    }
+
+    /// An installed opener's cold start settles each pending decision from
+    /// the native owner's record and issues nothing: a decision whose grant
+    /// the owner recorded is issued, one it did not record ends as not
+    /// issued, and an exact retry of that one issues it once.
+    #[tokio::test]
+    async fn cold_start_settles_pending_access_from_the_native_record() {
+        let directory = directory();
+        let path = directory.path().join("grants");
+        let owner = crate::original_ingress::tests::initialized(&path);
+        let adapter = adapter(owner.clone(), &directory.path().join("originals")).await;
+        let route = adapter.routes.get().unwrap()[0].clone();
+        let now_ms = owner.clock().now().unwrap().unix_ms;
+        let mut pending = Vec::new();
+        for (label, recorded) in [("recorded", true), ("unrecorded", false)] {
+            let mut request = decision();
+            request.decision = Id::new(label).unwrap();
+            let reference = PrivateServiceGrantRef {
+                route: request.route.clone(),
+                decision: request.decision.clone(),
+                decision_sha256: digest(&canonical_json(&request).unwrap()),
+            };
+            let key = adapter.access_key(&reference).unwrap();
+            let record = AccessRecord {
+                caller: route.grant_caller.clone(),
+                parent: route.application_parent.clone().unwrap(),
+                decision: AccessDecision::Legacy(request.clone()),
+                issuance: IssuanceObservation::PendingNativeIssuance,
+                mcp: None,
+                application_policy: None,
+            };
+            adapter
+                .store
+                .admit(AdmissionRequest {
+                    key: key.clone(),
+                    admission_key: key.id.clone(),
+                    data: encode_access(&record).unwrap(),
+                    events: vec![],
+                    effects: vec![],
+                })
+                .await
+                .unwrap();
+            if recorded {
+                owner
+                    .grants()
+                    .issue_child(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &route.grant_caller,
+                        route.application_parent.as_ref().unwrap().last().unwrap(),
+                        EvidenceId::new(format!("access-{}", key.id)).unwrap(),
+                        route.logical_executor.clone(),
+                        restrictions(&route, &request, now_ms).unwrap(),
+                    )
+                    .unwrap();
+            }
+            pending.push((request, reference, key));
+        }
+        assert!(
+            matches!(
+                adapter.reconcile_pending_access().await,
+                Err(PrivateOriginalError::Denied)
+            ),
+            "only an installed opener settles pending decisions"
+        );
+        adapter.select_installed_pair_recovery().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        adapter.reconcile_pending_access().await.unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "settling issues nothing"
+        );
+        let mut settled = Vec::new();
+        for (_, reference, key) in &pending {
+            let stored = adapter.store.get(key).await.unwrap().unwrap();
+            settled.push(adapter.decode_access(&stored, reference).unwrap().issuance);
+        }
+        assert!(matches!(&settled[0], IssuanceObservation::Issued { .. }));
+        assert!(matches!(&settled[1], IssuanceObservation::NotIssued));
+        assert!(matches!(
+            adapter.require_service_grant_issued(&pending[1].1).await,
+            Err(PrivateOriginalError::Unavailable)
+        ));
+        assert_eq!(
+            adapter
+                .apply_service_access_decision(pending[0].0.clone())
+                .await
+                .unwrap()
+                .state,
+            PrivateServiceGrantState::GrantIssued
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            adapter
+                .apply_service_access_decision(pending[1].0.clone())
+                .await
+                .unwrap()
+                .state,
+            PrivateServiceGrantState::GrantIssued
+        );
+        let issued = std::fs::read(&path).unwrap();
+        assert_ne!(issued, before, "the exact retry issued the grant");
+        assert!(
+            owner
+                .grants()
+                .issued_reference(&EvidenceId::new(format!("access-{}", pending[1].2.id)).unwrap())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            adapter
+                .apply_service_access_decision(pending[1].0.clone())
+                .await
+                .unwrap()
+                .state,
+            PrivateServiceGrantState::GrantIssued
+        );
+        adapter.reconcile_pending_access().await.unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            issued,
+            "nothing issues twice"
+        );
     }
 
     #[tokio::test]

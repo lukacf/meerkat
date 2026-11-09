@@ -2103,6 +2103,9 @@ class PrivateHostClient:
         This does not request another approval, install an integration, attach
         a tool or submit work. A timeout is unknown and is never retried here.
         An explicit exact retry observes the native host's retained decision.
+        A decision left pending by a lost host is settled when the next host
+        starts; one the native owner recorded no grant for is then accepted
+        again and issues its grant once.
         """
         if not isinstance(decision, PrivateServiceAccessDecision):
             raise HostControlError("invalid service access decision")

@@ -5,6 +5,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- After a host loss, or a close that ran out of its 30-second join bound, an
+  access decision whose native issuance was still pending no longer stays
+  pending. The next host settles it when it starts, from what the native grant
+  owner recorded, and issues nothing itself: a decision whose grant the owner
+  recorded is settled as issued, and one it recorded no grant for ends as not
+  issued, so a fresh approval of the same proposal, or an exact retry of the
+  decision, is accepted and issues its grant once.
+
+### Upgrade notes
+
+- Downgrade: an access decision the next host ended as not issued records the
+  issuance state `not_issued`. A Connect without this change answers a
+  conflict when that decision is applied or read again; other decisions are
+  unaffected.
+
 ## [0.9.11] - 2026-11-09
 
 Meerkat Connect 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11

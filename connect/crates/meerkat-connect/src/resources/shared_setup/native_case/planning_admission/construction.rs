@@ -442,6 +442,7 @@ async fn construct_selected(
     let operation_root = configuration
         .grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             native
                 .remote_operator
                 .as_ref()
@@ -461,6 +462,7 @@ async fn construct_selected(
     let operation_leaf = configuration
         .grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &native.grant_administrator,
             &operation_root,
             evidence("sdk-independent-g-leaf"),

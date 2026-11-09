@@ -36,6 +36,14 @@ regular expression searched in the pin) covers those pins only, and is stale
 when it covers none. A temporary entry names, in `removed_by`, the change
 that removes its pins; when that change lands the entry is stale and goes.
 
+Published release inputs (`published_release_inputs` in the configuration,
+with its reason) are files that pin published assets of an in-repo release
+by digest. Those cannot name a version before its release is published, so a
+pin there may name the version in this tree or the release before it (the
+newest release heading below that version in the product's CHANGELOG.md),
+nothing older and nothing newer. A listed path that matches no tracked file
+is stale.
+
 `--write` first moves every plain-text pin of a dependency manifest
 (package.json and a lock's root package, pyproject.toml, a requirements file,
 Cargo.toml) that no allow entry covers to the version of the package it pins;
@@ -132,12 +140,28 @@ class Finding:
     pinned: str
     expected: str
     movable: bool = False
+    # A pin of a published release input, and the release before `expected` it may also name.
+    published: bool = False
+    previous: str = ""
 
     def describe(self) -> str:
         where = f"{self.path}:{self.line}" if self.line else self.path
         if self.shape == "retired-repository":
             return (f"{where}: {self.pin}: a release of the retired standalone repository; "
                     f"use {self.package} {self.expected} of this repository")
+        if self.published:
+            allowed = (f"a published release input names {self.expected} or the release before it, {self.previous}"
+                       if self.previous else
+                       f"a published release input names {self.expected} or the release before it, and the "
+                       f"product's CHANGELOG.md has none")
+            if self.pinned and below(self.expected, self.pinned):
+                relation = f"above its version {self.expected}"
+            elif self.previous:
+                relation = f"older than the release before its version {self.expected}"
+            else:
+                relation = f"below its version {self.expected}"
+            return (f"{where}: {self.shape} {self.pin}: pins {self.package} {self.pinned or 'an open range'}, "
+                    f"{relation} in this tree ({allowed})")
         if not self.pinned:
             return (f"{where}: {self.shape} {self.pin}: admits {self.package} below {self.expected}; "
                     f"pin {self.expected} or use a same-commit reference")
@@ -153,6 +177,11 @@ class Inventory:
         self.packages: dict[tuple[str, str], Package] = {}
         self.tag_prefixes: list[tuple[str, tuple[str, str]]] = []
         self.assets: dict[str, tuple[str, str]] = {}
+        # Each product's root and CHANGELOG.md, and the packages configured as products of their own.
+        self.product_roots: dict[str, str] = {}
+        self.changelogs: dict[str, str] = {}
+        self.product_packages: dict[tuple[str, str], str] = {}
+        self._headings: dict[str, list[str]] = {}
         self._load_cargo()
         self._load_manifests(tracked)
         self._load_products()
@@ -225,6 +254,8 @@ class Inventory:
             name, root, prefix = product.get("name"), product.get("root"), product.get("tag_prefix")
             if not isinstance(name, str) or not isinstance(root, str) or not isinstance(prefix, str):
                 raise PinError(f"{PRODUCTS} lists a product without a name, root and tag_prefix")
+            self.product_roots[name] = root
+            self.changelogs[name] = f"{root}/CHANGELOG.md" if root else "CHANGELOG.md"
             if root == "":
                 version = ((self._root_manifest().get("workspace") or {}).get("package") or {}).get("version")
                 versions = {version} if version else set()
@@ -251,8 +282,12 @@ class Inventory:
                 self.packages[key_of(ecosystem, name)] = dataclasses.replace(
                     self.packages[package], ecosystem=ecosystem, name=name)
         for name, target in (config.get("products") or {}).items():
-            self.packages[("product", name)] = dataclasses.replace(
-                self.packages[self.target(target, f"product {name}")], ecosystem="product")
+            key = self.target(target, f"product {name}")
+            self.packages[("product", name)] = dataclasses.replace(self.packages[key], ecosystem="product")
+            # A product of its own inside another product's root (Forge in meta/) keeps
+            # its CHANGELOG.md beside its manifest.
+            self.product_packages[key] = name
+            self.changelogs[name] = PurePosixPath(self.packages[key].source).parent.joinpath("CHANGELOG.md").as_posix()
         for prefix, target in (config.get("release_tags") or {}).items():
             self.tag_prefixes.append((prefix, self.target(target, f"release tag {prefix}")))
         # Longest prefix first: meta-installer-v before meta-v before v.
@@ -276,6 +311,28 @@ class Inventory:
     def expected(self, key: tuple[str, str]) -> tuple[str, str]:
         package = self.packages[key]
         return package.name, package.version
+
+    def product_of(self, key: tuple[str, str]):
+        """The product that releases a package: its own when configured, else the owner of its manifest's root."""
+        if key[0] == "product":
+            return key[1]
+        if key in self.product_packages:
+            return self.product_packages[key]
+        package = self.packages.get(key)
+        return self._owner(package.source, self.product_roots) if package is not None else None
+
+    def previous_release(self, key: tuple[str, str]):
+        """The newest release heading of the package's product CHANGELOG.md below its version here."""
+        path = self.changelogs.get(self.product_of(key))
+        if path is None:
+            return None
+        if path not in self._headings:
+            full = self.root / path
+            text = full.read_text(encoding="utf-8") if full.is_file() else ""
+            self._headings[path] = re.findall(rf"^## \[({VERSION})\]", text, re.M)
+        expected = self.packages[key].version
+        earlier = [version for version in self._headings[path] if below(version, expected)]
+        return max(earlier, key=version_key) if earlier else None
 
     def tag(self, tag: str):
         for prefix, key in self.tag_prefixes:
@@ -337,9 +394,11 @@ def alternatives(names) -> str:
 
 
 class Scanner:
-    def __init__(self, root: Path, inventory: Inventory):
+    def __init__(self, root: Path, inventory: Inventory, published=()):
         self.root = root
         self.inventory = inventory
+        # The published release inputs (compiled path patterns).
+        self.published = list(published)
         self.findings: list[Finding] = []
         packages = inventory.packages.values()
         pypi = "|".join(re.sub(r"(?:\\-|_|\\\.)", "[-_.]", re.escape(name))
@@ -371,6 +430,17 @@ class Scanner:
         if key is None:
             return
         name, expected = self.inventory.expected(key)
+        if any(pattern.match(path) for pattern in self.published):
+            # A published asset pinned by digest: this tree's version, or the release
+            # before it until this version's release is published; never older or newer.
+            if pinned == expected:
+                return
+            previous = self.inventory.previous_release(key)
+            if pinned is not None and pinned == previous:
+                return
+            self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, False,
+                                         published=True, previous=previous or ""))
+            return
         if pinned is None or below(pinned, expected):
             self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, movable))
 
@@ -597,6 +667,21 @@ def load_allowlist(config: dict) -> list[AllowEntry]:
     return entries
 
 
+def load_published(config: dict) -> list[tuple[str, re.Pattern]]:
+    """The published release inputs: their paths, which need a reason."""
+    raw = config.get("published_release_inputs")
+    if raw is None:
+        return []
+    if not isinstance(raw, dict) or set(raw) - {"paths", "reason"}:
+        raise PinError("published_release_inputs takes paths and a reason")
+    paths = raw.get("paths") or []
+    if not isinstance(paths, list) or any(not isinstance(path, str) or not path for path in paths):
+        raise PinError("published_release_inputs paths must be path patterns")
+    if paths and (not isinstance(raw.get("reason"), str) or len(raw["reason"].split()) < 4):
+        raise PinError("published_release_inputs needs its reason")
+    return [(path, glob_regex(path)) for path in paths]
+
+
 def tracked_files(root: Path) -> list[str]:
     result = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=False)
     if result.returncode != 0:
@@ -604,9 +689,10 @@ def tracked_files(root: Path) -> list[str]:
     return sorted(path for path in result.stdout.decode("utf-8").split("\0") if path)
 
 
-def scan(root: Path, inventory: Inventory, tracked: list[str], allowlist: list[AllowEntry]) -> list[Finding]:
+def scan(root: Path, inventory: Inventory, tracked: list[str], allowlist: list[AllowEntry],
+         published=()) -> list[Finding]:
     whole = [entry for entry in allowlist if entry.match is None]
-    scanner = Scanner(root, inventory)
+    scanner = Scanner(root, inventory, [pattern for _, pattern in published])
     for path in tracked:
         covering = [entry for entry in whole if entry.path.match(path)]
         for entry in covering:
@@ -678,7 +764,8 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         tracked = tracked_files(root)
         inventory = Inventory(root, config, tracked)
         allowlist = load_allowlist(config)
-        findings = scan(root, inventory, tracked, allowlist)
+        published = load_published(config)
+        findings = scan(root, inventory, tracked, allowlist, published)
         if write:
             # An allowed pin (an upgrade fixture, or a pin another change removes)
             # stays as it is: only the pins the check would report move.
@@ -686,7 +773,7 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
             for path in write_pins(root, unallowed):
                 print(f"moved in-repo pins in {path}", file=out)
             allowlist = load_allowlist(config)
-            findings = scan(root, inventory, tracked, allowlist)
+            findings = scan(root, inventory, tracked, allowlist, published)
     except (PinError, OSError, ValueError, tomllib.TOMLDecodeError, re.error) as error:
         print(f"check_inrepo_version_pins: {error}", file=err)
         return 2
@@ -698,18 +785,23 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         if not entries:
             reported.append(finding)
     stale = [entry for entry in allowlist if entry.used == 0]
+    stale_paths = [text for text, pattern in published if not any(pattern.match(path) for path in tracked)]
     for finding in reported:
         print(finding.describe(), file=err)
     for entry in stale:
         print(f"{CONFIG}: allow entry {entry.index} {entry.label()} covers nothing; delete it", file=err)
-    if reported or stale:
+    for text in stale_paths:
+        print(f"{CONFIG}: published release input {text} matches no tracked file; delete it", file=err)
+    if reported or stale or stale_paths:
+        count = len(stale) + len(stale_paths)
         print(f"check_inrepo_version_pins: {len(reported)} pin(s) below the version of the in-repo package they pin, "
-              f"{len(stale)} stale allow entr{'y' if len(stale) == 1 else 'ies'}. Pin the version in this tree, use a "
+              f"{count} stale allow entr{'y' if count == 1 else 'ies'}. Pin the version in this tree, use a "
               f"same-commit reference, or allow the pin in {CONFIG} with its reason.", file=err)
         return 1
     temporary = sum(1 for raw in config.get("allow") or [] if "removed_by" in raw)
     print(f"check_inrepo_version_pins: every in-repo pin names its version in this tree "
-          f"({len(allowlist)} allow entries, {temporary} temporary)", file=out)
+          f"({len(allowlist)} allow entries, {temporary} temporary, {len(published)} published release input paths)",
+          file=out)
     return 0
 
 

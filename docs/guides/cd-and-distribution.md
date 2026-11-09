@@ -83,6 +83,10 @@ below the version in the tree with `scripts/check_inrepo_version_pins.py`, and
 a version bump moves the pins on the packages it bumps in the same commit: the
 release hook and Meta's `bump-sdk-versions.sh` run the check with `--write`,
 and a Connect bump runs `python3 scripts/check_inrepo_version_pins.py --write`.
+Files that pin a published release's assets by digest (Forge's release inputs,
+listed under `published_release_inputs`) can name a release only once it is
+published, so they may name the version in the tree or the release before it,
+nothing older.
 
 ## Release Checks
 

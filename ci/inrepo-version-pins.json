@@ -4,7 +4,8 @@
     "Configuration of scripts/check_inrepo_version_pins.py, run by scripts/verify-version-parity.sh.",
     "Every product of this repository consumes the others at the version this tree builds: in development and CI the build of the same commit, in a release the same release's artifacts. A pin of an in-repo package is a same-commit reference or names exactly the package's version in this tree.",
     "former_names: earlier names of in-repo packages, read as the package they became. products: product words the check reads beside ci/products.json. release_tags: release tag prefixes beside the products' own. release_assets: release asset name prefixes and the package whose version they carry (wheel and npm tarball names are derived).",
-    "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match covers whole files, which are not read; one with match covers the pins it matches. removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check."
+    "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match covers whole files, which are not read; one with match covers the pins it matches. removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check.",
+    "published_release_inputs: files that pin published assets of an in-repo release by digest; a pin there names the version in this tree or the release before it (the newest release heading below that version in the product's CHANGELOG.md), nothing older or newer. A path that matches no tracked file fails the check."
   ],
   "former_names": {
     "pypi:meerkat-mobkit": "pypi:meerkat-meta",
@@ -33,6 +34,13 @@
     "meta-installer": "pypi:meta-forge",
     "meta-forge": "pypi:meta-forge",
     "forge-service-host": "pypi:meta-forge"
+  },
+  "published_release_inputs": {
+    "reason": "Forge's release inputs and the model catalog of the Meta runtime that compiled agent teams install pin the assets of a published Meta or Connect release by digest, so they can name a release only after it is published and move after each publication; the list is emptied when Forge's release derives its in-repo inputs at release time.",
+    "paths": [
+      "meta/installer/release/**",
+      "meta/installer/launchkit/meta_model_catalog_*.json"
+    ]
   },
   "allow": [
     {
@@ -214,13 +222,13 @@
       "path": "meta/installer/release/**",
       "match": "0\\.9\\.10|forge-native-v0\\.3\\.1",
       "reason": "Forge's product inputs (the Connect 0.9.10 product, the ordinary gateway meta-v0.9.10 and the collection host forge-service-host 0.3.1, in the release inputs, their stable copy and the committed assembly record): forge-service-host is built outside this repository against Connect 0.9.10's resources digest, so these rows move together when this repository builds forge-service-host from the same commit and the Forge release takes all product inputs from the paired release.",
-      "removed_by": "U3: in-repo forge-service-host build"
+      "removed_by": "the in-repo forge-service-host build"
     },
     {
       "path": "meta/scripts/installer-release.py",
       "match": "meerkat-meta release v\\{version\\}$",
       "reason": "Dead code, removal tracked: the standalone repository's route for an ordinary gateway of a Meta release made before the monorepo, which no release input names.",
-      "removed_by": "U3: in-repo forge-service-host build"
+      "removed_by": "the in-repo forge-service-host build"
     },
     {
       "path": "meta/installer/launchkit/generator.py",

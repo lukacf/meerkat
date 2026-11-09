@@ -314,6 +314,75 @@ class WriteTests(GuardTest):
         self.assertIn("demo-meta==1.4.3", (self.repo.root / "connect/py/pyproject.toml").read_text())
 
 
+class PublishedInputTests(GuardTest):
+    """Published release inputs pin assets by digest: this tree's version or the release before it."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo.write("meta/CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n## [1.4.2] - 2026-01-03\n\n"
+                        "## [1.4.1] - 2026-01-02\n\n## [1.4.0] - 2026-01-01\n")
+        self.repo.config["published_release_inputs"] = {
+            "reason": "Published assets pinned by digest move after their release.",
+            "paths": ["meta/tool/release/**"]}
+        self.repo.save_config()
+
+    def inputs(self, version, path="meta/tool/release/inputs.json"):
+        url = (f"https://github.com/lukacf/meerkat/releases/download/meta-v{version}/"
+               f"demo-gateway-{version}-x86_64.tar.gz")
+        self.repo.write(path, json.dumps({"gateway": {"url": url, "sha256": HEX}}, indent=2) + "\n")
+
+    def test_the_version_in_the_tree_passes(self):
+        self.inputs("1.4.2")
+        self.assertIn("1 published release input paths", self.assertClean())
+
+    def test_the_release_before_it_passes(self):
+        self.inputs("1.4.1")
+        self.assertClean()
+
+    def test_two_releases_back_is_refused(self):
+        self.inputs("1.4.0")
+        self.assertFindings("asset demo-gateway-1.4.0: pins meta 1.4.0, older than the release before its version "
+                            "1.4.2 in this tree (a published release input names 1.4.2 or the release before it, "
+                            "1.4.1)", "release lukacf/meerkat release meta-v1.4.0")
+
+    def test_a_version_newer_than_the_tree_is_refused(self):
+        self.inputs("1.4.3")
+        self.assertFindings("asset demo-gateway-1.4.3: pins meta 1.4.3, above its version 1.4.2 in this tree")
+
+    def test_the_release_before_it_outside_the_inputs_is_refused(self):
+        self.inputs("1.4.1", path="meta/tool/other/inputs.json")
+        self.assertFindings("asset demo-gateway-1.4.1: pins meta 1.4.1, below its version 1.4.2 in this tree")
+
+    def test_a_requirement_follows_its_package_product(self):
+        catalog = self.repo.write("meta/tool/release/catalog.json", json.dumps({"requires": "demo-meta==1.4.1"}))
+        self.assertClean()
+        catalog.write_text(json.dumps({"requires": "demo-meta==1.4.0"}), encoding="utf-8")
+        self.assertFindings("requirement demo-meta==1.4.0: pins demo-meta 1.4.0, older than the release before")
+
+    def test_a_product_of_its_own_reads_its_own_changelog(self):
+        # demo-tool is the forge product inside meta/: its releases are in meta/tool/CHANGELOG.md.
+        pins = self.repo.write("meta/tool/release/tool.json", json.dumps({"requires": "demo-tool==0.3.0"}))
+        self.assertFindings("requirement demo-tool==0.3.0: pins demo-tool 0.3.0, below its version 0.3.1 in this "
+                            "tree (a published release input names 0.3.1 or the release before it, and the "
+                            "product's CHANGELOG.md has none)")
+        self.repo.write("meta/tool/CHANGELOG.md", "## [0.3.1] - 2026-01-02\n\n## [0.3.0] - 2026-01-01\n")
+        self.assertClean()
+        pins.write_text(json.dumps({"requires": "demo-tool==0.2.9"}), encoding="utf-8")
+        self.assertFindings("pins demo-tool 0.2.9, older than the release before its version 0.3.1")
+
+    def test_an_input_path_that_matches_nothing_is_stale(self):
+        self.repo.config["published_release_inputs"]["paths"].append("meta/gone/**")
+        self.repo.save_config()
+        self.inputs("1.4.2")
+        self.assertFindings("published release input meta/gone/** matches no tracked file; delete it")
+
+    def test_the_inputs_need_a_reason(self):
+        self.repo.config["published_release_inputs"]["reason"] = "digests"
+        self.repo.save_config()
+        self.inputs("1.4.2")
+        self.assertFindings("published_release_inputs needs its reason", code=2)
+
+
 class BumpTests(unittest.TestCase):
     """The version bumps move the pins this check reads, in the same commit."""
 

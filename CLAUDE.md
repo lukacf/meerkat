@@ -1023,7 +1023,7 @@ Six files must agree on the same version:
 
 Additionally, all internal crate dependencies in `Cargo.toml` (47 path deps) must require the workspace version exactly (`version = "=X.Y.Z"`; cargo-release keeps the `=` when it bumps). 0.x patch releases may break API, so every requirement a release crate publishes on a workspace crate is exact; `make check-rust-release-config` checks the manifests and `make check-rust-release-packaging` the packaged archives.
 
-**`make verify-version-parity`** runs in CI and fails on any drift. After changing versions or wire types:
+**`make verify-version-parity`** runs in CI and fails on any drift. It also refuses an in-repo product pinned below its version in this tree (`scripts/check_inrepo_version_pins.py`; upgrade fixtures and recorded history are allowed with their reasons in `ci/inrepo-version-pins.json`), and the release hook moves the other products' pins on Core's packages with the check's `--write` (see the [release guide](docs/guides/cd-and-distribution.md#in-repo-products)). After changing versions or wire types:
 
 ```bash
 make regen-schemas           # Re-emit schemas + regenerate SDK types

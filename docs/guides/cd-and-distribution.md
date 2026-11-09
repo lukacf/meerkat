@@ -67,6 +67,21 @@ release manifest and release notes. Downstream Rust projects should declare
 that version as an exact pin in `Cargo.toml`, not only in `Cargo.lock`, so the
 supported combination is visible without reconstructing historical lockfiles.
 
+### In-repo products
+
+Every product of this repository (Core, Meta, Connect, Forge and their SDKs)
+consumes the others at the version this tree builds: in development and CI the
+build of the same commit, in a release the same release's artifacts. A pin of
+an in-repo package is a same-commit reference (a path, `file:` or workspace
+dependency) or names exactly that package's version in the tree; only
+upgrade-test fixtures and recorded history keep an older version, each listed
+with its reason in `ci/inrepo-version-pins.json`. `make verify-version-parity`
+(CI's format and governance job, and the release hook) refuses any other pin
+below the version in the tree with `scripts/check_inrepo_version_pins.py`, and
+a version bump moves the pins on the packages it bumps in the same commit: the
+release hook and Meta's `bump-sdk-versions.sh` run the check with `--write`,
+and a Connect bump runs `python3 scripts/check_inrepo_version_pins.py --write`.
+
 ## Release Checks
 
 Run the release gate before cutting a tag:

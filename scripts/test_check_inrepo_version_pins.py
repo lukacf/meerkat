@@ -254,6 +254,56 @@ class AllowlistTests(GuardTest):
         self.assertFindings("unknown keys", code=2)
 
 
+class KeyEntryTests(GuardTest):
+    """In a JSON file an entry with a key covers the pins of the values under the key paths it matches."""
+
+    URL = "https://github.com/lukacf/meerkat/releases/download/meta-v1.4.1/demo-gateway-1.4.1-x86_64.tar.gz"
+
+    def setUp(self):
+        super().setUp()
+        # Two rows of one file pin the same release: line 6 under guide/, line 9 under product/.
+        self.repo.write("meta/release/inputs.json", json.dumps({"targets": [{"files": {
+            "guide/gateway": {"url": self.URL}, "product/gateway": {"url": self.URL}}}]}, indent=2) + "\n")
+
+    def test_key_paths_name_nested_keys_and_array_items(self):
+        text = '{\n  "a": [\n    {"b": 1},\n    "c"\n  ],\n  "d": {\n    "e/f": true\n  }\n}\n'
+        self.assertEqual(pins.json_value_lines(text), {1: "", 2: "a", 3: "a/0", 4: "a/1", 6: "d", 7: "d/e/f"})
+        for broken in ('{"a": }', '{"a": 1} x', '{"a" 1}'):
+            with self.assertRaises(ValueError):
+                pins.json_value_lines(broken)
+
+    def test_a_key_entry_covers_the_values_under_its_keys(self):
+        self.repo.allow(path="meta/release/*.json", key="^targets/[0-9]+/files/product/",
+                        reason="The product rows of the release inputs.")
+        err = self.assertFindings("meta/release/inputs.json:6: release lukacf/meerkat release meta-v1.4.1",
+                                  "meta/release/inputs.json:6: asset demo-gateway-1.4.1")
+        self.assertNotIn("inputs.json:9:", err)
+        self.assertNotIn("covers nothing", err)
+
+    def test_a_key_entry_with_a_match_covers_the_pins_both_select(self):
+        self.repo.allow(path="meta/release/*.json", key="files/product/", match="^demo-gateway-",
+                        reason="The product gateway archive of the release inputs.")
+        err = self.assertFindings("inputs.json:6: release lukacf/meerkat release meta-v1.4.1",
+                                  "inputs.json:6: asset demo-gateway-1.4.1",
+                                  "inputs.json:9: release lukacf/meerkat release meta-v1.4.1")
+        self.assertNotIn("inputs.json:9: asset", err)
+        self.repo.config["allow"][0]["match"] = "^nothing$"
+        self.repo.save_config()
+        self.assertFindings("inputs.json:9: asset demo-gateway-1.4.1", "allow entry 0 meta/release/*.json (^nothing$) "
+                            "[key files/product/] covers nothing")
+
+    def test_a_key_entry_covers_no_file_but_json(self):
+        self.repo.write("meta/release/notes.md", f"{self.URL}\n")
+        self.repo.allow(path="meta/release/*", key="files/", reason="The rows of the release inputs.")
+        err = self.assertFindings("meta/release/notes.md:1: release lukacf/meerkat release meta-v1.4.1")
+        self.assertNotIn("inputs.json", err)
+
+    def test_a_key_entry_needs_its_file_to_be_json(self):
+        self.repo.write("meta/release/broken.json", f'{{"url": "{self.URL}",}}\n')
+        self.repo.allow(path="meta/release/*.json", key="files/", reason="The rows of the release inputs.")
+        self.assertFindings("meta/release/broken.json cannot be read as JSON for an entry with a key", code=2)
+
+
 class WriteTests(GuardTest):
     def test_write_moves_manifest_pins_only(self):
         manifest = self.repo.write("connect/sdk/package.json", json.dumps({
@@ -476,6 +526,26 @@ class PublishedInputTests(GuardTest):
         self.repo.allow(path="meta/tool/**", reason="Fixtures and tests of the tool.")
         self.inputs("1.4.0")
         self.assertFindings("asset demo-gateway-1.4.0: pins meta 1.4.0, older than the release before")
+
+    def test_a_published_path_with_a_match_that_applies_to_no_pin_is_stale(self):
+        self.repo.config["published_release_inputs"]["paths"].append(
+            {"path": "meta/tool/runtime.py", "match": "^VERSION = "})
+        self.repo.config["version_constants"] = {"meta/tool/runtime.py": {"VERSION": "pypi:demo-meta"}}
+        self.repo.save_config()
+        self.inputs("1.4.2")
+        self.repo.write("meta/tool/runtime.py", 'VERSION = "1.4.1"\n')
+        self.assertClean()
+        self.repo.config["published_release_inputs"]["paths"][1]["match"] = "^RELEASE = "
+        self.repo.save_config()
+        self.assertFindings('meta/tool/runtime.py:1: constant VERSION = "1.4.1": pins demo-meta 1.4.1, below its '
+                            'version 1.4.2 in this tree\n',
+                            "published release input meta/tool/runtime.py (^RELEASE = ) applies to no pin")
+
+    def test_a_published_path_object_needs_a_match(self):
+        self.repo.config["published_release_inputs"]["paths"] = [{"path": "meta/tool/release/**"}]
+        self.repo.save_config()
+        self.inputs("1.4.2")
+        self.assertFindings("published_release_inputs paths must be path patterns or {path, match} objects", code=2)
 
 
 class BumpTests(unittest.TestCase):

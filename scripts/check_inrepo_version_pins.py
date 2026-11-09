@@ -30,22 +30,30 @@ Pins it finds in every tracked text file:
     "=0.9.3"`, `MOBKIT_VERSION = "0.8.47"`).
 
 The allowlist covers upgrade-test fixtures and recorded history, each entry
-with its reason. An entry without `match` covers whole files, which are not
-read; it is stale when it matches no tracked file. An entry with `match` (a
-regular expression searched in the pin) covers those pins only, and is stale
-when it covers none. A temporary entry names, in `removed_by`, the change
-that removes its pins; when that change lands the entry is stale and goes.
+with its reason. An entry without `match` or `key` covers whole files, which
+are not read; it is stale when it matches no tracked file. An entry with
+`match` (a regular expression searched in the pin) covers those pins only. In
+a JSON file an entry may also carry `key`, a regular expression searched in
+the key path of the value that starts on the pin's line (object keys joined
+by `/`, array items by their index): it then covers only the pins of the
+values under those keys, so two rows of one file that pin the same release
+keep apart. An entry with `match` or `key` is stale when it covers no pin. A
+temporary entry names, in `removed_by`, the change that removes its pins;
+when that change lands the entry is stale and goes.
 
 Published release inputs (`published_release_inputs` in the configuration,
 with its reason) are files that pin published assets of an in-repo release
 by digest. Those cannot name a version before its release is published, so a
 pin there may name the version in this tree or the release before it (the
 newest release heading below that version in the product's CHANGELOG.md),
-nothing older and nothing newer. Such a file is read even where a whole-file
-allow entry covers its directory. A listed path that matches no tracked file
-is stale. `version_constants` names the package of a version constant whose
-name names no product (`VERSION = "0.9.11"` in a given file); a configured
-constant the file no longer holds is stale.
+nothing older and nothing newer. A listed path may come with a `match`: the
+rule then applies to the pins it matches only, the file's other pins follow
+the ordinary rule, and the path is stale when it applies to no pin. Such a
+file is read even where a whole-file allow entry covers its directory. A
+listed path that matches no tracked file is stale. `version_constants` names
+the package of a version constant whose name names no product
+(`VERSION = "0.9.11"` in a given file); a configured constant the file no
+longer holds is stale.
 
 `--write` first moves every plain-text pin of a dependency manifest
 (package.json and a lock's root package, pyproject.toml, a requirements file,
@@ -65,11 +73,13 @@ Exit 0 when clean, 1 on a finding or a stale allowlist entry, 2 on an error.
 from __future__ import annotations
 
 import argparse
+import bisect
 import dataclasses
 import json
 import re
 import subprocess
 import sys
+from json.decoder import scanstring
 from pathlib import Path, PurePosixPath
 
 try:
@@ -192,6 +202,8 @@ class Finding:
     previous: str = ""
     # A range whose ceiling shuts out `expected`.
     excludes: bool = False
+    # In a JSON file a `key` entry scopes: the key path of the value that starts on the line.
+    key: str | None = None
 
     def describe(self) -> str:
         where = f"{self.path}:{self.line}" if self.line else self.path
@@ -449,7 +461,7 @@ class Scanner:
     def __init__(self, root: Path, inventory: Inventory, published=(), constants=None):
         self.root = root
         self.inventory = inventory
-        # The published release inputs (compiled path patterns).
+        # The published release inputs (PublishedEntry: a path pattern and an optional match).
         self.published = list(published)
         # Version constants without a product word, configured per file: {path: {name: package key}}.
         self.constants = constants or {}
@@ -485,7 +497,9 @@ class Scanner:
         if key is None:
             return
         name, expected = self.inventory.expected(key)
-        if any(pattern.match(path) for pattern in self.published):
+        published = next((entry for entry in self.published if entry.applies(path, pin)), None)
+        if published is not None:
+            published.used += 1
             # A published asset pinned by digest: this tree's version, or the release
             # before it until this version's release is published; never older or newer.
             if pinned == expected:
@@ -698,13 +712,91 @@ def glob_regex(pattern: str) -> re.Pattern:
     return re.compile(rf"^{regex}$")
 
 
+JSON_SPACE = re.compile(r"[ \t\n\r]*")
+
+
+def json_value_lines(text: str) -> dict[int, str]:
+    """For each line of a JSON document, the key path of the first value that starts on it.
+
+    Object keys are joined by `/` and array items named by their index: the URL of
+    `{"files": {"guide/rpc_gateway": {"url": ...}}}` sits under `files/guide/rpc_gateway/url`.
+    Raises ValueError when the text is not one JSON value.
+    """
+    starts = [0] + [match.end() for match in re.finditer("\n", text)]
+    decoder = json.JSONDecoder()
+    lines: dict[int, str] = {}
+
+    def skip(index: int) -> int:
+        return JSON_SPACE.match(text, index).end()
+
+    def expect(index: int, char: str) -> None:
+        if text[index:index + 1] != char:
+            raise ValueError(f"expected {char!r} at offset {index}")
+
+    def value(index: int, path: tuple[str, ...]) -> int:
+        index = skip(index)
+        lines.setdefault(bisect.bisect_right(starts, index), "/".join(path))
+        opening = text[index:index + 1]
+        if opening not in ("{", "["):
+            if opening == '"':
+                return scanstring(text, index + 1)[1]
+            return decoder.raw_decode(text, index)[1]
+        closing = "}" if opening == "{" else "]"
+        index = skip(index + 1)
+        if text[index:index + 1] == closing:
+            return index + 1
+        position = 0
+        while True:
+            if opening == "{":
+                expect(index, '"')
+                key, index = scanstring(text, index + 1)
+                index = skip(index)
+                expect(index, ":")
+                index = value(index + 1, (*path, key))
+            else:
+                index = value(index, (*path, str(position)))
+                position += 1
+            index = skip(index)
+            if text[index:index + 1] != ",":
+                expect(index, closing)
+                return index + 1
+            index = skip(index + 1)
+
+    end = skip(value(0, ()))
+    if end != len(text):
+        raise ValueError(f"extra data at offset {end}")
+    return lines
+
+
 @dataclasses.dataclass
 class AllowEntry:
     index: int
     path_text: str
     path: re.Pattern
     match: re.Pattern | None
+    key: re.Pattern | None = None
     used: int = 0
+
+    @property
+    def whole(self) -> bool:
+        """An entry without match or key covers whole files, which are not read."""
+        return self.match is None and self.key is None
+
+    def label(self) -> str:
+        return (self.path_text + (f" ({self.match.pattern})" if self.match else "")
+                + (f" [key {self.key.pattern}]" if self.key else ""))
+
+
+@dataclasses.dataclass
+class PublishedEntry:
+    """A published release input: a path pattern, and the pins it applies to when it has a match."""
+    path_text: str
+    path: re.Pattern
+    match: re.Pattern | None
+    used: int = 0
+
+    def applies(self, path: str, pin: str) -> bool:
+        return self.path.match(path) is not None and (self.match is None or self.match.search(pin) is not None)
 
     def label(self) -> str:
         return self.path_text + (f" ({self.match.pattern})" if self.match else "")
@@ -715,33 +807,45 @@ def load_allowlist(config: dict) -> list[AllowEntry]:
     for index, raw in enumerate(config.get("allow") or []):
         if not isinstance(raw, dict) or not isinstance(raw.get("path"), str) or not raw["path"]:
             raise PinError(f"allow entry {index} needs a path")
-        unknown = set(raw) - {"path", "match", "reason", "removed_by"}
+        unknown = set(raw) - {"path", "match", "key", "reason", "removed_by"}
         if unknown:
             raise PinError(f"allow entry {index} ({raw['path']}) has unknown keys {sorted(unknown)}")
         if not isinstance(raw.get("reason"), str) or len(raw["reason"].split()) < 4:
             raise PinError(f"allow entry {index} ({raw['path']}) needs its reason")
         if "removed_by" in raw and (not isinstance(raw["removed_by"], str) or len(raw["removed_by"].split()) < 3):
             raise PinError(f"allow entry {index} ({raw['path']}) removed_by must name the change that removes it")
-        match = raw.get("match")
-        if match is not None and (not isinstance(match, str) or not match):
-            raise PinError(f"allow entry {index} ({raw['path']}) match must be a regular expression")
-        entries.append(AllowEntry(index, raw["path"], glob_regex(raw["path"]), re.compile(match) if match else None))
+        patterns = {}
+        for field in ("match", "key"):
+            value = raw.get(field)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise PinError(f"allow entry {index} ({raw['path']}) {field} must be a regular expression")
+            patterns[field] = re.compile(value) if value else None
+        entries.append(AllowEntry(index, raw["path"], glob_regex(raw["path"]), patterns["match"], patterns["key"]))
     return entries
 
 
-def load_published(config: dict) -> list[tuple[str, re.Pattern]]:
-    """The published release inputs: their paths, which need a reason."""
+def load_published(config: dict) -> list[PublishedEntry]:
+    """The published release inputs: path patterns, each with an optional match; they need a reason."""
     raw = config.get("published_release_inputs")
     if raw is None:
         return []
     if not isinstance(raw, dict) or set(raw) - {"paths", "reason"}:
         raise PinError("published_release_inputs takes paths and a reason")
     paths = raw.get("paths") or []
-    if not isinstance(paths, list) or any(not isinstance(path, str) or not path for path in paths):
-        raise PinError("published_release_inputs paths must be path patterns")
-    if paths and (not isinstance(raw.get("reason"), str) or len(raw["reason"].split()) < 4):
+    if not isinstance(paths, list):
+        raise PinError("published_release_inputs paths must be a list")
+    entries = []
+    for item in paths:
+        if isinstance(item, str) and item:
+            entries.append(PublishedEntry(item, glob_regex(item), None))
+        elif (isinstance(item, dict) and not set(item) - {"path", "match"} and isinstance(item.get("path"), str)
+              and item["path"] and isinstance(item.get("match"), str) and item["match"]):
+            entries.append(PublishedEntry(item["path"], glob_regex(item["path"]), re.compile(item["match"])))
+        else:
+            raise PinError("published_release_inputs paths must be path patterns or {path, match} objects")
+    if entries and (not isinstance(raw.get("reason"), str) or len(raw["reason"].split()) < 4):
         raise PinError("published_release_inputs needs its reason")
-    return [(path, glob_regex(path)) for path in paths]
+    return entries
 
 
 def load_constants(config: dict, inventory: Inventory) -> dict[str, dict[str, tuple[str, str]]]:
@@ -767,13 +871,12 @@ def tracked_files(root: Path) -> list[str]:
 
 def scan(root: Path, inventory: Inventory, tracked: list[str], allowlist: list[AllowEntry],
          published=(), constants=None) -> Scanner:
-    whole = [entry for entry in allowlist if entry.match is None]
-    patterns = [pattern for _, pattern in published]
-    scanner = Scanner(root, inventory, patterns, constants)
+    whole = [entry for entry in allowlist if entry.whole]
+    scanner = Scanner(root, inventory, published, constants)
     for path in tracked:
         # A published release input is always read: its pins follow their own rule, which
         # no whole-file entry waives.
-        covering = [] if any(pattern.match(path) for pattern in patterns) else \
+        covering = [] if any(entry.path.match(path) for entry in published) else \
             [entry for entry in whole if entry.path.match(path)]
         for entry in covering:
             entry.used += 1
@@ -782,14 +885,32 @@ def scan(root: Path, inventory: Inventory, tracked: list[str], allowlist: list[A
     return scanner
 
 
+def attach_keys(root: Path, findings: list[Finding], allowlist: list[AllowEntry]) -> None:
+    """Give each finding in a JSON file that a `key` entry scopes the key path of its line's value."""
+    scoped = [entry.path for entry in allowlist if entry.key is not None]
+    files: dict[str, dict[int, str]] = {}
+    for finding in findings:
+        if not finding.line or not finding.path.endswith(".json") or \
+                not any(pattern.match(finding.path) for pattern in scoped):
+            continue
+        if finding.path not in files:
+            try:
+                files[finding.path] = json_value_lines((root / finding.path).read_text(encoding="utf-8"))
+            except ValueError as error:
+                raise PinError(f"{finding.path} cannot be read as JSON for an entry with a key: {error}") from error
+        finding.key = files[finding.path].get(finding.line, "")
+
+
 def move_version(text: str, pinned: str, expected: str) -> str:
     return re.sub(rf"(?<![0-9.]){re.escape(pinned)}(?![0-9]|\.[0-9])", expected, text, count=1)
 
 
 def covering(finding: Finding, allowlist: list[AllowEntry]) -> list[AllowEntry]:
-    """The allow entries with a `match` that cover a finding."""
+    """The allow entries with a `match` or a `key` that cover a finding."""
     return [entry for entry in allowlist
-            if entry.match is not None and entry.path.match(finding.path) and entry.match.search(finding.pin)]
+            if not entry.whole and entry.path.match(finding.path)
+            and (entry.match is None or entry.match.search(finding.pin))
+            and (entry.key is None or (finding.key is not None and entry.key.search(finding.key)))]
 
 
 def manifest_file(path: str) -> bool:
@@ -847,6 +968,7 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         published = load_published(config)
         constants = load_constants(config, inventory)
         scanner = scan(root, inventory, tracked, allowlist, published, constants)
+        attach_keys(root, scanner.findings, allowlist)
         if write:
             # An allowed pin (an upgrade fixture, or a pin another change removes)
             # stays as it is: only the pins the check would report move.
@@ -854,7 +976,9 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
             for path in write_pins(root, unallowed):
                 print(f"moved in-repo pins in {path}", file=out)
             allowlist = load_allowlist(config)
+            published = load_published(config)
             scanner = scan(root, inventory, tracked, allowlist, published, constants)
+            attach_keys(root, scanner.findings, allowlist)
         findings = scanner.findings
     except (PinError, OSError, ValueError, tomllib.TOMLDecodeError, re.error) as error:
         print(f"check_inrepo_version_pins: {error}", file=err)
@@ -867,7 +991,9 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         if not entries:
             reported.append(finding)
     stale = [entry for entry in allowlist if entry.used == 0]
-    stale_paths = [text for text, pattern in published if not any(pattern.match(path) for path in tracked)]
+    stale_paths = [entry.label() for entry in published if not any(entry.path.match(path) for path in tracked)]
+    stale_matches = [entry.label() for entry in published
+                     if entry.match is not None and entry.used == 0 and entry.label() not in stale_paths]
     stale_constants = [(path, name) for path, names in constants.items() for name in names
                        if (path, name) not in scanner.constants_seen]
     for finding in reported:
@@ -876,10 +1002,12 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         print(f"{CONFIG}: allow entry {entry.index} {entry.label()} covers nothing; delete it", file=err)
     for text in stale_paths:
         print(f"{CONFIG}: published release input {text} matches no tracked file; delete it", file=err)
+    for text in stale_matches:
+        print(f"{CONFIG}: published release input {text} applies to no pin; delete it", file=err)
     for path, name in stale_constants:
         print(f"{CONFIG}: version constant {name} of {path} is not in that file; delete it", file=err)
-    if reported or stale or stale_paths or stale_constants:
-        count = len(stale) + len(stale_paths) + len(stale_constants)
+    if reported or stale or stale_paths or stale_matches or stale_constants:
+        count = len(stale) + len(stale_paths) + len(stale_matches) + len(stale_constants)
         print(f"check_inrepo_version_pins: {len(reported)} pin(s) below the version of the in-repo package they pin, "
               f"{count} stale allow entr{'y' if count == 1 else 'ies'}. Pin the version in this tree, use a "
               f"same-commit reference, or allow the pin in {CONFIG} with its reason.", file=err)

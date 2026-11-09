@@ -4,8 +4,8 @@
     "Configuration of scripts/check_inrepo_version_pins.py, run by scripts/verify-version-parity.sh.",
     "Every product of this repository consumes the others at the version this tree builds: in development and CI the build of the same commit, in a release the same release's artifacts. A pin of an in-repo package is a same-commit reference or names exactly the package's version in this tree.",
     "former_names: earlier names of in-repo packages, read as the package they became. products: product words the check reads beside ci/products.json. release_tags: release tag prefixes beside the products' own. release_assets: release asset name prefixes and the package whose version they carry (wheel and npm tarball names are derived).",
-    "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match covers whole files, which are not read; one with match covers the pins it matches. removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check.",
-    "published_release_inputs: files that pin published assets of an in-repo release by digest; a pin there names the version in this tree or the release before it (the newest release heading below that version in the product's CHANGELOG.md), nothing older or newer. They are read even under a whole-file allow entry. A path that matches no tracked file fails the check.",
+    "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match or key covers whole files, which are not read; one with match covers the pins it matches. In a JSON file key scopes an entry to the pins of the values under the key paths it matches (object keys joined by /, array items by their index). removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check.",
+    "published_release_inputs: files that pin published assets of an in-repo release by digest; a pin there names the version in this tree or the release before it (the newest release heading below that version in the product's CHANGELOG.md), nothing older or newer. A path given with a match applies that rule to the pins it matches only, and fails the check when it applies to none. They are read even under a whole-file allow entry. A path that matches no tracked file fails the check.",
     "version_constants: per file, the package a version constant pins when its name names no product (VERSION = \"X.Y.Z\"); a constant the file no longer holds fails the check."
   ],
   "former_names": {
@@ -37,10 +37,13 @@
     "forge-service-host": "pypi:meta-forge"
   },
   "published_release_inputs": {
-    "reason": "Forge's release inputs, the Meta runtime that compiled agent teams install (its version beside the wheel's SHA-256), the model catalog of that runtime and the recorded release of it that the installer's tests read pin the assets of a published Meta or Connect release by digest, so they are filled in after that release is published and lag a version bump by one release; the list is emptied when Forge's release derives its in-repo inputs at release time.",
+    "reason": "Forge's release inputs, the VERSION line of the Meta runtime that compiled agent teams install (beside its wheel's SHA-256), the model catalog of that runtime and the recorded release of it that the installer's tests read pin the assets of a published Meta or Connect release by digest, so they are filled in after that release is published and lag a version bump by one release; the list is emptied when Forge's release derives its in-repo inputs at release time.",
     "paths": [
       "meta/installer/release/**",
-      "meta/installer/launchkit/public_meta_runtime.py",
+      {
+        "path": "meta/installer/launchkit/public_meta_runtime.py",
+        "match": "^VERSION = "
+      },
       "meta/installer/launchkit/meta_model_catalog_*.json",
       "meta/installer/tests/fixtures/meta_release_*/**"
     ]
@@ -229,7 +232,8 @@
     {
       "path": "meta/installer/release/**",
       "match": "0\\.9\\.10|forge-native-v0\\.3\\.1",
-      "reason": "Forge's product inputs (the Connect 0.9.10 product, the ordinary gateway meta-v0.9.10 and the collection host forge-service-host 0.3.1, in the release inputs, their stable copy and the committed assembly record): forge-service-host is built outside this repository against Connect 0.9.10's resources digest, so these rows move together when this repository builds forge-service-host from the same commit and the Forge release takes all product inputs from the paired release.",
+      "key": "^(?:targets/[^/]+/)?(?:files/(?:product|ordinary|native)/|selection/|paths/)|^provider/|^archive$",
+      "reason": "Forge's product inputs (the Connect 0.9.10 product, the ordinary gateway meta-v0.9.10 and the collection host forge-service-host 0.3.1: the product, ordinary and native files of the release inputs and their stable copy, the product selection and its paths, the stable copy's provider and the committed assembly record's archive, never a Guide row): forge-service-host is built outside this repository against Connect 0.9.10's resources digest, so these rows move together when this repository builds forge-service-host from the same commit and the Forge release takes all product inputs from the paired release.",
       "removed_by": "the in-repo forge-service-host build"
     },
     {
@@ -313,8 +317,15 @@
       "removed_by": "the change that moves Connect's README and docs to the published 0.9.11 release"
     },
     {
-      "path": "meta/docs/forge/*.mdx",
-      "reason": "Forge's install pages download Forge 0.3.0 from the standalone repository; Forge 0.3.1 is released here as meta-installer-v0.3.1.",
+      "path": "meta/docs/forge/quickstart.mdx",
+      "match": "release forge-v0\\.3\\.0$|^meta-forge-0\\.3\\.0$",
+      "reason": "Forge's install page downloads Forge 0.3.0 from the standalone repository; Forge 0.3.1 is released here as meta-installer-v0.3.1.",
+      "removed_by": "the change that points Forge's install docs at its meta-installer releases in this repository"
+    },
+    {
+      "path": "meta/docs/forge/reference.mdx",
+      "match": "release forge-v0\\.3\\.0$|^meta-forge-0\\.3\\.0$",
+      "reason": "Forge's reference page downloads Forge 0.3.0 from the standalone repository; Forge 0.3.1 is released here as meta-installer-v0.3.1.",
       "removed_by": "the change that points Forge's install docs at its meta-installer releases in this repository"
     },
     {

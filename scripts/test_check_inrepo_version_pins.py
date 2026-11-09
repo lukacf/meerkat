@@ -382,6 +382,46 @@ class PublishedInputTests(GuardTest):
         self.inputs("1.4.2")
         self.assertFindings("published_release_inputs needs its reason", code=2)
 
+    def test_a_bump_leaves_values_filled_in_after_a_release_one_release_behind(self):
+        # Digests, a wheel hash and a recorded catalog are filled in after their release
+        # is published: at a bump they name the release before the new version.
+        self.repo.config["version_constants"] = {"meta/tool/release/runtime.py": {"VERSION": "pypi:demo-meta"}}
+        self.repo.save_config()
+        self.inputs("1.4.2")
+        self.repo.write("meta/tool/release/runtime.py", f'VERSION = "1.4.2"\nWHEEL_SHA256 = "{HEX}"\n')
+        self.assertClean()
+        self.repo.write("meta/crates/demo-meta-rs/Cargo.toml", '[package]\nname = "demo-meta-rs"\nversion = "1.4.3"\n')
+        self.repo.write("meta/sdk/package.json", json.dumps({"name": "@rkat/demo-meta", "version": "1.4.3"}))
+        self.repo.write("meta/sdk/pyproject.toml", '[project]\nname = "demo-meta"\nversion = "1.4.3"\n')
+        self.repo.write("meta/CHANGELOG.md", "## [Unreleased]\n\n## [1.4.3] - 2026-01-04\n\n## [1.4.2] - 2026-01-03\n\n"
+                        "## [1.4.1] - 2026-01-02\n")
+        self.assertClean()
+        self.repo.write("meta/tool/release/runtime.py", f'VERSION = "1.4.1"\nWHEEL_SHA256 = "{HEX}"\n')
+        self.assertFindings('constant VERSION = "1.4.1": pins demo-meta 1.4.1, older than the release before its '
+                            'version 1.4.3 in this tree (a published release input names 1.4.3 or the release before '
+                            'it, 1.4.2)')
+
+    def test_a_bare_version_constant_is_a_pin_only_where_configured(self):
+        self.inputs("1.4.2")
+        self.repo.write("meta/tool/runtime.py", 'VERSION = "1.0.0"\n')
+        self.assertClean()
+        self.repo.config["version_constants"] = {"meta/tool/runtime.py": {"VERSION": "pypi:demo-meta"}}
+        self.repo.save_config()
+        self.assertFindings('meta/tool/runtime.py:1: constant VERSION = "1.0.0": pins demo-meta 1.0.0, below its '
+                            'version 1.4.2')
+
+    def test_a_configured_version_constant_that_is_gone_is_stale(self):
+        self.inputs("1.4.2")
+        self.repo.config["version_constants"] = {"meta/tool/runtime.py": {"VERSION": "pypi:demo-meta"}}
+        self.repo.save_config()
+        self.repo.write("meta/tool/runtime.py", 'RELEASE = "1.4.2"\n')
+        self.assertFindings("version constant VERSION of meta/tool/runtime.py is not in that file; delete it")
+
+    def test_a_published_input_is_read_under_a_whole_file_entry(self):
+        self.repo.allow(path="meta/tool/**", reason="Fixtures and tests of the tool.")
+        self.inputs("1.4.0")
+        self.assertFindings("asset demo-gateway-1.4.0: pins meta 1.4.0, older than the release before")
+
 
 class BumpTests(unittest.TestCase):
     """The version bumps move the pins this check reads, in the same commit."""

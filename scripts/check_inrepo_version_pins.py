@@ -41,8 +41,11 @@ with its reason) are files that pin published assets of an in-repo release
 by digest. Those cannot name a version before its release is published, so a
 pin there may name the version in this tree or the release before it (the
 newest release heading below that version in the product's CHANGELOG.md),
-nothing older and nothing newer. A listed path that matches no tracked file
-is stale.
+nothing older and nothing newer. Such a file is read even where a whole-file
+allow entry covers its directory. A listed path that matches no tracked file
+is stale. `version_constants` names the package of a version constant whose
+name names no product (`VERSION = "0.9.11"` in a given file); a configured
+constant the file no longer holds is stale.
 
 `--write` first moves every plain-text pin of a dependency manifest
 (package.json and a lock's root package, pyproject.toml, a requirements file,
@@ -394,11 +397,14 @@ def alternatives(names) -> str:
 
 
 class Scanner:
-    def __init__(self, root: Path, inventory: Inventory, published=()):
+    def __init__(self, root: Path, inventory: Inventory, published=(), constants=None):
         self.root = root
         self.inventory = inventory
         # The published release inputs (compiled path patterns).
         self.published = list(published)
+        # Version constants without a product word, configured per file: {path: {name: package key}}.
+        self.constants = constants or {}
+        self.constants_seen: set[tuple[str, str]] = set()
         self.findings: list[Finding] = []
         packages = inventory.packages.values()
         pypi = "|".join(re.sub(r"(?:\\-|_|\\\.)", "[-_.]", re.escape(name))
@@ -420,7 +426,7 @@ class Scanner:
         self.asset_re = re.compile(
             rf"(?<![A-Za-z0-9_.-])({alternatives(inventory.assets)})-v?({RELEASE_VERSION})(?=[-._][A-Za-z0-9])")
         self.constant_re = re.compile(
-            r"\b([A-Z][A-Z0-9_]*(?:VERSION|REQUIREMENT))\b[ \t]*(?::[^=\n]{0,40})?=[ \t]*(?:Some\()?([\"'])(=?)"
+            r"\b((?:[A-Z][A-Z0-9_]*)?(?:VERSION|REQUIREMENT))\b[ \t]*(?::[^=\n]{0,40})?=[ \t]*(?:Some\()?([\"'])(=?)"
             rf"({VERSION})\2")
         # Every pin shape holds a dotted version (two parts in a quoted Cargo or npm
         # requirement) or names the repository owner.
@@ -577,6 +583,10 @@ class Scanner:
                 product = self.constant_product(match.group(1))
                 if product is not None:
                     self.check(path, number, "constant", match.group(0), ("product", product), match.group(4))
+                elif match.group(1) in self.constants.get(path, {}):
+                    self.constants_seen.add((path, match.group(1)))
+                    self.check(path, number, "constant", match.group(0), self.constants[path][match.group(1)],
+                               match.group(4))
         if manifest:
             return
         for match in self.npm_entry_re.finditer(line):
@@ -682,6 +692,20 @@ def load_published(config: dict) -> list[tuple[str, re.Pattern]]:
     return [(path, glob_regex(path)) for path in paths]
 
 
+def load_constants(config: dict, inventory: Inventory) -> dict[str, dict[str, tuple[str, str]]]:
+    """Version constants whose name names no product, per file: the package each one pins."""
+    raw = config.get("version_constants") or {}
+    if not isinstance(raw, dict):
+        raise PinError("version_constants maps a file to its constants")
+    constants = {}
+    for path, names in raw.items():
+        if not isinstance(names, dict) or not names:
+            raise PinError(f"version_constants of {path} must map constant names to packages")
+        constants[path] = {name: inventory.target(target, f"version constant {name} of {path}")
+                           for name, target in names.items()}
+    return constants
+
+
 def tracked_files(root: Path) -> list[str]:
     result = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=False)
     if result.returncode != 0:
@@ -690,16 +714,20 @@ def tracked_files(root: Path) -> list[str]:
 
 
 def scan(root: Path, inventory: Inventory, tracked: list[str], allowlist: list[AllowEntry],
-         published=()) -> list[Finding]:
+         published=(), constants=None) -> Scanner:
     whole = [entry for entry in allowlist if entry.match is None]
-    scanner = Scanner(root, inventory, [pattern for _, pattern in published])
+    patterns = [pattern for _, pattern in published]
+    scanner = Scanner(root, inventory, patterns, constants)
     for path in tracked:
-        covering = [entry for entry in whole if entry.path.match(path)]
+        # A published release input is always read: its pins follow their own rule, which
+        # no whole-file entry waives.
+        covering = [] if any(pattern.match(path) for pattern in patterns) else \
+            [entry for entry in whole if entry.path.match(path)]
         for entry in covering:
             entry.used += 1
         if not covering:
             scanner.scan(path)
-    return scanner.findings
+    return scanner
 
 
 def move_version(text: str, pinned: str, expected: str) -> str:
@@ -765,15 +793,17 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         inventory = Inventory(root, config, tracked)
         allowlist = load_allowlist(config)
         published = load_published(config)
-        findings = scan(root, inventory, tracked, allowlist, published)
+        constants = load_constants(config, inventory)
+        scanner = scan(root, inventory, tracked, allowlist, published, constants)
         if write:
             # An allowed pin (an upgrade fixture, or a pin another change removes)
             # stays as it is: only the pins the check would report move.
-            unallowed = [finding for finding in findings if not covering(finding, allowlist)]
+            unallowed = [finding for finding in scanner.findings if not covering(finding, allowlist)]
             for path in write_pins(root, unallowed):
                 print(f"moved in-repo pins in {path}", file=out)
             allowlist = load_allowlist(config)
-            findings = scan(root, inventory, tracked, allowlist, published)
+            scanner = scan(root, inventory, tracked, allowlist, published, constants)
+        findings = scanner.findings
     except (PinError, OSError, ValueError, tomllib.TOMLDecodeError, re.error) as error:
         print(f"check_inrepo_version_pins: {error}", file=err)
         return 2
@@ -786,14 +816,18 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
             reported.append(finding)
     stale = [entry for entry in allowlist if entry.used == 0]
     stale_paths = [text for text, pattern in published if not any(pattern.match(path) for path in tracked)]
+    stale_constants = [(path, name) for path, names in constants.items() for name in names
+                       if (path, name) not in scanner.constants_seen]
     for finding in reported:
         print(finding.describe(), file=err)
     for entry in stale:
         print(f"{CONFIG}: allow entry {entry.index} {entry.label()} covers nothing; delete it", file=err)
     for text in stale_paths:
         print(f"{CONFIG}: published release input {text} matches no tracked file; delete it", file=err)
-    if reported or stale or stale_paths:
-        count = len(stale) + len(stale_paths)
+    for path, name in stale_constants:
+        print(f"{CONFIG}: version constant {name} of {path} is not in that file; delete it", file=err)
+    if reported or stale or stale_paths or stale_constants:
+        count = len(stale) + len(stale_paths) + len(stale_constants)
         print(f"check_inrepo_version_pins: {len(reported)} pin(s) below the version of the in-repo package they pin, "
               f"{count} stale allow entr{'y' if count == 1 else 'ies'}. Pin the version in this tree, use a "
               f"same-commit reference, or allow the pin in {CONFIG} with its reason.", file=err)

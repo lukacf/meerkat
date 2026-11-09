@@ -5,7 +5,8 @@
     "Every product of this repository consumes the others at the version this tree builds: in development and CI the build of the same commit, in a release the same release's artifacts. A pin of an in-repo package is a same-commit reference or names exactly the package's version in this tree.",
     "former_names: earlier names of in-repo packages, read as the package they became. products: product words the check reads beside ci/products.json. release_tags: release tag prefixes beside the products' own. release_assets: release asset name prefixes and the package whose version they carry (wheel and npm tarball names are derived).",
     "allow: pins that stay below the version in this tree, each with its reason: upgrade-test fixtures, recorded history, tests that feed recorded or synthetic versions to the code they test, and code that reads installations recorded by earlier releases. An entry without match covers whole files, which are not read; one with match covers the pins it matches. removed_by names the change that removes a temporary entry's pins. An entry that covers nothing fails the check.",
-    "published_release_inputs: files that pin published assets of an in-repo release by digest; a pin there names the version in this tree or the release before it (the newest release heading below that version in the product's CHANGELOG.md), nothing older or newer. A path that matches no tracked file fails the check."
+    "published_release_inputs: files that pin published assets of an in-repo release by digest; a pin there names the version in this tree or the release before it (the newest release heading below that version in the product's CHANGELOG.md), nothing older or newer. They are read even under a whole-file allow entry. A path that matches no tracked file fails the check.",
+    "version_constants: per file, the package a version constant pins when its name names no product (VERSION = \"X.Y.Z\"); a constant the file no longer holds fails the check."
   ],
   "former_names": {
     "pypi:meerkat-mobkit": "pypi:meerkat-meta",
@@ -36,11 +37,18 @@
     "forge-service-host": "pypi:meta-forge"
   },
   "published_release_inputs": {
-    "reason": "Forge's release inputs and the model catalog of the Meta runtime that compiled agent teams install pin the assets of a published Meta or Connect release by digest, so they can name a release only after it is published and move after each publication; the list is emptied when Forge's release derives its in-repo inputs at release time.",
+    "reason": "Forge's release inputs, the Meta runtime that compiled agent teams install (its version beside the wheel's SHA-256), the model catalog of that runtime and the recorded release of it that the installer's tests read pin the assets of a published Meta or Connect release by digest, so they are filled in after that release is published and lag a version bump by one release; the list is emptied when Forge's release derives its in-repo inputs at release time.",
     "paths": [
       "meta/installer/release/**",
-      "meta/installer/launchkit/meta_model_catalog_*.json"
+      "meta/installer/launchkit/public_meta_runtime.py",
+      "meta/installer/launchkit/meta_model_catalog_*.json",
+      "meta/installer/tests/fixtures/meta_release_*/**"
     ]
+  },
+  "version_constants": {
+    "meta/installer/launchkit/public_meta_runtime.py": {
+      "VERSION": "pypi:meerkat-meta"
+    }
   },
   "allow": [
     {

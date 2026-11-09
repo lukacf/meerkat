@@ -6845,6 +6845,324 @@ async fn a_reset_over_a_member_the_host_made_records_nothing_for_it() {
     );
 }
 
+/// The compaction discard the budget holder's run harvests: its model call
+/// waits for the row's gate, so that run holds the realm's background budget
+/// until then.
+const BUDGET_HOLDER_DISCARD: &str = "BUDGET-HOLDER the distiller run that holds the budget";
+
+/// The session whose compactions the budget holder's run harvests.
+const BUDGET_HOLDER_SESSION: &str = "budget-holder-session";
+
+/// The compaction discard the memory of `session_key` holds.
+fn discard_of(session_key: &str) -> String {
+    format!("DISCARD of {session_key}")
+}
+
+/// A source of compaction discards that holds one for every session
+/// ([`discard_of`]), the budget holder's for its session, and records each
+/// session whose discards the distiller reads.
+#[derive(Default)]
+struct OneDiscardEach(StdMutex<Vec<String>>);
+
+impl OneDiscardEach {
+    fn reads_of(&self, session: &SessionId) -> usize {
+        let session = session.to_string();
+        lock(&self.0)
+            .iter()
+            .filter(|read| **read == session)
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl CompactionDiscardSource for OneDiscardEach {
+    async fn read_discards(
+        &self,
+        session_key: &str,
+        _limit: usize,
+    ) -> Result<Vec<DiscardEntry>, DistillerError> {
+        lock(&self.0).push(session_key.to_string());
+        let content = if session_key == BUDGET_HOLDER_SESSION {
+            BUDGET_HOLDER_DISCARD.to_string()
+        } else {
+            discard_of(session_key)
+        };
+        Ok(vec![DiscardEntry {
+            content,
+            range: Some((0, 1)),
+        }])
+    }
+}
+
+/// The distiller's model in the rows whose distiller runs meet a busy
+/// background budget: it answers every extraction with no op, noting the
+/// evidence it was shown, and answers the budget holder's
+/// ([`BUDGET_HOLDER_DISCARD`]) only once its gate has a permit.
+struct GatedModel {
+    shown: StdMutex<Vec<String>>,
+    holding: AtomicBool,
+    gate: tokio::sync::Semaphore,
+}
+
+impl GatedModel {
+    fn new() -> Self {
+        Self {
+            shown: StdMutex::new(Vec::new()),
+            holding: AtomicBool::new(false),
+            gate: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    /// Whether the budget holder's run is inside its model call.
+    fn holding(&self) -> bool {
+        self.holding.load(Ordering::SeqCst)
+    }
+
+    /// Let the budget holder's run have its answer.
+    fn open(&self) {
+        self.gate.add_permits(1);
+    }
+
+    /// Whether an extraction the model answered was shown `evidence`.
+    fn was_shown(&self, evidence: &str) -> bool {
+        lock(&self.shown)
+            .iter()
+            .any(|shown| shown.contains(evidence))
+    }
+}
+
+#[async_trait::async_trait]
+impl meerkat_client::LlmClient for GatedModel {
+    fn stream<'a>(
+        &'a self,
+        request: &'a meerkat_client::LlmRequest,
+    ) -> meerkat_client::types::LlmStream<'a> {
+        use futures::StreamExt as _;
+        let shown = request
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::User(user) => Some(user.text_content()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let holds = shown.contains(BUDGET_HOLDER_DISCARD);
+        if holds {
+            self.holding.store(true, Ordering::SeqCst);
+        }
+        let answered = futures::stream::once(async move {
+            if holds {
+                let _ = self.gate.acquire().await;
+            }
+            lock(&self.shown).push(shown);
+        })
+        .filter_map(|()| async {
+            None::<Result<meerkat_client::LlmEvent, meerkat_client::LlmError>>
+        });
+        Box::pin(answered.chain(futures::stream::iter(vec![
+            Ok(meerkat_client::LlmEvent::TextDelta {
+                delta: "[]".to_string(),
+                meta: None,
+            }),
+            Ok(meerkat_client::LlmEvent::Done {
+                outcome: meerkat_client::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
+            }),
+        ])))
+    }
+
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
+    }
+
+    async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
+        Ok(())
+    }
+}
+
+/// The distiller's model client: `GatedModel`.
+struct GatedModelHandle(Arc<GatedModel>);
+
+#[async_trait::async_trait]
+impl DistillerClientHandle for GatedModelHandle {
+    async fn client(&self) -> Result<Arc<dyn meerkat_client::LlmClient>, DistillerError> {
+        Ok(Arc::clone(&self.0) as Arc<dyn meerkat_client::LlmClient>)
+    }
+
+    fn invalidate(&self) {}
+}
+
+/// Agent memory over a store in `dir`, whose distiller reads compaction
+/// discards through `discards` and transcripts through `reads`, and asks
+/// `model`; and that distiller.
+fn memory_harvesting(
+    dir: &std::path::Path,
+    reads: &Arc<ReadSessions>,
+    discards: &Arc<OneDiscardEach>,
+    model: &Arc<GatedModel>,
+) -> (AgentMemoryRuntimeInjector, Arc<DistillerEngine>) {
+    let store = Arc::new(crate::SqliteAgentMemoryStore::open(dir).expect("open the memory store"));
+    let distiller = Arc::new(DistillerEngine::new(
+        DistillerProfile::embedded_default(),
+        DistillerConfig {
+            enabled: true,
+            ..DistillerConfig::default()
+        },
+        Arc::new(GatedModelHandle(Arc::clone(model))),
+        store.clone(),
+        store.clone(),
+        Arc::clone(reads) as Arc<dyn TranscriptSource>,
+        Some(Arc::clone(discards) as Arc<dyn CompactionDiscardSource>),
+        None,
+        "default",
+    ));
+    let injector = AgentMemoryRuntimeInjector::new(store, AgentMemoryConfig::default())
+        .with_distiller(Arc::clone(&distiller));
+    (injector, distiller)
+}
+
+/// An error hook that keeps every event it is handed.
+fn keeping_errors(
+    errors: &Arc<StdMutex<Vec<crate::unified_runtime::types::ErrorEvent>>>,
+) -> crate::unified_runtime::ErrorHook {
+    let errors = Arc::clone(errors);
+    Arc::new(move |event| {
+        lock(&errors).push(event);
+        Box::pin(async {})
+    })
+}
+
+/// Start a distiller run that holds the realm's background budget: a harvest
+/// of the budget holder's session, inside its model call until `model`'s
+/// gate opens. Answers once the run holds the budget.
+async fn hold_the_budget(
+    distiller: &Arc<DistillerEngine>,
+    model: &GatedModel,
+) -> tokio::task::JoinHandle<crate::memory::distiller::DistillOutcome> {
+    let holder = tokio::spawn({
+        let distiller = Arc::clone(distiller);
+        async move {
+            distiller
+                .distill_now(
+                    "personal:holder",
+                    BUDGET_HOLDER_SESSION,
+                    crate::memory::distiller::DistillCause::Compaction,
+                )
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !model.holding() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the budget holder's run never reached its model"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    holder
+}
+
+/// A reset's harvest of the compactions the session it retires holds, while
+/// another distiller run holds the realm's background budget, is not ended
+/// by the budget: a denial is no failed attempt. The harvest waits for the
+/// budget, and once the other run ends it harvests the discards; nothing is
+/// recorded or reported as failed.
+///
+/// RED before a denial of the budget was a busy answer: each denial counted
+/// as a failed attempt, so the harvest ended failed after its attempts
+/// (`lifecycle_effect_failed`, "budget denied: concurrency ceiling
+/// reached"), and the discards were never harvested.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_s_harvest_waits_for_a_busy_budget_and_harvests_once_it_frees() {
+    let alice = identity("personal:alice");
+    let retired = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    // Short pauses between attempts, and a deadline no attempt here reaches.
+    runtime.set_lifecycle_effect_limits(Duration::from_secs(30), 2);
+    register_live(&runtime, &core.core, spec(&alice), 0, retired.clone())
+        .await
+        .expect("registered live");
+    let errors = Arc::new(StdMutex::new(Vec::new()));
+    runtime.set_error_hook(Some(keeping_errors(&errors)));
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let reads = Arc::new(ReadSessions::default());
+    let discards = Arc::new(OneDiscardEach::default());
+    let model = Arc::new(GatedModel::new());
+    let (memory, distiller) = memory_harvesting(memory_dir.path(), &reads, &discards, &model);
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    let holder = hold_the_budget(&distiller, &model).await;
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset rotates the identity");
+    let settle = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move { runtime.settle_lifecycle_projection().await }
+    });
+    // The retirement's harvest read the session's discards, and the budget
+    // did not admit its run. Its attempts, 10 ms apart, are long over by the
+    // time the other run ends.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while discards.reads_of(&retired) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retirement's harvest never read the session's discards"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    model.open();
+    holder.await.expect("the budget holder's run");
+
+    let harvested = discard_of(&retired.to_string());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !model.was_shown(&harvested) {
+        if tokio::time::Instant::now() >= deadline {
+            let failures = runtime
+                .lifecycle_effect_failures(0, 16)
+                .await
+                .expect("the recorded failures read");
+            panic!(
+                "the harvest of the compactions the retired session holds never ran once the \
+                 budget freed: recorded {failures:?}, reported {:?}",
+                lock(&errors)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(20), settle)
+        .await
+        .expect("the projection reaches the journal's head")
+        .expect("the settle task");
+    let failures = runtime
+        .lifecycle_effect_failures(0, 16)
+        .await
+        .expect("the recorded failures read");
+    assert!(
+        failures.is_empty(),
+        "nothing is recorded as failed: {failures:?}"
+    );
+    let reported = lock(&errors)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        reported.is_empty(),
+        "nothing is reported failed: {reported:?}"
+    );
+}
+
 /// The retirement hook of an incarnation a Meta step ended is called only
 /// once that step answered. The projection takes what the step kept for the
 /// hook (the registration it read before Core was asked, settled after Core

@@ -59,7 +59,8 @@ use meerkat_core::authorization::ControllerReadinessFailure;
 use meerkat_core::{OperationRefusalKind, OperationRefused, PrincipalRef};
 
 use super::local_authorization::{
-    NativeGrantWorkConfiguration, NativeIngressCheck, NativeRetainedResumeCheck,
+    NativeGrantWorkConfiguration, NativeIngressCheck, NativeKeptOriginalCheck,
+    NativeRetainedResumeCheck,
 };
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input::Input;
@@ -272,22 +273,35 @@ pub(crate) enum CustodyClass {
     NotRetained,
 }
 
+/// One read of the host's [`AuthenticatedOriginalSource`]. Native admission
+/// and operation authorization make these reads while they hold the
+/// session's mutation gate and driver lock, so each runs as a protected
+/// section: the host answers what it cannot answer now, it never waits.
+pub(crate) fn host_read<T>(read: impl FnOnce() -> T) -> T {
+    let _section = meerkat_core::protected_section::enter(
+        meerkat_core::protected_section::ProtectedSection::NativeAdmissionRead,
+    );
+    read()
+}
+
 /// The one classifier every reader of retained custody uses.
 pub(crate) fn classify_custody(
     originals: &dyn AuthenticatedOriginalSource,
     namespace: &QualifiedIngressNamespace,
     original: &OriginalWorkRef,
 ) -> Result<CustodyClass, ControllerReadinessFailure> {
-    Ok(match originals.retained_custody(namespace, original)? {
-        RetainedCustody::Retained(basis) => CustodyClass::Retained(basis),
-        RetainedCustody::AdmissionPending => {
-            match originals.original_disposition(namespace, original)? {
-                OriginalDisposition::Active => CustodyClass::Pending,
-                OriginalDisposition::OperationCancelled { .. } => CustodyClass::Cancelled,
+    Ok(
+        match host_read(|| originals.retained_custody(namespace, original))? {
+            RetainedCustody::Retained(basis) => CustodyClass::Retained(basis),
+            RetainedCustody::AdmissionPending => {
+                match host_read(|| originals.original_disposition(namespace, original))? {
+                    OriginalDisposition::Active => CustodyClass::Pending,
+                    OriginalDisposition::OperationCancelled { .. } => CustodyClass::Cancelled,
+                }
             }
-        }
-        RetainedCustody::NotRetained => CustodyClass::NotRetained,
-    })
+            RetainedCustody::NotRetained => CustodyClass::NotRetained,
+        },
+    )
 }
 
 /// The original owner's current operational disposition of one original
@@ -358,7 +372,10 @@ pub fn original_operation_grant(
         .map(Some)
         .map_err(|refusal| match refusal {
             GrantRefusal::Denied => denied(),
-            GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
+            GrantRefusal::ControllerInUse
+            | GrantRefusal::Duplicate
+            | GrantRefusal::Unavailable
+            | GrantRefusal::AdmissionFence => {
                 meerkat_core::OperationAuthorizationError::Unavailable
             }
         })
@@ -421,7 +438,10 @@ fn contributor_operation_ceiling(
             }
             LineageResolutionRefusal::Refused(GrantRefusal::Denied) => denied(),
             LineageResolutionRefusal::Refused(
-                GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable,
+                GrantRefusal::ControllerInUse
+                | GrantRefusal::Duplicate
+                | GrantRefusal::Unavailable
+                | GrantRefusal::AdmissionFence,
             ) => meerkat_core::OperationAuthorizationError::Unavailable,
         })
 }
@@ -494,7 +514,7 @@ fn require_active_operation(
     namespace: &QualifiedIngressNamespace,
     original: &OriginalWorkRef,
 ) -> Result<(), meerkat_core::OperationAuthorizationError> {
-    match originals.original_disposition(namespace, original) {
+    match host_read(|| originals.original_disposition(namespace, original)) {
         Ok(OriginalDisposition::Active) => Ok(()),
         Ok(OriginalDisposition::OperationCancelled { .. }) => {
             Err(OperationRefused::new(OperationRefusalKind::Denied).into())
@@ -559,6 +579,9 @@ pub struct ScopedGrantComposition {
     pub invocation: ScopedInvocation,
     pub operation_owner: Arc<dyn OperationPolicyOwner>,
     pub retained_resume: Option<Arc<NativeRetainedResumeCheck>>,
+    /// Owner of a kept governed input's controller
+    /// ([`NativeGrantWorkConfiguration::kept_original`]).
+    pub kept_original: Option<Arc<NativeKeptOriginalCheck>>,
 }
 
 impl ScopedGrantComposition {
@@ -581,6 +604,7 @@ impl ScopedGrantComposition {
             invocation_owner,
             operation_owner: self.operation_owner,
             retained_resume: self.retained_resume,
+            kept_original: self.kept_original,
             require_scoped_destination: true,
             configured_mcp_attachment: None,
         }
@@ -668,10 +692,12 @@ impl AdmittedWorkPolicyOwner for NamedContributorWork {
         original: &OriginalWorkRef,
     ) -> Result<Option<InputAuthorityAssociation>, meerkat_core::OperationAuthorizationError> {
         require_active_operation(self.originals.as_ref(), namespace, original)?;
-        self.originals
-            .enrolled_service_original(namespace, original)
-            .map(|record| record.map(|record| record.association))
-            .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)
+        host_read(|| {
+            self.originals
+                .enrolled_service_original(namespace, original)
+        })
+        .map(|record| record.map(|record| record.association))
+        .map_err(|_| meerkat_core::OperationAuthorizationError::Unavailable)
     }
 
     // An attachment control names no contributor work; the host invocation
@@ -1190,11 +1216,15 @@ impl ScopedOriginalIngress {
         if claims.ingress_namespace.ingress != self.ingress_domain {
             return Err(refused(OperationRefusalKind::MalformedFacts));
         }
-        let original = self
-            .originals
-            .authenticated_original(ingress, &claims.ingress_namespace, &claims.original_work)
-            .map_err(NativeAdmissionError::Readiness)?
-            .ok_or_else(|| refused(OperationRefusalKind::MalformedFacts))?;
+        let original = host_read(|| {
+            self.originals.authenticated_original(
+                ingress,
+                &claims.ingress_namespace,
+                &claims.original_work,
+            )
+        })
+        .map_err(NativeAdmissionError::Readiness)?
+        .ok_or_else(|| refused(OperationRefusalKind::MalformedFacts))?;
         if original.original_work != claims.original_work
             || original.occurrence_scope != claims.ingress_namespace.occurrence_scope
             || original.original_authentication != claims.original_authentication
@@ -1245,11 +1275,15 @@ impl ScopedOriginalIngress {
                     return Err(refused(OperationRefusalKind::MalformedFacts));
                 }
             }
-            let custody = self
-                .originals
-                .authenticated_original(ingress, &claims.ingress_namespace, contributor)
-                .map_err(NativeAdmissionError::Readiness)?
-                .ok_or_else(|| refused(OperationRefusalKind::MalformedFacts))?;
+            let custody = host_read(|| {
+                self.originals.authenticated_original(
+                    ingress,
+                    &claims.ingress_namespace,
+                    contributor,
+                )
+            })
+            .map_err(NativeAdmissionError::Readiness)?
+            .ok_or_else(|| refused(OperationRefusalKind::MalformedFacts))?;
             if &custody.original_work != contributor {
                 return Err(refused(OperationRefusalKind::MalformedFacts));
             }
@@ -1264,9 +1298,7 @@ impl ScopedOriginalIngress {
         namespace: &QualifiedIngressNamespace,
         original: &OriginalWorkRef,
     ) -> Result<(), NativeAdmissionError> {
-        match self
-            .originals
-            .original_disposition(namespace, original)
+        match host_read(|| self.originals.original_disposition(namespace, original))
             .map_err(NativeAdmissionError::Readiness)?
         {
             OriginalDisposition::Active => Ok(()),
@@ -1327,8 +1359,7 @@ pub fn require_source_original_live(
     executor: &PrincipalRef,
     represented_subject: Option<&PrincipalRef>,
 ) -> Result<(), NativeAdmissionError> {
-    match originals
-        .original_disposition(namespace, original)
+    match host_read(|| originals.original_disposition(namespace, original))
         .map_err(NativeAdmissionError::Readiness)?
     {
         OriginalDisposition::Active => {}
@@ -1478,7 +1509,10 @@ fn lineage_refusal(refusal: LineageResolutionRefusal) -> NativeAdmissionError {
 fn grant_refusal(refusal: GrantRefusal) -> NativeAdmissionError {
     match refusal {
         GrantRefusal::Denied => refused(OperationRefusalKind::Denied),
-        GrantRefusal::ControllerInUse | GrantRefusal::Duplicate | GrantRefusal::Unavailable => {
+        GrantRefusal::ControllerInUse
+        | GrantRefusal::Duplicate
+        | GrantRefusal::Unavailable
+        | GrantRefusal::AdmissionFence => {
             NativeAdmissionError::Readiness(ControllerReadinessFailure::PolicyUnavailable)
         }
     }

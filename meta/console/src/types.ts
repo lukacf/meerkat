@@ -93,6 +93,10 @@ export interface ConsoleAgent extends SidebarWatchFields {
    * human's branch of that agent's conversation (`meta/fork_member`),
    * as the runtime's roster records the fork. */
   side_chat_of?: string;
+  /** Who may see this side chat, as the server decided it for the viewer:
+   * private to the viewer, private to the person who opened it (the viewer
+   * is an access admin), or shared with everyone who may see its source. */
+  side_chat_audience?: SideChatAudience;
   /** The agent's newest console activity, in milliseconds since the epoch,
    * as the console's frame log recorded it. Advisory: absent means unknown. */
   last_activity_ms?: number;
@@ -118,8 +122,16 @@ export interface ConsoleExperienceAgentSnapshotRow extends Partial<IdentityStatu
   affordances?: ConsoleAgentAffordances;
   model_capabilities?: ConsoleModelCapabilities;
   side_chat_of?: string;
+  side_chat_audience?: string;
   last_activity_ms?: number;
 }
+
+/** Who may see a side chat: `private_to_you` (the viewer opened it on a
+ * console with sign-in), `private_to_creator` (someone else did, and the
+ * viewer sees it as an access admin) or `shared` (everyone who may see its
+ * source: a console without sign-in, or a side chat opened before side chats
+ * were private). */
+export type SideChatAudience = "private_to_you" | "private_to_creator" | "shared";
 
 export interface ConsoleSidebarButtonConfig {
   id: string;
@@ -499,7 +511,7 @@ export type MemoryAuthor =
   | { author: "agent"; identity?: string }
   | { author: "steward"; run_id?: string }
   | { author: "distiller"; run_id?: string }
-  | { author: "operator" }
+  | { author: "operator"; principal?: string }
   | { author: "application" };
 
 export interface MemoryProvenance {

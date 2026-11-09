@@ -263,9 +263,15 @@ pub(super) fn parse_handling_mode(
 /// 3. A failed read of a registered identity's Core facts while choosing its
 ///    door refuses the send typed (retryable, nothing submitted); it is never
 ///    taken as "not an identity".
-/// 4. Anything else (no identity runtime, unparseable identity, unknown
-///    identity) keeps raw member-id semantics so the original mob
-///    `member not found` error surfaces unchanged.
+/// 4. A name the `IdentityRuntime` has not registered that Core holds for an
+///    identity (an identity entry, a reserved or removed name, or a member
+///    seated before identity entries existed while the first roster pass
+///    has not run) is refused before any door, with the identity door's
+///    typed refusal: retryable while the next roster pass registers it,
+///    final otherwise. So is a name whose Core entry could not be read.
+/// 5. Anything else (no identity runtime, unparseable identity, a name Core
+///    holds for no identity) keeps raw member-id semantics so the original
+///    mob `member not found` error surfaces unchanged.
 enum SendMessageTarget {
     /// Deliver through the mob roster (`send_message_on_mob_with_interaction`).
     MobMember,
@@ -292,7 +298,8 @@ enum SendMessageTarget {
 }
 
 /// The door of a send to `member_id`; `Err` is the typed refusal of a
-/// registered identity whose Core facts could not be read (see
+/// registered identity whose Core facts could not be read, or of a name this
+/// runtime has not registered that Core holds for an identity (see
 /// [`SendMessageTarget`]): nothing reached any door.
 async fn resolve_send_message_target(
     runtime: &UnifiedRuntime,
@@ -313,12 +320,23 @@ async fn resolve_send_message_target(
     if crate::member_comms_id::is_reserved_generated_alias(&member_id) {
         return Ok(SendMessageTarget::AuthorityUnavailable { alias: member_id });
     }
-    // The identity's registration, never its status view, chooses its door.
+    // The identity's registration, or Core's entry of its name, never its
+    // status view, chooses its door. A name this runtime has not registered
+    // that Core holds for an identity (an entry, a reserved or removed name,
+    // a legacy member waiting for the first roster pass) is refused before
+    // any door, typed: retryable while the next roster pass registers it,
+    // final otherwise. A read of Core's entry Core could not serve refuses
+    // the send retryable: never the member door on a read that could not
+    // tell.
     if let Some(identity_rt) = configured_identity_runtime
         && let Ok(identity) = crate::identity_first::AgentIdentity::parse(&member_id)
-        && identity_rt.contains(&identity).await
     {
-        return identity_send_target(identity_rt, identity, None).await;
+        if identity_rt.contains(&identity).await {
+            return identity_send_target(identity_rt, identity, None).await;
+        }
+        if let Some(refusal) = identity_rt.unregistered_name_refusal(&identity).await {
+            return Err(refusal);
+        }
     }
     Ok(SendMessageTarget::MobMember)
 }
@@ -352,6 +370,26 @@ async fn identity_send_target(
         runtime_member_id,
         session_id,
     })
+}
+
+/// The durable identity a member operation by `mid` acts on
+/// ([`crate::identity_first::IdentityRuntime::identity_for_member_mutation`]):
+/// `Ok(None)` for a member of the mob's raw plane, and without an identity
+/// runtime. `Err` is the response to answer: the typed refusal of a name the
+/// runtime has not registered that Core holds for an identity, or whose
+/// Core entry could not be read.
+async fn member_operation_identity(
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    response_id: &Value,
+    mid: &str,
+) -> Result<Option<crate::identity_first::AgentIdentity>, JsonRpcResponse> {
+    let Some(identity_runtime) = identity_runtime else {
+        return Ok(None);
+    };
+    identity_runtime
+        .identity_for_member_mutation(mid)
+        .await
+        .map_err(|error| super::identity_error_response(response_id.clone(), &error))
 }
 
 pub(super) async fn handle_send_message(
@@ -830,7 +868,8 @@ pub(super) async fn handle_ensure_member(
                 }
             };
             if let Some(labels) = labels.as_ref()
-                && let Err(message) = crate::member_comms_id::validate_raw_identity_labels(labels)
+                && let Err(message) =
+                    crate::member_comms_id::validate_member_creation_labels(labels)
             {
                 return JsonRpcResponse {
                     jsonrpc: JSONRPC_VERSION.to_string(),
@@ -1167,8 +1206,13 @@ pub(super) async fn handle_retire_member(
             // not stale, but it still must not fall through to the raw Mob
             // handle. Retire through IdentityRuntime so fencing, continuity,
             // bridge state, and shutdown ownership advance together.
+            let durable =
+                match member_operation_identity(identity_runtime, &response_id, &mid).await {
+                    Ok(durable) => durable,
+                    Err(response) => return response,
+                };
             if let Some(identity_runtime) = identity_runtime
-                && let Some(durable) = identity_runtime.identity_for_member_mutation(&mid).await
+                && let Some(durable) = durable
             {
                 return match identity_runtime
                     .retire_member_alias_tracked(&durable, &mid)
@@ -1301,17 +1345,21 @@ pub(super) async fn handle_reload_member(
             }),
         };
     };
-    let Some(durable) = identity_runtime.identity_for_member_mutation(&mid).await else {
-        return JsonRpcResponse {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: response_id,
-            result: None,
-            error: Some(JsonRpcError {
-                code: -32001,
-                message: format!("unknown identity: {mid}"),
-                data: None,
-            }),
-        };
+    let durable = match identity_runtime.identity_for_member_mutation(&mid).await {
+        Ok(Some(durable)) => durable,
+        Ok(None) => {
+            return JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: response_id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32001,
+                    message: format!("unknown identity: {mid}"),
+                    data: None,
+                }),
+            };
+        }
+        Err(error) => return super::identity_error_response(response_id, &error),
     };
     let expected_alias =
         crate::member_comms_id::is_reserved_generated_alias(&mid).then_some(mid.as_str());
@@ -1380,8 +1428,8 @@ pub(super) async fn handle_member_health(
         };
     };
     let identity = match identity_runtime.identity_for_member_mutation(&mid).await {
-        Some(identity) => identity,
-        None => match crate::identity_first::AgentIdentity::parse(&mid) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => match crate::identity_first::AgentIdentity::parse(&mid) {
             Ok(identity) => identity,
             Err(_) => {
                 return JsonRpcResponse {
@@ -1396,6 +1444,7 @@ pub(super) async fn handle_member_health(
                 };
             }
         },
+        Err(error) => return super::identity_error_response(response_id, &error),
     };
     match identity_runtime.member_health(&identity).await {
         Ok(report) => JsonRpcResponse {
@@ -1428,8 +1477,13 @@ pub(super) async fn handle_respawn_member(
             // Doctrine: identity-owned members respawn through the identity
             // authority — reset rebuilds a fresh session under the SAME
             // durable identity (new generation, continuity preserved).
+            let durable =
+                match member_operation_identity(identity_runtime, &response_id, &mid).await {
+                    Ok(durable) => durable,
+                    Err(response) => return response,
+                };
             if let Some(identity_runtime) = identity_runtime
-                && let Some(durable) = identity_runtime.identity_for_member_mutation(&mid).await
+                && let Some(durable) = durable
             {
                 return match identity_runtime
                     .reset_member_alias_tracked(&durable, &mid)
@@ -2547,9 +2601,14 @@ pub(super) async fn handle_force_cancel_member(
             // it: a member that needs a runtime reload, an unknown member and
             // every other mob refusal keep meerkat's typed code and
             // structured data.
+            let identity =
+                match member_operation_identity(identity_runtime, &response_id, &mid).await {
+                    Ok(identity) => identity,
+                    Err(response) => return response,
+                };
             let result: Result<Result<(), meerkat_mob::MobError>, String> = if let Some(identity_rt) =
                 identity_runtime
-                && let Some(identity) = identity_rt.identity_for_member_mutation(&mid).await
+                && let Some(identity) = identity
             {
                 let handle = runtime.mob_handle();
                 // Decode before keying: an `rt:` runtime alias names its durable
@@ -2664,6 +2723,10 @@ pub(super) async fn handle_stop_member_run(
         }
     };
     let reason = reason.to_string();
+    let identity = match member_operation_identity(identity_runtime, &response_id, &mid).await {
+        Ok(identity) => identity,
+        Err(response) => return response,
+    };
     // The meerkat verb's typed `MobError` is carried out of the identity
     // operation intact, so unknown members and host refusals keep meerkat's
     // typed code and structured data.
@@ -2671,7 +2734,7 @@ pub(super) async fn handle_stop_member_run(
         Result<meerkat_contracts::WireRunStopReceipt, meerkat_mob::MobError>,
         String,
     > = if let Some(identity_rt) = identity_runtime
-        && let Some(identity) = identity_rt.identity_for_member_mutation(&mid).await
+        && let Some(identity) = identity
     {
         let handle = runtime.mob_handle();
         // Decode before keying: an `rt:` runtime alias names its durable
@@ -2969,6 +3032,14 @@ pub(super) async fn handle_fork_helper(
             } else {
                 crate::member_comms_id::mob_member_id(&source)
             };
+            // A helper forked from a member private to a person holds that
+            // person's conversation in its first prompt: the spawn customizer
+            // gives it the source's owner, read here from the roster.
+            runtime
+                .mob_runtime()
+                .private_owners()
+                .record_roster_member(&handle, &source_member_id)
+                .await;
             let fork_result = match authority_target {
                 Err(error) => Err(error.to_string()),
                 Ok(Some(target)) => {
@@ -5379,6 +5450,467 @@ comms = true
         }
 
         let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// A send to a name Core holds as an identity entry, before this
+    /// process's first roster pass registered the identity, never takes the
+    /// raw member door that skips the identity's guards: `meta/send_message`
+    /// refuses it before any door, as the identity door refuses it, typed and
+    /// retryable (`-32052`) until the pass registers the identity, and
+    /// nothing is delivered.
+    ///
+    /// RED before the door was chosen from Core's entry: Meta chose it from
+    /// its own registrations, which are empty until the first roster pass,
+    /// so the send took the raw member door. The refusal now comes before
+    /// any door, where `meta/send_message` answers it typed (it answered the
+    /// identity door's refusal as an untyped `-32000`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_before_the_first_roster_pass_waits_for_the_pass() -> Result<(), String> {
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "send-before-the-first-roster-pass-test"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .map_err(|err| format!("definition parses: {err:?}"))?;
+        let runtime = crate::UnifiedRuntime::builder()
+            .definition(definition)
+            .default_llm_client(std::sync::Arc::new(
+                meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            ))
+            .build()
+            .await
+            .map_err(|err| format!("runtime builds: {err:?}"))?;
+        let bridge = std::sync::Arc::new(
+            crate::identity_first::core_test_bridge::CoreReadsBridge::default(),
+        );
+        let alice = crate::identity_first::AgentIdentity::parse("door-alice")
+            .map_err(|err| format!("a valid identity: {err:?}"))?;
+        // An earlier process's roster pass declared the identity: Core holds
+        // it as an entry, its member seated.
+        crate::identity_first::core_test_bridge::bind_live(
+            &bridge.core,
+            &alice,
+            &meerkat_mob::ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )
+        .map_err(|err| format!("Core's member: {err:?}"))?;
+        bridge.hold_declared(&alice);
+        // This process has run no roster pass: it registered nothing.
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: "send-before-the-first-roster-pass".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+
+        match resolve_send_message_target(&runtime, Some(&identity_rt), "door-alice").await {
+            Err(error) if error.clears_on_its_own() => {}
+            Err(error) => {
+                return Err(format!(
+                    "the send is refused retryable until the pass registers the identity: \
+                     {error:?}"
+                ));
+            }
+            Ok(SendMessageTarget::MobMember) => {
+                return Err(
+                    "a name Core holds as an identity entry must never take the raw member door"
+                        .to_string(),
+                );
+            }
+            Ok(SendMessageTarget::Identity { identity, .. }) => {
+                return Err(format!(
+                    "an identity this runtime has not registered is refused before any door, \
+                     not sent through the door of {identity}"
+                ));
+            }
+            Ok(SendMessageTarget::AuthorityUnavailable { alias }) => {
+                return Err(format!(
+                    "a plain identity is refused as its door refuses it, not with the \
+                     reserved-alias refusal ({alias})"
+                ));
+            }
+        }
+        let response = handle_send_message(
+            &runtime,
+            Some(&identity_rt),
+            serde_json::json!(1),
+            &serde_json::json!({ "member_id": "door-alice", "message": "hello" }),
+        )
+        .await;
+        let error = response
+            .error
+            .ok_or_else(|| "meta/send_message is refused".to_string())?;
+        assert_eq!(
+            (error.code, error.data.clone()),
+            (
+                crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                Some(serde_json::json!({
+                    "kind": "identity_history_unavailable",
+                    "identity": "door-alice",
+                    "retryable": true,
+                }))
+            ),
+            "meta/send_message's typed, retryable refusal: {error:?}"
+        );
+        let refused = identity_rt
+            .send(
+                &alice,
+                &meerkat_core::ContentInput::Text("hello".to_string()),
+            )
+            .await;
+        match refused {
+            Err(error) if error.clears_on_its_own() => {}
+            other => {
+                return Err(format!(
+                    "the identity door refuses an identity its roster pass has not registered \
+                     yet, typed and retryable: {other:?}"
+                ));
+            }
+        }
+        if !bridge.delivered().is_empty() {
+            return Err("nothing reaches the member before its registration".to_string());
+        }
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// A send by name to a name no roster pass of this runtime will ever
+    /// register is refused for good, typed, and nothing is delivered: an
+    /// identity created at runtime (Core holds it as a created entry, whose
+    /// record the mob's identity store owns) and a removed identity are
+    /// unknown to this runtime (`-32001`); a name whose record Core cannot
+    /// read (written by a newer release, or contradicted by its journal)
+    /// needs a repair or an upgrade (`-32014`, `identity_name_unreadable`).
+    /// The identity runtime's send and `meta/send_message` answer the same,
+    /// `meta/send_message` before any door (no interaction is reserved).
+    ///
+    /// RED before the door told the three apart: it refused a created
+    /// entry, a removed name and an unreadable one alike, and
+    /// `meta/send_message` answered every refusal of its identity door as an
+    /// untyped `-32000`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_to_a_name_no_roster_pass_registers_is_refused_for_good() -> Result<(), String> {
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "send-to-a-name-no-roster-pass-registers-test"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .map_err(|err| format!("definition parses: {err:?}"))?;
+        let runtime = crate::UnifiedRuntime::builder()
+            .definition(definition)
+            .default_llm_client(std::sync::Arc::new(
+                meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            ))
+            .build()
+            .await
+            .map_err(|err| format!("runtime builds: {err:?}"))?;
+        let bridge = std::sync::Arc::new(
+            crate::identity_first::core_test_bridge::CoreReadsBridge::default(),
+        );
+        let parse = |name: &str| {
+            crate::identity_first::AgentIdentity::parse(name)
+                .map_err(|err| format!("a valid identity: {err:?}"))
+        };
+        let created = parse("door-created")?;
+        let removed = parse("door-removed")?;
+        let unreadable = parse("door-unreadable")?;
+        // An identity created at runtime: Core holds it as a created entry,
+        // its member seated.
+        crate::identity_first::core_test_bridge::bind_live(
+            &bridge.core,
+            &created,
+            &meerkat_mob::ProfileName::from("worker"),
+            1,
+            Some(meerkat_core::types::SessionId::new()),
+        )
+        .map_err(|err| format!("Core's member: {err:?}"))?;
+        bridge.hold_created(&created);
+        bridge.hold_removed(&removed);
+        bridge.hold_unreadable(&unreadable);
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: "send-to-a-name-no-roster-pass-registers".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(bridge.clone()),
+                default_timeout: None,
+            },
+        ));
+
+        let unknown = (-32001, None);
+        let unreadable_answer = (
+            crate::rpc::STORAGE_RESOLUTION_CODE,
+            Some(serde_json::json!({
+                "kind": "identity_name_unreadable",
+                "identity": "door-unreadable",
+                "remedy": "repair_or_upgrade",
+                "retryable": false,
+            })),
+        );
+        for (name, expected) in [
+            (&created, &unknown),
+            (&removed, &unknown),
+            (&unreadable, &unreadable_answer),
+        ] {
+            let refused = identity_rt
+                .send(name, &meerkat_core::ContentInput::Text("hello".to_string()))
+                .await
+                .err()
+                .ok_or_else(|| format!("{name}: the send is refused"))?;
+            assert!(!refused.clears_on_its_own(), "{name}: final: {refused:?}");
+            assert_eq!(
+                (
+                    crate::rpc::identity_error_code(&refused),
+                    refused.structured_data()
+                ),
+                expected.clone(),
+                "{name}: the send's typed refusal: {refused:?}"
+            );
+
+            let response = handle_send_message(
+                &runtime,
+                Some(&identity_rt),
+                serde_json::json!(1),
+                &serde_json::json!({ "member_id": name.as_str(), "message": "hello" }),
+            )
+            .await;
+            assert!(response.result.is_none(), "{name}: {response:?}");
+            let error = response
+                .error
+                .ok_or_else(|| format!("{name}: meta/send_message is refused"))?;
+            assert_eq!(
+                (error.code, error.data.clone()),
+                expected.clone(),
+                "{name}: meta/send_message's typed refusal: {error:?}"
+            );
+            assert!(
+                runtime
+                    .console_events()
+                    .response_phase_for_identity(name.as_str())
+                    .await
+                    .is_none(),
+                "{name}: a send refused before its door reserves no interaction"
+            );
+        }
+        if !bridge.delivered().is_empty() {
+            return Err("nothing reaches a member through a refused door".to_string());
+        }
+        let _ = runtime.mob_handle().stop().await;
+        Ok(())
+    }
+
+    /// A send by name to a member seated before identity entries existed
+    /// (its spawn row carries a legacy identity mark: the legacy identity
+    /// label naming it, or the durable-identity continuity marker), which
+    /// this runtime's first roster pass has not adopted and registered yet,
+    /// waits for that pass: `meta/send_message` refuses it typed and
+    /// retryable (`-32052`) before any door, and nothing reaches the member.
+    /// Once the pass adopted and registered the identity, the same send is
+    /// delivered through the identity's door.
+    ///
+    /// RED before the door read Core's legacy marks: the send took the raw
+    /// member door as external work, which skips the identity's guards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_to_a_legacy_member_waits_for_the_first_roster_pass() -> Result<(), String> {
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "send-to-a-legacy-member-test"
+
+[profiles.worker]
+model = "gpt-5.5"
+external_addressable = true
+
+[profiles.worker.tools]
+comms = true
+"#,
+        )
+        .map_err(|err| format!("definition parses: {err:?}"))?;
+        let mut runtime = crate::UnifiedRuntime::builder()
+            .definition(definition)
+            .default_llm_client(std::sync::Arc::new(
+                meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI),
+            ))
+            .build()
+            .await
+            .map_err(|err| format!("runtime builds: {err:?}"))?;
+        let labelled = crate::identity_first::AgentIdentity::parse("legacy-labelled")
+            .map_err(|err| format!("a valid identity: {err:?}"))?;
+        let marked = crate::identity_first::AgentIdentity::parse("legacy-marked")
+            .map_err(|err| format!("a valid identity: {err:?}"))?;
+        // Two members seated before identity entries existed: workers in
+        // Core, one whose spawn row carries the legacy identity label naming
+        // it, one whose spawn row carries the durable-identity continuity
+        // marker.
+        let mut spec = meerkat_mob::SpawnMemberSpec::new(
+            "worker",
+            meerkat_mob::AgentIdentity::from(labelled.as_str()),
+        );
+        spec.labels = Some(std::collections::BTreeMap::from([(
+            "agent_identity".to_string(),
+            labelled.as_str().to_string(),
+        )]));
+        runtime
+            .mob_handle()
+            .spawn_spec(spec)
+            .await
+            .map_err(|err| format!("the labelled legacy member spawns: {err:?}"))?;
+        let mut spec = meerkat_mob::SpawnMemberSpec::new(
+            "worker",
+            meerkat_mob::AgentIdentity::from(marked.as_str()),
+        );
+        spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: marked.as_str().to_string(),
+        };
+        runtime
+            .mob_handle()
+            .spawn_spec(spec)
+            .await
+            .map_err(|err| format!("the marked legacy member spawns: {err:?}"))?;
+        let identity_rt = std::sync::Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: std::sync::Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .map_err(|err| format!("in-memory continuity store: {err:?}"))?,
+                ),
+                lease_provider: std::sync::Arc::new(
+                    crate::identity_first::LocalLeaseProvider::new(),
+                ),
+                runtime_instance_id: "send-to-a-legacy-member".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(std::sync::Arc::new(
+                    crate::identity_first::MobSessionBridge::new(runtime.mob_handle()),
+                )),
+                default_timeout: None,
+            },
+        ));
+        let roster = [&labelled, &marked]
+            .into_iter()
+            .map(|identity| crate::identity_first::DurableAgentSpec {
+                identity: identity.clone(),
+                profile: meerkat_mob::ProfileName::from("worker"),
+                addressability: crate::identity_first::AgentAddressability::Addressable,
+                display_name: None,
+                labels: std::collections::BTreeMap::new(),
+                context: None,
+                additional_instructions: Vec::new(),
+                initial_message: None,
+                runtime_mode_override: None,
+                backend: None,
+                binding: None,
+                placement: None,
+            })
+            .collect::<Vec<_>>();
+        runtime.install_identity_first_context(std::sync::Arc::new(
+            crate::identity_first::IdentityFirstRuntimeContext::new(
+                identity_rt.clone(),
+                std::sync::Arc::new(crate::unified_runtime::held_identity_test_support::Roster(
+                    roster.clone(),
+                )),
+                None,
+                None,
+                Some(runtime.mob_handle().definition().clone()),
+            ),
+        ));
+        async fn send(
+            runtime: &crate::UnifiedRuntime,
+            identity_rt: &std::sync::Arc<crate::identity_first::IdentityRuntime>,
+            name: &crate::identity_first::AgentIdentity,
+        ) -> JsonRpcResponse {
+            handle_send_message(
+                runtime,
+                Some(identity_rt),
+                serde_json::json!(1),
+                &serde_json::json!({ "member_id": name.as_str(), "message": "hello" }),
+            )
+            .await
+        }
+
+        // No roster pass has run: each send waits for the first one.
+        for name in [&labelled, &marked] {
+            let response = send(&runtime, &identity_rt, name).await;
+            assert!(
+                response.result.is_none(),
+                "{name}: the send must not take the raw member door: {response:?}"
+            );
+            let error = response
+                .error
+                .ok_or_else(|| format!("{name}: meta/send_message is refused"))?;
+            assert_eq!(
+                (error.code, error.data.clone()),
+                (
+                    crate::rpc::IDENTITY_HISTORY_UNAVAILABLE_CODE,
+                    Some(serde_json::json!({
+                        "kind": "identity_history_unavailable",
+                        "identity": name.as_str(),
+                        "retryable": true,
+                    }))
+                ),
+                "{name}: the typed, retryable refusal: {error:?}"
+            );
+            assert!(
+                runtime
+                    .console_events()
+                    .response_phase_for_identity(name.as_str())
+                    .await
+                    .is_none(),
+                "{name}: a send refused before its door reserves no interaction"
+            );
+        }
+
+        // The first roster pass adopts and registers both: the same sends
+        // are delivered through the identities' doors.
+        runtime
+            .bootstrap_installed_identity_first_context(&roster)
+            .await
+            .map_err(|err| format!("the first roster pass: {err:?}"))?;
+        for name in [&labelled, &marked] {
+            if !identity_rt.contains(name).await {
+                return Err(format!("{name}: the first roster pass registers it"));
+            }
+            match resolve_send_message_target(&runtime, Some(&identity_rt), name.as_str()).await {
+                Ok(SendMessageTarget::Identity { identity, .. }) if identity == *name => {}
+                _ => return Err(format!("{name}: the send takes the identity's door")),
+            }
+            let response = send(&runtime, &identity_rt, name).await;
+            assert!(response.error.is_none(), "{name}: delivered: {response:?}");
+            assert_eq!(
+                response.result.as_ref().map(|result| &result["accepted"]),
+                Some(&serde_json::json!(true)),
+                "{name}: {response:?}"
+            );
+        }
+        runtime.shutdown().await;
         Ok(())
     }
 

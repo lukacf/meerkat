@@ -122,6 +122,7 @@ impl LocalWorkAuthorization {
         let observed = self.publication.observe(|| {
             let result = (|| -> Result<_, meerkat_core::OperationAuthorizationError> {
                 let mut combined: Option<(u64, u64, Instant, OperationReviewTier)> = None;
+                let mut spends = Vec::new();
                 // A batch shares one admitted controller selection.
                 let controller = self
                     .associations
@@ -153,6 +154,13 @@ impl LocalWorkAuthorization {
                             further,
                             now,
                         )?;
+                        // What the operation's entry spends for this
+                        // association, read under the same publication.
+                        if purpose == LocalPolicyPurpose::Operation
+                            && let Some(spend) = self.policy.entry_spend(association, binding)?
+                        {
+                            spends.push(spend);
+                        }
                         combined = Some(match combined {
                             None => current,
                             // Every contributor's owner tier applies; keep
@@ -166,7 +174,10 @@ impl LocalWorkAuthorization {
                         });
                     }
                 }
-                combined.ok_or_else(denied).map_err(Into::into)
+                combined
+                    .map(|combined| (combined, spends))
+                    .ok_or_else(denied)
+                    .map_err(Into::into)
             })();
             if matches!(
                 result,
@@ -181,7 +192,7 @@ impl LocalWorkAuthorization {
             return Err(error);
         }
         let (prepared, publication) = observed.map_err(publication_refusal)?;
-        let (not_before_ms, expires_at_ms, deadline, review_tier) = prepared?;
+        let ((not_before_ms, expires_at_ms, deadline, review_tier), spends) = prepared?;
         Ok(CompiledLocalAuthorization {
             binding: binding.clone(),
             publication,
@@ -190,6 +201,7 @@ impl LocalWorkAuthorization {
             expires_at_ms,
             deadline,
             review_tier,
+            spends,
         })
     }
 
@@ -468,6 +480,11 @@ impl LocalWorkAuthorization {
         // conjoined, admitted ceilings, review tier, window and deadline.
         let decision = self.compile_within(binding, &grants)?;
         decision.check_current(binding)?;
+        // These steps run no effect entry, so they cannot spend a counted
+        // use: an operation whose entry spends one enters only through it.
+        if !decision.spends.is_empty() {
+            return Err(denied().into());
+        }
         Ok(decision)
     }
 
@@ -585,16 +602,34 @@ impl WorkAuthorization for LocalWorkAuthorization {
             .publication
             .try_reserve_owner_change()
             .map_err(reservation_refusal)?;
+        // Beside it, the grant store's admission fence, also without
+        // waiting: an admission (or another fenced write) holding it answers
+        // before anything is decided or appended, and a waiting issuance
+        // waits it out.
+        let guard =
+            match meerkat_core::AdmissionGuard::try_acquire(policy.grants().admission_fences()) {
+                Ok(guard) => guard,
+                Err(meerkat_core::AdmissionRefusal::InProgress) => {
+                    return Ok(Box::new(
+                        meerkat_core::authorization::ChildIssuanceAdmissionInProgress,
+                    ));
+                }
+                Err(meerkat_core::AdmissionRefusal::Unavailable(_)) => {
+                    return Err(meerkat_core::OperationAuthorizationError::Unavailable);
+                }
+            };
         let decision = self.current_decision_within(binding, further, &policy)?;
         // The decision may require no more review than this dispatch entered.
         if decision.review_tier > entered_tier {
             return Err(denied().into());
         }
         let validity = self.within_prepared(&decision, prepared)?;
-        let outcome =
-            policy
-                .grants()
-                .issue_or_recover_child_reserved(&mut reservation, intent, || Ok(validity));
+        let outcome = policy.grants().issue_or_recover_child_reserved(
+            &mut reservation,
+            &guard,
+            intent,
+            || Ok(validity),
+        );
         Ok(Box::new(outcome))
     }
 
@@ -835,6 +870,8 @@ pub(crate) fn compile_context_control(
             expires_at_ms,
             deadline,
             review_tier,
+            // A context control spends no counted use.
+            spends: Vec::new(),
         };
         prepared.check_current(binding)?;
         Ok(Arc::new(prepared) as Arc<dyn PreparedOperationAuthorization>)
@@ -859,6 +896,9 @@ struct CompiledLocalAuthorization {
     expires_at_ms: u64,
     deadline: Instant,
     review_tier: OperationReviewTier,
+    /// What the operation's entry spends: the use of each approval-carried
+    /// grant its lineages end at (normally none).
+    spends: Vec<crate::grant_policy::GrantUseSpend>,
 }
 
 impl PreparedOperationAuthorization for CompiledLocalAuthorization {
@@ -870,6 +910,24 @@ impl PreparedOperationAuthorization for CompiledLocalAuthorization {
 
     fn review_tier(&self) -> OperationReviewTier {
         self.review_tier
+    }
+
+    /// Spend each use this decision's entry spends, once. Only a decision
+    /// still current spends: every spend advances the publication, so a
+    /// decision that already spent (or any decision a spend made stale)
+    /// refuses to rebuild instead of spending again, and the owner decides
+    /// each spend afresh.
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        if self.spends.is_empty() {
+            return Ok(());
+        }
+        self.publication
+            .check_current()
+            .map_err(publication_refusal)?;
+        for spend in &self.spends {
+            spend.spend()?;
+        }
+        Ok(())
     }
 
     fn validity(&self) -> Option<meerkat_core::authorization::OperationValidity> {

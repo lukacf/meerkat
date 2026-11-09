@@ -50,6 +50,51 @@ pub fn persisted_auth_mode_is_oauth_login(mode: PersistedAuthMode) -> bool {
     meerkat_core::persisted_auth_mode_uses_oauth_login_lifecycle(mode)
 }
 
+/// The directory, under a credential root, of the coordinator's
+/// cross-process refresh locks.
+const REFRESH_LOCK_DIR: &str = "refresh-locks";
+
+/// The default credential root, `<config dir>/meerkat/credentials`: the file
+/// store's default root, and the base a keychain store's refresh locks and
+/// credential fences use.
+fn default_credential_root() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|base| base.join("meerkat").join("credentials"))
+}
+
+/// Refuse a credential write whose `guard` does not cover the credential
+/// fence C(r) of `key`'s realm under `credential_root`: nothing is written.
+/// A persisted store calls it before its first byte or operating-system
+/// call; a store with no credential root refuses every write.
+pub(crate) fn require_credential_fence(
+    guard: &meerkat_core::AdmissionGuard,
+    credential_root: Option<&std::path::Path>,
+    key: &TokenKey,
+) -> Result<(), TokenStoreError> {
+    let Some(root) = credential_root else {
+        return Err(TokenStoreError::AdmissionFence(
+            "this credential store has no credential root, so no fence can cover its writes".into(),
+        ));
+    };
+    meerkat_core::AdmissionFence::credentials(root, key.realm())
+        .and_then(|fence| guard.covers(&fence))
+        .map_err(|refusal| TokenStoreError::AdmissionFence(refusal.to_string()))
+}
+
+/// A guard over the credential fence of `key`'s realm under `root`, as a
+/// coordinator hands its closures (tests that write a persisted store
+/// directly).
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+pub(crate) fn covering_guard(
+    root: &std::path::Path,
+    key: &TokenKey,
+) -> Arc<meerkat_core::AdmissionGuard> {
+    meerkat_core::AdmissionGuard::try_acquire(vec![
+        meerkat_core::AdmissionFence::credentials(root, key.realm()).expect("a credential fence"),
+    ])
+    .expect("the credential fence is free")
+}
+
 /// Backend selector for `TokenStore::open()`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TokenStoreBackend {
@@ -77,36 +122,45 @@ impl TokenStoreBackend {
     }
 
     pub fn default_keyring_auto() -> Result<Self, TokenStoreError> {
-        let base = dirs::config_dir()
+        let root = default_credential_root()
             .ok_or_else(|| TokenStoreError::Unavailable("no XDG_CONFIG_HOME".into()))?;
         Ok(Self::Auto {
-            root: base.join("meerkat").join("credentials"),
+            root,
             service_name: "meerkat-auth".into(),
         })
     }
 
     pub fn default_file() -> Result<Self, TokenStoreError> {
-        let base = dirs::config_dir()
+        let root = default_credential_root()
             .ok_or_else(|| TokenStoreError::Unavailable("no XDG_CONFIG_HOME".into()))?;
-        Ok(Self::File {
-            root: base.join("meerkat").join("credentials"),
-        })
+        Ok(Self::File { root })
+    }
+
+    /// The credential root of this persisted backend: `root` for the file
+    /// and auto backends; for the keychain backend, the default credential
+    /// root, the base its refresh locks use. The credential fence C(r) of
+    /// every credential the backend stores for realm id `r` is
+    /// [`meerkat_core::AdmissionFence::credentials`] of this root and `r`,
+    /// and its refresh locks live in [`Self::refresh_lock_dir`]. `None` for
+    /// the ephemeral backend, which is process-local and has no fence, and
+    /// when there is no configuration directory.
+    pub fn credential_root(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Self::File { root } | Self::Auto { root, .. } => Some(root.clone()),
+            #[cfg(feature = "keyring")]
+            Self::Keyring { .. } => default_credential_root(),
+            Self::Ephemeral => None,
+        }
     }
 
     /// Canonical cross-process refresh-lock directory for this persisted
-    /// credential backend. It is derived from the same backend root so callers
-    /// never reconstruct storage conventions independently.
+    /// credential backend: `refresh-locks` under its credential root
+    /// ([`Self::credential_root`]), so callers never reconstruct storage
+    /// conventions independently. Its coordinator takes the credential
+    /// fences of that root (`FileLockCoordinator`).
     pub fn refresh_lock_dir(&self) -> Option<std::path::PathBuf> {
-        match self {
-            Self::File { root } | Self::Auto { root, .. } => Some(root.join("refresh-locks")),
-            #[cfg(feature = "keyring")]
-            Self::Keyring { .. } => dirs::config_dir().map(|base| {
-                base.join("meerkat")
-                    .join("credentials")
-                    .join("refresh-locks")
-            }),
-            Self::Ephemeral => None,
-        }
+        self.credential_root()
+            .map(|root| root.join(REFRESH_LOCK_DIR))
     }
 
     /// Whether this backend's operations can wait on the operating system

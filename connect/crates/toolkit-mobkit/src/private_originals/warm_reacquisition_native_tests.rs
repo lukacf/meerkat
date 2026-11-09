@@ -6,6 +6,8 @@
 use super::*;
 use crate::installed_host::acquisition::{AcquisitionBootstrap, InstalledServiceTaskSource};
 use crate::installed_host::tool_policy::{ServiceToolInvocation, ServiceToolPolicySelection};
+use crate::private_originals::governed_submit::tests::first_input_tests::first_send_not_now;
+use crate::source_hold_probe::Site;
 use meerkat_authorization_contracts::work_association::GrantTarget;
 use meerkat_core::turn_execution_authority::TurnTerminalOutcome;
 use meerkat_core::{ApprovalDecision, ApprovalPrincipalId, ApprovalService, McpServerConfig};
@@ -507,7 +509,12 @@ fn revoke(
             .source
             .owner
             .grants()
-            .revoke(&route.grant_caller, &leaf, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &route.grant_caller,
+                &leaf,
+                &mut custody,
+            )
             .unwrap();
     }
 }
@@ -1064,7 +1071,90 @@ impl LlmClient for WarmProvider {
     }
 }
 
-async fn warm_case(setup_refusal: bool) {
+/// How an earlier bind attempt of B's first send left B's
+/// service setup child: its grant issued, its observation not recorded.
+#[derive(Clone, Copy, Debug)]
+enum EarlierAttempt {
+    /// It issued the grant and its observation was refused.
+    ObservationRefused,
+    /// It issued the grant and the process stopped before the record.
+    Stopped,
+}
+
+/// B's next bind attempt after `earlier` finds the child's
+/// grant, so recording the child's observation is its first durable
+/// write, marked `original.service_setup_observation`. Both attempts run
+/// B's service setup issuance inside a governed bind attempt, as B's
+/// first send does.
+async fn observation_first_write(
+    fixture: &Fixture,
+    b: &PrivateOriginalRef,
+    earlier: EarlierAttempt,
+) {
+    use meerkat_core::protected_section::{ProtectedSection, within_marked};
+    let record = source_record(fixture, b).await;
+    let selected = record
+        .approved_task
+        .as_ref()
+        .and_then(|task| task.setup())
+        .cloned()
+        .expect("B's service setup");
+    assert!(
+        record.service_setup_children.is_empty(),
+        "nothing recorded yet"
+    );
+    match earlier {
+        EarlierAttempt::ObservationRefused => {
+            let refused = first_send_not_now::hold_at(Site::ServiceSetupObservation);
+            let (first, effect) = within_marked(
+                ProtectedSection::GovernedBind,
+                fixture.source.issue_service_setup(b, &selected, None),
+            )
+            .await;
+            first_send_not_now::clear_probe().await;
+            assert!(first.is_err(), "the observation is refused: {first:?}");
+            assert_eq!(
+                effect,
+                Some("original.service_setup_grant"),
+                "the earlier attempt issued the grant"
+            );
+            assert_eq!(refused.at(Site::ServiceSetupObservation).len(), 1);
+        }
+        EarlierAttempt::Stopped => {
+            fixture
+                .source
+                .issue_service_setup_grants_for_test(b, &selected)
+                .unwrap();
+        }
+    }
+    assert!(
+        source_record(fixture, b)
+            .await
+            .service_setup_children
+            .is_empty(),
+        "the earlier attempt recorded nothing"
+    );
+    let (next, effect) = within_marked(
+        ProtectedSection::GovernedBind,
+        fixture.source.issue_service_setup(b, &selected, None),
+    )
+    .await;
+    next.expect("the next attempt records the child");
+    assert_eq!(
+        effect,
+        Some("original.service_setup_observation"),
+        "the observation record is the attempt's first write, marked"
+    );
+    assert!(
+        !source_record(fixture, b)
+            .await
+            .service_setup_children
+            .is_empty(),
+        "the child is recorded"
+    );
+}
+
+async fn warm_case(setup_refusal: bool, hold_b: bool, earlier: Option<EarlierAttempt>) {
     let acquisition = acquisition_denial::Script::paused_for_helper_entry();
     let report = Report::new(acquisition.tools().result_tool());
     let script = WarmScript::new(setup_refusal);
@@ -1107,7 +1197,32 @@ async fn warm_case(setup_refusal: bool) {
             )
             .await;
             let first_helper_binding = assert_helper_contributor(&fixture, &a, &helper_session, 1);
+            if let Some(earlier) = earlier {
+                observation_first_write(&fixture, &b, earlier).await;
+                return;
+            }
+            // The first-send leg: B's first send (a batch task with a service setup)
+            // held at its admitted-custody check.
+            let held_b = hold_b.then(|| {
+                first_send_not_now::hold_at_key(Site::OriginalAdmitted, b.original.as_str())
+            });
             let b_record = attach_and_enter(&fixture, &b, &endpoints[0], &script, 1).await;
+            if let Some(seen) = held_b {
+                first_send_not_now::clear_probe().await;
+                assert!(seen.at(Site::OriginalNotNow).is_empty(), "never not now");
+                let admitted: Vec<_> = seen
+                    .at(Site::OriginalAdmitted)
+                    .into_iter()
+                    .filter(|(key, _)| key == b.original.as_str())
+                    .collect();
+                assert_eq!(admitted.len(), 1, "one bind: the check waited in place");
+                assert_eq!(
+                    admitted[0].1,
+                    Some("original.service_setup_grant"),
+                    "the check runs after the first send's service setup grant issuance"
+                );
+                return;
+            }
             assert_reviewed_catalog_scope(&fixture, &b, &b_record);
             let b_binding = b_record.final_association.as_ref().unwrap();
             assert!(
@@ -1358,10 +1473,45 @@ async fn warm_case(setup_refusal: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warm_helper_reacquisition_uses_fresh_c_grants_and_independent_native_targets() {
-    warm_case(false).await;
+    warm_case(false, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admitted_b_setup_revoke_preserves_b_service_and_refuses_another_helper() {
-    warm_case(true).await;
+    warm_case(true, false, None).await;
+}
+
+/// A batch task's first send issues its service setup child grant
+/// inside the bind, before the shared binder's checks. Held at the
+/// admitted-custody check, it waits there as shipped and is admitted once:
+/// no "not now" escapes, and the mark there names the setup grant.
+///
+/// RED with the first-send marks dropped: the mark there is unset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_task_first_send_marks_its_service_setup_grant_and_keeps_its_shipped_wait() {
+    warm_case(false, true, None).await;
+}
+
+/// An earlier attempt of B's first send issued its
+/// service setup child's grant and its observation was refused. The next
+/// attempt finds the grant: recording the observation is its first
+/// durable write, and it is marked.
+///
+/// RED without the observation's mark: the write witness names the
+/// record's compare-and-swap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_service_setup_observation_recorded_first_after_a_refusal_is_marked() {
+    warm_case(false, false, Some(EarlierAttempt::ObservationRefused)).await;
+}
+
+/// An earlier attempt of B's first send issued its
+/// service setup child's grant and the process stopped before it recorded
+/// the child. The next attempt finds the grant: recording the observation
+/// is its first durable write, and it is marked.
+///
+/// RED without the observation's mark: the write witness names the
+/// record's compare-and-swap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_service_setup_observation_recorded_first_after_a_stop_is_marked() {
+    warm_case(false, false, Some(EarlierAttempt::Stopped)).await;
 }

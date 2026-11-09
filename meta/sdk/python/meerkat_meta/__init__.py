@@ -112,7 +112,14 @@ from .models import (
 # Agent builder protocol (public contract — CallbackDispatcher is internal)
 from .agent_builder import SessionAgentBuilder
 
+# Durable decisions
+from .decisions import DecisionAttestation
+
 # Errors
+from .errors import (
+    DECIDE_INSIDE_TOOL_CALLBACK_KIND,
+    DecideInsideToolCallbackError,
+)
 from .errors import (
     MOB_EVENTS_STALE_CURSOR_CODE,
     CAPABILITY_UNAVAILABLE_CODE,
@@ -131,6 +138,12 @@ from .errors import (
     SYSTEM_ROW_PRUNE_REFUSED_KIND,
     SYSTEM_ROW_PRUNE_REFUSAL_CAUSES,
     TRANSCRIPT_REVISION_CONFLICT_KIND,
+    TOOL_GRANT_REQUEST_REFUSED_KIND,
+    TOOL_GRANT_REQUEST_REFUSAL_KINDS,
+    REALM_MCP_OUTCOME_UNKNOWN_KIND,
+    REALM_MCP_REFUSED_KIND,
+    REALM_MCP_REFUSAL_KINDS,
+    REALM_MCP_UNAVAILABLE_KIND,
     WORKGRAPH_CONFLICT_CODE,
     WORKGRAPH_UNAVAILABLE_CODE,
     IDENTITY_HISTORY_UNAVAILABLE_CODE,
@@ -145,6 +158,10 @@ from .errors import (
     MemberReloadRequiredError,
     SystemRowPruneRefusedError,
     TranscriptRevisionConflictError,
+    ToolGrantRequestRefusedError,
+    RealmMcpOutcomeUnknownError,
+    RealmMcpRefusedError,
+    RealmMcpUnavailableError,
     ConsoleTimelineReplayUnavailableError,
     ContractMismatchError,
     InitInProgressError,
@@ -392,6 +409,9 @@ from .tool_content import (
     tool_content,
 )
 
+# The original requester a callback names.
+from .tool_requester import RequesterPrincipal, ToolCallRequester
+
 __all__ = [
     # Builder + Runtime
     "Meta",
@@ -451,6 +471,9 @@ __all__ = [
     "image_blob_block",
     "tool_content",
     "ToolResultContent",
+    # The original requester a callback names
+    "RequesterPrincipal",
+    "ToolCallRequester",
     # Data models
     "DiscoverySpec",
     "PreSpawnData",
@@ -463,6 +486,10 @@ __all__ = [
     "SessionAgentBuilder",
     # Errors
     "MetaError",
+    "DecideInsideToolCallbackError",
+    "DECIDE_INSIDE_TOOL_CALLBACK_KIND",
+    # Durable decisions
+    "DecisionAttestation",
     "TransportError",
     "TransportReaderFailedError",
     "GatewayChildEndedError",
@@ -494,6 +521,12 @@ __all__ = [
     "SYSTEM_ROW_PRUNE_REFUSED_KIND",
     "SYSTEM_ROW_PRUNE_REFUSAL_CAUSES",
     "TRANSCRIPT_REVISION_CONFLICT_KIND",
+    "TOOL_GRANT_REQUEST_REFUSED_KIND",
+    "TOOL_GRANT_REQUEST_REFUSAL_KINDS",
+    "REALM_MCP_OUTCOME_UNKNOWN_KIND",
+    "REALM_MCP_REFUSED_KIND",
+    "REALM_MCP_REFUSAL_KINDS",
+    "REALM_MCP_UNAVAILABLE_KIND",
     "WORKGRAPH_CONFLICT_CODE",
     "WORKGRAPH_UNAVAILABLE_CODE",
     "IDENTITY_HISTORY_UNAVAILABLE_CODE",
@@ -513,6 +546,10 @@ __all__ = [
     "MemberReloadRequiredError",
     "SystemRowPruneRefusedError",
     "TranscriptRevisionConflictError",
+    "ToolGrantRequestRefusedError",
+    "RealmMcpOutcomeUnknownError",
+    "RealmMcpRefusedError",
+    "RealmMcpUnavailableError",
     "WorkGraphConflictError",
     "WorkGraphUnavailableError",
     "MOB_ANNOUNCEMENTS_UNAVAILABLE_CODE",

@@ -15,28 +15,35 @@
 //! A row that cannot be decoded, or that is torn (its machine state, its
 //! descriptor and its evidence do not agree), is unreadable for that
 //! decision only: it is listed as unreadable and nothing executes it.
+//!
+//! A hold that opens a decision (the machine's `Held`) announces the row it
+//! wrote to the owner's subscribers once the row is written
+//! ([`DurableDecisionService::subscribe_openings`]); nothing else is
+//! announced, and nothing reads an announcement back.
 
 use std::fmt;
 use std::sync::Arc;
 
+use crate::tokio::sync::broadcast;
+
 use meerkat_core::approval::consent::{ConsentEligibility, ConsentEligibilityAnswer};
 use meerkat_core::approval::decision::{
     ApproverId, AttestedDecision, AttributedReview, ConsentProvenance, DECISION_PAGE_MAX,
-    DECISION_PRESENTATIONS_MAX, DecisionContractError, DecisionDescriptor, DecisionExecutorClaim,
-    DecisionHoldRequest, DecisionId, DecisionKind, DecisionListFilter, DecisionMachineState,
-    DecisionNotice, DecisionOperationId, DecisionOutcome, DecisionPage, DecisionPhase,
-    DecisionPrincipalKey, DecisionReference, DecisionReviewVerdict, DecisionRow, DecisionStage,
-    DecisionStore, PresentationAudience, PresentationRecord, Sha256Digest, StoredDecision,
-    UnreadableDecision,
+    DECISION_PRESENTATIONS_MAX, DecisionCleanup, DecisionContractError, DecisionDescriptor,
+    DecisionExecutorClaim, DecisionHoldRequest, DecisionId, DecisionKind, DecisionListFilter,
+    DecisionMachineState, DecisionNotice, DecisionOperationId, DecisionOutcome, DecisionPage,
+    DecisionPhase, DecisionPrincipalKey, DecisionReference, DecisionReviewVerdict, DecisionRow,
+    DecisionStage, DecisionStore, PresentationAudience, PresentationRecord, Sha256Digest,
+    StoredDecision, UnreadableDecision,
 };
 use meerkat_core::approval::{ApprovalConsentDeliveryState, ApprovalStoreError};
 use serde::{Deserialize, Serialize};
 
 use super::dsl::{
-    DecisionDigest, DecisionParty, DurableDecisionEffect, DurableDecisionInput,
-    DurableDecisionMachineAuthority, DurableDecisionMachineMutator, DurableDecisionMachineState,
-    DurableDecisionNotice, DurableDecisionPhase, DurableDecisionRefusal,
-    DurableDecisionReviewVerdict, DurableDecisionStage,
+    DecisionDigest, DecisionParty, DurableDecisionCleanup, DurableDecisionEffect,
+    DurableDecisionInput, DurableDecisionMachineAuthority, DurableDecisionMachineMutator,
+    DurableDecisionMachineState, DurableDecisionNotice, DurableDecisionPhase,
+    DurableDecisionRefusal, DurableDecisionReviewVerdict, DurableDecisionStage,
 };
 use super::permit::DecisionExecutionPermit;
 use super::{DecisionClock, DecisionWriteMode, SystemDecisionClock};
@@ -92,7 +99,8 @@ pub enum DecisionRefusal {
     /// The deadline passed while a permit is outstanding: the permit must be
     /// settled (executed, released or refused) first.
     SettlementOwed,
-    /// No notice is owed, or the receipt contradicts the settled one.
+    /// No notice, cleanup or reply is owed, or the receipt or reply
+    /// contradicts the settled one.
     NotOwed,
     /// The human decision was observed before the decision's first
     /// presentation to the approver.
@@ -245,15 +253,70 @@ enum Backing {
     Unavailable(String),
 }
 
+/// How many openings a subscription may fall behind before it misses some.
+pub(super) const DECISION_OPENINGS_CAPACITY: usize = 256;
+
+/// What a subscription to the decisions an owner opens reads next
+/// ([`DurableDecisionService::subscribe_openings`]). More variants may be
+/// added.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum DecisionOpening {
+    /// The owner opened this decision: the row its hold wrote.
+    Opened(Arc<StoredDecision>),
+    /// The subscription fell behind and missed this many openings. The
+    /// subscriber lists the open decisions to catch up; an `rkat-rpc`
+    /// connection whose operator decides decisions catches up so, presenting
+    /// each open decision it acts for and has not presented yet.
+    Missed { missed: u64 },
+}
+
+/// The decisions an owner opens from the subscription on
+/// ([`DurableDecisionService::subscribe_openings`]).
+pub struct DecisionOpenings {
+    openings: broadcast::Receiver<Arc<StoredDecision>>,
+}
+
+impl fmt::Debug for DecisionOpenings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecisionOpenings").finish_non_exhaustive()
+    }
+}
+
+impl DecisionOpenings {
+    /// The next opening, waiting for one: a decision the owner opened, or
+    /// how many openings the subscription missed when it fell behind.
+    /// `None` once the owner and every clone of it are gone.
+    pub async fn next(&mut self) -> Option<DecisionOpening> {
+        match self.openings.recv().await {
+            Ok(row) => Some(DecisionOpening::Opened(row)),
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                Some(DecisionOpening::Missed { missed })
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    }
+}
+
 /// The owner of durable decisions over one [`DecisionStore`].
 ///
 /// Opened once per persistence, beside its approval issuer, and shared by
-/// every surface of that persistence. Cloning shares the store.
+/// every surface of that persistence. Cloning shares the store, and the
+/// subscribers of the decisions the owner opens.
+///
+/// A SQLite store opens a connection per call that never waits for another
+/// writer: a call made while another one writes (an `rkat-rpc` connection
+/// recording a presentation, for one) can answer
+/// [`DecisionError::Unavailable`] with nothing written, and the caller makes
+/// it again.
 #[derive(Clone)]
 pub struct DurableDecisionService {
     backing: Backing,
     clock: Arc<dyn DecisionClock>,
     mode: DecisionWriteMode,
+    /// Where the decisions this owner (and every clone of it) opens are
+    /// announced.
+    openings: broadcast::Sender<Arc<StoredDecision>>,
 }
 
 impl fmt::Debug for DurableDecisionService {
@@ -330,6 +393,12 @@ pub(super) fn machine_state(state: &DecisionMachineState) -> DurableDecisionMach
             DecisionNotice::Delivered => DurableDecisionNotice::Delivered,
             DecisionNotice::Failed => DurableDecisionNotice::Failed,
         },
+        cleanup: match state.cleanup {
+            DecisionCleanup::NotOwed => DurableDecisionCleanup::NotOwed,
+            DecisionCleanup::Owed => DurableDecisionCleanup::Owed,
+            DecisionCleanup::Settled => DurableDecisionCleanup::Settled,
+        },
+        reply_digest: state.reply_digest.clone().map(DecisionDigest),
     }
 }
 
@@ -383,6 +452,12 @@ fn stored_state(
             DurableDecisionNotice::Delivered => DecisionNotice::Delivered,
             DurableDecisionNotice::Failed => DecisionNotice::Failed,
         },
+        cleanup: match state.cleanup {
+            DurableDecisionCleanup::NotOwed => DecisionCleanup::NotOwed,
+            DurableDecisionCleanup::Owed => DecisionCleanup::Owed,
+            DurableDecisionCleanup::Settled => DecisionCleanup::Settled,
+        },
+        reply_digest: state.reply_digest.as_ref().map(|digest| digest.0.clone()),
     })
 }
 
@@ -696,6 +771,7 @@ impl DurableDecisionService {
             backing: Backing::Store(store),
             clock,
             mode: DecisionWriteMode::Admitted,
+            openings: broadcast::channel(DECISION_OPENINGS_CAPACITY).0,
         }
     }
 
@@ -708,6 +784,7 @@ impl DurableDecisionService {
             backing: Backing::Unavailable(reason.into()),
             clock: Arc::new(SystemDecisionClock),
             mode: DecisionWriteMode::Admitted,
+            openings: broadcast::channel(DECISION_OPENINGS_CAPACITY).0,
         }
     }
 
@@ -824,7 +901,11 @@ impl DurableDecisionService {
     /// shows recorded. The subject digest is computed from the rendering.
     /// The first hold creates the store's file; nothing before it does. A
     /// requester that can be told the decision's end (`notice_routable`) is
-    /// owed one notice when the decision ends.
+    /// owed one notice when the decision ends. A hold that opens the decision
+    /// announces the row it wrote to the owner's subscribers
+    /// ([`Self::subscribe_openings`]) once the row is written; a replay, a
+    /// refused hold and a hold whose row another owner wrote first announce
+    /// nothing.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `InvalidWindow`, `SelfReview` or
@@ -874,9 +955,24 @@ impl DurableDecisionService {
                             refusal,
                         });
                     }
+                    let opened = effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            DurableDecisionEffect::Held { decision_id: held, .. }
+                                if held.as_str() == decision_id.as_str()
+                        )
+                    });
                     let row = StoredDecision::held(descriptor, stored_state(authority.state())?);
                     match store.insert_if_absent(&row) {
-                        Ok(()) => return Ok(row),
+                        Ok(()) => {
+                            // Nobody may be subscribed: the row is copied
+                            // for subscribers only, and an announcement
+                            // nobody receives is dropped.
+                            if opened && self.openings.receiver_count() > 0 {
+                                let _ = self.openings.send(Arc::new(row.clone()));
+                            }
+                            return Ok(row);
+                        }
                         // Another owner held it first: answer this hold as a
                         // replay of, or a conflict with, that row.
                         Err(ApprovalStoreError::Conflict) if !raced => raced = true,
@@ -887,10 +983,31 @@ impl DurableDecisionService {
         }
     }
 
+    /// Subscribe to the decisions this owner opens from now on: each hold
+    /// that opens a decision (the machine's `Held`) announces the row it
+    /// wrote, once the row is written ([`DecisionOpening::Opened`]). Every
+    /// clone of the owner announces to the same subscribers. A replay or a
+    /// refused hold announces nothing, a candidate launch opens nothing, and
+    /// a decision another process holds in the same store is not announced:
+    /// a subscriber lists the open decisions when it starts, and when it
+    /// reads [`DecisionOpening::Missed`]. A decision held in its review stage
+    /// is announced when it opens, in that stage; its later escalation to the
+    /// human stage is not announced.
+    #[must_use]
+    pub fn subscribe_openings(&self) -> DecisionOpenings {
+        DecisionOpenings {
+            openings: self.openings.subscribe(),
+        }
+    }
+
     /// Record a presentation of the decision's rendering. Only a complete
     /// presentation of the held subject to the party that decides now (the
     /// approver id in the human stage, the reviewer in the review stage)
-    /// counts; it is kept as that audience's latest. The decision's machine
+    /// counts: one that showed every canonical part, or a summary whose link
+    /// to the full presentation served the whole, unchanged rendering
+    /// ([`PresentationRecord::linked`]); the decision's machine decides it
+    /// from the parts shown and the digest the link served. It is kept as
+    /// that audience's latest. The decision's machine
     /// keeps, from the presentation's own time (`at_ms`), when a
     /// presentation first reached the approver: a human decision observed
     /// before that is refused. A presentation to the approver at 0 is no
@@ -913,6 +1030,10 @@ impl DurableDecisionService {
                 audience: audience_party(&presentation.audience),
                 digest: machine_digest(&presentation.subject_digest),
                 complete: presentation.shows_every_part_of(&loaded.row.descriptor.rendering),
+                link_served_digest: presentation
+                    .link
+                    .as_ref()
+                    .map(|link| machine_digest(&link.served_digest)),
                 presented_at_ms: presentation.at_ms,
                 now_ms,
             };
@@ -937,7 +1058,12 @@ impl DurableDecisionService {
     /// decision's first presentation to the approver (recorded, or the one
     /// the decision carries), it is refused; observed in the same
     /// millisecond or later, it may decide. A decision carrying a
-    /// presentation at 0 is refused as `PresentationIncomplete`.
+    /// presentation at 0 is refused as `PresentationIncomplete`. The machine
+    /// counts the presentation a decision carries only when it is a
+    /// complete presentation of the held subject to the approver (every
+    /// canonical part shown, or a summary whose link served the held
+    /// subject's rendering); any other counts as none. The decided row
+    /// keeps the carried presentation only when the machine counted it.
     ///
     /// # Errors
     /// [`DecisionError::Refused`] with `EvidenceRequired`, `SubjectChanged`,
@@ -954,15 +1080,8 @@ impl DurableDecisionService {
         let evidence = decision.evidence();
         let evidence_digest = evidence.digest()?;
         self.commit_row(decision_id, |loaded, now_ms| {
-            let descriptor = &loaded.row.descriptor;
-            let carried = decision.presentation().filter(|presentation| {
-                matches!(
-                    &presentation.audience,
-                    PresentationAudience::Approver { approver_id }
-                        if *approver_id == descriptor.approver_id
-                ) && presentation.subject_digest == descriptor.subject_digest
-                    && presentation.shows_every_part_of(&descriptor.rendering)
-            });
+            let rendering = &loaded.row.descriptor.rendering;
+            let carried = decision.presentation();
             let input = DurableDecisionInput::Decide {
                 approve: decision.approves(),
                 approver_id: approver_party(decision.approver_id()),
@@ -971,6 +1090,15 @@ impl DurableDecisionService {
                 evidence_digest: Some(evidence_digest.as_str().to_owned()),
                 eligible: eligibility.check_current().is_ok(),
                 carried_presentation_at_ms: carried.map(|presentation| presentation.at_ms),
+                carried_audience: carried
+                    .map(|presentation| audience_party(&presentation.audience)),
+                carried_digest: carried
+                    .map(|presentation| machine_digest(&presentation.subject_digest)),
+                carried_complete: carried
+                    .is_some_and(|presentation| presentation.shows_every_part_of(rendering)),
+                carried_link_served_digest: carried
+                    .and_then(|presentation| presentation.link.as_ref())
+                    .map(|link| machine_digest(&link.served_digest)),
                 observed_at_ms: decision.observed_at_ms(),
                 now_ms,
             };
@@ -981,10 +1109,24 @@ impl DurableDecisionService {
                     DurableDecisionEffect::Approved { .. } | DurableDecisionEffect::Rejected { .. }
                 )
             });
+            // The machine's verdict on the carried presentation: kept only
+            // when the decision counted it.
+            let carried_counted = effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    DurableDecisionEffect::Approved {
+                        carried_presentation_counted: true,
+                        ..
+                    } | DurableDecisionEffect::Rejected {
+                        carried_presentation_counted: true,
+                        ..
+                    }
+                )
+            });
             let next = successor(loaded, state, |row| {
                 if decided {
                     row.outcome = Some(DecisionOutcome::of(evidence.clone()));
-                    if let Some(presentation) = carried {
+                    if let Some(presentation) = carried.filter(|_| carried_counted) {
                         keep_presentation(row, presentation.clone());
                     }
                 }
@@ -1516,6 +1658,66 @@ impl DurableDecisionService {
                 }
             });
             Ok(Step::of(&effects, next))
+        })
+    }
+
+    /// Open the cleanup of the approved decision of `permit`, which the
+    /// caller holds: its execution is about to create work outside the
+    /// store that must be undone once the decision's work is over. Call it
+    /// before creating any of it. Opening it again changes nothing. The
+    /// cleanup is owed across a release, a refusal or an expiry, until
+    /// [`Self::settle_cleanup`].
+    ///
+    /// # Errors
+    /// [`DecisionError::Refused`] with `NotAuthorized` (no permit is
+    /// outstanding) or `NotApproved`; [`DecisionError::CandidateLaunch`];
+    /// store, clock and unreadable-row failures.
+    pub fn owe_cleanup(
+        &self,
+        permit: &DecisionExecutionPermit,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.commit_row(permit.decision_id(), |loaded, _now_ms| {
+            let (effects, state) = transition(loaded, DurableDecisionInput::OweCleanup {})?;
+            Ok(Step::of(&effects, successor(loaded, state, |_| {})))
+        })
+    }
+
+    /// Settle the cleanup an ended decision owes: its owner undid what its
+    /// execution created. The same settlement again changes nothing.
+    ///
+    /// # Errors
+    /// [`DecisionError::Refused`] with `NotOwed` (none is owed, or the
+    /// decision has not ended); [`DecisionError::CandidateLaunch`]; store,
+    /// clock and unreadable-row failures.
+    pub fn settle_cleanup(
+        &self,
+        decision_id: &DecisionId,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.commit_row(decision_id, |loaded, _now_ms| {
+            let (effects, state) = transition(loaded, DurableDecisionInput::SettleCleanup {})?;
+            Ok(Step::of(&effects, successor(loaded, state, |_| {})))
+        })
+    }
+
+    /// Settle the one reply of an executed decision's work, by the digest of
+    /// its exact text, before it is delivered: the first settles it, the
+    /// same one again changes nothing, and another is refused.
+    ///
+    /// # Errors
+    /// [`DecisionError::Refused`] with `NotOwed` (another reply is settled,
+    /// or the decision is not executed); [`DecisionError::CandidateLaunch`];
+    /// store, clock and unreadable-row failures.
+    pub fn settle_reply(
+        &self,
+        decision_id: &DecisionId,
+        reply_digest: &Sha256Digest,
+    ) -> Result<StoredDecision, DecisionError> {
+        self.commit_row(decision_id, |loaded, _now_ms| {
+            let input = DurableDecisionInput::SettleReply {
+                digest: machine_digest(reply_digest),
+            };
+            let (effects, state) = transition(loaded, input)?;
+            Ok(Step::of(&effects, successor(loaded, state, |_| {})))
         })
     }
 }

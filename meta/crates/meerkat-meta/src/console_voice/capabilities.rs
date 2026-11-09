@@ -41,7 +41,9 @@ pub(crate) struct MemberCapabilities {
 impl MemberCapabilities {
     /// Gather the member's capabilities from the mob handle. Peers are the
     /// member's live wiring targets when the roster knows them, else every
-    /// other live member of the mob. Tools and skills come from the member's
+    /// other live member of the mob. A peer private to a person other than
+    /// the member's own owner is never one: whoever speaks to the member
+    /// would learn of it. Tools and skills come from the member's
     /// inline profile; a realm-referenced profile contributes only the
     /// categories the definition can see, which is none.
     fn gather(
@@ -53,11 +55,16 @@ impl MemberCapabilities {
             .iter()
             .find(|member| &member.agent_identity == identity)?;
         let definition = handle.definition();
+        let my_owner = crate::access::private_owner(&me.labels);
+        let shareable = |member: &meerkat_mob::runtime::MobMemberListEntry| {
+            crate::access::private_owner(&member.labels).is_none_or(|owner| my_owner == Some(owner))
+        };
         let mut peers: Vec<PeerCapability> = if me.wired_to.is_empty() {
             members
                 .iter()
                 .filter(|member| member.agent_identity != *identity)
                 .filter(|member| !matches!(member.status, MobMemberStatus::Retiring))
+                .filter(|member| shareable(member))
                 .map(|member| PeerCapability {
                     name: member.agent_identity.to_string(),
                     role: member.role.to_string(),
@@ -66,13 +73,17 @@ impl MemberCapabilities {
         } else {
             me.wired_to
                 .iter()
-                .map(|peer| PeerCapability {
-                    name: peer.to_string(),
-                    role: members
-                        .iter()
-                        .find(|member| &member.agent_identity == peer)
-                        .map(|member| member.role.to_string())
-                        .unwrap_or_default(),
+                .filter_map(|peer| {
+                    let entry = members.iter().find(|member| &member.agent_identity == peer);
+                    if entry.is_some_and(|entry| !shareable(entry)) {
+                        return None;
+                    }
+                    Some(PeerCapability {
+                        name: peer.to_string(),
+                        role: entry
+                            .map(|member| member.role.to_string())
+                            .unwrap_or_default(),
+                    })
                 })
                 .collect()
         };

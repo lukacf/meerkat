@@ -30,7 +30,7 @@ pub(crate) use peer_ingress::delivery_input_id;
 pub use peer_ingress::{
     PeerIngressBindDenial, PeerIngressBindFuture, PeerIngressBindRefusal, PeerIngressBindRequest,
     PeerIngressBinder, PeerIngressBinding, PeerIngressClaimKind, PeerIngressCommsOrigin,
-    PeerIngressOrigin, PeerIngressSupervisorOrigin,
+    PeerIngressOrigin, PeerIngressSupervisorOrigin, PeerIngressWaiter,
 };
 
 /// The native replay lookup's verdict for one admission of a governed input:
@@ -590,11 +590,13 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     ///   the registration (the bound a resumed run's admission has), the next
     ///   such answer ends it as refused. Answer `Readiness` only while the
     ///   host cannot say now (a contended or unavailable owner).
-    /// - While an input waits without its client, the machine refuses
+    /// - While such a resume waits without its client, the machine refuses
     ///   controller grant mutations, credential publications and auth lease
     ///   releases and replacements on every session it serves, so a host
     ///   whose answer waits on a credential publication must answer
-    ///   definitely instead.
+    ///   definitely instead. (A kept governed input admitted under its own
+    ///   association, [`Self::authenticate_kept_original`], causes none of
+    ///   these refusals while the machine holds it.)
     ///
     /// At a fresh admission `Readiness(UnsupportedScope)` stays retryable, as
     /// every `Readiness`.
@@ -606,6 +608,62 @@ pub trait NativeWorkAuthorizationHost: Send + Sync {
     ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
     {
         let _ = (runtime_id, input, evidence);
+        Err(crate::retained_work::RetainedResumeError::Readiness(
+            crate::traits::ControllerReadinessFailure::UnsupportedScope,
+        ))
+    }
+
+    /// Supply again the controller client of a kept governed input: one
+    /// admitted with an authority association of its own (a governed
+    /// prompt, for example), not as a resume of retained work, that a
+    /// graceful requeue stop kept, or a restart found, in the store, and
+    /// whose client did not survive it (a client never survives
+    /// persistence). The input is queued, or bound to the run its session
+    /// left open, whose resumed run executes with its client.
+    ///
+    /// `input` is the stored form (no ingress context survives the store)
+    /// and `association` the one stored with the admitted row. The host
+    /// supplies no principal: there is no new authentication of the caller,
+    /// and the host's own custody record of the original authentication is
+    /// the re-attestation. It re-attests the original through that custody,
+    /// decides the requester's invocation and the controller admission again
+    /// under the current grants, and returns the usable controller client it
+    /// supplies itself, whose selection must be the association's stored
+    /// `controller_model`; a client for another selection (another account,
+    /// credential or route) is a refusal. The run's work authorization is
+    /// built again at staging from the current grants.
+    ///
+    /// The runtime asks when the registration recovers the input and from
+    /// its runtime loop, under the same locks as
+    /// [`Self::authenticate_retained_resume`]'s re-ask, so the host answers
+    /// synchronously from its own records, without calling back into the
+    /// runtime. Answers are classified as for that re-ask, with one
+    /// difference: a host that cannot say now (`Readiness`, other than
+    /// `UnsupportedScope`) is never refused for its time. The machine holds
+    /// the input (and the run it is bound to stays marked) until a later
+    /// ask, at the next wake of the runtime loop or the session's next
+    /// registration, answers; nothing asks on a timer. While it is held and
+    /// has no client, the machine-wide refusal above for work without its
+    /// client skips it: controller grant mutations, credential publications
+    /// and auth lease changes proceed, as it has no client to preserve and
+    /// its pin decides again under the grants and credentials current then.
+    /// (A revocation of a grant in its stored controller lineage is refused
+    /// as in use, as for all unfinished work.) A definite
+    /// answer ends the input as a refused resume
+    /// (`InputAbandonReason::ResumeRefused`), with its runtime-termination
+    /// receipt; a run left open that it is bound to is settled the same way.
+    ///
+    /// The default answers `Readiness(UnsupportedScope)`, a definite
+    /// refusal: a host that does not implement it ends every such input as a
+    /// refused resume.
+    fn authenticate_kept_original(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        input: &Input,
+        association: &InputAuthorityAssociation,
+    ) -> Result<meerkat_core::ControllerModelClient, crate::retained_work::RetainedResumeError>
+    {
+        let _ = (runtime_id, input, association);
         Err(crate::retained_work::RetainedResumeError::Readiness(
             crate::traits::ControllerReadinessFailure::UnsupportedScope,
         ))
@@ -855,11 +913,55 @@ pub(crate) fn generated_binding(
             .ok_or_else(unavailable)?;
         return association_binding(canonical.association());
     }
-    input
-        .header()
-        .authority_association
-        .as_ref()
-        .map_or(Ok((None, None)), association_binding)
+    match input.header().authority_association.as_ref() {
+        Some(association) => association_binding(association),
+        // An ungoverned input has no binding. Its batch key is its
+        // requester's, when its host supplied one, so that inputs of
+        // different requesters never share a run.
+        None => Ok((
+            None,
+            input
+                .header()
+                .requester
+                .as_ref()
+                .map(requester_batch_key)
+                .transpose()?,
+        )),
+    }
+}
+
+/// The batch key of an ungoverned input whose host supplied `requester`:
+/// `requester:` and the hex SHA-256 of the requester's canonical bytes. A
+/// governed batch key is pure hex, so the two never collide. Identity only:
+/// the key grants nothing and no requester is parsed back out of it.
+pub(crate) fn requester_batch_key(
+    requester: &meerkat_core::PrincipalRef,
+) -> Result<String, RuntimeDriverError> {
+    let bytes = serde_json::to_vec(requester).map_err(|_| unavailable())?;
+    let mut digest = Sha256::new();
+    digest.update(b"meerkat.input-requester-batch.v1\0");
+    digest.update(&bytes);
+    Ok(format!("requester:{}", hex(&digest.finalize())))
+}
+
+/// An input names at most one requester: its host-supplied requester must be
+/// a qualified principal, and a governed input (or a retained resume) whose
+/// header also names one must name its association's own requester.
+pub(crate) fn verify_single_requester(input: &Input) -> Result<(), RuntimeDriverError> {
+    let Some(requester) = input.header().requester.as_ref() else {
+        return Ok(());
+    };
+    if requester.validate_qualified().is_err() {
+        return Err(RuntimeDriverError::ValidationFailed {
+            reason: "an input's requester must be a qualified principal".into(),
+        });
+    }
+    match input.requester() {
+        Some(own) if own == requester => Ok(()),
+        _ => Err(RuntimeDriverError::ValidationFailed {
+            reason: "an input carries two different requesters".into(),
+        }),
+    }
 }
 
 pub(crate) fn association_binding(
@@ -889,7 +991,7 @@ pub(crate) fn qualified_idempotency_key(
 
 /// The submitter's key `raw` qualified under `association`: the key a
 /// governed admission binds in place of `raw`.
-fn qualify_idempotency_key(
+pub(crate) fn qualify_idempotency_key(
     association: &InputAuthorityAssociation,
     raw: &str,
 ) -> Result<IdempotencyKey, RuntimeDriverError> {
@@ -992,7 +1094,15 @@ pub(crate) fn verify_retained_replay(
         .find(|item| item.input_id() == &state.input_id);
     match (own, input.header().authority_association.as_ref()) {
         (Some(retained), Some(_)) => retained.verify_replay(input),
-        (None, None) if state.authority_contributors.is_empty() => Ok(()),
+        // An ungoverned retry replays only for the requester the row was
+        // admitted for (absence included): another requester's retry under
+        // the same key is a conflict, never that requester's receipt.
+        (None, None)
+            if state.authority_contributors.is_empty()
+                && state.requester.as_ref() == input.header().requester.as_ref() =>
+        {
+            Ok(())
+        }
         _ => Err(RuntimeDriverError::InputIdempotencyConflict {
             existing_id: state.input_id.clone(),
         }),
@@ -2011,6 +2121,81 @@ pub(crate) mod tests {
             prompt.injected_context.push("new hidden context".into());
         }
         assert!(verify_retained_replay(&decoded.state, &altered).is_err());
+    }
+
+    /// One requester concept: a governed input's requester is its work
+    /// association's. An input that also carries a host-supplied requester
+    /// must name the same principal. Another principal is refused before
+    /// admission and nothing is admitted; the same one is admitted, and its
+    /// receipt names the association's requester.
+    #[tokio::test]
+    async fn an_input_carrying_two_different_requesters_is_refused() {
+        let mut driver = driver(true);
+        let carrying = |host_requester: &str| {
+            let mut input = driver.input("caller-a");
+            input.header_mut().ingress_context = None;
+            input.header_mut().requester = Some(principal(host_requester));
+            attach_ingress(input, "caller-a", "host-supplied-requester")
+        };
+        let conflicting = carrying("caller-b");
+        let agreeing = carrying("caller-a");
+        let conflicting_id = conflicting.id().clone();
+        assert!(
+            driver.accept_input(conflicting).await.is_err(),
+            "an input whose host-supplied requester differs from its association's is refused"
+        );
+        assert!(
+            driver.input_state(&conflicting_id).is_none(),
+            "the refused input is not admitted"
+        );
+        let AcceptOutcome::Accepted { state, .. } = driver
+            .accept_input(agreeing)
+            .await
+            .expect("an agreeing requester is admitted")
+        else {
+            panic!("agreeing admission");
+        };
+        assert_eq!(state.requester(), Some(&principal("caller-a")));
+    }
+
+    /// An ungoverned keyed retry replays only for the requester its row was
+    /// admitted for. The same key, content and requester deduplicate to the
+    /// row; another requester's retry under that key is an
+    /// `InputIdempotencyConflict` naming the row, never that requester's
+    /// receipt.
+    #[tokio::test]
+    async fn a_keyed_retry_for_another_requester_is_an_idempotency_conflict() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("keyed-retry"));
+        let keyed = |requester: &str| {
+            let mut prompt = crate::input::PromptInput::new("the same request", None);
+            prompt.header.idempotency_key =
+                Some(crate::identifiers::IdempotencyKey::new("one-key"));
+            prompt.header.requester = Some(principal(requester));
+            Input::Prompt(prompt)
+        };
+        let AcceptOutcome::Accepted { state, .. } = driver
+            .accept_input(keyed("caller-a"))
+            .await
+            .expect("the original is admitted")
+        else {
+            panic!("the original is admitted");
+        };
+        let original = state.input_id.clone();
+        assert!(
+            matches!(
+                driver.accept_input(keyed("caller-a")).await,
+                Ok(AcceptOutcome::Deduplicated { existing_id, .. }) if existing_id == original
+            ),
+            "the same requester's retry replays the row"
+        );
+        assert!(
+            matches!(
+                driver.accept_input(keyed("caller-b")).await,
+                Err(RuntimeDriverError::InputIdempotencyConflict { existing_id })
+                    if existing_id == original
+            ),
+            "another requester's retry under the key is a conflict"
+        );
     }
 
     /// The driver resolves its native replay lookup before the host

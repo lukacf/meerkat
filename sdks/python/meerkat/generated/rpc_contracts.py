@@ -36,6 +36,8 @@ from .types import (
     CommsPeersResult,
     CommsSendParams,
     CommsSendResult,
+    CompactSessionParams,
+    CompactSessionResult,
     ConfigEnvelope,
     ConfigPatchParams,
     ConfigSetParams,
@@ -146,6 +148,8 @@ from .types import (
     MobCancelWorkResult,
     MobClaimCallbackRouteParams,
     MobClaimCallbackRouteResult,
+    MobCompactMemberParams,
+    MobCompactMemberResult,
     MobConcludeObjectiveParams,
     MobConcludeObjectiveResult,
     MobCreateParams,
@@ -164,6 +168,8 @@ from .types import (
     MobFlowsResult,
     MobForceCancelResult,
     MobForkHelperParams,
+    MobForkMemberParams,
+    MobForkMemberResult,
     MobGrantScopesParams,
     MobGrantScopesResult,
     MobGrantsResult,
@@ -174,6 +180,9 @@ from .types import (
     MobIdParams,
     MobIngressInteractionParams,
     MobIngressInteractionResult,
+    MobInstructionStatusParams,
+    MobInstructionStatusResult,
+    MobInstructionWriteResult,
     MobLifecycleParams,
     MobLifecycleResult,
     MobListMembersMatchingParams,
@@ -209,6 +218,7 @@ from .types import (
     MobRetireResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
+    MobRevokeInstructionParams,
     MobRevokeScopesParams,
     MobRevokeScopesResult,
     MobRotateSupervisorResult,
@@ -216,6 +226,7 @@ from .types import (
     MobRunParams,
     MobRunResult,
     MobRunResultParams,
+    MobSetInstructionParams,
     MobSnapshotResult,
     MobSpawnHelperParams,
     MobSpawnManyParams,
@@ -250,7 +261,10 @@ from .types import (
     ReadSessionTranscriptRevisionParams,
     ReadyWorkFilter,
     RealmIdParams,
+    RequestToolGrantParams,
+    RequestToolGrantResult,
     RestoreSessionTranscriptRevisionParams,
+    RevokeSessionInstructionParams,
     RevokeToolGrantParams,
     RevokeToolGrantResult,
     RewriteSessionTranscriptParams,
@@ -270,12 +284,16 @@ from .types import (
     SessionForkResult,
     SessionInputStateParams,
     SessionInputStateResult,
+    SessionInstructionStatusParams,
+    SessionInstructionStatusResult,
+    SessionInstructionWriteResult,
     SessionPeerResponseTerminalParams,
     SessionStreamCloseParams,
     SessionStreamCloseResult,
     SessionStreamOpenParams,
     SessionStreamOpenResult,
     SessionTranscriptRewriteResult,
+    SetSessionInstructionParams,
     SkillListResponse,
     StopRunParams,
     StopRunResult,
@@ -560,6 +578,30 @@ class RpcRequest(Protocol):
     @overload
     def __call__(
         self,
+        method: Literal["session/set_instruction"],
+        params: SetSessionInstructionParams,
+        /,
+    ) -> Awaitable[SessionInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/revoke_instruction"],
+        params: RevokeSessionInstructionParams,
+        /,
+    ) -> Awaitable[SessionInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/instruction_status"],
+        params: SessionInstructionStatusParams,
+        /,
+    ) -> Awaitable[SessionInstructionStatusResult]: ...
+
+    @overload
+    def __call__(
+        self,
         method: Literal["session/transcript_revision"],
         params: ReadSessionTranscriptRevisionParams,
         /,
@@ -612,6 +654,14 @@ class RpcRequest(Protocol):
         params: StopRunParams,
         /,
     ) -> Awaitable[StopRunResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["session/compact"],
+        params: CompactSessionParams,
+        /,
+    ) -> Awaitable[CompactSessionResult]: ...
 
     @overload
     def __call__(
@@ -836,6 +886,14 @@ class RpcRequest(Protocol):
         params: GrantToolParams,
         /,
     ) -> Awaitable[GrantToolResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["tool_grants/request"],
+        params: RequestToolGrantParams,
+        /,
+    ) -> Awaitable[RequestToolGrantResult]: ...
 
     @overload
     def __call__(
@@ -1424,6 +1482,30 @@ class RpcRequest(Protocol):
     @overload
     def __call__(
         self,
+        method: Literal["mob/set_instruction"],
+        params: MobSetInstructionParams,
+        /,
+    ) -> Awaitable[MobInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/revoke_instruction"],
+        params: MobRevokeInstructionParams,
+        /,
+    ) -> Awaitable[MobInstructionWriteResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/instruction_status"],
+        params: MobInstructionStatusParams,
+        /,
+    ) -> Awaitable[MobInstructionStatusResult]: ...
+
+    @overload
+    def __call__(
+        self,
         method: Literal["mob/flows"],
         params: MobIdParams,
         /,
@@ -1484,6 +1566,14 @@ class RpcRequest(Protocol):
         params: MobForkHelperParams,
         /,
     ) -> Awaitable[MobHelperResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/fork_member"],
+        params: MobForkMemberParams,
+        /,
+    ) -> Awaitable[MobForkMemberResult]: ...
 
     @overload
     def __call__(
@@ -1732,6 +1822,14 @@ class RpcRequest(Protocol):
         params: MobStopMemberRunParams,
         /,
     ) -> Awaitable[MobStopMemberRunResult]: ...
+
+    @overload
+    def __call__(
+        self,
+        method: Literal["mob/compact_member"],
+        params: MobCompactMemberParams,
+        /,
+    ) -> Awaitable[MobCompactMemberResult]: ...
 
     @overload
     def __call__(

@@ -89,14 +89,15 @@ mod session;
 pub(crate) mod test_host;
 #[cfg(test)]
 mod tests;
+pub mod writer_fence;
 
 use std::time::Duration;
 
 use meerkat_core::host_store::{FenceToken, HostStoreError};
 
 pub use realm::{
-    ArmedScopes, PoisonedScope, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard, ScopeId,
-    ScopeState, SpiRealm, SpiRealmConfig,
+    ArmedScopes, PoisonedScope, QuarantinedScope, ScopeCell, ScopeDelta, ScopeFamily, ScopeGuard,
+    ScopeId, ScopeState, SpiRealm, SpiRealmConfig,
 };
 pub use runtime::{RUNTIME_FAMILY, SpiRuntimeStore};
 pub use session::SpiSessionStore;
@@ -114,10 +115,24 @@ pub enum SpiError {
     /// refuses every call until the realm is reopened.
     #[error("host store scope {scope} is poisoned: {cause}")]
     ScopePoisoned { scope: String, cause: String },
+    /// The store reports a conflict for this scope (two batches hold one of
+    /// its versions): the realm quarantined it, and it refuses every call
+    /// until it is repaired in the store and the realm is reopened. `cause`
+    /// names each conflicted incarnation, its version and the repair.
+    #[error("host store scope {scope} is quarantined: {cause}")]
+    ScopeQuarantined { scope: String, cause: String },
     /// A read across the scopes of some families met poisoned ones: it
     /// refuses until the realm is reopened. Names each with its cause.
     #[error("{}", PoisonedScopesDisplay(scopes))]
     ScopesPoisoned { scopes: Vec<PoisonedScope> },
+    /// A read across the scopes of some families met quarantined ones, and
+    /// maybe poisoned ones: it refuses until they are repaired in the store
+    /// and the realm is reopened. Names each with its cause.
+    #[error("{}", QuarantinedScopesDisplay(quarantined, poisoned))]
+    ScopesQuarantined {
+        quarantined: Vec<QuarantinedScope>,
+        poisoned: Vec<PoisonedScope>,
+    },
     /// An exclusive acquire met a live holder.
     #[error("host store fence is held by token {holder} for {remaining:?} more")]
     Held {
@@ -132,7 +147,8 @@ pub enum SpiError {
     /// fence token the batch carries closed: Core sends no batch past that
     /// window, since the token's lease at the store may have ended by then.
     /// The batch was sent `attempts` times, `last` answering the last of them
-    /// (`None`: it was never sent), so it may or may not have landed. The
+    /// (`None`: it was never sent, and did not land); a batch that was sent
+    /// may or may not have landed. The
     /// scopes it touched are poisoned like those of any batch whose outcome
     /// stays unknown; the realm keeps its fence.
     #[error(
@@ -145,6 +161,18 @@ pub enum SpiError {
         attempts: u32,
         last: Option<HostStoreError>,
     },
+    /// A commit stopped settling its batch when its retry budget ran out,
+    /// the self-fence window of its fence token open throughout: every
+    /// attempt answered unknown or unavailable and no head read showed the
+    /// batch. The batch was sent `attempts` times, `last` answering the last
+    /// of them, so it may or may not have landed. The scopes it touched are
+    /// poisoned like those of any batch whose outcome stays unknown; the
+    /// realm keeps its fence.
+    #[error(
+        "host store batch is unsettled: its retry budget ran out (attempts sent: {attempts}; \
+         last answer: {last})"
+    )]
+    UnsettledPastRetryBudget { attempts: u32, last: HostStoreError },
     /// The host store failed.
     #[error("host store: {0}")]
     Host(#[from] HostStoreError),
@@ -170,9 +198,10 @@ pub enum SpiError {
 impl SpiError {
     /// The error a mutating store call answers. A poisoned realm or scope
     /// answers its typed refusal ([`RuntimeStoreError::RealmRefused`] or
-    /// [`RuntimeStoreError::ScopeRefused`]), and a batch left unsettled when
-    /// its fence window closed answers
-    /// [`RuntimeStoreError::UnsettledAtFenceWindow`].
+    /// [`RuntimeStoreError::ScopeRefused`]), and a batch left unsettled
+    /// answers its typed stop: [`RuntimeStoreError::UnsettledAtFenceWindow`]
+    /// when its fence window closed, [`RuntimeStoreError::UnsettledPastRetryBudget`]
+    /// when its retry budget ran out.
     #[must_use]
     pub fn into_write(self) -> RuntimeStoreError {
         match self.into_typed() {
@@ -189,8 +218,8 @@ impl SpiError {
     /// [`RuntimeStoreError::Corrupt`], so a reader can tell a refusal that
     /// lasts until the realm reopens and an outage a later read may get past
     /// from state that needs a repair. A read that changed memory commits
-    /// like a write, and a batch it left unsettled when its fence window
-    /// closed answers [`RuntimeStoreError::UnsettledAtFenceWindow`].
+    /// like a write, and a batch it left unsettled answers its typed stop, as
+    /// a write's does ([`Self::into_write`]).
     #[must_use]
     pub fn into_read(self) -> RuntimeStoreError {
         match self.into_typed() {
@@ -207,7 +236,8 @@ impl SpiError {
 
     /// The typed error a read and a write both answer: a refusal until the
     /// realm is reopened ([`Self::into_refusal`]), or a batch left unsettled
-    /// when its fence window closed. Any other error comes back unchanged.
+    /// when its fence window closed or its retry budget ran out. Any other
+    /// error comes back unchanged.
     fn into_typed(self) -> Result<RuntimeStoreError, Self> {
         match self.into_refusal() {
             Ok(refusal) => Ok(refusal),
@@ -216,19 +246,29 @@ impl SpiError {
                     cause: error.to_string(),
                 })
             }
+            Err(error @ Self::UnsettledPastRetryBudget { .. }) => {
+                Ok(RuntimeStoreError::UnsettledPastRetryBudget {
+                    cause: error.to_string(),
+                })
+            }
             Err(other) => Err(other),
         }
     }
 
     /// The typed refusal a poisoned realm or scope answers until the realm
-    /// is reopened: [`RuntimeStoreError::RealmRefused`] for a realm that lost
-    /// its fence, [`RuntimeStoreError::ScopeRefused`] naming each poisoned
-    /// scope the call needs. Any other error comes back unchanged.
+    /// is reopened, and a quarantined scope until it is repaired in the
+    /// store and the realm is reopened: [`RuntimeStoreError::RealmRefused`]
+    /// for a realm that lost its fence, [`RuntimeStoreError::ScopeRefused`]
+    /// naming each poisoned or quarantined scope the call needs. Any other
+    /// error comes back unchanged.
     fn into_refusal(self) -> Result<RuntimeStoreError, Self> {
         match self {
             Self::RealmPoisoned(cause) => Ok(RuntimeStoreError::RealmRefused { cause }),
             Self::ScopePoisoned { scope, cause } => Ok(RuntimeStoreError::ScopeRefused {
                 scopes: vec![RefusedScope::new(scope, cause)],
+            }),
+            Self::ScopeQuarantined { scope, cause } => Ok(RuntimeStoreError::ScopeRefused {
+                scopes: vec![RefusedScope::of_quarantined(scope, cause)],
             }),
             Self::ScopesPoisoned { scopes } => Ok(RuntimeStoreError::ScopeRefused {
                 scopes: scopes
@@ -236,6 +276,22 @@ impl SpiError {
                     .map(|poisoned| RefusedScope::new(poisoned.id.to_string(), poisoned.cause))
                     .collect(),
             }),
+            Self::ScopesQuarantined {
+                quarantined,
+                poisoned,
+            } => {
+                Ok(RuntimeStoreError::ScopeRefused {
+                    scopes: quarantined
+                        .into_iter()
+                        .map(|quarantined| {
+                            RefusedScope::of_quarantined(quarantined.scope, quarantined.cause)
+                        })
+                        .chain(poisoned.into_iter().map(|poisoned| {
+                            RefusedScope::new(poisoned.id.to_string(), poisoned.cause)
+                        }))
+                        .collect(),
+                })
+            }
             other => Err(other),
         }
     }
@@ -251,6 +307,33 @@ impl std::fmt::Display for LastAnswer<'_> {
             Some(last) => write!(f, "; last answer: {last}"),
             None => Ok(()),
         }
+    }
+}
+
+/// The scopes of a [`SpiError::ScopesQuarantined`], each with its cause.
+struct QuarantinedScopesDisplay<'a>(&'a [QuarantinedScope], &'a [PoisonedScope]);
+
+impl std::fmt::Display for QuarantinedScopesDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "host store scopes refuse until the quarantined ones are repaired in the store and \
+             the realm is reopened (",
+        )?;
+        let quarantined = self
+            .0
+            .iter()
+            .map(|scope| (scope.scope.clone(), "quarantined", scope.cause.as_str()));
+        let poisoned = self
+            .1
+            .iter()
+            .map(|scope| (scope.id.to_string(), "poisoned", scope.cause.as_str()));
+        for (index, (scope, state, cause)) in quarantined.chain(poisoned).enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{scope} is {state}: {cause}")?;
+        }
+        f.write_str(")")
     }
 }
 

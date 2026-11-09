@@ -276,3 +276,121 @@ async fn the_reopen_loads_a_batch_stopped_at_its_fence_window_that_landed() {
     );
     assert_eq!(host.commit_count(), 1, "nothing was written again");
 }
+
+// Every renew fails, so the window of the open's token closes at 2 s. A
+// large value commits its chunk batch first, and the store holds that batch
+// until half a second past the deadline: the main batch's first send would
+// come past the deadline, so it is never sent. The settle stops typed, with
+// no attempt and no answer, and the realm keeps its fence. Without the
+// deadline check before a batch's first send, the main batch went out late.
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_first_send_would_come_past_its_tokens_deadline_is_never_sent() {
+    use meerkat_core::host_store::SelfFence;
+    let host = fast_host();
+    let realm = SpiRealm::open(Arc::clone(&host) as _, SpiRealmConfig::default())
+        .await
+        .expect("realm opens");
+    let token = realm.fence();
+    let window = realm.window();
+    let deadline = tokio::time::Instant::now() - window.elapsed + window.window;
+    host.faults.lock().unwrap().renew_unavailable = 1000;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *host.commit_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    host.take_calls();
+    let id = ScopeId::new(TEST_FAMILY, "big");
+    let big = Arc::new(vec![7_u8; INLINE_VALUE_LIMIT + 1]);
+    let (outcome, ()) = tokio::join!(
+        commit_one(
+            &realm,
+            &id,
+            ScopeDelta::Changes(vec![("row/big".into(), Some(big))])
+        ),
+        async {
+            tokio::time::sleep_until(deadline + Duration::from_millis(500)).await;
+            *host.commit_gate.lock().unwrap() = None;
+            gate.notify_one();
+        }
+    );
+    let attempts = commit_attempts(&host);
+    assert_eq!(
+        attempts.len(),
+        1,
+        "only the chunk batch was sent, before the deadline: {attempts:?}"
+    );
+    assert!(
+        attempts.iter().all(|at| *at < deadline),
+        "the chunk batch went out before the deadline: {attempts:?}"
+    );
+    assert!(
+        matches!(
+            &outcome,
+            Err(SpiError::UnsettledAtFenceWindow {
+                token: stopped,
+                attempts: 0,
+                last: None,
+            }) if *stopped == token
+        ),
+        "the main batch stops typed, with no attempt and no answer: {outcome:?}"
+    );
+    assert!(
+        realm.realm_poisoned().is_none(),
+        "the realm keeps its fence: {:?}",
+        realm.realm_poisoned()
+    );
+}
+
+// The renew in flight never answers, so the window of the open's token stays
+// open until that renew times out at its deadline (2 s), and every commit
+// answers `Unavailable`. A settle that starts 100 ms before the deadline
+// sends nothing at or past it and stops typed. With the deadline counted
+// from the settle's start instead of the token's last acquire or renew, it
+// went on past the deadline.
+#[tokio::test(start_paused = true)]
+async fn a_settle_that_starts_late_in_its_window_stops_at_its_tokens_deadline() {
+    use meerkat_core::host_store::SelfFence;
+    let host = fast_host();
+    let config = SpiRealmConfig {
+        renew_timeout: Duration::from_secs(1),
+        ..SpiRealmConfig::default()
+    };
+    let realm = SpiRealm::open(Arc::clone(&host) as _, config)
+        .await
+        .expect("realm opens");
+    let store = SpiRuntimeStore::open(Arc::clone(&realm))
+        .await
+        .expect("store opens");
+    let window = realm.window();
+    let deadline = tokio::time::Instant::now() - window.elapsed + window.window;
+    {
+        let mut faults = host.faults.lock().unwrap();
+        faults.renew_hang = 1000;
+        faults.unavailable = 1000;
+    }
+    tokio::time::sleep_until(deadline - Duration::from_millis(100)).await;
+    assert!(realm.lease_is_live(), "the window is still open");
+    host.take_calls();
+    let written = store
+        .persist_input_state(
+            &LogicalRuntimeId::new("late-start"),
+            &persistable(StoredInputState::new_accepted(InputId::new())),
+        )
+        .await;
+    let attempts = commit_attempts(&host);
+    assert!(!attempts.is_empty(), "the batch was sent");
+    let late: Vec<Duration> = attempts
+        .iter()
+        .filter(|at| **at >= deadline)
+        .map(|at| *at - deadline)
+        .collect();
+    assert!(
+        late.is_empty(),
+        "attempts were sent past the token's deadline, by {late:?}"
+    );
+    assert!(
+        matches!(
+            written,
+            Err(RuntimeStoreError::UnsettledAtFenceWindow { .. })
+        ),
+        "the settle stops typed at the token's deadline: {written:?}"
+    );
+}

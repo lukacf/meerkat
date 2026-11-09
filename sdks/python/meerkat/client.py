@@ -52,6 +52,17 @@ from . import _rkat_rpc_digests
 from .errors import BinaryIntegrityError, CapabilityUnavailableError, MeerkatError
 from .event_envelope import parse_agent_event_envelope
 from .events import RealtimeMessageOrigin, Usage, _parse_usage
+from .instructions import (
+    InstructionTarget,
+    MobInstructionStatus,
+    MobInstructionWriteResult,
+    SessionInstructionStatus,
+    SessionInstructionWriteResult,
+    parse_mob_instruction_status,
+    parse_mob_instruction_write_result,
+    parse_session_instruction_status,
+    parse_session_instruction_write_result,
+)
 from .generated.rpc_contracts import RpcRequest
 from .generated.types import (
     CONTRACT_VERSION,
@@ -81,6 +92,9 @@ from .generated.types import (
     InterruptResult,
     StopRunParams,
     StopRunResult,
+    CompactSessionParams,
+    CompactSessionResult,
+    WireCompactionRequestOutcome,
     ToolDispatchAdmissionSource,
     ToolDispatchSettlementFailure,
     ToolDispatchTerminalErrorKind,
@@ -133,6 +147,8 @@ from .generated.types import (
     MobHardCancelParams,
     MobStopMemberRunParams,
     MobStopMemberRunResult,
+    MobCompactMemberParams,
+    MobCompactMemberResult,
     MobHostStatus,
     MobIdParams,
     MobIngressInteractionParams,
@@ -154,6 +170,7 @@ from .generated.types import (
     MobMemberLiveOpenParams,
     MobMemberLiveStatusParams,
     MobMemberParams,
+    MobForkMemberResult,
     MobRevokeHostParams,
     MobRevokeHostResult,
     MobRevokeScopesParams,
@@ -169,6 +186,7 @@ from .generated.types import (
     MobSpawnManyResultEntry,
     MobSpawnManySpawnedResult,
     MobSpawnSpecParams,
+    MobStreamCursor,
     MobTurnStartParams,
     MobUnwireParams,
     MobWireParams,
@@ -878,6 +896,17 @@ class MeerkatClient:
         A handler that declares a ``dedupe_key`` parameter also receives the
         call's :class:`ToolCallDedupeKey` (``None`` when the call has none). A
         resumed run that dispatches the same call again sends the same key.
+
+        A handler that declares a ``requester`` parameter receives the
+        :class:`ToolCallRequester` of the run the call serves (``None`` when
+        the run has none). The runtime sets it, never the arguments, so a tool
+        that acts in one person's name can refuse every other requester::
+
+            @client.tool("read_mail", description="Read the owner's mail")
+            async def read_mail(arguments: dict, requester=None) -> str:
+                if requester is None or requester.direct_principal != OWNER:
+                    raise PermissionError("this mailbox serves its owner only")
+                ...
         """
 
         def decorator(fn: Any) -> Any:
@@ -2272,6 +2301,157 @@ class MeerkatClient:
         raw = await self._request("session/instruction_activations", params)
         return self._parse_instruction_activation_read_page(raw)
 
+    # -- Operator instructions ---------------------------------------------
+
+    async def set_session_instruction(
+        self,
+        session_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        *,
+        content_sha256: str | None = None,
+    ) -> SessionInstructionWriteResult:
+        """Record one session-owned operator instruction: the slot's body at
+        a revision, applied at the session's next fresh run start.
+
+        A mob member's session is refused ``owned_by_mob``: write to it with
+        :meth:`set_mob_instruction` and a member target. A refusal raises
+        :class:`MeerkatError`; :func:`meerkat.errors.instruction_set_code`
+        reads its closed code.
+        """
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "namespace": namespace,
+            "key": key,
+            "revision": revision,
+            "body": body,
+        }
+        if content_sha256 is not None:
+            params["content_sha256"] = content_sha256
+        raw = await self._request("session/set_instruction", params)
+        return parse_session_instruction_write_result(
+            raw, "Invalid session/set_instruction response"
+        )
+
+    async def revoke_session_instruction(
+        self,
+        session_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+    ) -> SessionInstructionWriteResult:
+        """Revoke one session-owned operator instruction at a higher revision."""
+        raw = await self._request(
+            "session/revoke_instruction",
+            {
+                "session_id": session_id,
+                "namespace": namespace,
+                "key": key,
+                "revision": revision,
+            },
+        )
+        return parse_session_instruction_write_result(
+            raw, "Invalid session/revoke_instruction response"
+        )
+
+    async def session_instruction_status(
+        self, session_id: str
+    ) -> SessionInstructionStatus:
+        """Read a session's committed operator-instruction state without
+        materializing the session."""
+        raw = await self._request(
+            "session/instruction_status", {"session_id": session_id}
+        )
+        return parse_session_instruction_status(
+            raw, "Invalid session/instruction_status response"
+        )
+
+    async def set_mob_instruction(
+        self,
+        mob_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+        body: str,
+        target: InstructionTarget,
+        *,
+        content_sha256: str | None = None,
+    ) -> MobInstructionWriteResult:
+        """Write one operator instruction for the members ``target`` selects:
+        ``{"kind": "mob"}``, ``{"kind": "profile", "profile": ...}`` or
+        ``{"kind": "member", "agent_identity": ...}``.
+
+        Returns once the record is in the mob's journal; delivery to the
+        members is asynchronous (see :meth:`mob_instruction_status`).
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "namespace": namespace,
+            "key": key,
+            "revision": revision,
+            "body": body,
+            "target": dict(target),
+        }
+        if content_sha256 is not None:
+            params["content_sha256"] = content_sha256
+        raw = await self._request("mob/set_instruction", params)
+        return parse_mob_instruction_write_result(
+            raw, "Invalid mob/set_instruction response"
+        )
+
+    async def revoke_mob_instruction(
+        self,
+        mob_id: str,
+        namespace: str,
+        key: str,
+        revision: int,
+    ) -> MobInstructionWriteResult:
+        """Revoke one operator instruction of a mob at a higher revision; the
+        record keeps its target."""
+        raw = await self._request(
+            "mob/revoke_instruction",
+            {
+                "mob_id": mob_id,
+                "namespace": namespace,
+                "key": key,
+                "revision": revision,
+            },
+        )
+        return parse_mob_instruction_write_result(
+            raw, "Invalid mob/revoke_instruction response"
+        )
+
+    async def mob_instruction_status(
+        self,
+        mob_id: str,
+        *,
+        namespace: str | None = None,
+        key: str | None = None,
+        agent_identity: str | None = None,
+        profile: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> MobInstructionStatus:
+        """Read a mob's operator-instruction records and one page of members
+        (``limit`` 1 to 200, 100 when absent), without waking a member."""
+        params: dict[str, Any] = {"mob_id": mob_id}
+        for name, value in (
+            ("namespace", namespace),
+            ("key", key),
+            ("agent_identity", agent_identity),
+            ("profile", profile),
+            ("offset", offset),
+            ("limit", limit),
+        ):
+            if value is not None:
+                params[name] = value
+        raw = await self._request("mob/instruction_status", params)
+        return parse_mob_instruction_status(
+            raw, "Invalid mob/instruction_status response"
+        )
+
     async def restore_session_transcript_revision(
         self,
         session_id: str,
@@ -2639,38 +2819,84 @@ class MeerkatClient:
     async def decide_approval(self, params: ApprovalDecideParams) -> dict[str, Any]:
         return await self._request("approval/decide", _wire_params(params))
 
+    @staticmethod
+    def _tool_grant_subject(
+        session_id: str | None, mob_id: str | None, identity: str | None
+    ) -> dict[str, Any]:
+        """The ``tool_grants/*`` subject: a session, or a mob member identity."""
+        if session_id is not None:
+            if mob_id is not None or identity is not None:
+                raise ValueError(
+                    "name either session_id or mob_id with identity, not both"
+                )
+            return {"kind": "session", "session_id": session_id}
+        if mob_id is None or identity is None:
+            raise ValueError("name either session_id or mob_id with identity")
+        return {"kind": "identity", "mob_id": mob_id, "identity": identity}
+
     async def grant_tool(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         tool: str | None = None,
         family: str | None = None,
         duration_ms: int | None = None,
         expires_at_ms: int | None = None,
         reason: str | None = None,
+        scope: str | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
+        decision_ref: str | None = None,
+        mcp_server: str | None = None,
+        server_tools: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Grant one of a session's grant-gated tool names or tool families.
+        """Grant one of a subject's grant-gated tool names, tool families or
+        MCP servers.
 
-        Name exactly one of ``tool`` and ``family``: the session's build must
-        gate it (``create_session(grant_gated_tools=...)``). Bound the grant
-        by exactly one of ``duration_ms`` and ``expires_at_ms`` (UNIX ms), at
-        most the server's maximum lifetime. Returns the ``tool_grants/grant``
-        result, ``{"grant": {...}}``: a family grant's ``target.names`` are
-        the names the server took for it.
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``): an identity's grant applies to the
+        member's builds in the mob's running incarnation, across respawns.
+        Name exactly one of ``tool``, ``family`` and ``mcp_server``: the
+        session's build, or the member's gate (its profile's joined with its
+        role's), must gate it. A server grant covers every tool the server
+        provides, or with ``server_tools`` (a non-empty list) only those of
+        them. Bound the grant by exactly one of ``duration_ms`` and
+        ``expires_at_ms`` (UNIX ms), at most the server's maximum lifetime.
+        ``scope="current_run"`` also scopes the grant to the run the subject
+        is running now (an identity's: the run of the session its member
+        holds on the server): it opens the target in that run only and ends
+        with it, and a subject that runs no turn refuses it (the request
+        refusal ``run_not_active``: error ``data``
+        ``{"kind": "tool_grant_request_refused", "tool_grant_request_refusal":
+        {"kind": "run_not_active"}}``). Omitted, or ``"window"``, the grant
+        lasts for its window. ``decision_ref`` records the host's reference
+        to the decision it made before issuing, as attribution. Returns the
+        ``tool_grants/grant`` result, ``{"grant": {...}}``: a family grant's
+        ``target.names`` are the names the server took for it, and an
+        identity grant's ``applies`` says whether the member's running build
+        gates the target.
         """
-        if (tool is None) == (family is None):
-            raise ValueError("exactly one of tool or family must be provided")
+        if sum(target is not None for target in (tool, family, mcp_server)) != 1:
+            raise ValueError("exactly one of tool, family or mcp_server must be provided")
+        if server_tools is not None and mcp_server is None:
+            raise ValueError("server_tools narrows an mcp_server grant only")
         if (duration_ms is None) == (expires_at_ms is None):
             raise ValueError(
                 "exactly one of duration_ms or expires_at_ms must be provided"
             )
-        target: dict[str, Any] = (
-            {"kind": "tool", "name": tool}
-            if tool is not None
-            else {"kind": "family", "family": family}
-        )
+        if scope is not None and scope not in ("window", "current_run"):
+            raise ValueError('scope must be "window" or "current_run"')
+        target: dict[str, Any]
+        if tool is not None:
+            target = {"kind": "tool", "name": tool}
+        elif family is not None:
+            target = {"kind": "family", "family": family}
+        else:
+            target = {"kind": "mcp_server", "server": mcp_server}
+            if server_tools is not None:
+                target["tools"] = list(server_tools)
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "target": target,
         }
         if duration_ms is not None:
@@ -2679,7 +2905,63 @@ class MeerkatClient:
             params["expires_at_ms"] = expires_at_ms
         if reason is not None:
             params["reason"] = reason
+        if scope is not None:
+            params["scope"] = {"kind": scope}
+        if decision_ref is not None:
+            params["decision_ref"] = decision_ref
         return await self._request("tool_grants/grant", params)
+
+    async def request_tool_grant(
+        self,
+        session_id: str | None = None,
+        *,
+        tool: str | None = None,
+        family: str | None = None,
+        duration_ms: int,
+        scope: str | None = None,
+        reason: str | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
+    ) -> dict[str, Any]:
+        """Ask for a grant of a subject's grant-gated tool name or tool family
+        that a person approves.
+
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``), as for :meth:`grant_tool`. Name exactly
+        one of ``tool`` and ``family``, as for :meth:`grant_tool`.
+        ``duration_ms`` bounds the grant from its issuance, at most the
+        server's maximum lifetime; ``scope="current_run"`` also scopes it to
+        the run the subject is running now (an identity's: the run of the
+        session its member holds on the server). The server holds a durable
+        decision of kind ``tool_grant.issue`` and issues nothing: once a
+        person approves the decision, the server issues the grant under the
+        id the result names. Returns ``{"grant": {...}, "decision": {...}}``:
+        the request as a list shows it (status ``requested``) and its
+        decision. A server whose persistence keeps no durable decisions
+        answers capability unavailable. Needs a Meerkat 0.9.11 or newer
+        server: an older one answers method not found (``-32601``), raised
+        as a :class:`MeerkatError` that names the method.
+        """
+        if (tool is None) == (family is None):
+            raise ValueError("exactly one of tool or family must be provided")
+        if scope is not None and scope not in ("window", "current_run"):
+            raise ValueError('scope must be "window" or "current_run"')
+        target: dict[str, Any] = (
+            {"kind": "tool", "name": tool}
+            if tool is not None
+            else {"kind": "family", "family": family}
+        )
+        params: dict[str, Any] = {
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
+            "target": target,
+            "duration_ms": duration_ms,
+        }
+        if scope is not None:
+            params["scope"] = {"kind": scope}
+        if reason is not None:
+            params["reason"] = reason
+        with _decision_method_served("tool_grants/request"):
+            return await self._request("tool_grants/request", params)
 
     async def revoke_tool_grant(
         self, grant_id: str, *, reason: str | None = None
@@ -2696,36 +2978,56 @@ class MeerkatClient:
         return await self._request("tool_grants/revoke", params)
 
     async def list_tool_grants(
-        self, session_id: str, *, include_ended: bool = False
+        self,
+        session_id: str | None = None,
+        *,
+        include_ended: bool = False,
+        mob_id: str | None = None,
+        identity: str | None = None,
     ) -> dict[str, Any]:
-        """List a session's scoped tool grants, each due one read as expired.
+        """List a subject's scoped tool grants, each due one read as expired.
 
-        Ended (expired or revoked) grants are listed only with
-        ``include_ended``. Returns ``{"grants": [...]}``, with an
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``); a retired identity's history stays
+        readable. Ended (expired, revoked or run-ended) grants are listed
+        only with ``include_ended``. On a 0.9.11 or newer server that keeps
+        durable decisions, the subject's grant requests
+        (:meth:`request_tool_grant`) follow its grants: open and approved ones
+        as ``requested`` and, with ``include_ended``, recently declined ones
+        as ``declined``. Returns ``{"grants": [...]}``, with an
         ``"unreadable"`` list naming any stored grant the server cannot read.
+        For a member identity in the mob's roster the result also carries
+        ``"gate"``: ``"running"``, what the member's live build gates and the
+        names it ignored as not mounted (``None`` when no build of it is live
+        on the server), and ``"next_build"``, the gate its next build
+        resolves. The gate is advisory.
         """
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
             "include_ended": include_ended,
         }
         return await self._request("tool_grants/list", params)
 
     async def tool_grant_audit(
         self,
-        session_id: str,
+        session_id: str | None = None,
         *,
         after_sequence: int | None = None,
         limit: int | None = None,
+        mob_id: str | None = None,
+        identity: str | None = None,
     ) -> dict[str, Any]:
-        """Read a page of the audit log of a session's scoped tool grants.
+        """Read a page of the audit log of a subject's scoped tool grants.
 
-        Rows come in sequence order, after ``after_sequence`` when given.
-        Returns ``{"rows": [...]}``, with ``"next_sequence"`` while more rows
-        may follow: pass it as the next page's ``after_sequence``. A row the
-        server cannot read is named in ``"unreadable"``.
+        The subject is a session (``session_id``) or a mob member identity
+        (``mob_id`` and ``identity``). Rows come in sequence order, after
+        ``after_sequence`` when given. Returns ``{"rows": [...]}``, with
+        ``"next_sequence"`` while more rows may follow: pass it as the next
+        page's ``after_sequence``. A row the server cannot read is named in
+        ``"unreadable"``.
         """
         params: dict[str, Any] = {
-            "subject": {"kind": "session", "session_id": session_id},
+            "subject": self._tool_grant_subject(session_id, mob_id, identity),
         }
         if after_sequence is not None:
             params["after_sequence"] = after_sequence
@@ -2759,8 +3061,10 @@ class MeerkatClient:
         answers, the server shows the connection's operator each decision of
         the page that is open, waits for a human and is held for an approver
         id the operator acts for (once per connection), and records each
-        presentation. It writes a ``decision/notice`` for each decision it
-        shows; this client drops those notices.
+        presentation. Such a decision that opens while the connection is open
+        is shown at once, without a list. The server writes a
+        ``decision/notice`` for each decision it shows; this client drops
+        those notices.
         """
         params: dict[str, Any] = {}
         if kind is not None:
@@ -2820,11 +3124,13 @@ class MeerkatClient:
         "approver_id": ...}`` or ``{"kind": "reviewer", "reviewer": ...}``),
         the ``subject_digest`` shown, the ``parts_shown``, the
         ``channel_ref`` and ``message_ref`` and the host clock reading
-        ``at_ms``. It counts only when it shows every canonical part to the
-        party that decides now. Returns ``{"decision": {...}}``. Needs a
-        Meerkat 0.9.11 or newer server: an older one answers method not
-        found (``-32601``), raised as a :class:`MeerkatError` that names the
-        method.
+        ``at_ms``; a summary a surface with a size limit showed adds the
+        ``link`` it carried (``{"reference": ..., "served_digest": ...}``).
+        It counts only when it shows every canonical part, or its link
+        served the held rendering, to the party that decides now. Returns
+        ``{"decision": {...}}``. Needs a Meerkat 0.9.11 or newer server: an
+        older one answers method not found (``-32601``), raised as a
+        :class:`MeerkatError` that names the method.
         """
         params: dict[str, Any] = {
             "decision_id": decision_id,
@@ -4166,6 +4472,28 @@ class MeerkatClient:
             receipt=self._parse_run_stop_receipt(result.get("receipt"), context),
         )
 
+    async def compact_mob_member(
+        self,
+        mob_id: str,
+        agent_identity: str,
+    ) -> MobCompactMemberResult:
+        """Ask a live member's next compaction check to compact.
+
+        The member is not respawned and its compaction thresholds do not
+        change: the check before its next model request compacts. The outcome
+        is ``requested``, or ``already_requested`` when a request no check
+        consumed yet was already recorded. A dormant member is refused, never
+        woken.
+        """
+        params = MobCompactMemberParams(mob_id=mob_id, agent_identity=agent_identity)
+        result = await self._request("mob/compact_member", _wire_params(params))
+        context = "Invalid mob/compact_member response"
+        return MobCompactMemberResult(
+            mob_id=self._require_string_field(result, "mob_id", context),
+            agent_identity=self._require_string_field(result, "agent_identity", context),
+            outcome=self._parse_compaction_request_outcome(result.get("outcome"), context),
+        )
+
     async def open_mob_member_live(
         self,
         mob_id: str,
@@ -4707,6 +5035,58 @@ class MeerkatClient:
             "Invalid mob/fork_helper response",
         )
 
+    async def fork_mob_member(
+        self,
+        mob_id: str,
+        source_member_id: str,
+        agent_identity: str,
+        *,
+        message_index: int | None = None,
+        profile: str | None = None,
+        runtime_mode: WireMobRuntimeMode | None = None,
+    ) -> MobForkMemberResult:
+        """Fork a member's session at a message boundary into a new member.
+
+        The new member ``agent_identity`` holds the source's messages before
+        ``message_index`` (its committed end when ``None``) and takes the
+        source member's profile and runtime mode unless named. A source
+        whose turn is in flight is refused with ``SESSION_BUSY``, and
+        nothing is seated.
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "source_member_id": source_member_id,
+            "agent_identity": agent_identity,
+        }
+        for key, value in {
+            "message_index": message_index,
+            "profile": profile,
+            "runtime_mode": runtime_mode,
+        }.items():
+            if value is not None:
+                params[key] = value
+        result: MobForkMemberResult | dict[str, Any] = await self._request(
+            "mob/fork_member", params
+        )
+        if isinstance(result, MobForkMemberResult):
+            return result
+        context = "Invalid mob/fork_member response"
+        message_count = self._require_number_field(result, "message_count", context)
+        if not isinstance(message_count, int) or message_count < 0:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: message_count must be a non-negative integer",
+            )
+        return MobForkMemberResult(
+            agent_identity=self._require_string_field(result, "agent_identity", context),
+            member_ref=self._require_string_field(result, "member_ref", context),
+            session_id=self._require_string_field(result, "session_id", context),
+            source_session_id=self._require_string_field(
+                result, "source_session_id", context
+            ),
+            message_count=message_count,
+        )
+
     async def create_mob_profile(
         self, name: str, profile: MobProfile
     ) -> StoredMobProfile:
@@ -5064,11 +5444,27 @@ class MeerkatClient:
         )
 
     async def subscribe_mob_member_events(
-        self, mob_id: str, agent_identity: str
+        self,
+        mob_id: str,
+        agent_identity: str,
+        *,
+        cursor: MobStreamCursor | None = None,
     ) -> EventSubscription:
+        """Subscribe to one mob member's events.
+
+        Without ``cursor`` the stream is live. With the ``epoch`` and ``seq``
+        of the last event received (``subscription.last_event_epoch`` and
+        ``subscription.last_event_seq``), it first replays the events the
+        member still retains after that position; a cursor of another
+        sequence space replays the current space from its earliest retained
+        event.
+        """
+        params: dict[str, Any] = {"mob_id": mob_id, "agent_identity": agent_identity}
+        if cursor is not None:
+            params["cursor"] = _wire_params(cursor)
         return await self._open_event_subscription(
             "mob/stream_open",
-            {"mob_id": mob_id, "agent_identity": agent_identity},
+            params,
             "mob/stream_close",
             self._parse_agent_event_envelope,
         )
@@ -5291,6 +5687,27 @@ class MeerkatClient:
             session_id=self._require_string_field(result, "session_id", context),
             receipt=self._parse_run_stop_receipt(result.get("receipt"), context),
         )
+
+    async def _compact(self, session_id: str) -> CompactSessionResult:
+        params = CompactSessionParams(session_id=session_id)
+        result = await self._request("session/compact", _wire_params(params))
+        context = "Invalid session/compact response"
+        return CompactSessionResult(
+            session_id=self._require_string_field(result, "session_id", context),
+            outcome=self._parse_compaction_request_outcome(result.get("outcome"), context),
+        )
+
+    @staticmethod
+    def _parse_compaction_request_outcome(
+        raw: Any, context: str
+    ) -> WireCompactionRequestOutcome:
+        """Validate a compaction request's outcome (a closed vocabulary)."""
+        if raw not in ("requested", "already_requested"):
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                f"{context}: outcome must be 'requested' or 'already_requested'",
+            )
+        return raw
 
     @staticmethod
     def _parse_run_stop_receipt(raw: Any, context: str) -> WireRunStopReceipt:

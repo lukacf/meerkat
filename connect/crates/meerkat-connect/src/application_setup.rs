@@ -108,13 +108,28 @@ pub enum ApplicationSetupDefinition {
 }
 
 impl ApplicationSetupDefinition {
-    fn resolve(&self) -> Result<MobDefinition, String> {
-        match self {
+    /// The definition this source names. An application's definition cannot
+    /// pin a profile to a realm binding: which binding a member's credentials
+    /// come from is the operator's choice, so a profile that names
+    /// `auth_binding` is refused in either source form.
+    pub(crate) fn resolve(&self) -> Result<MobDefinition, String> {
+        let definition = match self {
             Self::Toml { text } => {
-                MobDefinition::from_toml(text).map_err(|error| error.to_string())
+                MobDefinition::from_toml(text).map_err(|error| error.to_string())?
             }
-            Self::Native { definition } => Ok((**definition).clone()),
+            Self::Native { definition } => (**definition).clone(),
+        };
+        if let Some(name) = definition.profiles.iter().find_map(|(name, binding)| {
+            binding
+                .as_inline()
+                .is_some_and(|profile| profile.auth_binding.is_some())
+                .then_some(name)
+        }) {
+            return Err(format!(
+                "application profile `{name}` names an auth_binding, which an application setup definition cannot set"
+            ));
         }
+        Ok(definition)
     }
 }
 

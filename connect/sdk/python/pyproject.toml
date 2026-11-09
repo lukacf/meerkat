@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meerkat-toolkit"
-version = "0.9.10"
+version = "0.9.11"
 description = "Shared Meerkat Toolkit host adapters"
 requires-python = ">=3.11"
 license = "(MIT OR Apache-2.0) AND Apache-2.0 AND BSD-2-Clause AND MIT"
@@ -57,7 +57,7 @@ slack = ["httpx>=0.28.1,<0.29", "anyio>=4.13,<5"]
 paired-host-live = ["httpx>=0.28.1,<0.29", "anyio>=4.13,<5"]
 # Requires the matching generic local transport API from this development
 # composition; an older SDK is rejected before a child process is started.
-native-host = ["meerkat-meta==0.9.10"]
+native-host = ["meerkat-meta==0.9.11"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

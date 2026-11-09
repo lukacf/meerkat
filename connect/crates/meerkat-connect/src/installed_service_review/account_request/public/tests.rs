@@ -516,6 +516,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for PublicReque
         }
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 
 async fn public_operation_dispatch(

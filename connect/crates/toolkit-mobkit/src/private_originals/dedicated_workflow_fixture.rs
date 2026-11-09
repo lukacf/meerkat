@@ -573,6 +573,7 @@ impl<
                 .owner
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     selected.remote_operator.as_ref().unwrap_or(
                         &meerkat::governed_realm::stock::StockPrincipals::for_local_operator(
                             &selected.realm,
@@ -596,6 +597,7 @@ impl<
                 .owner
                 .grants()
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &selected.grant_administrator,
                     &root,
                     EvidenceId::new("dedicated-operation-leaf").unwrap(),

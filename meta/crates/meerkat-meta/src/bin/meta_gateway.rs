@@ -1,3 +1,13 @@
+//! The conventional Meta gateway: the Console and admin surfaces over one
+//! mob (`config/contacts.toml`, `config/access.toml`).
+//!
+//! It keeps no durable decisions and declares no decision ingresses, so it
+//! does not check the ingress names of the access configuration's approver
+//! map against any declaration (`unknown_ingress` is never its answer). An
+//! access file shared with an `rpc_gateway` is edited through that
+//! `rpc_gateway`, which declares the ingresses (`runtime_options.decisions`)
+//! and refuses an edit that names another.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
@@ -113,6 +123,12 @@ struct InitParams {
     /// (the default) and `persistent_sessions: true`.
     #[serde(default)]
     mob_announcements: Option<Value>,
+    /// The scoped tool grants' maximum lifetime: the object `rpc_gateway`
+    /// takes as `runtime_options.tool_grants` (`{max_lifetime_ms?}`), through
+    /// the same parser and refusal. The runtime takes it as its grant policy
+    /// at init; without it the runtime's default of 24 hours stands.
+    #[serde(default)]
+    tool_grants: Option<Value>,
     /// Member role migrations this activation is authorized to perform, e.g.
     /// `[{"identity": "domain:automation", "from_role": "domain"}]`.
     ///
@@ -641,6 +657,36 @@ fn member_agent_builder(factory: AgentFactory, config: Config) -> FactoryAgentBu
     builder
 }
 
+/// The startup refusal of `config/mcp_accounts.toml` naming personal servers
+/// on a launch whose member factory keeps no provider credentials.
+fn personal_accounts_unavailable(error: meerkat::HostAuthError) -> anyhow::Error {
+    anyhow!(
+        "config/mcp_accounts.toml names personal servers, and this launch has no provider \
+         credential store to keep personal accounts in: {error}"
+    )
+}
+
+/// The account modes of `config/mcp_accounts.toml`, checked against the MCP
+/// servers `definition`'s profiles declare, as the owner check this launch's
+/// member factory installs; `None` without the file or when it names no
+/// personal server.
+fn load_personal_accounts(
+    paths: &ConventionalPaths,
+    definition: &meerkat_mob::MobDefinition,
+) -> anyhow::Result<Option<meerkat_meta::PersonalAccountOwnerCheck>> {
+    let Some(path) = &paths.mcp_accounts_toml else {
+        return Ok(None);
+    };
+    let config = meerkat_meta::McpAccountsConfig::load(path)
+        .map_err(|error| anyhow!("failed to load {}: {error}", path.display()))?;
+    config
+        .check_mob_definition(definition)
+        .map_err(|refusal| anyhow!("{}: {refusal}", path.display()))?;
+    Ok(config
+        .has_personal_servers()
+        .then(|| meerkat_meta::PersonalMcpAccounts::new(config).owner_check()))
+}
+
 /// Returns (session_service, runtime_adapter, binary_blob_store).
 ///
 /// The session service and explicit runtime adapter share the same runtime
@@ -659,6 +705,7 @@ fn build_persistent_session_service(
     compaction: Option<&meerkat_core::config::CompactionRuntimeConfig>,
     member_mcp_custody: &Arc<meerkat_meta::MemberMcpCustody>,
     provider_auth_persistence: Option<meerkat::ProviderAuthPersistence>,
+    personal_accounts: Option<&meerkat_meta::PersonalAccountOwnerCheck>,
 ) -> anyhow::Result<PersistentSessionServiceParts> {
     let store_dir = layout.state_dir().to_path_buf();
     fs::create_dir_all(&store_dir)
@@ -720,6 +767,20 @@ fn build_persistent_session_service(
     // Member MCP routers go into the gateway's custody, which the runtime's
     // shutdown (and again the executor-exit boundary) closes and settles.
     factory = member_mcp_custody.install(factory);
+    // Personal accounts on MCP servers: the owner check on every member's
+    // MCP adapter, and the people's accounts in this factory's credential
+    // store. The members connect to every other server without OAuth.
+    if let Some(check) = personal_accounts {
+        check
+            .keep_accounts_in(
+                &factory,
+                adapter.provider_auth_runtime_authority(),
+                meerkat_realm.clone(),
+                None,
+            )
+            .map_err(personal_accounts_unavailable)?;
+        factory = check.install(factory, None);
+    }
 
     let config = gateway_agent_config(host_config, compaction)?;
     let live_factory = factory.clone();
@@ -927,7 +988,43 @@ fn print_json_line(value: &Value) {
     let _ = stdout.flush();
 }
 
-fn parse_init_request(line: &str) -> anyhow::Result<(Value, InitParams)> {
+/// A `meta/init` its parse refused, answered on the init's id when the line
+/// names one, with the refusal's typed `error.data` when it has one (an
+/// invalid `tool_grants` maximum answers `tool_grant_lifetime_invalid`, as
+/// `rpc_gateway` answers it).
+#[derive(Debug)]
+struct InitRefusal {
+    request_id: Value,
+    error: anyhow::Error,
+}
+
+impl InitRefusal {
+    fn data(&self) -> Option<Value> {
+        self.error
+            .downcast_ref::<meerkat_meta::tool_grant_options::ToolGrantLaunchOptionsError>()
+            .and_then(meerkat_meta::tool_grant_options::ToolGrantLaunchOptionsError::data)
+    }
+}
+
+impl std::fmt::Display for InitRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for InitRefusal {}
+
+fn parse_init_request(line: &str) -> Result<(Value, InitParams), InitRefusal> {
+    parse_init_line(line).map_err(|error| InitRefusal {
+        request_id: serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|raw| raw.get("id").cloned())
+            .unwrap_or(Value::Null),
+        error,
+    })
+}
+
+fn parse_init_line(line: &str) -> anyhow::Result<(Value, InitParams)> {
     let raw: Value = serde_json::from_str(line).context("failed to parse init request")?;
     let method = raw
         .get("method")
@@ -994,6 +1091,10 @@ fn parse_init_request(line: &str) -> anyhow::Result<(Value, InitParams)> {
         meerkat_meta::console_auth_config::parse_console_auth_config(auth)
             .map_err(|error| anyhow!("{error}"))?;
     }
+    meerkat_meta::tool_grant_options::ToolGrantLaunchOptions::parse(
+        parsed.tool_grants.as_ref(),
+        "tool_grants",
+    )?;
     if let Some(root) = parsed.provider_credentials_root.as_deref() {
         meerkat_meta::gateway_composition::validate_provider_credentials_root(root)
             .map_err(|error| anyhow!("provider_credentials_root: {error}"))?;
@@ -1099,8 +1200,22 @@ impl std::error::Error for InitReplied {}
 /// `rpc_gateway` answers with), so an SDK gets a caller action rather than an
 /// "internal error" with a null id.
 fn refuse_init(request_id: &Value, code: i64, message: String) -> anyhow::Error {
+    refuse_init_with_data(request_id, code, message, None)
+}
+
+/// [`refuse_init`] with the refusal's typed `error.data`.
+fn refuse_init_with_data(
+    request_id: &Value,
+    code: i64,
+    message: String,
+    data: Option<Value>,
+) -> anyhow::Error {
     tracing::warn!(code, %message, "meta/init refused");
-    print_json_line(&init_error(request_id.clone(), code, message));
+    let mut response = init_error(request_id.clone(), code, message);
+    if let Some(data) = data {
+        response["error"]["data"] = data;
+    }
+    print_json_line(&response);
     anyhow::Error::new(InitReplied)
 }
 
@@ -2634,8 +2749,14 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
 
     let (request_id, params) = match parse_init_request(init_line.trim()) {
         Ok(value) => value,
-        Err(error) => {
-            return Err(refuse_init(&Value::Null, -32602, error.to_string()));
+        Err(refusal) => {
+            let data = refusal.data();
+            return Err(refuse_init_with_data(
+                &refusal.request_id,
+                -32602,
+                refusal.to_string(),
+                data,
+            ));
         }
     };
 
@@ -2704,6 +2825,13 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             })
         })
         .transpose()?;
+    // The scoped tool grants' maximum lifetime, checked at parse; the
+    // runtime takes it as its grant policy once the runtime exists.
+    let tool_grant_options = meerkat_meta::tool_grant_options::ToolGrantLaunchOptions::parse(
+        params.tool_grants.as_ref(),
+        "tool_grants",
+    )
+    .map_err(|error| refuse_init_with_data(&request_id, -32602, error.to_string(), error.data()))?;
     // Doctrine default: the identity substrate is ON. `identity_first: false`
     // remains as a one-release opt-out for deployments that need the pure
     // mob-plane console back (changelog-flagged).
@@ -2955,6 +3083,8 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             .with_context(|| format!("failed to load {}", path.display()))?,
         None => meerkat_meta::GatingEscalationRoutes::default(),
     };
+    // Personal accounts on MCP servers (`config/mcp_accounts.toml`).
+    let personal_accounts = load_personal_accounts(&paths, &definition)?;
     for origin in [
         Some(http_base_url.as_str()),
         http_public_base_url.as_deref(),
@@ -3009,7 +3139,11 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             compaction_policy.as_ref(),
             &member_mcp_custody,
             provider_auth_persistence.clone(),
+            personal_accounts.as_ref(),
         )?;
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         // Pair the schedule wiring with a clone of the runtime adapter so the
         // firing host can be spawned once the runtime has booted (below).
         let schedule_host_inputs =
@@ -3107,6 +3241,9 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             )
             .context("failed to acquire the gateway runtime machine")?,
         );
+        if let Some(options) = tool_grant_options {
+            options.apply(&adapter);
+        }
         let session_store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let mut factory = AgentFactory::new(&runtime_root)
             .session_store(session_store.clone())
@@ -3131,6 +3268,19 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
             factory = factory.context_root(ctx.clone());
         }
         factory = member_mcp_custody.install(factory);
+        // As in the persistent arm: the owner check and the people's
+        // accounts in this factory's credential store.
+        if let Some(check) = &personal_accounts {
+            check
+                .keep_accounts_in(
+                    &factory,
+                    adapter.provider_auth_runtime_authority(),
+                    meerkat_meta::storage_provider::default_meerkat_level_realm(),
+                    None,
+                )
+                .map_err(personal_accounts_unavailable)?;
+            factory = check.install(factory, None);
+        }
         // Same producer as the persistent arm: host config first, the
         // compaction declaration on top.
         let config = gateway_agent_config(host_config.as_ref(), compaction_policy.as_ref())?;
@@ -3254,6 +3404,12 @@ async fn run(launch: GatewayLaunchArgs) -> anyhow::Result<()> {
         (spec, None, workgraph_service, None)
     };
     let (session_spec, schedule_host_inputs, workgraph_service, voice_inputs) = session_bootstrap;
+    // Every member build classifies the personal servers it carries, with
+    // the owner check installed on the member factory above.
+    let session_spec = match &personal_accounts {
+        Some(check) => session_spec.with_personal_mcp_accounts(check.clone()),
+        None => session_spec,
+    };
     let mob_spec = session_spec.with_options(MobBootstrapOptions {
         allow_ephemeral_sessions: !persistent_sessions,
         notify_orchestrator_on_resume: true,
@@ -3844,6 +4000,66 @@ mod tests {
         Ok(())
     }
 
+    /// `config/mcp_accounts.toml` loads strictly, and a personal server that
+    /// cannot use personal accounts among the profiles' MCP servers refuses
+    /// startup.
+    #[test]
+    fn mcp_accounts_toml_loads_strictly_against_the_profiles() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let config = workspace.path().join("config");
+        std::fs::create_dir(&config)?;
+        let definition = MobDefinition::from_toml(
+            r#"
+[mob]
+id = "team"
+
+[profiles.assistant]
+model = "gpt-5.5"
+
+[[profiles.assistant.tools.mcp_servers]]
+name = "files"
+command = "files-server"
+"#,
+        )?;
+        let load = || load_personal_accounts(&conventional_paths(workspace.path()), &definition);
+        assert!(load()?.is_none(), "no file: every server is system");
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.notes]\naccounts = \"personal\"\n",
+        )?;
+        let Some(check) = load()? else {
+            anyhow::bail!("a personal server must compose personal accounts");
+        };
+        assert!(check.accounts().config().is_personal("notes"));
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.notes]\naccounts = \"system\"\n",
+        )?;
+        assert!(load()?.is_none(), "no personal server: nothing to compose");
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.files]\naccounts = \"personal\"\n",
+        )?;
+        let refused = match load() {
+            Ok(_) => anyhow::bail!("a stdio personal server must refuse startup"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            refused.contains("personal_accounts_unsupported"),
+            "{refused}"
+        );
+
+        std::fs::write(
+            config.join("mcp_accounts.toml"),
+            "[servers.notes]\naccounts = \"team\"\n",
+        )?;
+        assert!(load().is_err(), "an unknown mode refuses startup");
+        Ok(())
+    }
+
     /// The default tracing filter (RUST_LOG unset) must surface this crate's
     /// own INFO lines — storage-verb/migration progress was invisible at the
     /// old blanket "warn" default — while keeping dependencies at WARN.
@@ -3942,6 +4158,45 @@ mod tests {
         assert!(
             error.contains("rpc_gateway") && error.contains("declare_spec_update"),
             "the refusal must name where the options work and the option that matters: {error}"
+        );
+    }
+
+    /// A refused init answers on its id, with the refusal's typed data when it
+    /// has one; a line that is not JSON names no id to answer on.
+    #[test]
+    fn a_refused_init_answers_on_its_id_with_its_typed_data() {
+        let refused = |params: Value| {
+            parse_init_request(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "meta/init",
+                    "params": params
+                })
+                .to_string(),
+            )
+            .err()
+        };
+        let lifetime = refused(serde_json::json!({ "tool_grants": { "max_lifetime_ms": 0 } }));
+        assert_eq!(
+            lifetime.as_ref().map(|refusal| refusal.request_id.clone()),
+            Some(serde_json::json!(7))
+        );
+        assert_eq!(
+            lifetime.and_then(|refusal| refusal.data()),
+            Some(serde_json::json!({ "kind": "tool_grant_lifetime_invalid" }))
+        );
+        let options = refused(serde_json::json!({ "runtime_options": {} }));
+        assert_eq!(
+            options.as_ref().map(|refusal| refusal.request_id.clone()),
+            Some(serde_json::json!(7))
+        );
+        assert_eq!(options.and_then(|refusal| refusal.data()), None);
+        assert_eq!(
+            parse_init_request("not json")
+                .err()
+                .map(|refusal| refusal.request_id),
+            Some(Value::Null)
         );
     }
 

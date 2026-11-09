@@ -265,10 +265,13 @@ fn unavailable() -> ToolError {
 fn invalid() -> ToolError {
     ToolError::InvalidArguments { name: SETUP_REPORT.into(), reason: "Provide kind failed or unavailable and a nonempty human-facing explanation within 4096 bytes. Operation, authority and routing are supplied by the installed host.".into() }
 }
+/// A source owner's answer as the report tool's: its own refusal denies; a
+/// conflict in the source's facts is contention (another writer's change in
+/// flight), unavailable, retryable.
 fn source_error(error: PrivateOriginalError) -> ToolError {
     match error {
-        PrivateOriginalError::Unavailable => unavailable(),
-        _ => denied(),
+        PrivateOriginalError::Unavailable | PrivateOriginalError::Conflict => unavailable(),
+        PrivateOriginalError::Denied => denied(),
     }
 }
 /// Exact native tool definition for the application's initial-surface compiler.
@@ -282,4 +285,34 @@ pub fn setup_report_definition() -> ToolDef {
         ToolSourceKind::RustBundle,
         SETUP_RESULTS_BUNDLE,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The source owner's answer as the report tool's: a conflict in the
+    // source's facts is contention (another writer's change in flight), so
+    // it is unavailable, retryable, never a denial; only the owner's own
+    // refusal denies.
+    //
+    // RED before the fix: a conflict answers `access_denied`.
+    #[test]
+    fn a_source_conflict_is_unavailable_never_a_denial() {
+        assert!(
+            matches!(
+                source_error(PrivateOriginalError::Conflict),
+                ToolError::Unavailable { .. }
+            ),
+            "a conflict is contention"
+        );
+        assert!(matches!(
+            source_error(PrivateOriginalError::Unavailable),
+            ToolError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            source_error(PrivateOriginalError::Denied),
+            ToolError::AccessDenied { .. }
+        ));
+    }
 }

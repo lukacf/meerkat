@@ -33,19 +33,28 @@ impl TokenStore for HeldTokens {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
         self.file.load(key).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         if self.held {
             self.release.acquire().await.unwrap().forget();
         }
-        let result = self.file.save(key, tokens).await;
+        let result = self.file.save(fence, key, tokens).await;
         self.settled.fetch_add(1, Ordering::SeqCst);
         result
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         self.clears.fetch_add(1, Ordering::SeqCst);
-        self.file.clear(key).await
+        self.file.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.file.list().await
@@ -110,7 +119,11 @@ impl Fixture {
         });
         let persistence = ProviderAuthPersistence::new(
             tokens.clone(),
-            Arc::new(FileLockCoordinator::new(root.path().join("locks"))),
+            // The coordinator's credential root (its lock directory's parent)
+            // is the file store's, so the fence it takes covers the store.
+            Arc::new(FileLockCoordinator::new(
+                root.path().join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup::open(storage).await.unwrap();
         startup.factory = startup
@@ -492,15 +505,23 @@ async fn private_provider_use_rechecks_after_action_wait() {
         let config = fixture.config.clone();
         let file = fixture.tokens.file.clone();
         let key = TokenKey::from_credential_identity(&fixture.target.credential_identity);
+        let credentials = fixture._root.path().join("credentials");
         let result = drive(
             &mut fixture,
             |mut prompts, _retire, _completed| async move {
                 let held = prompt(&mut prompts, "provider_target").await;
                 // A real native file-store credential arrives after the initial
                 // Missing observation. This makes the actual Use branch reachable.
-                file.save(&key, &PersistedTokens::api_key(KEY))
+                // A direct save outside any coordinator takes the credential
+                // fence of the key's realm under the store's root itself.
+                let fence = meerkat_core::AdmissionGuard::try_acquire(vec![
+                    meerkat_core::AdmissionFence::credentials(&credentials, key.realm()).unwrap(),
+                ])
+                .unwrap();
+                file.save(&fence, &key, &PersistedTokens::api_key(KEY))
                     .await
                     .unwrap();
+                drop(fence);
                 select(held);
                 let held = prompt(&mut prompts, "provider_action").await;
                 assert!(

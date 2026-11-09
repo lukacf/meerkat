@@ -50,12 +50,16 @@ pub(crate) struct MobEventMemberAuthority {
 }
 
 /// Internal projection used by protected console transports. The envelope is
-/// still the public payload; `member_authority` is authorization metadata and
-/// is deliberately never serialized.
+/// still the public payload; `member_authority` and `endpoints` are
+/// authorization metadata and are deliberately never serialized.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProjectedMobEvent {
     pub(crate) envelope: MobStructuralEventEnvelope,
     pub(crate) member_authority: Option<MobEventMemberAuthority>,
+    /// The members a mob-level event names as its endpoints
+    /// ([`extract_member_endpoints`]): a console shows the event to no
+    /// caller one of them is hidden from.
+    pub(crate) endpoints: Vec<String>,
 }
 
 /// Result of scanning a structural-event snapshot through a caller-provided
@@ -164,6 +168,7 @@ impl MobEventsStore {
         ProjectedMobEvent {
             envelope: self.build_envelope(event).await,
             member_authority: extract_member_authority(&event.kind),
+            endpoints: extract_member_endpoints(&event.kind),
         }
     }
 
@@ -518,6 +523,44 @@ where
         items: accumulator,
         resume_after_seq: latest,
     })
+}
+
+/// The members a mob-level event names as its endpoints: both members of a
+/// wiring edge, the local member of an external peer edge, the member an
+/// operator instruction targets and the members a delivery wave records,
+/// and the member whose tool call an operator action records. An event of
+/// one member names it as its `agent_identity` instead.
+pub(crate) fn extract_member_endpoints(kind: &MobEventKind) -> Vec<String> {
+    match kind {
+        MobEventKind::MembersWired { a, b } | MobEventKind::MembersUnwired { a, b } => {
+            vec![a.to_string(), b.to_string()]
+        }
+        MobEventKind::MembersWiredBatch { edges } => edges
+            .iter()
+            .flat_map(|edge| [edge.a.to_string(), edge.b.to_string()])
+            .collect(),
+        MobEventKind::ExternalPeerWired { local, .. }
+        | MobEventKind::ExternalPeerUnwired { local, .. } => vec![local.to_string()],
+        MobEventKind::OperatorInstructionCommitted(event) => match &event.target {
+            meerkat_mob::OperatorInstructionTarget::Member { agent_identity } => {
+                vec![agent_identity.to_string()]
+            }
+            _ => Vec::new(),
+        },
+        MobEventKind::MemberInstructionTargetsRecorded(event) => event
+            .members
+            .iter()
+            .map(|member| member.agent_identity.to_string())
+            .collect(),
+        MobEventKind::OperatorActionRecorded {
+            caller_provenance, ..
+        } => caller_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.caller_member_id())
+            .map(|member| vec![member.to_string()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 fn extract_member_authority(kind: &MobEventKind) -> Option<MobEventMemberAuthority> {

@@ -3629,6 +3629,31 @@ pub trait SessionAgentBuilder: Send + Sync {
             "session builder cannot reconcile durable compaction stages before session {session_id} is materialized"
         )))
     }
+
+    /// Finalize the durable compaction stages of `projections`, committed
+    /// rewrites of the exact session `session_id` that no live
+    /// [`SessionAgent`] hosts, and answer the records each one published,
+    /// in `projections` order.
+    ///
+    /// The persistent service calls this seam for a cold settle of the
+    /// session's owed projections
+    /// (`PersistentSessionService::settle_owed_compaction_projections`).
+    /// Every projection names a row the runtime's compaction outbox holds
+    /// pending, so each stage is committed authority and its finalization is
+    /// idempotent. The builder owns this boundary because it owns
+    /// construction-time access to the canonical memory backend. Generic
+    /// builders fail closed until they explicitly provide it, and a builder
+    /// that wraps another forwards it.
+    async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        let _ = projections;
+        Err(SessionError::Unsupported(format!(
+            "session builder cannot finalize the durable compaction stages of session {session_id} without its live agent"
+        )))
+    }
 }
 
 /// Trait abstracting over the agent's run/cancel interface.
@@ -4126,6 +4151,13 @@ pub trait SessionAgent: Send {
         self.cancel();
         None
     }
+
+    /// End the run-scoped tool grants of the run
+    /// [`Self::cancel_dropped_run`] just cancelled. The cancel is
+    /// synchronous, so the session task awaits this right after it. The
+    /// default ends nothing, which is right only for an agent without a tool
+    /// grant gate.
+    async fn end_dropped_run_tool_grants(&mut self) {}
 
     /// End a turn whose run future a graceful requeue stop's suspension has
     /// dropped, with no terminal and no closing write, and say how the run
@@ -4857,6 +4889,21 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     /// ([`SessionAgentBuilder::session_comms_identity_root`]).
     pub fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
         self.builder.session_comms_identity_root()
+    }
+
+    /// Finalize the durable compaction stages of `projections` for a session
+    /// no live actor of this service hosts, through this service's builder
+    /// ([`SessionAgentBuilder::finalize_absent_session_compaction_stages`]).
+    /// The persistent service's cold settle is its only caller.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+    pub(crate) async fn finalize_absent_session_compaction_stages(
+        &self,
+        session_id: &SessionId,
+        projections: &[meerkat_core::memory::CompactionProjectionId],
+    ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+        self.builder
+            .finalize_absent_session_compaction_stages(session_id, projections)
+            .await
     }
 
     /// The host's MCP attempt guards this service's builder carries, if any.
@@ -11526,6 +11573,7 @@ async fn session_task<A: SessionAgent>(
                         metadata
                             .transient_turn_context
                             .iter()
+                            .chain(metadata.request_only_context.iter())
                             .chain(metadata.transient_turn_context_appends.iter())
                             .cloned()
                             .collect()
@@ -12187,7 +12235,12 @@ async fn session_task<A: SessionAgent>(
                         | None => (None, interrupted),
                     };
                     let mut dropped_run_terminal = if cancel_dropped {
-                        agent.cancel_dropped_run()
+                        let terminal = agent.cancel_dropped_run();
+                        // The cancel realized the run's end: its run-scoped
+                        // tool grants end with it, before its terminal is
+                        // published.
+                        agent.end_dropped_run_tool_grants().await;
+                        terminal
                     } else {
                         None
                     };
@@ -12235,6 +12288,19 @@ async fn session_task<A: SessionAgent>(
                         Ok(()) => (result, false),
                         Err(error) => (Err(error), true),
                     };
+                // The settlement publishes a fallback it committed on the
+                // agent's channel after the drain above: forward it with this
+                // turn, so it does not wait in the channel for the next one.
+                while let Ok(event) = agent_event_rx.try_recv() {
+                    let envelope = stamp_event_envelope(&next_seq, &source, event);
+                    control.publish_session_event(envelope.clone()).await;
+                    if event_stream_open
+                        && let Some(ref tx) = event_tx
+                        && tx.send(envelope).await.is_err()
+                    {
+                        event_stream_open = false;
+                    }
+                }
                 // A suspended run keeps its uncommitted compaction stages, as a
                 // crash keeps them: the next start reconciles them with the
                 // run's provisional tail.
@@ -12410,6 +12476,15 @@ async fn session_task<A: SessionAgent>(
                 let result = agent
                     .reconcile_runtime_compaction_projections(&intents)
                     .await;
+                // The runtime reconciles between turns, when no turn reads
+                // the agent's event channel: forward what the agent queued
+                // (a finalized compaction's `CompactionCompleted`) to the
+                // session's event stream before the runtime hears back, so
+                // it neither waits for the next turn nor ends with the actor.
+                while let Ok(event) = agent_event_rx.try_recv() {
+                    let envelope = stamp_event_envelope(&next_seq, &source, event);
+                    control.publish_session_event(envelope).await;
+                }
                 let _ = reply_tx.send(result);
             }
             SessionCommand::AbortUncommittedCompactionProjections { reply_tx } => {
@@ -13771,6 +13846,7 @@ mod runtime_turn_metadata_tests {
             messages_after: 1,
             summary_source: None,
             estimated_history_tokens_after: None,
+            instruction_snapshot: None,
         };
         let error = service
             .reconcile_runtime_compaction_projections(&missing_session_id, vec![intent])
@@ -15059,6 +15135,8 @@ mod admission_window_tests {
         /// Ask a suspension instead of the hard interrupt, and answer it with
         /// this outcome from `suspend_dropped_run`.
         suspend_before_success: Option<meerkat_core::DroppedRunSuspension>,
+        /// How many times the session ended a dropped run's tool grants.
+        dropped_run_grant_ends: Arc<AtomicUsize>,
     }
 
     struct AdmissionProbeAgent {
@@ -15071,6 +15149,7 @@ mod admission_window_tests {
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
         suspend_before_success: Option<meerkat_core::DroppedRunSuspension>,
+        dropped_run_grant_ends: Arc<AtomicUsize>,
         active_work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     }
@@ -15099,6 +15178,7 @@ mod admission_window_tests {
                 turn_admission_for_run: Arc::clone(&self.turn_admission_for_run),
                 interrupt_before_success: self.interrupt_before_success,
                 suspend_before_success: self.suspend_before_success.clone(),
+                dropped_run_grant_ends: Arc::clone(&self.dropped_run_grant_ends),
                 active_work_authorization: None,
                 transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
@@ -15196,6 +15276,10 @@ mod admission_window_tests {
             self.suspend_before_success.clone()
         }
 
+        async fn end_dropped_run_tool_grants(&mut self) {
+            self.dropped_run_grant_ends.fetch_add(1, Ordering::SeqCst);
+        }
+
         fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
             Some(self.cancel_after_boundary_tx.clone())
         }
@@ -15278,6 +15362,7 @@ mod admission_window_tests {
             turn_admission_for_run: Arc::new(Mutex::new(None)),
             interrupt_before_success: false,
             suspend_before_success: None,
+            dropped_run_grant_ends: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -15365,6 +15450,47 @@ mod admission_window_tests {
             .expect("next turn should run after interrupted compaction cleanup");
         assert_eq!(next.text, "ran");
         assert_eq!(compaction_abort_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A hard interrupt cancels the dropped run, then has the agent end the
+    /// dropped run's run-scoped tool grants, once. A turn that runs to its
+    /// end ends them at its own terminal: the session asks nothing more.
+    #[tokio::test]
+    async fn a_hard_interrupt_ends_the_dropped_runs_tool_grants() {
+        let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
+            tokio::sync::mpsc::unbounded_channel();
+        let builder = probe_builder(
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            cancel_after_boundary_tx,
+        );
+        let grant_ends = Arc::clone(&builder.dropped_run_grant_ends);
+        let service = EphemeralSessionService::new(builder, 1);
+        let (session_id, command_tx) = create_admitted_session(&service).await;
+
+        service
+            .interrupt(&session_id)
+            .await
+            .expect("admitted turn accepts hard interrupt");
+        let result = deliver_start_turn(command_tx).await;
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert_eq!(
+            grant_ends.load(Ordering::SeqCst),
+            1,
+            "the cancelled run's grants are ended once"
+        );
+
+        let next = service
+            .start_turn(&session_id, start_turn_request())
+            .await
+            .expect("the next turn runs");
+        assert_eq!(next.text, "ran");
+        assert_eq!(
+            grant_ends.load(Ordering::SeqCst),
+            1,
+            "a turn that ran to its end asks nothing more"
+        );
     }
 
     #[tokio::test]
@@ -17489,6 +17615,9 @@ mod tool_application_custody_tests;
 
 #[cfg(test)]
 mod staged_prompt_lowering_tests;
+
+#[cfg(test)]
+mod settled_fallback_event_tests;
 
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 mod operator_instruction_tests;

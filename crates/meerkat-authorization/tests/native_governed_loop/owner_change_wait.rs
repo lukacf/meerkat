@@ -284,6 +284,7 @@ async fn start_native_run(
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -293,6 +294,7 @@ async fn start_native_run(
         .expect("actual controller lineage");
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("read-only"),
             principal("executor"),
@@ -305,6 +307,7 @@ async fn start_native_run(
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

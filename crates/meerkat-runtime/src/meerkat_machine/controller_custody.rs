@@ -106,6 +106,38 @@ impl NativeControllerGrantMutation<'_> {
         result.map_err(|_| crate::input_authority::unavailable())
     }
 
+    /// Whether durable unfinished row `input_id` of `runtime_id` is a kept
+    /// governed input that its attached owner holds for its controller
+    /// without a client
+    /// (`EphemeralRuntimeDriver::held_kept_original_without_client`). The
+    /// attached owner's machine state decides; a row with no attached owner
+    /// is not one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn attached_owner_holds_kept_original(
+        &self,
+        runtime_id: &crate::identifiers::LogicalRuntimeId,
+        input_id: &meerkat_core::lifecycle::InputId,
+    ) -> bool {
+        self.drivers
+            .iter()
+            .map(|driver| Self::driver(driver))
+            .find(|driver| driver.runtime_id() == runtime_id)
+            .is_some_and(|owner| {
+                owner
+                    .ledger()
+                    .get(input_id)
+                    .is_some_and(|live| owner.held_kept_original_without_client(live))
+            })
+    }
+
+    /// Whether unfinished work references the credential of `key` (any
+    /// credential when `None`), for a credential publication or an auth
+    /// lease release or replacement. Unfinished work without a pinned client
+    /// cannot say which credential it uses, so it refuses as unavailable,
+    /// except a kept governed input (admitted under its own association) that
+    /// the machine holds for its controller: it has no client that could use
+    /// the credential, and its pin asks its host again under the credential
+    /// current then.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn references_credential(
         &self,
@@ -116,6 +148,9 @@ impl NativeControllerGrantMutation<'_> {
         for driver in &self.drivers {
             let driver = Self::driver(driver);
             if driver.visit_unfinished_controller_inputs(|row| {
+                if driver.held_kept_original_without_client(row) {
+                    return Ok(false);
+                }
                 let controller = row
                     .controller_client
                     .as_ref()
@@ -137,7 +172,10 @@ impl NativeControllerGrantMutation<'_> {
                 return Ok(true);
             }
         }
-        self.visit_durable_unfinished(|_, row| {
+        self.visit_durable_unfinished(|runtime_id, row| {
+            if self.attached_owner_holds_kept_original(runtime_id, &row.state.input_id) {
+                return Ok(false);
+            }
             Ok(row.state.authority_contributors.iter().any(|original| {
                 original
                     .association()
@@ -160,6 +198,11 @@ impl NativeControllerGrantMutation<'_> {
     /// Check a proposed policy against every original contributor still owned
     /// by this native owner, then commit once under the same custody.
     /// A terminal input in an unfinished run still protects its controller.
+    /// Unfinished work without a pinned client refuses the change as
+    /// unavailable, except a kept governed input (admitted under its own
+    /// association) that the machine holds for its controller: it has no
+    /// client to protect, and its later pin decides its controller admission
+    /// and invocation again under the grants current then.
     ///
     /// The trusted callback must check the actual proposed state against the
     /// exact association and immutable client, including the admitted-work
@@ -180,6 +223,13 @@ impl NativeControllerGrantMutation<'_> {
             let mut refusal = None;
             driver
                 .visit_unfinished_controller_inputs(|row| {
+                    // A kept governed input the machine holds for its
+                    // controller has no client to preserve: its pin decides
+                    // again under the grants current then, so a mutation now
+                    // can only make its next ask refuse it.
+                    if driver.held_kept_original_without_client(row) {
+                        return Ok(false);
+                    }
                     let pin = row
                         .controller_client
                         .as_ref()
@@ -218,13 +268,21 @@ impl NativeControllerGrantMutation<'_> {
             // A detached retained association can veto mutation, but cannot
             // stand in for the immutable actual client needed to validate a
             // proposed policy. Require its exact still-attached native owner.
-            let live = self
+            let owner = self
                 .drivers
                 .iter()
                 .map(|driver| Self::driver(driver))
                 .find(|driver| driver.runtime_id() == runtime_id)
-                .and_then(|driver| driver.ledger().get(&stored.state.input_id))
                 .ok_or_else(crate::input_authority::unavailable)?;
+            let live = owner
+                .ledger()
+                .get(&stored.state.input_id)
+                .ok_or_else(crate::input_authority::unavailable)?;
+            // As above: a held kept governed input has no client to
+            // preserve.
+            if owner.held_kept_original_without_client(live) {
+                return Ok(false);
+            }
             let pin = live
                 .controller_client
                 .as_ref()

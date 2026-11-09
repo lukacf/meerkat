@@ -114,6 +114,7 @@ impl ServicePolicyOwner {
                         None => context
                             .grants
                             .issue_root(
+                                &meerkat_core::AdmissionGuard::none(),
                                 &context.operator,
                                 id.clone(),
                                 context.application.clone(),

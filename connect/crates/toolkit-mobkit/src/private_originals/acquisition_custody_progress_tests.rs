@@ -15,6 +15,32 @@ enum Change {
     CustodyOnly,
     Cancel,
     SetupSelection,
+    /// The source's facts in conflict at the recheck, cleared while the
+    /// admission waits.
+    ConflictCleared,
+    /// The source's facts in conflict at the recheck, for good.
+    ConflictPersists,
+}
+
+/// Remove the second retained handle of `held` a conflict control added, if
+/// it is still there.
+fn remove_second_handle(
+    source: &PrivateOriginals,
+    held: &Arc<crate::private_originals::HeldPrivateOriginal>,
+) {
+    let mut retained = source.retained.lock().unwrap();
+    if retained
+        .iter()
+        .filter(|other| Arc::ptr_eq(other, held))
+        .count()
+        > 1
+    {
+        let second = retained
+            .iter()
+            .rposition(|other| Arc::ptr_eq(other, held))
+            .unwrap();
+        retained.remove(second);
+    }
 }
 
 // Pure typed comparison checks over this fixture's real exact first attempt.
@@ -93,6 +119,8 @@ fn accounting_checks(
 }
 
 async fn exercise(change: Change) {
+    // The conflicts the admission's waiter met at the recheck.
+    let conflicts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let script = Script::paused_for_helper_entry();
     let (fixture, history) = Fixture::for_approved_acquisition(script.clone()).await;
     let installed = script.installed_owner();
@@ -186,6 +214,29 @@ async fn exercise(change: Change) {
 
         match change {
             Change::CustodyOnly => {}
+            Change::ConflictCleared | Change::ConflictPersists => {
+                // A second retained handle of this original: the recheck's
+                // acquisition original read finds two originals for one
+                // staged association, the source's facts in conflict, as
+                // under contention.
+                fixture.source.retained.lock().unwrap().push(held.clone());
+                let source = Arc::downgrade(&fixture.source);
+                let second = held.clone();
+                let seen = conflicts.clone();
+                let clears = matches!(change, Change::ConflictCleared);
+                crate::source_hold_probe::install(Arc::new(move |site, _| {
+                    if site == crate::source_hold_probe::Site::AcquisitionConflict
+                        && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                        && clears
+                    {
+                        // The conflict clears while the admission waits.
+                        if let Some(source) = source.upgrade() {
+                            remove_second_handle(&source, &second);
+                        }
+                    }
+                    None
+                }));
+            }
             Change::Cancel => fixture
                 .source
                 .record_operation_cancelled(fixture.original_reference())
@@ -242,6 +293,39 @@ async fn exercise(change: Change) {
                 );
                 fixture.finish(&first).await.unwrap();
             }
+            Change::ConflictCleared => {
+                assert!(
+                    actual.is_ok(),
+                    "a conflict in the source's facts that clears is waited out, never \
+                     refused: {actual:?}"
+                );
+                assert_eq!(
+                    conflicts.load(std::sync::atomic::Ordering::SeqCst),
+                    1,
+                    "the recheck met the conflict once, waited, and read afresh"
+                );
+                fixture.finish(&first).await.unwrap();
+            }
+            Change::ConflictPersists => {
+                remove_second_handle(&fixture.source, &held);
+                assert!(
+                    matches!(actual, Err(ToolAdmissionError::Unavailable)),
+                    "a conflict that outlasts the wait is retryable, never a denial: {actual:?}"
+                );
+                assert!(
+                    conflicts.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+                    "the recheck waited the conflict out before it answered"
+                );
+                assert!(
+                    fixture
+                        .store
+                        .list_records(&acquisition_approved::scope(&fixture), None, 10)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "refused admission must not create setup work"
+                );
+            }
             Change::Cancel | Change::SetupSelection => {
                 assert!(
                     matches!(actual, Err(ToolAdmissionError::Denied)),
@@ -270,6 +354,7 @@ async fn exercise(change: Change) {
     // futures before joining native and source custody on every exit.
     drop(first_round.take());
     pause.release();
+    crate::source_hold_probe::clear();
     script.release_first_response();
     fixture.source.stop_custody_recovery();
     let native = native_close.as_mut().await;
@@ -300,4 +385,23 @@ async fn native_admission_refuses_cancellation_during_inner_await() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_admission_refuses_substantive_source_change_during_inner_await() {
     exercise(Change::SetupSelection).await;
+}
+/// A conflict in the source's facts at the canonical recheck (two retained
+/// handles of one original, as under contention) is waited out through
+/// Core's owner-change waiter: it clears during the wait, and the recheck
+/// reads afresh and admits. Never a denial.
+///
+/// RED before the fix: the conflict is answered as a denial at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_admission_waits_out_a_conflict_in_the_source_facts() {
+    exercise(Change::ConflictCleared).await;
+}
+/// A conflict in the source's facts that outlasts the recheck's wait is
+/// answered as unavailable (retryable), never as a denial, and creates no
+/// setup work.
+///
+/// RED before the fix: the conflict is answered as a denial at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_admission_answers_a_persisting_conflict_as_unavailable() {
+    exercise(Change::ConflictPersists).await;
 }

@@ -368,7 +368,10 @@ impl Fixture {
         let path = state_directory(&selection, &native, NativeOwnerStartup::Restore).unwrap();
         let source = Arc::new(
             ToolkitOriginalOwner::restore(
-                Arc::new(FileGrantOwnerStore::new(path.join("grants.jsonl"))),
+                Arc::new(FileGrantOwnerStore::new(
+                    path.join("grants.jsonl"),
+                    meerkat_authorization::grants::GrantLogFence::NotAdmissionRead,
+                )),
                 Arc::new(HostAuthorizationClock),
                 native.ingress_domain.clone(),
             )
@@ -417,6 +420,7 @@ impl Fixture {
             let leaf = source
                 .grants()
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &native.grant_administrator,
                     parent.last().unwrap(),
                     id(name),
@@ -1364,6 +1368,7 @@ async fn retained_targeted_setup_preserves_native_target_and_controller_authorit
         f.source
             .grants()
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &f.application.native.grant_administrator,
                 targets[0].lineage.last().unwrap(),
                 &mut custody,
@@ -1816,6 +1821,7 @@ async fn internal_helper_policy_stops_when_its_flattened_frontend_ancestor_close
             .source
             .grants()
             .issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &native.grant_administrator,
                 parent.last().unwrap(),
                 id(label),

@@ -585,6 +585,7 @@ pub fn mob_definition_with(external_addressable: bool) -> MobDefinition {
             model: MODEL.to_string(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -653,6 +654,7 @@ impl Fixture {
         );
         let controller = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("controller"),
                 principal("executor"),
@@ -662,6 +664,7 @@ impl Fixture {
             .expect("actual controller lineage");
         let operation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("read-only"),
                 principal("executor"),
@@ -671,6 +674,7 @@ impl Fixture {
             .expect("actual operation grant");
         let invocation = grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("grant-owner"),
                 id("invocation"),
                 principal("requester"),
@@ -698,6 +702,7 @@ impl Fixture {
             })),
             operation_owner: Arc::new(ControllerOwner),
             retained_resume: None,
+            kept_original: None,
         }
         .into_configuration();
         assert!(configuration.require_scoped_destination);
@@ -723,8 +728,15 @@ impl Fixture {
         .await
         .expect("mob over the governed machine");
         let member = AgentIdentity::from(MEMBER);
+        // Seated as identity-first materialization seats a member: under the
+        // durable-identity continuity marker, so the declaration of a later
+        // registration of the identity adopts it as the identity's member.
+        let mut spec = SpawnMemberSpec::new("worker", member.clone());
+        spec.continuity_intent = meerkat_mob::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: member.to_string(),
+        };
         handle
-            .spawn_spec(SpawnMemberSpec::new("worker", member.clone()))
+            .spawn_spec(spec)
             .await
             .expect("spawn the governed member");
         let session_id = handle
@@ -790,6 +802,29 @@ impl Fixture {
             service,
             target,
         }
+    }
+
+    /// Serve `session` as the member's first session is served: its session
+    /// document's destination is bound to the original's target on that
+    /// session's runtime, and the source answers with that target.
+    pub async fn serve_session(&self, session: &SessionId) {
+        let target = association(
+            &LogicalRuntimeId::for_session(session),
+            self.controller.clone(),
+            self.operation.clone(),
+            self.pin.selection().clone(),
+        )
+        .target;
+        *self.adapter.target.lock().expect("fixture") = Some(target.clone());
+        let registration = self
+            .machine
+            .current_session_registration_witness(session)
+            .await
+            .expect("the session's registration");
+        self.machine
+            .bind_scoped_context(&registration, &target)
+            .await
+            .expect("bind the session document's destination");
     }
 
     /// The original event `event-7`, bound to its final input by the

@@ -119,6 +119,12 @@ impl PreparedOperationCheck {
         self.0.decision.policy_observation()
     }
 
+    /// Spend what the retained decision's entry spends, once, at the effect
+    /// entry ([`super::PreparedOperationAuthorization::spend_at_entry`]).
+    pub(crate) fn spend_at_entry(&self) -> Result<(), OperationAuthorizationError> {
+        self.0.decision.spend_at_entry()
+    }
+
     /// [`Self::current`] for a held consent decision (ADR-001 D9): its
     /// owners prepare the exact retained operation afresh also when this
     /// decision's own check refuses it rather than asks for a re-preparation

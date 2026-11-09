@@ -84,6 +84,10 @@ pub struct DecisionListFilter {
     pub phase: Option<DecisionPhase>,
     pub approver_id: Option<ApproverId>,
     pub requester: Option<DecisionPrincipalKey>,
+    /// Only decisions whose deadline is at or after this reading, in UNIX
+    /// ms. With a phase, a store reads them through its phase and deadline
+    /// index, so a listing of recent decisions never reads the whole store.
+    pub deadline_from_ms: Option<u64>,
 }
 
 impl DecisionListFilter {
@@ -115,6 +119,13 @@ impl DecisionListFilter {
         self
     }
 
+    /// Only decisions whose deadline is at or after `deadline_from_ms`.
+    #[must_use]
+    pub fn with_deadline_from(mut self, deadline_from_ms: u64) -> Self {
+        self.deadline_from_ms = Some(deadline_from_ms);
+        self
+    }
+
     /// Whether `row` matches every field this filter sets.
     #[must_use]
     pub fn matches(&self, row: &StoredDecision) -> bool {
@@ -130,6 +141,9 @@ impl DecisionListFilter {
                 .requester
                 .as_ref()
                 .is_none_or(|requester| *requester == row.descriptor.requester)
+            && self
+                .deadline_from_ms
+                .is_none_or(|from| row.descriptor.deadline_at_ms >= from)
     }
 }
 

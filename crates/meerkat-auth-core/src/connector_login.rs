@@ -203,8 +203,11 @@ pub async fn load_connector_client_secret(
 
 /// Store (or replace) the secret `realm` holds for the connector client whose
 /// profile binding is `profile_binding`. Rotation under the same binding
-/// replaces it in place.
+/// replaces it in place. The write is fenced: `guard` is the admission guard
+/// of the operation it belongs to, which must cover the credential fence of
+/// `realm` under the store's root, or nothing is written.
 pub async fn save_connector_client_secret(
+    guard: &meerkat_core::AdmissionGuard,
     store: &dyn crate::auth_store::TokenStore,
     realm: &meerkat_core::RealmId,
     profile_binding: &str,
@@ -220,20 +223,22 @@ pub async fn save_connector_client_secret(
     tokens.auth_mode = PersistedAuthMode::ConnectorClientSecret;
     tokens.metadata = serde_json::json!({ CLIENT_SECRET_BINDING_FIELD: profile_binding });
     store
-        .save_for(&key, &tokens, TokenStoreAccess::Interactive)
+        .save_for(guard, &key, &tokens, TokenStoreAccess::Interactive)
         .await
         .map_err(login_store_error)
 }
 
-/// Remove the secret `realm` holds for the client binding `profile_binding`.
+/// Remove the secret `realm` holds for the client binding `profile_binding`,
+/// fenced as [`save_connector_client_secret`] is.
 pub async fn clear_connector_client_secret(
+    guard: &meerkat_core::AdmissionGuard,
     store: &dyn crate::auth_store::TokenStore,
     realm: &meerkat_core::RealmId,
     profile_binding: &str,
 ) -> Result<(), ConnectorLoginError> {
     let key = client_secret_key(realm, profile_binding)?;
     store
-        .clear_for(&key, TokenStoreAccess::Interactive)
+        .clear_for(guard, &key, TokenStoreAccess::Interactive)
         .await
         .map_err(login_store_error)
 }
@@ -1764,10 +1769,15 @@ impl ConnectorOAuthAuthority {
             .refresh_coordinator()
             .with_refresh(
                 key,
-                Box::new(move || {
+                Box::new(move |admission| {
                     Box::pin(async move {
                         authority
-                            .refresh_under_coordinator(&refresh_identity, &refresh_key, None)
+                            .refresh_under_coordinator(
+                                &admission,
+                                &refresh_identity,
+                                &refresh_key,
+                                None,
+                            )
                             .await
                     })
                 }),
@@ -1992,10 +2002,11 @@ impl ConnectorOAuthAuthority {
             .refresh_coordinator()
             .with_refresh(
                 key,
-                Box::new(move || {
+                Box::new(move |admission| {
                     Box::pin(async move {
                         authority
                             .refresh_under_coordinator(
+                                &admission,
                                 &refresh_identity,
                                 &refresh_key,
                                 Some((rejected.as_str(), flag.as_ref())),
@@ -2151,6 +2162,7 @@ impl ConnectorOAuthAuthority {
     /// and the flag is set only when this call begins the refresh.
     async fn refresh_under_coordinator(
         &self,
+        admission: &meerkat_core::AdmissionGuard,
         identity: &AuthCredentialIdentity,
         key: &TokenKey,
         exact: Option<(&str, &std::sync::atomic::AtomicBool)>,
@@ -2218,7 +2230,7 @@ impl ConnectorOAuthAuthority {
         let Some(refresh_token) = previous.refresh_token.clone() else {
             let observation = meerkat_core::RefreshFailureObservation::local_credential_unusable();
             let disposition = self
-                .close_refresh_failure(key, &lease_key, &observation)
+                .close_refresh_failure(admission, key, &lease_key, &observation)
                 .await?;
             return Err(RefreshError::Classified {
                 message: "stored connector OAuth credential has no refresh token".to_owned(),
@@ -2330,7 +2342,7 @@ impl ConnectorOAuthAuthority {
             Err(error) => {
                 let observation = oauth_refresh_observation(&error);
                 let disposition = self
-                    .close_refresh_failure(key, &lease_key, &observation)
+                    .close_refresh_failure(admission, key, &lease_key, &observation)
                     .await?;
                 return Err(RefreshError::Classified {
                     message: error.to_string(),
@@ -2358,7 +2370,7 @@ impl ConnectorOAuthAuthority {
                     let observation =
                         meerkat_core::RefreshFailureObservation::local_credential_unusable();
                     let disposition = self
-                        .close_refresh_failure(key, &lease_key, &observation)
+                        .close_refresh_failure(admission, key, &lease_key, &observation)
                         .await?;
                     return Err(RefreshError::Classified {
                         message: "connector refresh response carried no replacement refresh token"
@@ -2501,6 +2513,7 @@ impl ConnectorOAuthAuthority {
             Err(error) => {
                 return Err(self
                     .rollback_refresh(
+                        admission,
                         key,
                         &lease_key,
                         &previous,
@@ -2513,11 +2526,12 @@ impl ConnectorOAuthAuthority {
         if let Err(error) = self
             .persistence
             .token_store()
-            .save_for(key, &published, TokenStoreAccess::Unattended)
+            .save_for(admission, key, &published, TokenStoreAccess::Unattended)
             .await
         {
             return Err(self
                 .rollback_refresh(
+                    admission,
                     key,
                     &lease_key,
                     &previous,
@@ -2564,6 +2578,7 @@ impl ConnectorOAuthAuthority {
     /// process cannot resurrect bytes the token endpoint rejected.
     async fn close_refresh_failure(
         &self,
+        admission: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         lease_key: &LeaseKey,
         observation: &meerkat_core::RefreshFailureObservation,
@@ -2576,7 +2591,7 @@ impl ConnectorOAuthAuthority {
             && let Err(error) = self
                 .persistence
                 .token_store()
-                .clear_for(key, TokenStoreAccess::Unattended)
+                .clear_for(admission, key, TokenStoreAccess::Unattended)
                 .await
         {
             let _ = self
@@ -2598,6 +2613,7 @@ impl ConnectorOAuthAuthority {
 
     async fn rollback_refresh(
         &self,
+        admission: &meerkat_core::AdmissionGuard,
         key: &TokenKey,
         lease_key: &LeaseKey,
         previous: &PersistedTokens,
@@ -2626,7 +2642,7 @@ impl ConnectorOAuthAuthority {
         if let Err(error) = self
             .persistence
             .token_store()
-            .save_for(key, &restored, TokenStoreAccess::Unattended)
+            .save_for(admission, key, &restored, TokenStoreAccess::Unattended)
             .await
         {
             errors.push(format!("TokenStore restore failed: {error}"));
@@ -2928,6 +2944,19 @@ fn map_mutation_error(error: CredentialMutationError) -> ConnectorLoginError {
         CredentialMutationError::CredentialAccess { refusal, detail } => {
             ConnectorLoginError::CredentialAccess { refusal, detail }
         }
+        // The credential fence is held, or could not be taken: the mutation
+        // did not start and wrote nothing. A typed refusal, retryable once
+        // the hold ends.
+        CredentialMutationError::AdmissionInProgress => ConnectorLoginError::CredentialAccess {
+            refusal: meerkat_core::auth::TokenStoreRefusal::Pending,
+            detail: CredentialMutationError::AdmissionInProgress.to_string(),
+        },
+        CredentialMutationError::AdmissionFenceUnavailable(detail) => {
+            ConnectorLoginError::CredentialAccess {
+                refusal: meerkat_core::auth::TokenStoreRefusal::Unavailable,
+                detail,
+            }
+        }
     }
 }
 
@@ -3051,6 +3080,16 @@ fn map_refresh_error(error: RefreshError) -> ConnectorLoginError {
                 detail: detail.clone(),
             }
         }
+        // The credential fence is held, or could not be taken: the refresh
+        // did not start, sent no token request and wrote nothing.
+        RefreshError::AdmissionInProgress => ConnectorLoginError::CredentialAccess {
+            refusal: meerkat_core::auth::TokenStoreRefusal::Pending,
+            detail: error.to_string(),
+        },
+        RefreshError::AdmissionFenceUnavailable(detail) => ConnectorLoginError::CredentialAccess {
+            refusal: meerkat_core::auth::TokenStoreRefusal::Unavailable,
+            detail: detail.clone(),
+        },
     }
 }
 

@@ -243,6 +243,18 @@ impl ExternalToolSurfaceHandle for RuntimeExternalToolSurfaceHandle {
         )
     }
 
+    fn stage_gated_add(
+        &self,
+        surface_id: String,
+        now_ms: u64,
+    ) -> Result<ExternalToolSurfaceTransition, DslTransitionError> {
+        // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
+        self.apply_input_with_effects(
+            mm_dsl::MeerkatMachineInput::SurfaceStageGatedAdd { surface_id, now_ms },
+            "ExternalToolSurfaceHandle::stage_gated_add",
+        )
+    }
+
     fn stage_remove(&self, surface_id: String, now_ms: u64) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(

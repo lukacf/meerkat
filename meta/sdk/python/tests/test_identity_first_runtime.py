@@ -866,3 +866,106 @@ for raw_line in sys.stdin:
             assert runtime.gateway_ended is None
         finally:
             await runtime.shutdown()
+
+
+class TestOperatorInstructions:
+    """set_instruction, revoke_instruction and instruction_status: host verbs over Core's mob."""
+
+    @pytest.mark.asyncio
+    async def test_set_instruction_rpc(self):
+        receipt = {
+            "mob_id": "gateway",
+            "namespace": "host",
+            "key": "persona",
+            "revision": 1,
+            "disposition": "committed",
+            "generation": 1,
+            "matched_members": 1,
+        }
+        rt, transport = _make_runtime(result=receipt)
+        member = {"kind": "member", "identity": "agent:1"}
+        result = await rt.set_instruction("host", "persona", 1, "Be brief.", member)
+        assert transport.calls[0]["method"] == "meta/set_instruction"
+        assert transport.calls[0]["params"] == {
+            "namespace": "host",
+            "key": "persona",
+            "revision": 1,
+            "body": "Be brief.",
+            "target": member,
+        }
+        assert result == receipt
+        digest = "sha256:" + "0" * 64
+        await rt.set_instruction(
+            "host",
+            "tone",
+            2,
+            "Be formal.",
+            {"kind": "profile", "profile": "worker"},
+            content_sha256=digest,
+        )
+        assert transport.calls[1]["params"] == {
+            "namespace": "host",
+            "key": "tone",
+            "revision": 2,
+            "body": "Be formal.",
+            "target": {"kind": "profile", "profile": "worker"},
+            "content_sha256": digest,
+        }
+        await rt.set_instruction("host", "tone", 3, "Be formal.", {"kind": "mob"})
+        assert transport.calls[2]["params"]["target"] == {"kind": "mob"}
+
+    @pytest.mark.asyncio
+    async def test_revoke_instruction_rpc(self):
+        rt, transport = _make_runtime(result={"disposition": "committed", "generation": 2})
+        result = await rt.revoke_instruction("host", "persona", 2)
+        assert transport.calls[0]["method"] == "meta/revoke_instruction"
+        assert transport.calls[0]["params"] == {
+            "namespace": "host",
+            "key": "persona",
+            "revision": 2,
+        }
+        assert result["disposition"] == "committed"
+
+    @pytest.mark.asyncio
+    async def test_instruction_status_rpc_keeps_unknown_advisory_values(self):
+        status = {
+            "mob_id": "gateway",
+            "generation": 2,
+            "desired": [],
+            "members": [
+                {
+                    "identity": "agent:1",
+                    "profile": "worker",
+                    "residency": "a_future_residency",
+                    "delivery": {"state": "current", "recorded_generation": 2},
+                    "slots": [
+                        {
+                            "namespace": "host",
+                            "key": "persona",
+                            "desired": {"revision": 1, "effect": "active"},
+                            "state": {"state": "pending", "reason": "a_future_reason"},
+                        }
+                    ],
+                    "effective_read": {"status": "ok"},
+                    "live_channel_open": False,
+                }
+            ],
+        }
+        rt, transport = _make_runtime(result=status)
+        result = await rt.instruction_status()
+        assert transport.calls[0]["method"] == "meta/instruction_status"
+        assert transport.calls[0]["params"] == {}
+        # A value this SDK does not know is kept as the gateway sent it.
+        assert result == status
+        await rt.instruction_status(
+            identity="agent:1", namespace="host", key="persona", offset=0, limit=10
+        )
+        assert transport.calls[1]["params"] == {
+            "identity": "agent:1",
+            "namespace": "host",
+            "key": "persona",
+            "offset": 0,
+            "limit": 10,
+        }
+        await rt.instruction_status(profile="worker")
+        assert transport.calls[2]["params"] == {"profile": "worker"}

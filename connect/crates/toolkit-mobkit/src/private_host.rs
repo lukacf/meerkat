@@ -823,9 +823,14 @@ impl Drop for HostLossGuard {
             if let Ok(observation) = close {
                 let owner = self.owner.clone();
                 // A dropped waiter does not retire the physical close owner.
+                // On host loss the custody release stays immediate: once this
+                // close settles, the native custody bound to the host ends at
+                // once, without waiting for admitted work, which then fails
+                // closed.
                 if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                     runtime.spawn(async move {
                         let _ = owner.join_close(&observation.handle).await;
+                        let _ = owner.release_native_custody().await;
                     });
                 }
                 // Executor/process loss has no settlement attestation. It
@@ -2213,6 +2218,9 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
         Ok(observation) => owner.join_close(&observation.handle).await,
         Err(error) => Err(error),
     };
+    // The join releases nothing: the admitted work drained below still uses
+    // the native custody bound to the host. The process's close ends it
+    // after this drain and its presenters' joins.
     while let Some(joined) = joins.join_next().await {
         match joined {
             Ok(reply) if normal_close => {
@@ -2263,6 +2271,7 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
 
 #[cfg(test)]
 mod tests {
+    mod close_custody;
     mod service_parent_controls;
     use super::*;
     use meerkat_toolkit::host_lifetime::control::{HostCloseScope, HostComponentState};
@@ -2469,6 +2478,8 @@ mod tests {
         joining: Arc<AtomicUsize>,
         wake: Arc<Notify>,
         fail_host_loss: bool,
+        // Final custody releases this owner received.
+        released: Arc<AtomicUsize>,
     }
     impl ProbeOwner {
         fn new(settled: bool) -> Self {
@@ -2486,6 +2497,7 @@ mod tests {
                 joining: Arc::new(AtomicUsize::new(0)),
                 wake: Arc::new(Notify::new()),
                 fail_host_loss: false,
+                released: Arc::new(AtomicUsize::new(0)),
             }
         }
         fn observation(&self) -> HostCloseObservation {
@@ -2573,6 +2585,13 @@ mod tests {
                 return Err(HostLifetimeError::Unavailable);
             }
             self.begin_close_activation(HostCloseReason::HostLost)
+        }
+        async fn release_native_custody(&self) -> Result<(), HostLifetimeError> {
+            if !self.settled.load(Ordering::Acquire) {
+                return Err(HostLifetimeError::NotSettled);
+            }
+            self.released.fetch_add(1, Ordering::AcqRel);
+            Ok(())
         }
     }
     #[test]

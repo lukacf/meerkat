@@ -206,6 +206,13 @@ pub enum MaterializeServeError {
     IdentityMismatch { expected: String, created: String },
     #[error("runtime session bindings preparation failed: {detail}")]
     Bindings { detail: String },
+    /// The session a `Fresh` launch mints refused the operator-instruction
+    /// snapshot the materialize carried (V7), before anything was built.
+    #[error("the member's operator-instruction snapshot was refused: {detail}")]
+    InstructionTargetRefused {
+        code: meerkat_core::InstructionSetErrorCode,
+        detail: String,
+    },
     #[error("member session executor attachment failed: {detail}")]
     ExecutorAttach { detail: String },
     #[error("member durable event floor read failed: {detail}")]
@@ -269,6 +276,9 @@ impl MaterializeServeError {
                 }
             },
             Self::ResumeSessionIdInvalid { .. } => (Cause::Unsupported, self.to_string()),
+            Self::InstructionTargetRefused { code, .. } => {
+                (Cause::InstructionTargetRefused { code: *code }, self.to_string())
+            }
             Self::AuthBindingUnresolvable { realm, binding, .. } => (
                 Cause::AuthBindingUnresolvable {
                     realm: realm.clone(),
@@ -306,6 +316,24 @@ impl MaterializeServeError {
             | Self::RevivedIdentityDiverged { .. } => (Cause::Internal, self.to_string()),
         }
     }
+}
+
+/// The carrier of the session a `Fresh` launch mints, born with the
+/// member's operator-instruction snapshot the materialize carried (V7). The
+/// session's own authority decides the snapshot, as it does a delivered
+/// one; its refusal travels typed.
+fn born_session_carrier(
+    session_id: &SessionId,
+    record: meerkat_core::InstructionTargetRecord,
+) -> Result<meerkat_core::Session, MaterializeServeError> {
+    let mut carrier = meerkat_core::Session::with_id(session_id.clone());
+    carrier.record_instruction_target(record).map_err(|error| {
+        MaterializeServeError::InstructionTargetRefused {
+            code: error.code(),
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(carrier)
 }
 
 fn classify_materialize_create_error(
@@ -650,6 +678,9 @@ fn decompile_portable_spec_with_env(
         // never re-infers a provider for the model id.
         provider: Some(spec.profile.provider),
         self_hosted_server_id: spec.profile.self_hosted_server_id.clone(),
+        // A placed member resolves its credentials here, on its member host:
+        // the spec overlay's binding applies, never a profile's.
+        auth_binding: None,
         image_generation_provider: spec.profile.image_generation_provider,
         auto_compact_threshold: spec.profile.auto_compact_threshold,
         resume_overrides: spec
@@ -678,6 +709,7 @@ fn decompile_portable_spec_with_env(
             mcp_servers: decompile_mcp_servers(&spec.profile.tools.mcp_servers, env_lookup)?,
             rust_bundles: Vec::new(),
             bundles: Vec::new(),
+            grant_gated: Default::default(),
         },
         peer_description: spec.profile.peer_description.clone(),
         external_addressable: spec.profile.external_addressable,
@@ -1079,6 +1111,10 @@ pub struct MaterializeServingContext<'a> {
     /// child's session records its seed and its create build the typed
     /// source.
     pub prompt_context_fork: Option<MaterializePromptContextFork<'a>>,
+    /// The operator-instruction snapshot a V7 `Fresh` `MaterializeMember`
+    /// carries: the session the launch mints is born with it, recorded
+    /// before anything else.
+    pub instruction_target: Option<meerkat_core::InstructionTargetRecord>,
 }
 
 /// The prompt-context fork a member build records: the seed the child's
@@ -1816,8 +1852,12 @@ impl HostMemberMaterializer {
             supervisor,
             epoch,
             prompt_context_fork,
+            instruction_target,
         } = context;
         let decompiled = decompile_portable_spec(spec)?;
+        // The carrier of the session a Fresh launch mints, when the
+        // materialize carried the member's operator-instruction snapshot.
+        let mut born_session = None;
         // Step 2 — session id + launch resolution (the provisioner template).
         let (
             session_id,
@@ -1833,6 +1873,13 @@ impl HostMemberMaterializer {
         ) = match launch {
             MaterializeLaunchMode::Fresh {} => {
                 let id = SessionId::new();
+                // The session the launch mints is born with the member's
+                // operator-instruction snapshot the materialize carried: it
+                // is recorded on the build's carrier before anything else,
+                // so a refusal leaves no effect.
+                if let Some(record) = instruction_target {
+                    born_session = Some(born_session_carrier(&id, record)?);
+                }
                 let boundary = self.acquire_vacant_materialization_boundary(&id).await?;
                 let residency_update = self
                     .substrate
@@ -1856,6 +1903,15 @@ impl HostMemberMaterializer {
                 session_id,
                 resume_from_role,
             } => {
+                // A resumed session is recorded by delivery, never seeded:
+                // the decode refused a snapshot on a Resume launch.
+                if instruction_target.is_some() {
+                    return Err(MaterializeServeError::Bindings {
+                        detail: "an operator-instruction snapshot at birth rides only a Fresh \
+                                 launch"
+                            .to_string(),
+                    });
+                }
                 let id = SessionId::parse(session_id).map_err(|err| {
                     MaterializeServeError::ResumeSessionIdInvalid {
                         session_id: session_id.clone(),
@@ -2177,6 +2233,20 @@ impl HostMemberMaterializer {
                 meerkat_core::fork_notice::SESSION_FORK_SEED_KEY.to_string(),
                 fork.seed,
             );
+        }
+        if let Some(carrier) = born_session {
+            // The build mints the session on this carrier: the pre-assigned
+            // id, born with the member's operator-instruction snapshot.
+            let Some(build) = req.build.as_mut() else {
+                return Err(MaterializeServeError::Bindings {
+                    detail: format!(
+                        "the create request of member session {session_id} has no build to \
+                         carry its operator-instruction snapshot"
+                    ),
+                });
+            };
+            build.resume_session = Some(carrier);
+            build.resume_session_intent = meerkat_core::SessionBuildIntent::Mint;
         }
         let boundary = materialization_boundary.take().ok_or_else(|| {
             MaterializeServeError::Bindings {

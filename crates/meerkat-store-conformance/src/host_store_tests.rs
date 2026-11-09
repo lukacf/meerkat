@@ -4,6 +4,7 @@
 //! run chapters accept a Core that resumes as the contract says and refuse
 //! one that calls the model again for a committed round.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,8 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meerkat_core::host_store::{
     AcquireMode, CommitBatch, CommitId, FenceGrant, FenceTiming, FenceToken, HeadPage, HostStore,
-    HostStoreError, Row, RowIndex, ScopeKind, ScopeName, ScopeRef, ScopeUpdate, ScopeVersion,
-    VersionedHead,
+    HostStoreError, Row, RowIndex, ScopeConflict, ScopeHead, ScopeKind, ScopeName, ScopeRef,
+    ScopeUpdate, ScopeVersion, VersionedHead,
 };
 use meerkat_core::{RunId, ToolCallDedupeKey};
 use serde_json::value::RawValue;
@@ -26,6 +27,151 @@ use crate::long_run::{
     ResumedRun, RoundSet, call_id, resumes, takes_first_commit,
 };
 use crate::{ConformanceFailure, HostStoreFactory, InMemoryHostStore, chapters};
+
+/// A store that meets obligation 4 at load: the reference store refuses the
+/// second batch for one version at commit, and this store keeps it instead,
+/// so the scope loads as a typed conflict at that version from then on. With
+/// `per_scope` its listings report such a scope in `conflicts`; without, a
+/// page that would show it fails whole, as a store that does not report a
+/// conflict per scope does. With `rows_serve`, a row read of such a scope
+/// answers the rows of the batch the reference store kept instead of the
+/// conflict, as a store that checks its versions at head loads only does.
+struct LoadConflicting {
+    inner: Arc<InMemoryHostStore>,
+    per_scope: bool,
+    rows_serve: bool,
+    newest: AtomicU64,
+    conflicted: Mutex<BTreeMap<ScopeRef, ScopeVersion>>,
+}
+
+impl LoadConflicting {
+    fn factory(per_scope: bool) -> Shared {
+        Self::canary(per_scope, false)
+    }
+
+    /// Lists its conflicts per scope and fails their head loads, but serves
+    /// their rows.
+    fn serving_rows() -> Shared {
+        Self::canary(true, true)
+    }
+
+    fn canary(per_scope: bool, rows_serve: bool) -> Shared {
+        let inner = Arc::new(InMemoryHostStore::new());
+        let store = Arc::new(Self {
+            inner: Arc::clone(&inner),
+            per_scope,
+            rows_serve,
+            newest: AtomicU64::new(0),
+            conflicted: Mutex::new(BTreeMap::new()),
+        });
+        Shared::canary(inner, store)
+    }
+
+    fn conflict_of(&self, scope: &ScopeRef) -> Option<HostStoreError> {
+        self.conflicted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(scope)
+            .map(|version| HostStoreError::Conflict {
+                scope: scope.clone(),
+                current: Some(*version),
+            })
+    }
+}
+
+#[async_trait]
+impl HostStore for LoadConflicting {
+    async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        let grant = self.inner.acquire_fence(mode).await?;
+        self.newest.fetch_max(grant.token.get(), Ordering::SeqCst);
+        Ok(grant)
+    }
+
+    async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError> {
+        self.inner.renew_fence(token).await
+    }
+
+    fn fence_timing(&self) -> FenceTiming {
+        self.inner.fence_timing()
+    }
+
+    async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        match self.conflict_of(scope) {
+            Some(conflict) => Err(conflict),
+            None => self.inner.load_head(scope).await,
+        }
+    }
+
+    async fn list_heads(
+        &self,
+        kind: ScopeKind,
+        after: Option<&ScopeName>,
+        limit: usize,
+    ) -> Result<HeadPage, HostStoreError> {
+        let every = self.inner.list_heads(kind, after, usize::MAX).await?;
+        let conflicted = self
+            .conflicted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut heads = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut last = None;
+        let mut more = false;
+        for entry in every.heads {
+            if heads.len() + conflicts.len() == limit {
+                more = true;
+                break;
+            }
+            let scope = ScopeRef::new(kind, entry.name.clone());
+            last = Some(entry.name.clone());
+            match conflicted.get(&scope) {
+                Some(version) if self.per_scope => {
+                    conflicts.push(ScopeConflict::new(entry.name, *version, Vec::new()));
+                }
+                Some(version) => {
+                    return Err(HostStoreError::Conflict {
+                        scope,
+                        current: Some(*version),
+                    });
+                }
+                None => heads.push(entry),
+            }
+        }
+        let next = if more { last } else { None };
+        Ok(HeadPage::new(heads, next).with_conflicts(conflicts))
+    }
+
+    async fn read_rows(
+        &self,
+        scope: &ScopeRef,
+        from: RowIndex,
+        limit: usize,
+    ) -> Result<Vec<Row>, HostStoreError> {
+        match self.conflict_of(scope) {
+            Some(conflict) if !self.rows_serve => Err(conflict),
+            _ => self.inner.read_rows(scope, from, limit).await,
+        }
+    }
+
+    async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        match self.inner.commit(batch).await {
+            // A second batch for a version under the current token is kept:
+            // its first scope loads as a typed conflict at that version.
+            Err(HostStoreError::Conflict {
+                scope,
+                current: Some(version),
+            }) if batch.fence().get() == self.newest.load(Ordering::SeqCst) => {
+                self.conflicted
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(scope, version);
+                Ok(())
+            }
+            answer => answer,
+        }
+    }
+}
 
 /// Hands out handles over one store: one realm that outlives its processes.
 struct Shared {
@@ -90,6 +236,18 @@ enum Breaks {
     /// Moves each scope from its current version, whatever the batch says:
     /// two batches for one version both land.
     VersionChain,
+    /// Answers a takeover with the newest token granted before it: a grant
+    /// no higher than an earlier one.
+    TokenOrder,
+    /// Takes a commit's place in the store's order when it is first polled,
+    /// and applies the batch only when the commit completes, even after a
+    /// higher acquire: a batch ordered before an acquire that a load right
+    /// after the acquire does not show yet.
+    LateVisibility,
+    /// Skips the fence check at commit: a batch under a superseded token is
+    /// acknowledged and never applied, as a store that fences only at load
+    /// answers it.
+    CommitFence,
 }
 
 struct Canary {
@@ -113,8 +271,15 @@ impl Canary {
 #[async_trait]
 impl HostStore for Canary {
     async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        let before = self.newest.load(Ordering::SeqCst);
         let grant = self.inner.acquire_fence(mode).await?;
         self.newest.fetch_max(grant.token.get(), Ordering::SeqCst);
+        if self.breaks == Breaks::TokenOrder && mode == AcquireMode::Takeover && before > 0 {
+            return Ok(FenceGrant {
+                token: FenceToken::new(before),
+                ..grant
+            });
+        }
         Ok(grant)
     }
 
@@ -189,7 +354,152 @@ impl HostStore for Canary {
                     CommitBatch::try_new(batch.commit_id().clone(), batch.fence(), updates)?;
                 self.inner.commit(&rebatched).await
             }
+            Breaks::TokenOrder => self.inner.commit(batch).await,
+            Breaks::LateVisibility => {
+                if self.inner.commit_point(batch)? {
+                    return Ok(());
+                }
+                YieldOnce::default().await;
+                self.inner.apply_unfenced(batch)
+            }
+            Breaks::CommitFence => {
+                if batch.fence().get() < self.newest.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                self.inner.commit(batch).await
+            }
         }
+    }
+}
+
+/// A handle that serves each kind's listing from its first full listing of
+/// that kind, forever, applying only its own commits to it: a listing kept
+/// from one granted acquire for the next.
+struct StaleRelist {
+    inner: Arc<InMemoryHostStore>,
+    listed: Mutex<BTreeMap<ScopeKind, BTreeMap<ScopeName, VersionedHead>>>,
+}
+
+impl StaleRelist {
+    fn listed(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<ScopeKind, BTreeMap<ScopeName, VersionedHead>>> {
+        self.listed.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Hands out a new [`StaleRelist`] handle per open, over one store: each
+/// process keeps its own listing.
+struct StaleRelistFactory {
+    memory: Arc<InMemoryHostStore>,
+}
+
+#[async_trait]
+impl HostStoreFactory for StaleRelistFactory {
+    async fn open(&self) -> Result<Arc<dyn HostStore>, ConformanceFailure> {
+        Ok(Arc::new(StaleRelist {
+            inner: Arc::clone(&self.memory),
+            listed: Mutex::new(BTreeMap::new()),
+        }))
+    }
+
+    async fn lapse_fence_leases(&self) -> Result<(), ConformanceFailure> {
+        self.memory.lapse_fence_leases();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl HostStore for StaleRelist {
+    async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError> {
+        self.inner.acquire_fence(mode).await
+    }
+
+    async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError> {
+        self.inner.renew_fence(token).await
+    }
+
+    fn fence_timing(&self) -> FenceTiming {
+        self.inner.fence_timing()
+    }
+
+    async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError> {
+        self.inner.load_head(scope).await
+    }
+
+    async fn list_heads(
+        &self,
+        kind: ScopeKind,
+        after: Option<&ScopeName>,
+        limit: usize,
+    ) -> Result<HeadPage, HostStoreError> {
+        let cached = self.listed().get(&kind).cloned();
+        let heads = match cached {
+            Some(heads) => heads,
+            None => {
+                let page = self.inner.list_heads(kind, None, usize::MAX).await?;
+                let heads: BTreeMap<ScopeName, VersionedHead> = page
+                    .heads
+                    .into_iter()
+                    .map(|entry| (entry.name, entry.head))
+                    .collect();
+                self.listed().insert(kind, heads.clone());
+                heads
+            }
+        };
+        let mut matching = heads
+            .into_iter()
+            .filter(|(name, _)| after.is_none_or(|after| name > after));
+        let page: Vec<ScopeHead> = matching
+            .by_ref()
+            .take(limit)
+            .map(|(name, head)| ScopeHead { name, head })
+            .collect();
+        let next = if matching.next().is_some() {
+            page.last().map(|last| last.name.clone())
+        } else {
+            None
+        };
+        Ok(HeadPage::new(page, next))
+    }
+
+    async fn read_rows(
+        &self,
+        scope: &ScopeRef,
+        from: RowIndex,
+        limit: usize,
+    ) -> Result<Vec<Row>, HostStoreError> {
+        self.inner.read_rows(scope, from, limit).await
+    }
+
+    async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError> {
+        self.inner.commit(batch).await?;
+        let mut listed = self.listed();
+        for update in batch.updates() {
+            let Some(heads) = listed.get_mut(&update.scope.kind) else {
+                continue;
+            };
+            if update.delete {
+                heads.remove(&update.scope.name);
+                continue;
+            }
+            let head = match &update.head {
+                Some(head) => head.clone(),
+                None => heads
+                    .get(&update.scope.name)
+                    .map(|known| known.head.clone())
+                    .unwrap_or_default(),
+            };
+            heads.insert(
+                update.scope.name.clone(),
+                VersionedHead {
+                    version: update.next,
+                    commit_id: batch.commit_id().clone(),
+                    head,
+                },
+            );
+        }
+        Ok(())
     }
 }
 
@@ -238,6 +548,91 @@ async fn store_landing_two_batches_for_one_version_fails_the_host_store_chapter(
         .expect_err("a store that lands two batches for one version must fail");
     assert_eq!(failure.chapter(), "host_store");
     assert_eq!(failure.step(), "same_version_twice");
+}
+
+#[tokio::test]
+async fn store_answering_a_takeover_with_an_earlier_token_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&Canary::factory(Breaks::TokenOrder))
+        .await
+        .expect_err(
+            "a store whose takeover answers no higher token than an earlier grant must fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "token_order");
+}
+
+#[tokio::test]
+async fn store_showing_an_earlier_batch_only_after_an_acquire_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&Canary::factory(Breaks::LateVisibility))
+        .await
+        .expect_err(
+            "a store that shows a batch it ordered before an acquire only after the acquire \
+             returned must fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "an_acquire_decides_the_cut");
+}
+
+#[tokio::test]
+async fn store_keeping_a_listing_across_acquires_fails_the_host_store_chapter() {
+    let factory = StaleRelistFactory {
+        memory: Arc::new(InMemoryHostStore::new()),
+    };
+    let failure = chapters::host_store(&factory).await.expect_err(
+        "a store whose handle serves the listing it made before another writer committed must \
+         fail",
+    );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "reacquire_lists_another_writers_commits");
+}
+
+// The canary passes every other row: the chapter runs its rows in order and
+// this one last.
+#[tokio::test]
+async fn store_acknowledging_a_superseded_token_fails_only_the_commit_fence_row() {
+    let failure = chapters::host_store(&Canary::factory(Breaks::CommitFence))
+        .await
+        .expect_err("a store that answers Ok to a commit under a superseded token must fail");
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "a_superseded_token_is_refused_at_commit");
+}
+
+#[tokio::test]
+async fn store_listing_its_load_conflicts_per_scope_passes_the_host_store_chapter() {
+    chapters::host_store(&LoadConflicting::factory(true))
+        .await
+        .expect(
+            "a store that loads two batches for one version as a typed conflict and lists the \
+             scope per scope must satisfy the host store chapter",
+        );
+}
+
+#[tokio::test]
+async fn store_failing_the_page_of_a_conflicted_scope_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&LoadConflicting::factory(false))
+        .await
+        .expect_err(
+            "a store that fails a whole listing page for a scope that loads as a typed conflict \
+             must fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "a_conflicted_scope_is_listed_typed");
+}
+
+// A store that lists a conflicted scope typed and fails its head load, but
+// serves one batch's rows of it, would let Core fold the rows of a scope
+// whose conflict arose after the open's listing instead of quarantining it:
+// the conflict row reads the scope's rows too.
+#[tokio::test]
+async fn store_serving_the_rows_of_a_conflicted_scope_fails_the_host_store_chapter() {
+    let failure = chapters::host_store(&LoadConflicting::serving_rows())
+        .await
+        .expect_err(
+            "a store that serves the rows of a scope whose head loads as a typed conflict must \
+             fail",
+        );
+    assert_eq!(failure.chapter(), "host_store");
+    assert_eq!(failure.step(), "a_conflicted_scope_is_listed_typed");
 }
 
 fn scope(name: &str) -> ScopeRef {
@@ -810,11 +1205,17 @@ impl DurableWorkerHarness for ScriptedCore {
         plan: &LongRunPlan,
         gate: ResumeGate,
     ) -> Result<RestartedWorker, ConformanceFailure> {
-        let refused = matches!(gate, ResumeGate::Superseded | ResumeGate::Unavailable);
-        let report = if refused {
-            self.settled_report()
-        } else {
-            self.restart_report(plan)
+        let refused = gate == ResumeGate::Superseded;
+        let report = match gate {
+            ResumeGate::Superseded => self.settled_report(),
+            // The gate could not decide: the run stays open for the next
+            // start, nothing of it runs and nothing of it ends.
+            ResumeGate::Unavailable => RestartReport {
+                inputs_settled: false,
+                inputs_consumed: false,
+                ..self.settled_report()
+            },
+            _ => self.restart_report(plan),
         };
         Ok(RestartedWorker {
             identity: "worker".to_string(),

@@ -1258,7 +1258,9 @@ impl MobNativeDelivery {
 
     /// The members of this gateway's mob whose registered row names the
     /// profile `role`, or of a mob hosted here a member created whose roster
-    /// entry has the role: the members a role template takes now. None for
+    /// entry has the role: the members a role template takes now. A member
+    /// private to a person ([`crate::access::PRIVATE_TO_LABEL`]) is never
+    /// one: an announcement a role takes reaches no private member. None for
     /// a mob that is gone; unavailable while it is held.
     pub async fn members_with_role(
         &self,
@@ -1266,12 +1268,20 @@ impl MobNativeDelivery {
         role: &str,
     ) -> Result<Vec<Member>, NativeUnavailable> {
         let identities: Vec<String> = if *mob_id == self.mob_id {
-            self.identities
-                .registered_with_profile(role)
-                .await
-                .into_iter()
-                .map(|identity| identity.as_str().to_string())
-                .collect()
+            let mut shared = Vec::new();
+            for identity in self.identities.registered_with_profile(role).await {
+                let private =
+                    self.identities
+                        .registered_spec(&identity)
+                        .await
+                        .is_ok_and(|registered| {
+                            crate::access::private_owner(&registered.spec.labels).is_some()
+                        });
+                if !private {
+                    shared.push(identity.as_str().to_string());
+                }
+            }
+            shared
         } else {
             let Some(handle) = self.running_child(mob_id).await? else {
                 return Ok(Vec::new());
@@ -1280,7 +1290,10 @@ impl MobNativeDelivery {
                 .list_members()
                 .await
                 .into_iter()
-                .filter(|entry| entry.role.as_str() == role)
+                .filter(|entry| {
+                    entry.role.as_str() == role
+                        && crate::access::private_owner(&entry.labels).is_none()
+                })
                 .map(|entry| entry.agent_identity.as_str().to_string())
                 .collect()
         };

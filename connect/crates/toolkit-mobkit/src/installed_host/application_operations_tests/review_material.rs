@@ -224,6 +224,7 @@ async fn installed_review_material_refuses_expired_and_revoked_actual_lineage() 
         f.source
             .grants()
             .revoke(
+                &meerkat_core::AdmissionGuard::none(),
                 &f.application.native.grant_administrator,
                 targets[0].lineage.last().unwrap(),
                 &mut custody,

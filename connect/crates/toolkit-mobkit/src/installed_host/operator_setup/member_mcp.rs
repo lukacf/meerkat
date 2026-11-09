@@ -1019,6 +1019,7 @@ impl OperatorSetup {
                                     return Err(HostLifetimeError::Denied);
                                 }
                                 grants.issue_root(
+                                    &meerkat_core::AdmissionGuard::none(),
                                     &self.operator,
                                     native_id,
                                     record.intent.executor.clone(),
@@ -1127,7 +1128,12 @@ impl OperatorSetup {
                     .try_controller_grant_mutation()
                     .map_err(|_| MemberMcpError::PendingReconciliation)?;
                 grants
-                    .revoke(&self.operator, &lineage[0], &mut custody)
+                    .revoke(
+                        &meerkat_core::AdmissionGuard::none(),
+                        &self.operator,
+                        &lineage[0],
+                        &mut custody,
+                    )
                     .map_err(|_| MemberMcpError::PendingReconciliation)?;
                 record.cleanup = Some(Cleanup::Revoked);
             }

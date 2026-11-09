@@ -456,6 +456,79 @@ impl RetirementArchiveObservationSource {
     }
 }
 
+/// A fresh-session rotation's settle of the session it leaves, after its
+/// archive and before its terminal step
+/// ([`MobSessionService::settle_owed_compaction_projections`]): no wake ever
+/// finalizes what the session still owes, so its owed compaction projections
+/// are finalized cold here, for every host. The answered batch is dropped. A
+/// settle that fails leaves the projections owed, as before, and never fails
+/// the rotation. It runs within the retirement's `deadline`: a settle still
+/// running there is dropped and logged, and what it had not acknowledged
+/// stays owed (a later settle finds a batch this one published, and
+/// acknowledges it with no entries).
+async fn settle_owed_compaction_of_rotated_session(
+    service: &dyn MobSessionService,
+    session: &SessionId,
+    identity: &AgentIdentity,
+    deadline: Instant,
+) {
+    let settle = service.settle_owed_compaction_projections(session);
+    let Ok(answer) =
+        tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), settle).await
+    else {
+        tracing::warn!(
+            %identity,
+            session_id = %session,
+            "the rotation's settle of the compaction projections the session it leaves owes \
+             did not finish within the retirement's deadline; what it did not acknowledge \
+             stays owed"
+        );
+        return;
+    };
+    match answer {
+        Ok(meerkat_session::OwedCompactionSettlement::Settled { projections }) => {
+            tracing::info!(
+                %identity,
+                session_id = %session,
+                projections = projections.len(),
+                "the rotation settled the compaction projections the session it leaves still owed"
+            );
+        }
+        Ok(_) => {}
+        // A service that keeps durable sessions refuses the settle only
+        // when a wrapper does not forward it: the projections stay owed
+        // for good, so that is said at warn.
+        Err(meerkat_core::service::SessionError::Unsupported(detail))
+            if service.supports_persistent_sessions() =>
+        {
+            tracing::warn!(
+                %identity,
+                session_id = %session,
+                detail,
+                "the session service keeps durable sessions but does not settle owed \
+                 compaction projections (a wrapper that does not forward the settle); they \
+                 stay owed"
+            );
+        }
+        Err(meerkat_core::service::SessionError::Unsupported(detail)) => {
+            tracing::debug!(
+                %identity,
+                session_id = %session,
+                detail,
+                "the session service does not settle owed compaction projections"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                %identity,
+                session_id = %session,
+                %error,
+                "the rotation could not settle the compaction projections the session it leaves owes; they stay owed"
+            );
+        }
+    }
+}
+
 /// Which members one retirement stage's commit asserts.
 ///
 /// A stage's commit treats any non-current fence as lost authority: the
@@ -3349,6 +3422,13 @@ impl MobActor {
             #[cfg(feature = "runtime-adapter")]
             adapter: self.runtime_adapter.clone(),
         };
+        // A rotation onto a fresh session ends this session for good: no
+        // wake ever finalizes what it still owes. Once the archive ended it,
+        // and before the rotation's terminal step, its owed compaction
+        // projections are settled cold, so every host gets their
+        // finalization. The answered batch is not handed to anyone.
+        let settle_owed_compaction =
+            matches!(continuation.reply, RetirementReply::Rotate { .. }) && !session_unborn;
         // Fence scope: self-only; disposes the retiring member's own exact member/session.
         self.dispatch_retirement(
             continuation,
@@ -3410,6 +3490,18 @@ impl MobActor {
                     result
                 }
                 .await;
+                if settle_owed_compaction
+                    && matches!(result, Ok(mob_dsl::MemberSessionDisposal::Archived))
+                    && let Some(session) = member.bridge_session_id()
+                {
+                    settle_owed_compaction_of_rotated_session(
+                        observation.service.as_ref(),
+                        session,
+                        &identity,
+                        deadline,
+                    )
+                    .await;
+                }
                 RetirementObservation::Archived(result)
             },
         );
@@ -5811,9 +5903,17 @@ impl MobActor {
                         });
                     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
                     if replacement.placement.is_some() {
+                        // The replacement's profile is checked as every placed
+                        // spawn's is (`check_placed_profile`), again after the
+                        // respawn checked it before the retirement.
+                        let placed_profile_check = self.placed_profile_check_context(
+                            super::super::handle::SpawnSource::Respawn,
+                            replacement.role_name.clone(),
+                        );
                         boxed_arm_future(|| {
                             self.enqueue_spawn_remote(
                                 *replacement,
+                                placed_profile_check,
                                 None,
                                 None,
                                 origin,
@@ -7279,6 +7379,8 @@ mod tests {
                 fork_source: None,
                 fork_overlay: Default::default(),
                 definition_wiring: crate::DefinitionWiring::Applies,
+                approval_branch: None,
+                dispatch_admission_lineage: false,
             };
             let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(
                 crate::roster::Roster::from_projected_entries([entry]),

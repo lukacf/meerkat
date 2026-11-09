@@ -495,6 +495,7 @@ async fn exercise_a2(server: &Server, order: Order) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -506,6 +507,7 @@ async fn exercise_a2(server: &Server, order: Order) {
     operation_ceiling.actions = ExactRestriction::exact([action("read"), action("delete")]);
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("record-actions"),
             principal("executor"),
@@ -541,6 +543,7 @@ async fn exercise_a2(server: &Server, order: Order) {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,

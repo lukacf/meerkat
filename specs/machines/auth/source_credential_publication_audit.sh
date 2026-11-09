@@ -5,18 +5,22 @@
 #
 # Derives the TLC config from the generated ci.cfg next to this script (every
 # generated constant and invariant, unchanged), then adds a second credential
-# value, the audit's action property and invariants, and its step bound, and
-# checks them over the whole bounded space. It then reruns the same space
+# value, the audit's action properties and invariants, and its step bound,
+# and checks them over the whole bounded space. It then reruns the same space
 # once per reachability witness, with that witness's negation as an extra
 # invariant, and requires TLC to report exactly that violation, so the
-# properties are not vacuous. With --mutants it then seeds three defects,
+# properties are not vacuous. With --mutants it then seeds five defects,
 # each into its own copy of the generated model, and requires TLC to refuse
 # each: Acquire without its guard credential_material_publishable (refused by
-# the action property), the renewal arms AcquireFromExpiring and
-# AcquireFromExpired disabled (refused by the verdict invariant), and
-# MarkPublicationRefusedFromValid without its guard
-# refused_publication_current (refused by the refusal invariant). An anchor
-# this script expects but cannot find fails the run.
+# the action property AuditWithdrawnMaterialNeverRepublished), the renewal
+# arms AcquireFromExpiring and AcquireFromExpired disabled (refused by the
+# verdict invariant), MarkPublicationRefusedFromValid without its guard
+# refused_publication_current (refused by the refusal invariant),
+# RestoreAuthoritySnapshotValid taking the restored record's generation
+# (refused by the action property AuditGenerationNeverDecreases), and Acquire
+# keeping the withdrawn publication's time (refused by the generated
+# invariant released_publication_only_without_credential). An anchor this
+# script expects but cannot find fails the run.
 set -euo pipefail
 
 usage="usage: source_credential_publication_audit.sh <max-steps> [--mutants] [extra tlc args...]"
@@ -27,8 +31,8 @@ if [[ "${1:-}" == "--mutants" ]]; then
   run_mutants=true
   shift
 fi
-if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 3 )); then
-  echo "error: max-steps must be an integer >= 3 (the longest witness is 3 steps)" >&2
+if ! [[ "${max_steps}" =~ ^[0-9]+$ ]] || (( max_steps < 4 )); then
+  echo "error: max-steps must be an integer >= 4 (the longest witness is 4 steps)" >&2
   exit 2
 fi
 
@@ -60,6 +64,7 @@ write_cfg() {
   AuditMaxSteps = ${max_steps}" "${cfg}"
   replace_exact_line "INVARIANTS" "PROPERTIES
   AuditWithdrawnMaterialNeverRepublished
+  AuditGenerationNeverDecreases
 INVARIANTS${invariants}" "${cfg}"
   replace_exact_line "  CiStateConstraint" "  AuditStateConstraint" "${cfg}"
   printf 'CHECK_DEADLOCK FALSE\n' >> "${cfg}"
@@ -107,7 +112,8 @@ if [[ "${safety_status}" != "0" ]] \
 fi
 
 for witness in RefusalHealed LogoutHealed WindowRenewed RefusedValueBlocked \
-  LoggedOutValueBlocked LateRefusalLeavesNewer CurrentRefusalWithdraws; do
+  LoggedOutValueBlocked LateRefusalLeavesNewer CurrentRefusalWithdraws \
+  AdoptedBelowLease ReleasedBound; do
   cfg="${work_dir}/witness-${witness}.cfg"
   write_cfg "${cfg}" "
   NotAuditWitness${witness}"
@@ -225,5 +231,78 @@ PY
     exit 1
   fi
   echo "mutant uncorrelated-refusal refused by AuditRefusalCorrelated"
+
+  # The restore of a durable record takes the record's generation, as a
+  # restore that let the lease generation go back would: the lease of a
+  # process that published again moves back to another process's lower
+  # generation (and records no marker generation of its own). The action
+  # property AuditGenerationNeverDecreases must refuse it.
+  dir="${work_dir}/mutant-restore-takes-record-generation"
+  mkdir -p "${dir}"
+  cp "${spec_dir}"/*.tla "${dir}/"
+  MODEL="${dir}/model.tla" python3 - <<'PY'
+import os
+import re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^RestoreAuthoritySnapshotValid\(.*?\n\n", text, re.S | re.M)
+assert block, "RestoreAuthoritySnapshotValid not found"
+lines = block.group(0).split("\n")
+replacements = {
+    "    /\\ credential_generation' = ": "    /\\ credential_generation' = arg_credential_generation",
+    "    /\\ adopted_marker_generation' = ": "    /\\ adopted_marker_generation' = None",
+}
+for prefix, mutated in replacements.items():
+    hits = [i for i, line in enumerate(lines) if line.startswith(prefix)]
+    assert len(hits) == 1, f"expected one line starting {prefix!r} in RestoreAuthoritySnapshotValid, found {len(hits)}"
+    lines[hits[0]] = mutated
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+  cfg="${work_dir}/mutant-restore-takes-record-generation.cfg"
+  write_cfg "${cfg}" ""
+  status=0
+  (cd "${dir}" && run_tlc mutant-restore-takes-record-generation "${cfg}" "$@") || status=$?
+  log="${work_dir}/mutant-restore-takes-record-generation.log"
+  if ! grep -q "Error: Action property AuditGenerationNeverDecreases is violated" "${log}"; then
+    cat "${log}"
+    echo "error: mutant restore-takes-record-generation was not refused by AuditGenerationNeverDecreases (tlc exit ${status})" >&2
+    exit 1
+  fi
+  echo "mutant restore-takes-record-generation refused by AuditGenerationNeverDecreases"
+
+  # A publication keeps the withdrawn publication's time: a lease that holds
+  # a credential would still carry the bound of an earlier withdrawal. The
+  # generated invariant released_publication_only_without_credential must
+  # refuse it.
+  dir="${work_dir}/mutant-publication-keeps-released-bound"
+  mkdir -p "${dir}"
+  cp "${spec_dir}"/*.tla "${dir}/"
+  MODEL="${dir}/model.tla" python3 - <<'PY'
+import os
+import re
+path = os.environ["MODEL"]
+text = open(path).read()
+block = re.search(r"^Acquire\(.*?\n\n", text, re.S | re.M)
+assert block, "Acquire not found"
+lines = block.group(0).split("\n")
+prefix = "    /\\ released_publication_at_millis' = "
+hits = [i for i, line in enumerate(lines) if line.startswith(prefix)]
+assert len(hits) == 1, f"expected one released_publication_at_millis update in Acquire, found {len(hits)}"
+lines[hits[0]] = prefix + "released_publication_at_millis"
+text = text[: block.start()] + "\n".join(lines) + text[block.end():]
+open(path, "w").write(text)
+PY
+  cfg="${work_dir}/mutant-publication-keeps-released-bound.cfg"
+  write_cfg "${cfg}" ""
+  status=0
+  (cd "${dir}" && run_tlc mutant-publication-keeps-released-bound "${cfg}" "$@") || status=$?
+  log="${work_dir}/mutant-publication-keeps-released-bound.log"
+  if ! grep -q "Error: Invariant released_publication_only_without_credential is violated" "${log}"; then
+    cat "${log}"
+    echo "error: mutant publication-keeps-released-bound was not refused by released_publication_only_without_credential (tlc exit ${status})" >&2
+    exit 1
+  fi
+  echo "mutant publication-keeps-released-bound refused by released_publication_only_without_credential"
 fi
 echo "source-credential publication audit passed at model_step_count <= ${max_steps}"

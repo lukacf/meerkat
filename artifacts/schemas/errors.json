@@ -155,6 +155,16 @@
         "const": "FORK_INSTRUCTION_REFUSED",
         "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
         "type": "string"
+      },
+      {
+        "const": "ADMISSION_IN_PROGRESS",
+        "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+        "type": "string"
+      },
+      {
+        "const": "ADMISSION_FENCE_UNAVAILABLE",
+        "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
+        "type": "string"
       }
     ],
     "title": "ErrorCode"
@@ -316,6 +326,16 @@
           {
             "const": "FORK_INSTRUCTION_REFUSED",
             "description": "A durable fork was refused before commit because of the activation\nrows its child would inherit, under the host's fork instruction\npolicy. No child exists; the typed cause and keys ride in the error\ndata. A fork request may set `inherited_instructions` to\n`reactivate_inherited` to carry the source's effective activations.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_IN_PROGRESS",
+            "description": "A realm admission fence the operation needs is held, by an admission\nor another fenced operation, beyond the operation's bound. The\noperation did not start and wrote nothing. It may be retried once the\nhold ends, which after an interrupted admission can be only when the\nprocess holding it restarts: an immediate retry is not promised to\nsucceed.",
+            "type": "string"
+          },
+          {
+            "const": "ADMISSION_FENCE_UNAVAILABLE",
+            "description": "A realm admission fence the operation needs could not be opened,\ncreated, locked or identity-checked. The operation did not start and\nwrote nothing; it fails closed.",
             "type": "string"
           }
         ]

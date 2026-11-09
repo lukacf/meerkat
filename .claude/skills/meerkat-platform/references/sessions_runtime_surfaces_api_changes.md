@@ -1,5 +1,5 @@
 Covers: Meerkat 0.9 API surface changes: JSON-RPC methods and REST routes
-added or renamed since 0.8.40; the full `ErrorCode` table (-32001 to -32037)
+added or renamed since 0.8.40; the full `ErrorCode` table (-32001 to -32039)
 with HTTP status, input readiness kinds (`original_admission_pending`), and
 real `rkat` exit codes; Python, TypeScript and Web SDK changes (RunInput,
 CONNECTION_CLOSED stderr tail, wasm stack, 0.9.4 `run_failed` content-filtered
@@ -65,6 +65,8 @@ with the resumable session identity in `details`.
 | `APPROVAL_COMMIT_UNKNOWN` | -32035 | 500 | Approval commit unknown; reconcile (0.9.0) |
 | `STALE_DELIVERY_SCOPE` | -32036 | 409 | Member session rotated; re-capture the delivery scope (0.9.0) |
 | `FORK_INSTRUCTION_REFUSED` | -32037 | 422 | A fork refused before commit by the fork instruction policy; `data.fork_instruction_refusal` names the cause and keys; CLI exit 57 (0.9.4) |
+| `ADMISSION_IN_PROGRESS` | -32038 | 409 | A realm admission fence the config write needs is held; nothing written; retryable once the hold ends; CLI exit 58 (0.9.11) |
+| `ADMISSION_FENCE_UNAVAILABLE` | -32039 | 503 | A realm admission fence the config write needs could not be used; nothing written; CLI exit 59 (0.9.11) |
 | `INVALID_PARAMS` | -32602 | 400 | Invalid request |
 | `INTERNAL_ERROR` | -32603 | 500 | Unexpected failure |
 

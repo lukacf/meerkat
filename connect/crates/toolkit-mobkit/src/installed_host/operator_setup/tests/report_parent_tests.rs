@@ -30,6 +30,7 @@ impl Fixture {
                 let controller = source
                     .grants()
                     .issue_root(
+                        &meerkat_core::AdmissionGuard::none(),
                         operator,
                         EvidenceId::new("separate-controller-parent").unwrap(),
                         native.grant_administrator.clone(),
@@ -312,7 +313,12 @@ fn configured_original_targets_recover_partial_roots_and_keep_helper_roots_indep
         let mut custody = machine.try_controller_grant_mutation().unwrap();
         source
             .grants()
-            .revoke(operator, &selected.helper_targets[0].parent, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                operator,
+                &selected.helper_targets[0].parent,
+                &mut custody,
+            )
             .unwrap();
         assert!(
             source
@@ -486,6 +492,7 @@ fn report_parent_recovery_refuses_legacy_unrestricted_id_and_new_id_selects_owne
             let legacy = source
                 .grants()
                 .issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     operator,
                     fixture.request.issuance_id.clone(),
                     native.grant_administrator.clone(),
@@ -506,6 +513,7 @@ fn report_parent_recovery_refuses_legacy_unrestricted_id_and_new_id_selects_owne
             let child = source
                 .grants()
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &native.grant_administrator,
                     &legacy,
                     EvidenceId::new("historical-report-child").unwrap(),
@@ -584,14 +592,16 @@ fn report_parent_recovery_refuses_legacy_unrestricted_id_and_new_id_selects_owne
             requested: legacy_child_bounds.clone(),
         };
         assert_eq!(
-            grants.issue_or_recover_child_under_exclusion(&rebound_child, || Ok(
-                meerkat_authorization::grants::ChildGrantValidity {
+            grants.issue_or_recover_child_under_exclusion(
+                &meerkat_core::AdmissionGuard::none(),
+                &rebound_child,
+                || Ok(meerkat_authorization::grants::ChildGrantValidity {
                     not_before_ms: 0,
                     expires_at_ms: u64::MAX,
                     deadline: meerkat_core::time_compat::Instant::now()
                         + std::time::Duration::from_secs(60),
-                }
-            )),
+                })
+            ),
             Err(meerkat_authorization::grants::ChildGrantRefusal::Denied)
         );
         assert_eq!(

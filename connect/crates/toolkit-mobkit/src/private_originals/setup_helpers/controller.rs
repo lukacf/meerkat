@@ -337,9 +337,9 @@ fn with_helper_logins<T>(
 fn child_error(refusal: HelperChildIssuanceRefusal) -> PrivateOriginalError {
     match refusal {
         HelperChildIssuanceRefusal::Denied => PrivateOriginalError::Denied,
-        HelperChildIssuanceRefusal::Unavailable | HelperChildIssuanceRefusal::Uncertain => {
-            PrivateOriginalError::Unavailable
-        }
+        HelperChildIssuanceRefusal::Unavailable
+        | HelperChildIssuanceRefusal::AdmissionInProgress
+        | HelperChildIssuanceRefusal::Uncertain => PrivateOriginalError::Unavailable,
     }
 }
 

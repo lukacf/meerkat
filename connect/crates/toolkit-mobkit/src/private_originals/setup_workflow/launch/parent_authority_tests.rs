@@ -68,7 +68,12 @@ fn revoke(c: &Fixture, selected: &WorkflowParentAuthoritySelection) {
         .unwrap();
     let mut custody = c.f.machine.try_controller_grant_mutation().unwrap();
     grants
-        .revoke(&native.grant_administrator, &leaf, &mut custody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &native.grant_administrator,
+            &leaf,
+            &mut custody,
+        )
         .unwrap();
 }
 

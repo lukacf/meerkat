@@ -48,6 +48,69 @@ pub struct TranscriptMessageIdentity {
     /// conversational turns (typed, spoken or peer input).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_input: Option<TranscriptTurnInput>,
+    /// The original requester the turn served: the requester its inputs
+    /// share, stamped at admission from the inputs, never inferred from
+    /// content. Absent when the turn's inputs carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<TurnRequester>,
+}
+
+/// The original requester of a turn: the principal its inputs share, and
+/// whether it reached them directly.
+///
+/// The principal is opaque to Core. A host supplies it for the inputs it
+/// admits (the authenticated caller it acts for), or a governed input's work
+/// association names it. Core carries it and never interprets it: it has no
+/// person, account or assurance concept for it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TurnRequester {
+    principal: crate::PrincipalRef,
+    /// Set when an input of the turn reached it through an actor other than
+    /// the requester: governed work another agent sent (a peer hop), or work
+    /// another owner admitted for the requester. Absent when the requester's
+    /// own ingress admitted every input.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    carried: bool,
+}
+
+impl TurnRequester {
+    /// A requester whose own ingress admitted the turn's inputs.
+    #[must_use]
+    pub fn direct(principal: crate::PrincipalRef) -> Self {
+        Self {
+            principal,
+            carried: false,
+        }
+    }
+
+    /// A requester whose work reached the turn through another actor.
+    #[must_use]
+    pub fn carried(principal: crate::PrincipalRef) -> Self {
+        Self {
+            principal,
+            carried: true,
+        }
+    }
+
+    /// The requester's principal, whether direct or carried.
+    #[must_use]
+    pub fn principal(&self) -> &crate::PrincipalRef {
+        &self.principal
+    }
+
+    /// Whether the requester reached the turn through another actor.
+    #[must_use]
+    pub fn is_carried(&self) -> bool {
+        self.carried
+    }
+
+    /// The principal, only when the requester's own ingress admitted every
+    /// input of the turn. Consumers that act for a person use only this.
+    #[must_use]
+    pub fn direct_principal(&self) -> Option<&crate::PrincipalRef> {
+        (!self.carried).then_some(&self.principal)
+    }
 }
 
 /// Authorship of a turn's input that readers act on (see
@@ -240,6 +303,7 @@ impl TranscriptMessageIdentity {
             && self.objective_id.is_none()
             && self.realtime_origin.is_none()
             && self.turn_input.is_none()
+            && self.requester.is_none()
     }
 
     pub fn with_run_id(&self, run_id: crate::lifecycle::RunId) -> Self {
@@ -249,6 +313,7 @@ impl TranscriptMessageIdentity {
             objective_id: self.objective_id,
             realtime_origin: self.realtime_origin.clone(),
             turn_input: self.turn_input,
+            requester: self.requester.clone(),
         }
     }
 }

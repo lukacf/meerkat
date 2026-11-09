@@ -9,6 +9,7 @@ import { canonicalAssistantToolCounterparts, reconcileAssistantMessageFrames } f
 import { loadedTimelineStartMs, reconcileAssistantHistoryPositions, reconcileRuntimeAppendFrames, runtimeAppendNoticeKey } from "./runtime-append-projection";
 import { settledToolCompletion, toolCompletionFromFrame, unknownToolCompletion, type ToolCompletionEvidence } from "./tool-completion";
 import { parseConsoleContextMessage } from "./context-record";
+import { PRIVATE_REPLY_FRAME_EVENT, privateReplyText } from "./console-attention";
 import { memberKickoffNotice, memberKickoffPhaseLabel } from "./member-kickoff";
 import {
   decodeMemberAlias,
@@ -1876,8 +1877,26 @@ function renderHistoryUserEntry(
   };
 }
 
+/// Whether a send frame's payload records `field` (an object).
+function hasDeliveryRecord(frame: ConsoleFrame, field: string): boolean {
+  const data = frame.data;
+  if (!data || typeof data !== "object") return false;
+  const record = (data as Record<string, unknown>)[field];
+  return Boolean(record) && typeof record === "object";
+}
+
+/// A governed send held at its host's door records `delivery_hold` on its
+/// still-accepted input frame: nothing was delivered yet, and a replay of
+/// its key dispatches it again. A governed send whose native admission
+/// answered unresolved records `delivery_unresolved` on its
+/// still-submitted input frame: its input may have run, and the runtime's
+/// evidence settles it. Neither is a reason to send it again unchecked.
 function renderUserDeliveryFailureEntry(frame: ConsoleFrame, entryId: string): ConversationTimelineEntry | null {
-  if (frame.event !== "user_input" || frame.status !== "delivery_failed") return null;
+  if (frame.event !== "user_input") return null;
+  const failed = frame.status === "delivery_failed";
+  const held = frame.status === "accepted" && hasDeliveryRecord(frame, "delivery_hold");
+  const unresolved = frame.status === "submitted" && hasDeliveryRecord(frame, "delivery_unresolved");
+  if (!failed && !held && !unresolved) return null;
   return {
     kind: "message",
     id: `${entryId}:delivery-status`,
@@ -1885,7 +1904,11 @@ function renderUserDeliveryFailureEntry(frame: ConsoleFrame, entryId: string): C
     variant: "meta",
     createdAt: isoFromTimestampMs(frame.timestampMs),
     ...(frame.interactionId ? { interactionId: frame.interactionId } : {}),
-    text: "Message delivery failed.",
+    text: failed
+      ? "Message delivery failed."
+      : unresolved
+        ? "Message may have run. Check before sending it again."
+        : "Message held: nothing was delivered yet. Check before sending it again.",
     runtimeEvent: runtimeEventFromFrame(frame.event, {
       status: frame.status,
       input_frame_id: frame.id,
@@ -3869,6 +3892,26 @@ export function mapFramesToTimelineEntries(
       flushPendingReasoning(true);
       flushPendingText();
       entries.push(entry);
+      continue;
+    }
+
+    // A reply meant for this thread's person alone, appended after the turn
+    // that asked: the agent's message, never a runtime event. One without
+    // text shows nothing.
+    if (frame.event === PRIVATE_REPLY_FRAME_EVENT) {
+      const text = privateReplyText(frame);
+      if (!text) continue;
+      flushPendingReasoning(true);
+      flushPendingText();
+      const blocks = messageTextBlocks(text, textMode);
+      entries.push({
+        kind: "message",
+        id: entryId,
+        identity: agentIdentity(agent),
+        variant: blocks.length > 0 ? "rich" : "plain",
+        createdAt: isoFromTimestampMs(frame.timestampMs),
+        ...(blocks.length > 0 ? { blocks } : { text }),
+      });
       continue;
     }
 

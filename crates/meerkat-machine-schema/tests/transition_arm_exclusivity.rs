@@ -41,7 +41,8 @@
 //! transition_arm_exclusivity -- --ignored print_exclusivity_baseline
 //! --nocapture`. It prints the current unrefuted pairs on stdout (the census
 //! summary goes to stderr), keeping each listed reason and printing a new
-//! pair as `unproven-1811`. Replace [`BASELINE`] with those lines. The review
+//! pair as `unproven-1811`. Replace the entries of [`BASELINE`] with those
+//! lines, and keep the `#` comment lines that explain an entry. The review
 //! list is then the `git diff` of [`BASELINE`], and every `+` line needs a
 //! decision: a guard that makes the pair refutable, an `invariant:<name>` the
 //! machine declares, or an `unproven-1811` the reviewer accepts. A renamed
@@ -692,12 +693,13 @@ fn census(machines: &[MachineSchema]) -> Census {
     }
 }
 
-/// The baseline entries: each pair with its reason.
+/// The baseline entries: each pair with its reason. A line that starts with
+/// `#` is a comment.
 fn parse_baseline(baseline: &str) -> Vec<(ArmPair, String)> {
     baseline
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
             let [machine, phase, trigger, first, second, reason] = fields[..] else {
@@ -897,7 +899,8 @@ fn a_stale_baseline_entry_is_refused() {
 }
 
 /// Unrefuted same-trigger arm pairs, one per line:
-/// `machine phase trigger first second reason`.
+/// `machine phase trigger first second reason`. A line that starts with `#`
+/// is a comment on the entries below it.
 const BASELINE: &str = r"
 ApprovalLifecycleMachine Ready input:DecideConsent DecideConsentApprove DecideConsentRejectedMissing unproven-1811
 ApprovalLifecycleMachine Ready input:DecideConsent DecideConsentDeny DecideConsentRejectedMissing unproven-1811
@@ -1275,10 +1278,14 @@ MobMachine Running input:ResolvePlacedKickoffStarted ResolvePlacedKickoffStarted
 MobMachine Running input:ResolvePlacedKickoffStarted ResolvePlacedKickoffStartedAfterCancellationRunning ResolvePlacedKickoffStartedReplayRunning unproven-1811
 MobMachine Running input:ResolvePlacedKickoffStarted ResolvePlacedKickoffStartedFreshRunning ResolvePlacedKickoffStartedReplayRunning unproven-1811
 MobMachine Running input:ResolveRemoteTurnObligation ResolveRemoteTurnObligationCommittedRunning ResolveRemoteTurnObligationReplayRunning unproven-1811
+MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionCurrentRuntimeNotLive ResolveSubmitWorkRejectionIdentityMember unproven-1811
+MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionCurrentRuntimeNotLive ResolveSubmitWorkRejectionIdentityMemberUnreadableName unproven-1811
 MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionCurrentRuntimeNotLive ResolveSubmitWorkRejectionNotExternallyAddressable unproven-1811
 MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionCurrentRuntimeNotLive ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable unproven-1811
 MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionCurrentRuntimeNotLive ResolveSubmitWorkRejectionRetiringAsMemberNotFound unproven-1811
 MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionCurrentRuntimeNotLive ResolveSubmitWorkRejectionStaleSessionBinding unproven-1811
+MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionIdentityMember ResolveSubmitWorkRejectionStaleFenceToken unproven-1811
+MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionIdentityMemberUnreadableName ResolveSubmitWorkRejectionStaleFenceToken unproven-1811
 MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionNotExternallyAddressable ResolveSubmitWorkRejectionStaleFenceToken unproven-1811
 MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionNotExternallyAddressable ResolveSubmitWorkRejectionStaleSessionBinding unproven-1811
 MobMachine Running input:ResolveSubmitWorkRejection ResolveSubmitWorkRejectionPeerOnlyNotExternallyAddressable ResolveSubmitWorkRejectionStaleFenceToken unproven-1811
@@ -1317,6 +1324,18 @@ MobMachine Stopped input:Retire RetireRemoteConfirmedRevokedStopped RetireRemote
 MobMachine Stopped input:StartPlacedKickoff StartPlacedKickoffPendingReplayStopped StartPlacedKickoffResolvedReplayStopped unproven-1811
 MobMachine Stopped signal:AdmitDestroyMemberRetire AdmitDestroyMemberRetireAlreadyRetiringReleasedSessionStopped AdmitDestroyMemberRetireAlreadyRetiringSessionStopped unproven-1811
 MobMachine Stopped signal:AdmitDestroyMemberRetire AdmitDestroyMemberRetireConfirmedRevokedStopped AdmitDestroyMemberRetireRemoteStopped unproven-1811
+# ResolveMemberDispatchAdmission: AskHost and Inherit against NoneRequired are disjoint by
+# member_dispatch_admission_audit's AuditVerdictIsTotalAndDisjoint (TLC). The rules split the
+# lineage guard (record, gated or Unknown) into its cases and drop the arm's host_answer, the
+# only conjunct that separates an Unknown lineage from NoneRequired's.
+MobMachine Completed input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionAskHostCompleted ResolveMemberDispatchAdmissionNoneRequiredCompleted unproven-1811
+MobMachine Completed input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionInheritCompleted ResolveMemberDispatchAdmissionNoneRequiredCompleted unproven-1811
+MobMachine Destroyed input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionAskHostDestroyed ResolveMemberDispatchAdmissionNoneRequiredDestroyed unproven-1811
+MobMachine Destroyed input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionInheritDestroyed ResolveMemberDispatchAdmissionNoneRequiredDestroyed unproven-1811
+MobMachine Running input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionAskHostRunning ResolveMemberDispatchAdmissionNoneRequiredRunning unproven-1811
+MobMachine Running input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionInheritRunning ResolveMemberDispatchAdmissionNoneRequiredRunning unproven-1811
+MobMachine Stopped input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionAskHostStopped ResolveMemberDispatchAdmissionNoneRequiredStopped unproven-1811
+MobMachine Stopped input:ResolveMemberDispatchAdmission ResolveMemberDispatchAdmissionInheritStopped ResolveMemberDispatchAdmissionNoneRequiredStopped unproven-1811
 RuntimeDeliveryMachine Active input:ClassifyDeliveryStatus ClassifyAcknowledgedAhead ClassifyApplied unproven-1811
 RuntimeDeliveryMachine Active input:ClassifyDeliveryStatus ClassifyAcknowledgedAhead ClassifyMixed unproven-1811
 RuntimeDeliveryMachine Active input:ClassifyDeliveryStatus ClassifyAcknowledgedAhead ClassifyRefused unproven-1811

@@ -21873,6 +21873,7 @@ ORDER BY runtime_id";
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     reason: "released active steer".to_string(),
                     continuation_kind: crate::input::ContinuationKind::Ordinary,
@@ -21911,6 +21912,7 @@ ORDER BY runtime_id";
                         idempotency_key: None,
                         supersession_key: None,
                         correlation_id: None,
+                        requester: None,
                     },
                     reason: "released instruction continuation".to_string(),
                     continuation_kind: crate::input::ContinuationKind::WorkgraphAttention,
@@ -29135,6 +29137,7 @@ ORDER BY runtime_id";
                 messages_after: 1,
                 summary_source: None,
                 estimated_history_tokens_after: None,
+                instruction_snapshot: None,
             };
             session
                 .add_compaction_projection_intent(intent.clone())
@@ -29168,6 +29171,7 @@ ORDER BY runtime_id";
                 messages_after: 1,
                 summary_source: None,
                 estimated_history_tokens_after: None,
+                instruction_snapshot: None,
             }
         }
 

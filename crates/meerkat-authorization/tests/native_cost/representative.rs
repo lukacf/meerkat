@@ -407,6 +407,7 @@ impl RepresentativeFixture {
             let machine = MeerkatMachine::ephemeral()
                 .with_local_grant_authorization(NativeGrantWorkConfiguration {
                     retained_resume: None,
+                    kept_original: None,
                     require_scoped_destination: false,
                     grants: grants.clone(),
                     ingress,
@@ -1321,6 +1322,7 @@ async fn native_representative_correctness() {
                 .as_ref()
                 .unwrap()
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &principal("grant-owner"),
                     f.operations[2].last().unwrap(),
                     &mut custody,

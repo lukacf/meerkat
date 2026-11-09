@@ -164,7 +164,7 @@ async fn explicit_correlated_targets_use_one_review_source_and_real_first_input(
         {
             let mut custody = fixture.machine.try_controller_grant_mutation().unwrap();
             for parent in [&selection.parent[0], &selection.helper_targets[0].parent] {
-                owner.source.grants().revoke(&parent.root_authority, parent, &mut custody).unwrap();
+                owner.source.grants().revoke(&meerkat_core::AdmissionGuard::none(), &parent.root_authority, parent, &mut custody).unwrap();
             }
         }
         // The exact same canonical decision is still required. Revoking FI

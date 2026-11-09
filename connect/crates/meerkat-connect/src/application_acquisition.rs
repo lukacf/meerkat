@@ -1,8 +1,6 @@
 //! Trusted first-party acquisition selection from the activated application bundle.
 //! This composes existing installed owners; it opens no runtime or WorkGraph store.
-use crate::application_setup::{
-    ApplicationSetupDefinition, ApplicationSetupTools, PreparedApplicationSetup,
-};
+use crate::application_setup::{ApplicationSetupTools, PreparedApplicationSetup};
 use meerkat_toolkit::{
     authority::Ceiling,
     host_lifetime::{
@@ -1108,11 +1106,12 @@ fn prepare_gateway_acquisition_selected(
     let expected_state_root = storage.layout.state_root().to_path_buf();
     let realm = storage.locator.clone();
     let helper_member = helper.member().clone();
-    let original_definition = match &prepared.definition_source {
-        ApplicationSetupDefinition::Toml { text } => meerkat_mob::MobDefinition::from_toml(text)
-            .map_err(|_| HostLifetimeError::InvalidSelection)?,
-        ApplicationSetupDefinition::Native { definition } => (**definition).clone(),
-    };
+    // The same source read as preparation's, with its refusals: a setup
+    // definition that names a profile auth binding is refused here too.
+    let original_definition = prepared
+        .definition_source
+        .resolve()
+        .map_err(|_| HostLifetimeError::InvalidSelection)?;
     let expected_definition = update
         .map(|row| row.update.definition().clone())
         .unwrap_or_else(|| prepared.definition.clone());

@@ -50,6 +50,7 @@ fn authority(clock: Arc<dyn LocalAuthorizationClock>) -> Arc<LocalGrantAuthority
 fn issue(owner: &LocalGrantAuthority, name: &str) -> GrantLineageRef {
     owner
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id(name),
             who("holder"),
@@ -70,6 +71,7 @@ fn refused_root_and_duplicate_issue_preserve_existing_stamp_and_rows() {
     let revision = owner.owner.lock().expect("owner").state().revision;
     assert!(matches!(
         owner.issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("intruder"),
             id("denied"),
             who("holder"),
@@ -81,6 +83,7 @@ fn refused_root_and_duplicate_issue_preserve_existing_stamp_and_rows() {
     assert_eq!(before.check_current(), Ok(()));
     assert!(matches!(
         owner.issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             id("existing"),
             who("holder"),
@@ -93,6 +96,7 @@ fn refused_root_and_duplicate_issue_preserve_existing_stamp_and_rows() {
     // A caller who may not issue learns nothing about retained ids.
     assert!(matches!(
         owner.issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &who("intruder"),
             id("existing"),
             who("holder"),
@@ -118,6 +122,7 @@ fn refused_child_and_revoke_preserve_stamp_then_real_mutations_invalidate() {
     let before = stamp(&owner);
     assert!(matches!(
         owner.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("intruder"),
             &parent,
             id("child"),
@@ -128,12 +133,18 @@ fn refused_child_and_revoke_preserve_stamp_then_real_mutations_invalidate() {
     ));
     assert_eq!(before.check_current(), Ok(()));
     assert!(matches!(
-        owner.revoke(&who("intruder"), &parent, &mut IsolatedGrantTestCustody),
+        owner.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("intruder"),
+            &parent,
+            &mut IsolatedGrantTestCustody
+        ),
         Err(GrantRefusal::Denied)
     ));
     assert_eq!(before.check_current(), Ok(()));
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -144,7 +155,12 @@ fn refused_child_and_revoke_preserve_stamp_then_real_mutations_invalidate() {
     assert_eq!(before.check_current(), Err(PublicationError::Changed));
     let before_revoke = stamp(&owner);
     owner
-        .revoke(&who("root"), &child, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &child,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("accepted revoke");
     assert_eq!(
         before_revoke.check_current(),
@@ -152,7 +168,12 @@ fn refused_child_and_revoke_preserve_stamp_then_real_mutations_invalidate() {
     );
     let after_revoke = stamp(&owner);
     owner
-        .revoke(&who("root"), &child, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &child,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("idempotent revoke");
     assert_eq!(
         after_revoke.check_current(),
@@ -191,6 +212,7 @@ fn accepted_change_cannot_return_new_owner_facts_under_the_old_stamp() {
     let writer_owner = Arc::clone(&owner);
     let writer = std::thread::spawn(move || {
         writer_owner.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -272,6 +294,7 @@ fn mutation_panic_never_keeps_a_successfully_current_stamp() {
     let before = stamp(&owner);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         owner.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -301,7 +324,12 @@ fn issued_reference_is_the_retained_reference_or_none() {
     assert_eq!(before.check_current(), Ok(()));
     // A revoked grant keeps its issued reference.
     owner
-        .revoke(&who("root"), &issued, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &issued,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     assert_eq!(owner.issued_reference(&id("existing")), Ok(Some(issued)));
 }
@@ -312,6 +340,7 @@ fn a_child_under_a_used_id_is_a_duplicate_only_for_its_issuer() {
     let parent = issue(&owner, "parent");
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -323,6 +352,7 @@ fn a_child_under_a_used_id_is_a_duplicate_only_for_its_issuer() {
     for used in ["child", "parent"] {
         assert!(matches!(
             owner.issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("holder"),
                 &parent,
                 id(used),
@@ -333,6 +363,7 @@ fn a_child_under_a_used_id_is_a_duplicate_only_for_its_issuer() {
         ));
         assert!(matches!(
             owner.issue_child(
+                &meerkat_core::AdmissionGuard::none(),
                 &who("intruder"),
                 &parent,
                 id(used),
@@ -352,6 +383,7 @@ fn an_intruder_revoke_is_denied_even_while_the_reservation_is_busy() {
     let parent = issue(&owner, "parent");
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -365,26 +397,51 @@ fn an_intruder_revoke_is_denied_even_while_the_reservation_is_busy() {
         .expect("hold the reservation");
     for grant in [&parent, &child] {
         assert_eq!(
-            owner.revoke(&who("intruder"), grant, &mut IsolatedGrantTestCustody),
+            owner.revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &who("intruder"),
+                grant,
+                &mut IsolatedGrantTestCustody
+            ),
             Err(GrantRefusal::Denied)
         );
     }
     // Authorized callers (the root, the child's issuer) meet the busy
     // reservation: unavailable, nothing changed.
     assert_eq!(
-        owner.revoke(&who("root"), &parent, &mut IsolatedGrantTestCustody),
+        owner.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &parent,
+            &mut IsolatedGrantTestCustody
+        ),
         Err(GrantRefusal::Unavailable)
     );
     assert_eq!(
-        owner.revoke(&who("holder"), &child, &mut IsolatedGrantTestCustody),
+        owner.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("holder"),
+            &child,
+            &mut IsolatedGrantTestCustody
+        ),
         Err(GrantRefusal::Unavailable)
     );
     drop(busy);
     owner
-        .revoke(&who("holder"), &child, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("holder"),
+            &child,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("the issuer revokes once the reservation is free");
     assert_eq!(
-        owner.revoke(&who("intruder"), &parent, &mut IsolatedGrantTestCustody),
+        owner.revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("intruder"),
+            &parent,
+            &mut IsolatedGrantTestCustody
+        ),
         Err(GrantRefusal::Denied)
     );
 }
@@ -415,6 +472,7 @@ fn an_expected_revoke_after_a_published_owner_change_is_refused_unchanged() {
     let before = revision(&owner);
     assert_eq!(
         owner.revoke_expecting(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &grant,
             &checked,
@@ -438,6 +496,7 @@ fn an_expected_revoke_refuses_a_current_stamp_of_an_unrelated_publication() {
     let before = revision(&owner);
     assert_eq!(
         owner.revoke_expecting(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &grant,
             &foreign,
@@ -458,6 +517,7 @@ fn an_expected_revoke_with_a_current_stamp_revokes_exactly_once() {
     // Every refusal of `revoke` keeps its meaning; nothing is published.
     assert_eq!(
         owner.revoke_expecting(
+            &meerkat_core::AdmissionGuard::none(),
             &who("intruder"),
             &grant,
             &current,
@@ -469,6 +529,7 @@ fn an_expected_revoke_with_a_current_stamp_revokes_exactly_once() {
     let before = revision(&owner);
     owner
         .revoke_expecting(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &grant,
             &current,
@@ -486,6 +547,7 @@ fn an_expected_revoke_with_a_current_stamp_revokes_exactly_once() {
     // The checked stamp is now stale and cannot revoke again.
     assert_eq!(
         owner.revoke_expecting(
+            &meerkat_core::AdmissionGuard::none(),
             &who("root"),
             &grant,
             &current,
@@ -561,10 +623,14 @@ fn a_caught_owner_poison_inside_a_child_issuance_is_never_overwritten() {
     let host = Mutex::new(());
     let intent = child_intent(&parent, "child");
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&intent, || {
-            caught_host_poison(&publication, &host);
-            Ok(open())
-        }),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent,
+            || {
+                caught_host_poison(&publication, &host);
+                Ok(open())
+            }
+        ),
         Err(ChildGrantRefusal::Unavailable),
         "a conjunct's own poison refuses the append"
     );
@@ -589,7 +655,11 @@ fn a_caught_owner_poison_inside_a_child_issuance_is_never_overwritten() {
         Err(PublicationError::Unavailable)
     ));
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&intent, || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent,
+            || Ok(open())
+        ),
         Err(ChildGrantRefusal::Unavailable)
     );
 
@@ -598,7 +668,11 @@ fn a_caught_owner_poison_inside_a_child_issuance_is_never_overwritten() {
         .reconstruct(LocalAuthorizationPublication::new())
         .expect("reconstructed under a new publication");
     let issued = owner
-        .issue_or_recover_child_under_exclusion(&intent, || Ok(open()))
+        .issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent,
+            || Ok(open()),
+        )
         .expect("issued afresh after reconstruction");
     assert!(
         matches!(issued, ChildGrantOutcome::Issued { .. }),
@@ -618,7 +692,11 @@ fn a_child_issued_before_an_owner_poison_is_recovered_after_reconstruction() {
     let parent = issue(&owner, "parent");
     let intent = child_intent(&parent, "child");
     let issued = owner
-        .issue_or_recover_child_under_exclusion(&intent, || Ok(open()))
+        .issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent,
+            || Ok(open()),
+        )
         .expect("issued before the poison");
     let lineage = issued.lineage().to_vec();
     let resolved = owner
@@ -638,7 +716,11 @@ fn a_child_issued_before_an_owner_poison_is_recovered_after_reconstruction() {
         .reconstruct(LocalAuthorizationPublication::new())
         .expect("reconstructed under a new publication");
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&intent, || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent,
+            || Ok(open())
+        ),
         Ok(ChildGrantOutcome::Recovered { lineage })
     );
 }
@@ -685,11 +767,15 @@ fn a_poison_after_the_pre_append_check_leaves_the_issued_child_unusable_until_re
     let issuing_owner = Arc::clone(&owner);
     let issuing_intent = intent.clone();
     let issuer = std::thread::spawn(move || {
-        issuing_owner.issue_or_recover_child_under_exclusion(&issuing_intent, || {
-            // The next clock read is the final one before the append.
-            clock.armed.store(true, Ordering::SeqCst);
-            Ok(open())
-        })
+        issuing_owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &issuing_intent,
+            || {
+                // The next clock read is the final one before the append.
+                clock.armed.store(true, Ordering::SeqCst);
+                Ok(open())
+            },
+        )
     });
     entered_rx
         .recv_timeout(Duration::from_secs(5))
@@ -719,7 +805,11 @@ fn a_poison_after_the_pre_append_check_leaves_the_issued_child_unusable_until_re
         Err(GrantRefusal::Unavailable)
     ));
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&intent, || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent,
+            || Ok(open())
+        ),
         Err(ChildGrantRefusal::Unavailable)
     );
 
@@ -728,7 +818,11 @@ fn a_poison_after_the_pre_append_check_leaves_the_issued_child_unusable_until_re
         .reconstruct(LocalAuthorizationPublication::new())
         .expect("reconstructed under a new publication");
     assert_eq!(
-        owner.issue_or_recover_child_under_exclusion(&intent, || Ok(open())),
+        owner.issue_or_recover_child_under_exclusion(
+            &meerkat_core::AdmissionGuard::none(),
+            &intent,
+            || Ok(open())
+        ),
         Ok(ChildGrantOutcome::Recovered {
             lineage: lineage.clone()
         })

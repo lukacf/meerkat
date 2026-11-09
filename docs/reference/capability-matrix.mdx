@@ -173,27 +173,27 @@ v1 (recorded v2 hardening).
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "=0.9.10", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "=0.9.10", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "=0.9.10", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add facade-local predicate-schedule helper re-exports. The schedule service
 # and WorkGraph substrate are already linked.
-meerkat = { version = "=0.9.10", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "=0.9.11", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Broad native facade with WebSocket live support
-meerkat = { version = "=0.9.10", features = [
+meerkat = { version = "=0.9.11", features = [
   "all-providers", "openai-realtime", "session-store", "session-compaction",
   "memory-store-session", "comms", "mcp", "skills", "schedule", "live",
   "atif", # 0.8.23+
 ] }
 
 # WebRTC is separate and still needs `rkat-rpc --live-webrtc` at runtime
-meerkat = { version = "=0.9.10", features = ["openai-realtime", "live-webrtc"] }
+meerkat = { version = "=0.9.11", features = ["openai-realtime", "live-webrtc"] }
 ```
 
 ## Runtime capabilities
@@ -311,11 +311,15 @@ SDK spawn request even though the private remote-host bridge shares schema
 types with public artifacts.
 
 Scoped tool grants are a Rust API and a JSON-RPC family: a build marks tool
-names grant-gated (`grant_gated_tools` on `SessionBuildOptions`,
-`AgentBuildConfig` or `session/create`), and `MeerkatMachine::grant_tool`,
+names, built-in families and MCP servers grant-gated (`grant_gated_tools` on
+`SessionBuildOptions`, `AgentBuildConfig` or `session/create`), and
+`MeerkatMachine::grant_tool`,
 `revoke_tool_grant`, `list_tool_grants` and `read_tool_grant_audit` manage the
 grants that open them, as `tool_grants/grant`, `tool_grants/revoke`,
-`tool_grants/list` and `tool_grants/audit` do for sessions over JSON-RPC
+`tool_grants/list` and `tool_grants/audit` do for sessions and mob member
+identities over JSON-RPC;
+`MeerkatMachine::request_tool_grant` and `tool_grants/request` ask for a grant
+a person approves through a durable decision
 (the Python and TypeScript SDKs wrap them; the stock governed stdio pipe
 serves neither the methods nor the create field). See
 [Scoped tool grants](/concepts/tools#scoped-tool-grants). Grants persist with

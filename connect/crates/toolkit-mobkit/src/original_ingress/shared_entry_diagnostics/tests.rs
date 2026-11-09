@@ -23,6 +23,7 @@ impl Fixture {
         let root = owner
             .grants
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &principal("admin"),
                 meerkat_authorization_contracts::evidence::EvidenceId::new("diagnostic-root")
                     .unwrap(),

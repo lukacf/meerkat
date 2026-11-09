@@ -30,6 +30,8 @@ exclude = [
     # needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)
     "tests/connector_protocol_providers.rs",
     # needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)
+    "tests/credential_commit_fence.rs",
+    # needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)
     "tests/google_auth_authorizer.rs",
     # needs meerkat-runtime, which depends on this crate (a cyclic dev-dependency the package cannot carry)
     "tests/mcp_oauth_account_use.rs",

@@ -2,7 +2,9 @@
 //! Values are validated against the same named structural bindings as the owner.
 
 use crate::identity::{FieldId, NamedTypeId};
-use crate::{NamedTypeBinding, RustTypeAtom, TypePathEnumPayloadAtom, TypePathStructFieldAtom};
+use crate::{
+    NamedTypeBinding, RustTypeAtom, TypePathEnumPayloadAtom, TypePathStructFieldAtom, TypeRef,
+};
 use std::collections::BTreeMap;
 
 // TLC IntValue uses signed 32-bit integers; u64::MAX is the existing named abstraction.
@@ -78,6 +80,52 @@ fn has_duplicates(values: &[TlcValue]) -> bool {
         .iter()
         .enumerate()
         .any(|(index, value)| values[..index].contains(value))
+}
+
+/// Whether `value` is a value of `ty`, a machine field's type: a `bool`, a
+/// number, a string, a named or enum value (checked against `bindings`), or
+/// an `Option` of one. Every integer in it must be a literal a TLC model can
+/// hold.
+pub(crate) fn is_value_of_type(
+    value: &TlcValue,
+    ty: &TypeRef,
+    bindings: &[NamedTypeBinding],
+) -> bool {
+    holds_tlc_literals(value) && value_of_type(value, ty, bindings, 0)
+}
+
+fn holds_tlc_literals(value: &TlcValue) -> bool {
+    match value {
+        TlcValue::U64(number) => *number <= TLC_LITERAL_MAX,
+        TlcValue::Some(inner) => holds_tlc_literals(inner),
+        TlcValue::Record(fields) => fields.values().all(holds_tlc_literals),
+        TlcValue::Set(values) => values.iter().all(holds_tlc_literals),
+        TlcValue::Bool(_) | TlcValue::String(_) | TlcValue::None => true,
+    }
+}
+
+fn value_of_type(
+    value: &TlcValue,
+    ty: &TypeRef,
+    bindings: &[NamedTypeBinding],
+    depth: usize,
+) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    match (ty, value) {
+        (TypeRef::Bool, TlcValue::Bool(_))
+        | (TypeRef::String, TlcValue::String(_))
+        | (TypeRef::U32 | TypeRef::U64, TlcValue::U64(_))
+        | (TypeRef::Option(_), TlcValue::None) => true,
+        (TypeRef::Named(name), value) => validate_named(value, name, bindings, depth).is_ok(),
+        (TypeRef::Enum(id), value) => NamedTypeId::parse(id.as_str())
+            .is_ok_and(|name| validate_named(value, &name, bindings, depth).is_ok()),
+        (TypeRef::Option(inner), TlcValue::Some(value)) => {
+            value_of_type(value, inner, bindings, depth + 1)
+        }
+        _ => false,
+    }
 }
 
 fn validate_named(

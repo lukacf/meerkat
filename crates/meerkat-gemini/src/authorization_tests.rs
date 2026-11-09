@@ -99,6 +99,10 @@ impl PreparedOperationAuthorization for Check {
         }
         Ok(())
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 impl WorkAuthorization for Policy {
     fn prepare(
@@ -658,6 +662,10 @@ impl PreparedOperationAuthorization for RatedDecision {
         if !self.binding.same_operation(binding) {
             return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
         }
+        Ok(())
+    }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
         Ok(())
     }
 }

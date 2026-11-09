@@ -41,6 +41,7 @@ impl ObservedBridge {
             return Err(BridgeAdmissionError::GovernedInput(
                 GovernedInputError::AdmissionUnresolved {
                     detail: "injected refusal before second native lookup".into(),
+                    receipt: None,
                 },
             ));
         }
@@ -111,6 +112,7 @@ impl ObservedBridge {
                 return Err(BridgeAdmissionError::GovernedInput(
                     GovernedInputError::AdmissionUnresolved {
                         detail: "injected loss after native fresh acceptance".into(),
+                        receipt: None,
                     },
                 ));
             }
@@ -269,6 +271,7 @@ impl ObservedBridge {
             return Err(BridgeAdmissionError::GovernedInput(
                 GovernedInputError::AdmissionUnresolved {
                     detail: "injected loss after actual helper fresh acceptance".into(),
+                    receipt: None,
                 },
             ));
         }
@@ -489,6 +492,27 @@ impl SessionBridge for ObservedBridge {
             .await
     }
 
+    fn members_holding_run_starts_for_published_tools(
+        &self,
+    ) -> Result<Vec<MobAgentIdentity>, BridgeError> {
+        self.inner.members_holding_run_starts_for_published_tools()
+    }
+
+    fn member_holds_run_starts_for_published_tools(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<bool, BridgeError> {
+        self.inner
+            .member_holds_run_starts_for_published_tools(member_id)
+    }
+
+    async fn resolve_member_build_preparation(
+        &self,
+        member_id: &MobAgentIdentity,
+    ) -> Result<(), BridgeError> {
+        self.inner.resolve_member_build_preparation(member_id).await
+    }
+
     async fn member_durability(
         &self,
         session_id: &meerkat_core::types::SessionId,
@@ -543,6 +567,13 @@ impl SessionBridge for ObservedBridge {
         self.inner.seat_dormant_members(requests).await
     }
 
+    async fn apply_declared_roster(
+        &self,
+        roster: DeclaredRosterRequest,
+    ) -> Result<DeclaredRosterAnswer, BridgeError> {
+        self.inner.apply_declared_roster(roster).await
+    }
+
     async fn rotate_member(
         &self,
         identity: &AgentIdentity,
@@ -554,12 +585,6 @@ impl SessionBridge for ObservedBridge {
 
     async fn release_member(&self, identity: &AgentIdentity) -> Result<(), BridgeError> {
         self.inner.release_member(identity).await
-    }
-
-    async fn broken_members(
-        &self,
-    ) -> Result<std::collections::BTreeMap<meerkat_mob::AgentIdentity, String>, BridgeError> {
-        self.inner.broken_members().await
     }
 
     async fn capture_queued_member_inputs(
@@ -679,6 +704,13 @@ impl SessionBridge for ObservedBridge {
         identity: &AgentIdentity,
     ) -> Result<MemberStanding, BridgeError> {
         self.inner.member_standing(identity).await
+    }
+
+    async fn identity_entry(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Result<CoreIdentityEntry, BridgeError> {
+        self.inner.identity_entry(identity).await
     }
 
     async fn identity_management(

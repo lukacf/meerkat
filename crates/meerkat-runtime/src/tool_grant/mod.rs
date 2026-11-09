@@ -1,7 +1,8 @@
 //! Scoped tool grants.
 //!
 //! One grant opens tool names a session build marked grant-gated, for a
-//! bounded window. The canonical `ToolGrantLifecycleMachine` owns each
+//! bounded window, and, when it is scoped to a run of the session, only in
+//! that run and until it ends. The canonical `ToolGrantLifecycleMachine` owns each
 //! grant's lifecycle; see `dsl.rs` for its production instantiation and
 //! `crates/meerkat-machine-schema/src/catalog/dsl/tool_grant_lifecycle.rs`
 //! for the catalog body (the two must stay structurally identical; the
@@ -9,13 +10,21 @@
 //!
 //! - [`service`]: [`ToolGrantService`], stateless over a
 //!   [`RuntimeStore`](crate::store::RuntimeStore). It grants, revokes, lists
-//!   and reads the audit, and adjudicates a served session's model-request
-//!   boundary and each gated dispatch. Every answer rebuilds the generated
-//!   machine from the stored row, applies one input at the clock reading of
-//!   that answer and decides from the input's effects alone.
+//!   and reads the audit, adjudicates a served session's model-request
+//!   boundary and each gated dispatch, and ends the grants of a run that
+//!   ended (durable-tail recovery ends those of a run it closed). Every
+//!   answer rebuilds the generated machine from the stored row, applies one
+//!   input at the clock reading of that answer and decides from the input's
+//!   effects alone.
 //! - [`gate`]: [`RuntimeSessionToolGrants`], the core
 //!   [`SessionToolGrants`](meerkat_core::tool_grant::SessionToolGrants) seam
-//!   of one served session, carried on its runtime bindings.
+//!   of one served session, carried on its runtime bindings; the session's
+//!   agent asks for a grant through it while the runtime takes requests
+//!   ([`ToolGrantRequestHost`]).
+//! - [`request`]: grant requests a person approves: a request holds a
+//!   durable decision of kind `tool_grant.issue`
+//!   ([`hold_tool_grant_request`]), and [`ToolGrantIssueExecutor`] issues
+//!   the grant of an approved one under the id its decision derives.
 //! - [`deadlines`]: [`ToolGrantDeadlines`], the deadline driver of one
 //!   runtime owner's served sessions.
 //! - [`audit`]: the audit rows each subject's grants append.
@@ -41,6 +50,7 @@ pub mod deadlines;
 )]
 pub mod dsl;
 pub mod gate;
+pub mod request;
 pub mod service;
 pub mod wire;
 
@@ -50,6 +60,14 @@ pub use audit::{
 };
 pub use deadlines::ToolGrantDeadlines;
 pub use gate::RuntimeSessionToolGrants;
+pub use request::{
+    TOOL_GRANT_ISSUE_BODY, TOOL_GRANT_ISSUE_KIND, TOOL_GRANT_ISSUE_RENDERER, ToolGrantIssueBody,
+    ToolGrantIssueExecutor, ToolGrantIssueRequest, ToolGrantRequestError, ToolGrantRequestHost,
+    ToolGrantRequestNotice, ToolGrantRequestNotices, ToolGrantRequestOrigin,
+    ToolGrantRequestOutcome, ToolGrantRequestPolicy, ToolGrantSubjectLife,
+    ToolGrantSubjectObserver, ToolGrantSubjectPresence, hold_tool_grant_request,
+    tool_grant_issue_kind, tool_grant_requests_of,
+};
 pub use service::{
     RevokedToolGrant, StoredToolGrant, ToolGrantListing, ToolGrantRequest, ToolGrantRevocation,
     ToolGrantService, ToolGrantServiceError, ToolGrantStatus, ToolGrantWindow, UnreadableToolGrant,

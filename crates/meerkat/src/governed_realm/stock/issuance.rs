@@ -52,7 +52,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use meerkat_authorization::clock::LocalAuthorizationClock;
-use meerkat_authorization::grants::{FileGrantOwnerStore, GrantRefusal, LocalGrantAuthority};
+use meerkat_authorization::grants::{GrantRefusal, LocalGrantAuthority};
 use meerkat_authorization::mcp_installation::{
     MCP_INSTALLATION_FEATURE, mcp_connector_action, mcp_connector_domain,
 };
@@ -66,6 +66,7 @@ use meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal;
 use meerkat_authorization_contracts::work_association::{
     GrantLineageRef, GrantTarget, TargetGrantLineage, WorkAuthorityBasis,
 };
+use meerkat_core::AdmissionGuard;
 use meerkat_core::connection::RealmId;
 use meerkat_core::storage_layout::ResolvedStorage;
 use meerkat_core::{ControllerRouteKey, PrincipalKind, PrincipalRef, TrustDomainId};
@@ -284,6 +285,32 @@ pub enum StockGrantError {
     /// or revoked.
     #[error("the grant command did not complete; whether it issued or selected is unknown")]
     CommandUncertain,
+    /// An admission, or another fenced operation, holds the realm's
+    /// admission fence beyond the command's bound: nothing was issued,
+    /// selected or revoked. It may be retried once the hold ends, which can
+    /// be only when the holding process restarts.
+    #[error(
+        "an admission or another fenced operation holds the realm's admission fence; nothing \
+         was issued, selected or revoked; retry later (an admission's hold may last until its \
+         process restarts)"
+    )]
+    AdmissionInProgress,
+    /// The realm's admission fence could not be opened, created, locked or
+    /// identity-checked, or the command's guard does not hold it: nothing
+    /// was issued, selected or revoked.
+    #[error("{0}; nothing was issued, selected or revoked")]
+    AdmissionFenceUnavailable(String),
+}
+
+impl From<meerkat_core::AdmissionRefusal> for StockGrantError {
+    fn from(refusal: meerkat_core::AdmissionRefusal) -> Self {
+        match refusal {
+            meerkat_core::AdmissionRefusal::InProgress => Self::AdmissionInProgress,
+            meerkat_core::AdmissionRefusal::Unavailable(unavailable) => {
+                Self::AdmissionFenceUnavailable(unavailable.to_string())
+            }
+        }
+    }
 }
 
 /// The executor principal of `agent` in `realm`. It is named by the realm
@@ -771,9 +798,7 @@ pub(super) fn restore_owner(
     realm_id: &str,
 ) -> Result<Arc<LocalGrantAuthority>, StockGovernanceError> {
     let paths = meerkat_store::realm_paths_in(realms_root, realm_id);
-    let store = Arc::new(FileGrantOwnerStore::new(
-        meerkat_store::grant_owner_store_path(&paths.root),
-    ));
+    let store = Arc::new(super::super::realm_grant_owner_store(&paths)?);
     LocalGrantAuthority::restore(
         store,
         LocalAuthorizationPublication::new(),
@@ -814,13 +839,17 @@ fn custody_refusal_outcome(refusal: ControllerCustodyRefusal) -> RevocationOutco
 }
 
 /// A generated refusal precedes every owner change; an unavailable owner may
-/// fail after its durable append, so the revocation is then uncertain.
+/// fail after its durable append, so the revocation is then uncertain. A
+/// guard that does not hold the realm's fence is refused before anything is
+/// appended.
 fn revocation_outcome(result: Result<(), GrantRefusal>) -> RevocationOutcome {
     match result {
         Ok(()) => RevocationOutcome::Revoked,
         Err(GrantRefusal::ControllerInUse) => RevocationOutcome::ControllerInUse,
         // Duplicate is an issuance refusal; a revocation never returns it.
-        Err(GrantRefusal::Denied | GrantRefusal::Duplicate) => RevocationOutcome::Refused,
+        Err(GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::AdmissionFence) => {
+            RevocationOutcome::Refused
+        }
         Err(GrantRefusal::Unavailable) => RevocationOutcome::Uncertain,
     }
 }
@@ -882,6 +911,9 @@ struct RealmEffects<'a> {
     machine: &'a meerkat_runtime::MeerkatMachine,
     operator: &'a PrincipalRef,
     paths: &'a meerkat_store::RealmPaths,
+    /// The command's guard: it holds the realm's admission fence, which
+    /// covers the grant log and the selection.
+    guard: &'a AdmissionGuard,
 }
 
 impl IssuanceEffects for RealmEffects<'_> {
@@ -892,13 +924,13 @@ impl IssuanceEffects for RealmEffects<'_> {
         restrictions: ExecutionRestrictions,
     ) -> Result<GrantLineageRef, GrantRefusal> {
         self.owner
-            .issue_root(self.operator, id, executor, None, restrictions)
+            .issue_root(self.guard, self.operator, id, executor, None, restrictions)
     }
 
     async fn select(&self, file: &StockGrantFile) -> Result<(), super::SelectionWriteFailure> {
         #[cfg(test)]
         held_publication(&self.paths.root).await;
-        super::write_stock_grant_file(self.paths, file).await
+        super::write_stock_grant_file(self.guard, self.paths, file).await
     }
 
     fn retire(&self, grant: &GrantLineageRef) -> RevocationOutcome {
@@ -909,7 +941,7 @@ impl IssuanceEffects for RealmEffects<'_> {
         // The reference query and the revocation run under the same held
         // custody, so no work can take the grant up in between.
         match custody.revoke_if_unreferenced(grant, &NoRetainedOriginals, |custody| {
-            self.owner.revoke(self.operator, grant, custody)
+            self.owner.revoke(self.guard, self.operator, grant, custody)
         }) {
             Ok(Some(result)) => revocation_outcome(result),
             Ok(None) => RevocationOutcome::Deferred,
@@ -920,9 +952,12 @@ impl IssuanceEffects for RealmEffects<'_> {
 
     fn revoke(&self, grant: &GrantLineageRef) -> RevocationOutcome {
         match self.machine.try_controller_grant_mutation() {
-            Ok(mut custody) => {
-                revocation_outcome(self.owner.revoke(self.operator, grant, &mut custody))
-            }
+            Ok(mut custody) => revocation_outcome(self.owner.revoke(
+                self.guard,
+                self.operator,
+                grant,
+                &mut custody,
+            )),
             Err(refusal) => custody_refusal_outcome(refusal),
         }
     }
@@ -980,6 +1015,12 @@ async fn issue_and_select(
     let issued = match effects.issue(id.clone(), executor, restrictions) {
         Ok(issued) => issued,
         Err(GrantRefusal::Unavailable) => return Err(StockGrantError::IssuanceUncertain { id }),
+        // Refused before anything was appended.
+        Err(GrantRefusal::AdmissionFence) => {
+            return Err(StockGrantError::AdmissionFenceUnavailable(
+                "the command does not hold the realm's admission fence".to_string(),
+            ));
+        }
         Err(refusal) => {
             return Err(StockGovernanceError::GrantOwner(refusal.to_string()).into());
         }
@@ -1064,6 +1105,12 @@ async fn revoke_and_unselect(
 /// then issue, write the selection naming the new grant with the superseded
 /// one recorded for cleanup, and attempt the recorded cleanups (see
 /// [`StockGrantError`] and [`RevocationOutcome`]).
+///
+/// The command's owned task first takes the realm's admission fence
+/// (`meerkat_core::realm_admission`), waiting up to the interactive bound,
+/// before any custody: a held fence refuses
+/// ([`StockGrantError::AdmissionInProgress`]) with nothing issued, selected
+/// or revoked.
 pub async fn grant_stock_agent(
     realms_root: &Path,
     realm_id: &str,
@@ -1073,7 +1120,8 @@ pub async fn grant_stock_agent(
     let (realms_root, realm_id) = (realms_root.to_path_buf(), realm_id.to_string());
     let (principals, request) = (principals.clone(), request.clone());
     on_owned_task(async move {
-        grant_under_custody(&realms_root, &realm_id, &principals, &request).await
+        let guard = super::take_realm_fence::<StockGrantError>(&realms_root, &realm_id).await?;
+        grant_under_custody(&guard, &realms_root, &realm_id, &principals, &request).await
     })
     .await
 }
@@ -1101,6 +1149,7 @@ pub struct ReviewedMcpInstallation {
 /// layout gives that document no location is refused as unavailable before
 /// any effect). The grant is prepared with the reviewed installation's
 /// connector approval. Then, on the command's owned task, under the realm's
+/// admission fence (taken first, as [`grant_stock_agent`] takes it), its
 /// administrative custody and then that document's writer exclusion (held
 /// through the selection write), the document must still list exactly
 /// `reviewed.server` under its name at `reviewed.generation`; otherwise
@@ -1137,9 +1186,11 @@ pub async fn grant_stock_agent_for_reviewed_installation(
     let realms_root = storage.locator.state_root.clone();
     let (principals, request, reviewed) = (principals.clone(), request.clone(), reviewed.clone());
     on_owned_task(async move {
+        let guard = super::take_realm_fence::<StockGrantError>(&realms_root, &realm_id).await?;
         let bundle = administrative_custody(&realms_root, &realm_id).await?;
         let outcome = issue_for_current_installation(
             &bundle,
+            &guard,
             &realms_root,
             &realm_id,
             &principals,
@@ -1250,8 +1301,9 @@ pub(super) async fn held_publication(realm_root: &Path) {
 /// then reads the installation it approves under the config document's
 /// writer exclusion and is prepared from it; that exclusion and the
 /// custody are held until the selection naming the issued grant is
-/// written.
+/// written. `guard` holds the realm's admission fence.
 async fn grant_under_custody(
+    guard: &AdmissionGuard,
     realms_root: &Path,
     realm_id: &str,
     principals: &StockPrincipals,
@@ -1262,6 +1314,7 @@ async fn grant_under_custody(
     let machine = bundle.runtime_adapter();
     let outcome = grant_prepared_under(
         &machine,
+        guard,
         without_installation,
         realms_root,
         realm_id,
@@ -1278,7 +1331,11 @@ async fn grant_under_custody(
 /// staged governed machine (see [`crate::governed_realm::staged`]) instead
 /// of a separately opened administrative custody: `machine` is a clone of
 /// that stage, which already excludes every other opener. Run on the
-/// stage's owned task; the same validation precedes every effect.
+/// stage's owned task. The realm's admission fence is taken first, as
+/// [`grant_stock_agent`] takes it, but without waiting, since the stage's
+/// custody is already held: an admission's hold refuses at once with
+/// [`StockGrantError::AdmissionInProgress`]. The same validation precedes
+/// every effect.
 pub(crate) async fn grant_under_staged_custody(
     machine: meerkat_runtime::MeerkatMachine,
     realms_root: std::path::PathBuf,
@@ -1286,9 +1343,11 @@ pub(crate) async fn grant_under_staged_custody(
     principals: StockPrincipals,
     request: StockGrantRequest,
 ) -> Result<StockGrantOutcome, StockGrantError> {
+    let guard = super::take_realm_fence_now::<StockGrantError>(&realms_root, &realm_id)?;
     let without_installation = prepare_without_installation(&realm_id, &principals, &request)?;
     grant_prepared_under(
         &machine,
+        &guard,
         without_installation,
         &realms_root,
         &realm_id,
@@ -1322,6 +1381,7 @@ fn prepare_without_installation(
 /// held until the selection naming the issued grant is written.
 async fn grant_prepared_under(
     machine: &meerkat_runtime::MeerkatMachine,
+    guard: &AdmissionGuard,
     without_installation: Option<PreparedGrant>,
     realms_root: &Path,
     realm_id: &str,
@@ -1363,6 +1423,7 @@ async fn grant_prepared_under(
     };
     issue_prepared_with_machine(
         machine,
+        guard,
         realms_root,
         realm_id,
         principals,
@@ -1426,9 +1487,10 @@ pub(super) fn prepare_grant(
 
 /// Issue and select `prepared` for `request`'s target under the
 /// administrative custody `bundle` the caller holds (see
-/// [`grant_stock_agent`]).
+/// [`grant_stock_agent`]) and the realm's admission fence `guard` holds.
 pub(super) async fn issue_prepared_in_custody(
     bundle: &crate::PersistenceBundle,
+    guard: &AdmissionGuard,
     realms_root: &Path,
     realm_id: &str,
     principals: &StockPrincipals,
@@ -1438,6 +1500,7 @@ pub(super) async fn issue_prepared_in_custody(
     let machine = bundle.runtime_adapter();
     issue_prepared_with_machine(
         &machine,
+        guard,
         realms_root,
         realm_id,
         principals,
@@ -1451,6 +1514,7 @@ pub(super) async fn issue_prepared_in_custody(
 /// holds (an administrative bundle's machine or a staged realm's).
 async fn issue_prepared_with_machine(
     machine: &meerkat_runtime::MeerkatMachine,
+    guard: &AdmissionGuard,
     realms_root: &Path,
     realm_id: &str,
     principals: &StockPrincipals,
@@ -1467,6 +1531,7 @@ async fn issue_prepared_with_machine(
         machine,
         operator: &principals.operator,
         paths: &paths,
+        guard,
     };
     issue_and_select(
         &effects,
@@ -1487,10 +1552,13 @@ async fn issue_prepared_with_machine(
 /// only while the document still lists exactly `server` under its name at
 /// `generation`. Otherwise the grant is refused locally
 /// ([`StockGovernanceError::InstallationChanged`]) and nothing is issued or
-/// selected; a generation that cannot be read is unavailable.
+/// selected; a generation that cannot be read is unavailable. `guard` holds
+/// the realm's admission fence, taken before the custody; the writer
+/// exclusion is the document's config custody alone and takes no fence.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn issue_for_current_installation(
     bundle: &crate::PersistenceBundle,
+    guard: &AdmissionGuard,
     realms_root: &Path,
     realm_id: &str,
     principals: &StockPrincipals,
@@ -1508,12 +1576,23 @@ pub(super) async fn issue_for_current_installation(
     if installed.as_ref() != Some(server) || current != generation {
         return Err(StockGovernanceError::InstallationChanged(server.name.clone()).into());
     }
-    issue_prepared_in_custody(bundle, realms_root, realm_id, principals, request, prepared).await
+    issue_prepared_in_custody(
+        bundle,
+        guard,
+        realms_root,
+        realm_id,
+        principals,
+        request,
+        prepared,
+    )
+    .await
 }
 
 /// Revoke an agent's grant selected in `slot` now, through the grant owner
 /// under native controller custody, and remove it from the selection once
-/// revoked.
+/// revoked. The realm's admission fence is taken first, as
+/// [`grant_stock_agent`] takes it: a held fence refuses
+/// ([`StockGovernanceError::AdmissionInProgress`]) with nothing revoked.
 pub async fn revoke_stock_agent(
     realms_root: &Path,
     realm_id: &str,
@@ -1524,12 +1603,15 @@ pub async fn revoke_stock_agent(
     let (realms_root, realm_id) = (realms_root.to_path_buf(), realm_id.to_string());
     let (principals, agent, slot) = (principals.clone(), agent.to_string(), slot.clone());
     on_owned_task(async move {
-        revoke_under_custody(&realms_root, &realm_id, &principals, &agent, &slot).await
+        let guard =
+            super::take_realm_fence::<StockGovernanceError>(&realms_root, &realm_id).await?;
+        revoke_under_custody(&guard, &realms_root, &realm_id, &principals, &agent, &slot).await
     })
     .await
 }
 
 async fn revoke_under_custody(
+    guard: &AdmissionGuard,
     realms_root: &Path,
     realm_id: &str,
     principals: &StockPrincipals,
@@ -1548,6 +1630,7 @@ async fn revoke_under_custody(
         machine: &machine,
         operator: &principals.operator,
         paths: &paths,
+        guard,
     };
     let outcome = revoke_and_unselect(&effects, file, agent, slot).await;
     drop(bundle);
@@ -1847,7 +1930,10 @@ fn conclude(
         }
         Err(GrantRefusal::Denied) => StockGrantConclusion::NotCurrent,
         Err(
-            GrantRefusal::Unavailable | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse,
+            GrantRefusal::Unavailable
+            | GrantRefusal::Duplicate
+            | GrantRefusal::ControllerInUse
+            | GrantRefusal::AdmissionFence,
         ) => StockGrantConclusion::Unavailable,
     }
 }

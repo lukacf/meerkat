@@ -79,7 +79,32 @@ impl MobActor {
                 let _ = reply_tx.send(result);
             }
             IdentityChangeCommand::Unlist { identity, reply_tx } => {
-                let _ = reply_tx.send(self.unlist_identity_entry(&identity));
+                let result = Box::pin(self.unlist_identity_entry(&identity)).await;
+                let _ = reply_tx.send(result);
+            }
+            IdentityChangeCommand::EndDeniedEdge {
+                owner,
+                peer,
+                reply_tx,
+            } => {
+                let result = Box::pin(self.end_denied_owned_edge(owner, peer)).await;
+                let _ = reply_tx.send(result);
+            }
+            IdentityChangeCommand::RealizeOwnedEdges { reply_tx } => {
+                Box::pin(self.realize_every_owned_edge()).await;
+                let _ = reply_tx.send(());
+            }
+            IdentityChangeCommand::CommitAdoption { commit, reply_tx } => {
+                let result = Box::pin(self.commit_identity_adoption(*commit)).await;
+                let _ = reply_tx.send(result);
+            }
+            IdentityChangeCommand::CommitPurge { commit, reply_tx } => {
+                let result = Box::pin(self.commit_identity_rows_purge(*commit)).await;
+                let _ = reply_tx.send(result);
+            }
+            IdentityChangeCommand::CommitImport { commit, reply_tx } => {
+                let result = Box::pin(self.commit_identity_import(*commit)).await;
+                let _ = reply_tx.send(result);
             }
             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
             IdentityChangeCommand::BeginConstruction { request, reply_tx } => {
@@ -119,7 +144,7 @@ impl MobActor {
     /// The store's receipt of `operation`, as the machine reads it: none, the
     /// same request's (the receipt itself, which a replay answers), or
     /// another request's.
-    async fn observe_change_receipt(
+    pub(super) async fn observe_change_receipt(
         &self,
         operation: &IdentityOperation,
     ) -> Result<
@@ -295,6 +320,11 @@ impl MobActor {
                 .iter()
                 .map(|item| (item.spec.identity.clone(), item.facts)),
         )?;
+        // The edges each new identity's create declares, probed after every
+        // record: a peer may be another identity of the same create.
+        for item in &items {
+            Self::declare_owned_edges(&mut probe, &item.spec.identity, &item.peers)?;
+        }
         let mut entries = Vec::with_capacity(items.len());
         for (item, cause) in items.into_iter().zip(causes) {
             // Only an entry owed its seat is seated by the commit step: one
@@ -407,8 +437,17 @@ impl MobActor {
                 .iter()
                 .map(|(request, facts)| (request.spec.identity.clone(), *facts)),
         )?;
+        // The edges each new identity's create declares, after every record
+        // (a peer may be another identity of the same create) and before the
+        // seats, whose step wires the declared edges whose ends it seats.
+        let mut owned = BTreeMap::new();
+        for (request, _) in &commit.identities {
+            let declared =
+                Self::declare_owned_edges(&mut authority, &request.spec.identity, &request.peers)?;
+            owned.insert(request.spec.identity.clone(), declared);
+        }
         let (rows, receipt) =
-            create_rows_and_receipt(&self.definition.id, &commit, &causes, now_ms())?;
+            create_rows_and_receipt(&self.definition.id, &commit, &causes, &owned, now_ms())?;
         let CreateCommit { seats, .. } = commit;
         let staged = self
             .stage_seat_commit(authority, seats, SeatCommitScope::AllOrNothing)
@@ -479,6 +518,16 @@ impl MobActor {
             .identity_entry_constructions_held
             .get(&agent_identity)
             .copied();
+        // The owners of the identity's owned edges before the step: a
+        // removal ends those edges in the same step, and its store
+        // transaction writes their owners' rows with the tombstone.
+        let edge_owners: BTreeSet<AgentIdentity> = authority
+            .state()
+            .identity_edge_owners
+            .iter()
+            .filter(|(edge, _)| edge.a == agent_identity || edge.b == agent_identity)
+            .map(|(_, owner)| AgentIdentity::from(owner.0.as_str()))
+            .collect();
         let input = match commit.kind {
             mob_dsl::IdentityEntryChangeKind::Remove => {
                 mob_dsl::MobMachineInput::RemoveIdentityEntry {
@@ -577,6 +626,18 @@ impl MobActor {
             archived_session,
             at_ms,
         )?;
+        // A removal ends the identity's owned edges: the rows of their other
+        // owners, written without them in the removal's own transaction.
+        let owner_rows = if matches!(
+            verdict,
+            mob_dsl::IdentityEntryChangeVerdict::Retiring
+                | mob_dsl::IdentityEntryChangeVerdict::Removed
+        ) {
+            self.owner_rows_without_removed_peer(&edge_owners, &commit.identity)
+                .await?
+        } else {
+            Vec::new()
+        };
         let mut entry =
             crate::identity::IdentityChangeReceiptEntry::new(commit.identity.clone(), outcome);
         if let Some(record) = row.as_ref().map(|row| &row.record)
@@ -601,12 +662,18 @@ impl MobActor {
             effects: transition.into_effects(),
             phase_changed: false,
         };
+        // The removal of an unseated entry ends the identity at once
+        // (MobMachine names it, `IdentityEnded`): its scoped tool grants end
+        // before the change's store transaction and the step's commit. A
+        // failure fails the change, which writes nothing.
+        self.end_tool_grants_of_ended_identities(&prepared.effects, "it was removed")
+            .await?;
         let written = receipt.clone();
         self.commit_prepared_dsl_input_after(prepared, move || async move {
             let commit = store
                 .commit_identity_change(&crate::store::IdentityChangeWrite {
                     receipt: written,
-                    rows: row.into_iter().collect(),
+                    rows: row.into_iter().chain(owner_rows).collect(),
                     events: Vec::new(),
                 })
                 .await

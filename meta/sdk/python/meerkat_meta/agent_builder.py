@@ -17,8 +17,10 @@ from .jobs import (
     DetachedJobRpc,
     _DetachedJobReporter,
 )
+from .decisions import _enter_tool_callback, _leave_tool_callback
 from .models import SessionBuildOptions
 from .live import LiveAssistantOutputAddress
+from .tool_requester import ToolCallRequester, _accepts_requester
 from .types import ErrorEvent
 
 _log = logging.getLogger("meerkat_meta")
@@ -112,12 +114,19 @@ class CallbackDispatcher:
         self._live_output_queues: dict[
             str, asyncio.Queue[LiveAssistantOutputAddress]
         ] = {}
+        # The host's handler of `meta/decisions/notice`, when it set one.
+        self._decision_notice_handler: Callable[[dict[str, Any]], Any] | None = None
 
     def register_builder(self, builder: SessionAgentBuilder) -> None:
         self._builder = builder
 
     def register_error_callback(self, callback: Callable) -> None:
         self._error_callback = callback
+
+    def register_decision_notice_handler(
+        self, handler: Callable[[dict[str, Any]], Any]
+    ) -> None:
+        self._decision_notice_handler = handler
 
     def register_roster_provider(self, provider: Any) -> None:
         self._roster_provider = provider
@@ -190,6 +199,15 @@ class CallbackDispatcher:
             self._live_output_queues.pop(channel_id, None)
 
     async def handle_callback(self, method: str, params: dict[str, Any]) -> Any:
+        if method == "meta/decisions/notice":
+            # One open durable decision, noticed once per gateway
+            # connection; a host without a handler is told nothing more.
+            if self._decision_notice_handler is not None:
+                result = self._decision_notice_handler(params)
+                if inspect.isawaitable(result):
+                    await result
+            return None
+
         if method == "meta/live/assistant_output_available":
             output = LiveAssistantOutputAddress.from_dict(params)
             queue = self._live_output_queues.get(output.channel_id)
@@ -268,9 +286,23 @@ class CallbackDispatcher:
                 raise ValueError(
                     f"no handler registered for tool: {tool_name} (scope: {scope_id})"
                 )
-            result = handler(arguments)
-            if asyncio.iscoroutine(result):
-                result = await result
+            # The handler serves an agent's tool call: a durable decision's
+            # decide refuses inside it, and inside the tasks it starts.
+            token = _enter_tool_callback()
+            try:
+                if _accepts_requester(handler):
+                    # The gateway names the run's requester here, never in the
+                    # arguments; absent or malformed is no requester.
+                    result = handler(
+                        arguments,
+                        requester=ToolCallRequester.from_wire(params.get("requester")),
+                    )
+                else:
+                    result = handler(arguments)
+                if asyncio.iscoroutine(result):
+                    result = await result
+            finally:
+                _leave_tool_callback(token)
             # Rich content is opt-in: only an explicit ToolResultContent is
             # delivered as content blocks (images / multi-block). Any other
             # return keeps the legacy single-text-block behavior.
@@ -451,6 +483,7 @@ class CallbackDispatcher:
             ),
             cancellation=cancellation,
             reporter=reporter,
+            requester=ToolCallRequester.from_wire(params.get("requester")),
         )
         attempt = _ActiveJobAttempt(
             authority=authority,

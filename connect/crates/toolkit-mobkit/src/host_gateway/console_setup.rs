@@ -1006,9 +1006,9 @@ impl ConsoleSetupBinding {
             Ok(()) => "revoked",
             Err(ExpectedRevokeRefusal::NotCurrent) => "not_current",
             Err(ExpectedRevokeRefusal::Grant(GrantRefusal::ControllerInUse)) => "controller_in_use",
-            Err(ExpectedRevokeRefusal::Grant(GrantRefusal::Denied | GrantRefusal::Duplicate)) => {
-                "refused"
-            }
+            Err(ExpectedRevokeRefusal::Grant(
+                GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::AdmissionFence,
+            )) => "refused",
             Err(ExpectedRevokeRefusal::Grant(GrantRefusal::Unavailable)) => "unavailable",
         };
         Ok(serde_json::json!({"scope":"application_issued_access","state":state}))

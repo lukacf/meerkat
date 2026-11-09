@@ -524,7 +524,7 @@
           "data": {
             "kind": "candidate_launch"
           },
-          "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the console schedule writes (meta/schedule/create, update, pause, resume and delete), the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper, meta/fork_member and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
+          "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the console schedule writes (meta/schedule/create, update, pause, resume and delete), the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper, meta/fork_member and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/console/attention/dismiss, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
         },
         "approver_unauthenticated": {
           "status": 200,
@@ -1359,13 +1359,82 @@
           "success": {
             "required_fields": [
               "entries"
-            ]
+            ],
+            "optional_fields": [
+              "retention"
+            ],
+            "note": "retention is durable when the runtime keeps the gating state across a restart, process when it keeps it in memory."
           },
           "errors": [
             {
               "codes": [
                 -32004,
                 -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/decisions/list": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "kind",
+              "phase",
+              "approver_id",
+              "requester",
+              "after",
+              "limit"
+            ],
+            "note": "The rows a caller reads whole are under decisions, the rows it may see only the status of under statuses; a decision the caller may not see is not listed. decisions.view is needed while access control is enforced."
+          },
+          "success": {
+            "required_fields": [
+              "decisions",
+              "statuses",
+              "unreadable"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32020,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/decisions/rendering": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "decision_id"
+            ],
+            "optional_fields": [
+              "max_part_bytes"
+            ],
+            "note": "A caller who may see only the decision's status is refused with -32030, data.kind content_not_visible; a decision it may not see reads as decision_not_found."
+          },
+          "success": {
+            "required_fields": [
+              "decision_id",
+              "rendering",
+              "renderer",
+              "subject_digest",
+              "parts"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32030,
+                -32020,
                 -32601
               ]
             }
@@ -1413,6 +1482,48 @@
             }
           ]
         },
+        "meta/console/attention": {
+          "success": {
+            "required_fields": [
+              "items",
+              "retention"
+            ],
+            "note": "The caller's own attention items, newest first, at most 100 from the newest 200 not dismissed: replies meant for the caller alone that no private thread of theirs took. Every console that keeps an attention list serves a verified person the items addressed to them, whatever its posture; every other caller reads an empty list. An item has id, created_at_ms and kind; a private_reply item adds origin {identity, interaction_id, input_frame_id}, the text the payload policies leave of the reply (the host's before the item is stored, this console's as it is read, as they leave the reply's frame in a thread; absent when they leave none) and redacted: true when a policy rewrote it. An item is listed only while the caller may view the agent the request went to. A client shows the kinds it knows and skips the rest. retention is durable or process."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/console/attention/dismiss": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "item_id"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item_id",
+              "dismissed"
+            ],
+            "note": "dismissed is false when the caller holds no such item, another person's included. A dismissed item is no longer listed."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32602,
+                -32601
+              ]
+            }
+          ]
+        },
         "meta/access/status": {
           "success": {
             "required_fields": [
@@ -1443,9 +1554,10 @@
             ],
             "optional_fields": [
               "owner_instance",
-              "conditional_mutations"
+              "conditional_mutations",
+              "last_edit"
             ],
-            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes."
+            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes. last_edit (principal, at_ms, revision) is present once the controller committed an edit since it started; principal is null when the edit named no one."
           },
           "errors": [
             {

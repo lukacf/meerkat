@@ -176,6 +176,8 @@ mod tests {
                 fork_source: None,
                 fork_overlay: Default::default(),
                 definition_wiring: crate::DefinitionWiring::Applies,
+                approval_branch: None,
+                dispatch_admission_lineage: false,
                 direct_member_fence: None,
             },
             retiring_comms: None,

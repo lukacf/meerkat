@@ -13,6 +13,8 @@
 mod conditional;
 mod io_custody;
 mod sqlite;
+#[doc(hidden)]
+pub mod write_witness;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,7 +27,7 @@ pub use conditional::{
     ConditionalAdmission, ConditionalAdmissionStore, ConditionalTransition, RecordCondition,
 };
 pub use io_custody::retain_io_custody;
-pub use sqlite::SqliteStore;
+pub use sqlite::{SqliteStore, StoreCustody};
 
 /// Mechanical invalidation supplied by the actual installed record owner.
 /// This does not interpret records or authorize mutations. An installed host

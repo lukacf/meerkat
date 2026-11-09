@@ -2855,6 +2855,10 @@ fn candidate_refused_operator_mutations() -> Vec<(&'static str, Value)> {
             "meta/workgraph/attention/reassign",
             "meta/workgraph/attention/prune",
             "meta/workgraph/attention/break_glass_reassign",
+            // The mob's operator instructions, which the authoritative
+            // launch delivers to its members.
+            "meta/set_instruction",
+            "meta/revoke_instruction",
             "meta/call_tool",
             "meta/routing/routes/add",
             "meta/routing/routes/delete",
@@ -2936,6 +2940,7 @@ fn candidate_served_reads() -> Vec<(&'static str, Value)> {
         ("meta/mob_labels/get", json!({})),
         ("meta/routing/routes/list", json!({})),
         ("jobs/list", json!({})),
+        ("meta/instruction_status", json!({})),
     ]
 }
 /// The stdio methods that admit member input or act on a member's runs.

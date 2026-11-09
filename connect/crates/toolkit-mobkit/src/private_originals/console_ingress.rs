@@ -1,15 +1,16 @@
 //! The installed route and native verified human produce one actual source.
 //! Forwarded login labels alone never select a requester or a route.
 
-use super::governed_submit::{OriginalBinder, evidence};
+use super::governed_submit::{BindFailure, OriginalBinder, evidence};
 use super::*;
 use crate::private_host::{ConsoleLoginHandle, ConsoleLoginReservation, ConsoleLogins};
 use meerkat_mobkit::{
     access::{ACTION_AGENT_SEND, AccessController},
     console_governed_ingress::{ConsoleGovernedIngress, ConsoleSendContext},
     identity_first::{
-        AgentIdentity, BoundGovernedInput, GovernedBindContext, GovernedEntryFence,
-        GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder, GovernedSettlement,
+        AgentIdentity, BoundGovernedInput, GovernedBindContext, GovernedBindError,
+        GovernedEntryFence, GovernedEntryPermit, GovernedEntryRefusal, GovernedInputBinder,
+        GovernedSettlement,
     },
     runtime::AuthenticatedConsoleHuman,
 };
@@ -295,20 +296,46 @@ struct ConsoleBinder {
 }
 #[async_trait::async_trait]
 impl GovernedInputBinder for ConsoleBinder {
-    async fn bind(
+    async fn try_bind(
         &self,
         context: &GovernedBindContext,
         input: Input,
-    ) -> Result<BoundGovernedInput, String> {
+    ) -> Result<BoundGovernedInput, GovernedBindError> {
+        let binder = self
+            .prepare_delegate(context, &input)
+            .await
+            .map_err(BindFailure::into_error)?;
+        // The delegate's own answer, as typed.
+        binder.try_bind(context, input).await
+    }
+    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str) {
+        if let Some(binder) = self.delegate.get() {
+            binder.retain_unresolved(settlement, detail);
+        } else {
+            drop(settlement);
+        }
+    }
+}
+
+impl ConsoleBinder {
+    /// Retain the Console's source, prepare its child and settle its login
+    /// reservation, then hand the send to the shared binder (once).
+    async fn prepare_delegate(
+        &self,
+        context: &GovernedBindContext,
+        input: &Input,
+    ) -> Result<Arc<OriginalBinder>, BindFailure> {
         if self.delegate.get().is_some() {
-            return Err("The Console binder was already used".into());
+            return Err(BindFailure::denied("The Console binder was already used"));
         }
         // The Console itself created this raw Input. Its exact native id and
         // canonical bytes are source evidence, never a browser-selected grant.
-        let event_key = stock_console_event_key(&input)?;
-        let reservation = self.entry.reserve()?;
+        let event_key = stock_console_event_key(input)?;
+        let reservation = self.entry.reserve().map_err(BindFailure::denied)?;
         if context.spec.identity != self.entry.identity {
-            return Err("The native registered Console target changed".into());
+            return Err(BindFailure::denied(
+                "The native registered Console target changed",
+            ));
         }
         if let Some(child) = &self.child {
             let principal = self
@@ -325,7 +352,7 @@ impl GovernedInputBinder for ConsoleBinder {
                 )
                 .map_err(|_| "The prepared Console child is no longer current")?;
             child
-                .claim(&input)
+                .claim(input)
                 .map_err(|_| "The prepared Console child was reused or its input changed")?;
         }
         let runtime = self
@@ -364,7 +391,7 @@ impl GovernedInputBinder for ConsoleBinder {
         {
             return Err("The selected Console route changed".into());
         }
-        let bytes = canonical_json(&input).map_err(|_| "The Console input cannot be retained")?;
+        let bytes = canonical_json(input).map_err(|_| "The Console input cannot be retained")?;
         let input_id = EvidenceId::new(input.id().to_string())
             .map_err(|_| "The Console input id is invalid")?;
         let revision =
@@ -405,6 +432,8 @@ impl GovernedInputBinder for ConsoleBinder {
                 })
                 .map_err(|_| "The Console child already retained a source")?;
         }
+        // A bind attempt's durable effect: no "not now" may follow it.
+        meerkat_core::protected_section::note_effect("console.source_record");
         let original = self
             .source
             .retain_event_for_route_with_input(
@@ -419,13 +448,15 @@ impl GovernedInputBinder for ConsoleBinder {
             .map_err(|_| "The Console original could not be retained")?;
         self.entry.check()?;
         if let Some(child) = &self.child {
+            // A bind attempt's durable effect: no "not now" may follow it.
+            meerkat_core::protected_section::note_effect("console.child_prepared");
             child
                 .prepare(
                     &self.source,
                     original.clone(),
                     self.entry.clone(),
                     context,
-                    &input,
+                    input,
                     authentication.clone(),
                 )
                 .await
@@ -449,15 +480,8 @@ impl GovernedInputBinder for ConsoleBinder {
         });
         self.delegate
             .set(binder.clone())
-            .map_err(|_| "The Console binder was already used")?;
-        binder.bind(context, input).await
-    }
-    fn retain_unresolved(&self, settlement: Box<dyn GovernedSettlement>, detail: &str) {
-        if let Some(binder) = self.delegate.get() {
-            binder.retain_unresolved(settlement, detail);
-        } else {
-            drop(settlement);
-        }
+            .map_err(|_| BindFailure::denied("The Console binder was already used"))?;
+        Ok(binder)
     }
 }
 

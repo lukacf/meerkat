@@ -2,7 +2,7 @@ use meerkat_meta::{
     AppendOutcome, ConsoleCursor, ConsoleDeltaCompaction, ConsoleFrame, ConsoleFrameSource,
     ConsoleFrameSourceKind, ConsoleFrameStatus, ConsoleLogResult, ConsoleLogStore,
     ConsoleTimelinePage, ConsoleTimelineQuery, ConsoleTimelineQueryError,
-    ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery, NewConsoleFrame,
+    ConsoleTimelineWindowPage, ConsoleTimelineWindowQuery, NewConsoleFrame, SendTransition,
 };
 use std::sync::{
     Arc,
@@ -80,6 +80,22 @@ impl ConsoleLogStore for FaultStore {
     ) -> ConsoleLogResult<Option<ConsoleFrame>> {
         self.inner.update_frame_status(id, status).await
     }
+    // The send machine's own transitions pass through, so a governed send
+    // moves through its states on the wrapped store.
+    fn supports_send_transitions(&self) -> bool {
+        self.inner.supports_send_transitions()
+    }
+    async fn transition_send_frame(
+        &self,
+        id: &str,
+        transition: SendTransition,
+        note: Option<(&'static str, serde_json::Value)>,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.transition_send_frame(id, transition, note).await
+    }
+    async fn take_send_frame_hold(&self, id: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.take_send_frame_hold(id).await
+    }
     async fn query_frames(
         &self,
         query: ConsoleTimelineQuery,
@@ -112,6 +128,14 @@ impl ConsoleLogStore for FaultStore {
     }
     async fn frame_by_dedupe_key(&self, key: &str) -> ConsoleLogResult<Option<ConsoleFrame>> {
         self.inner.frame_by_dedupe_key(key).await
+    }
+    // The send record lookup passes through too: the trait's default finds
+    // none, and a reply to a console request would then have no thread.
+    async fn send_frame_by_interaction(
+        &self,
+        interaction_id: &str,
+    ) -> ConsoleLogResult<Option<ConsoleFrame>> {
+        self.inner.send_frame_by_interaction(interaction_id).await
     }
     async fn latest_cursor(&self) -> ConsoleLogResult<Option<ConsoleCursor>> {
         if self.fault.load(Ordering::SeqCst) == 2 {

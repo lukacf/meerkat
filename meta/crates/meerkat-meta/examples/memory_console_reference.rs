@@ -278,7 +278,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
                 "Router deploy cadence",
                 "Deploys happen ad hoc whenever a fix lands.",
             ),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("chain root");
@@ -290,7 +290,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
                 "Router deploy cadence",
                 "Deploys moved to a weekly Tuesday window.",
             ),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("chain mid");
@@ -312,7 +312,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
             &identity_scope("router"),
             &chain_mid.memory_id,
             tip_record,
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("chain tip");
@@ -332,7 +332,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
             .remember_authored(
                 &identity_scope("router"),
                 record(title, body),
-                MemoryAuthor::Operator,
+                MemoryAuthor::Operator { principal: None },
             )
             .await
             .expect("router fact");
@@ -344,7 +344,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
                 "Delivery sink preference",
                 "The delivery sink prefers batched flushes over per-message writes.",
             ),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("delivery fact");
@@ -355,7 +355,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
                 "Delivery quiet hours",
                 "No non-urgent delivery notifications between 22:00 and 07:00.",
             ),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("delivery fact 2");
@@ -370,7 +370,11 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
         ),
     ] {
         store
-            .remember_authored(&mob_scope, record(title, body), MemoryAuthor::Operator)
+            .remember_authored(
+                &mob_scope,
+                record(title, body),
+                MemoryAuthor::Operator { principal: None },
+            )
             .await
             .expect("mob fact");
     }
@@ -383,7 +387,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
                 "Realm data residency",
                 "All realm data stays in the EU region unless a ticket says otherwise.",
             ),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("realm fact");
@@ -397,7 +401,7 @@ async fn seed_store(store: &SqliteAgentMemoryStore) -> SeededIds {
                 "Operator briefing preference",
                 "Prefers terse morning summaries with links over long prose.",
             ),
-            MemoryAuthor::Operator,
+            MemoryAuthor::Operator { principal: None },
         )
         .await
         .expect("operator fact");

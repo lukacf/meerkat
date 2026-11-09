@@ -126,7 +126,7 @@ async fn missing_or_revoked_configured_parent_binds_controller_only() {
             if revoked {
                 let parent = parent(&fixture);
                 let mut custody = fixture.machine.try_controller_grant_mutation().unwrap();
-                fixture.source.owner.grants().revoke(&parent.root_authority, &parent, &mut custody).unwrap();
+                fixture.source.owner.grants().revoke(&meerkat_core::AdmissionGuard::none(), &parent.root_authority, &parent, &mut custody).unwrap();
             }
             let first = fixture.submit().await;
             fixture.finish(&first).await.unwrap();
@@ -198,7 +198,12 @@ async fn revoking_bound_configured_parent_refuses_without_substitution() {
             .source
             .owner
             .grants()
-            .revoke(&parent.root_authority, &parent, &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &parent.root_authority,
+                &parent,
+                &mut custody,
+            )
             .unwrap();
         drop(custody);
         assert!(matches!(
@@ -496,6 +501,50 @@ async fn committed_binding_and_lost_read_recover_exact_native_child() {
             Some(exact_child)
         );
         assert_eq!(fixture.model_requests(), 1);
+    }))
+    .catch_unwind()
+    .await;
+    let cleanup = fixture.shutdown().await;
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+/// The configured setup child grant: after a dropped bind
+/// left the configured selection saved and the child unissued, the child's
+/// issuance is the attempt's first write. The selection is retained before
+/// the send, so the send's bind issues the child first: marked, it binds and
+/// is admitted; with the child's mark dropped, the write witness names it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_child_issued_first_after_its_selection_was_retained_is_marked() {
+    let fixture = configured().await;
+    let result = AssertUnwindSafe(Box::pin(async {
+        let capability = fixture
+            .lifetime()
+            .selected_policy()
+            .native_host
+            .as_ref()
+            .unwrap()
+            .members[0]
+            .setup_capability
+            .clone()
+            .unwrap();
+        fixture
+            .source
+            .retain_configured_setup(&fixture.submission.original, &fixture.session, capability)
+            .await
+            .unwrap();
+        let first = fixture.submit().await;
+        fixture.finish(&first).await.unwrap();
+        let binding = fixture.binding().await.unwrap().unwrap();
+        assert!(
+            matches!(
+                &binding.candidate().authority_basis,
+                WorkAuthorityBasis::GrantLineage { lineage } if lineage.len() == 2
+            ),
+            "the configured child binds"
+        );
     }))
     .catch_unwind()
     .await;

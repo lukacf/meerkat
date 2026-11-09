@@ -273,21 +273,29 @@ settings before the turn, so REST can change build settings that RPC refuses.
   place, its content becomes the `[meerkat-retired-instruction-v1]` header
   (`status=superseded`), and the newest row of each key keeps its body. The
   1 MiB activation budget counts live bodies only.
-- Operator instructions (0.9.9, Rust API, no wire method): standing
+- Operator instructions (0.9.9 Rust API; since 0.9.11 also JSON-RPC
+  `session/set_instruction`, `session/revoke_instruction` and
+  `session/instruction_status`, and the Python and TypeScript SDKs): standing
   instructions by slot (namespace and key), revision and body.
   `SessionServiceInstructionExt::set_session_instruction` and
   `read_session_instructions` (the persistent service; the ephemeral one
   refuses `durability_unavailable`) record a session-owned write without
   waking anything; the pending changes apply at the session's next fresh run
   start as one System entry before the run's input, and a compaction folds
-  the entries into one snapshot. Limits: 64 slots, 256 KiB a body, 1 MiB of
+  the entries into one snapshot; each applied entry is published as an
+  `operator_instructions_applied` event (an observation; the status read is
+  the authority). Limits: 64 slots, 256 KiB a body, 1 MiB of
   Active bodies; a stale or conflicting revision is refused typed
-  (`InstructionSetErrorCode`). A model that lowers System rows only in its
+  (`InstructionSetErrorCode`, on the wire `error.data.instruction_set_code`).
+  A governed runtime refuses every write `prepared_authorization_required`.
+  A model that lowers System rows only in its
   leading prompt defers them (`leading_prefix_only`), and a backend whose
   wire carries one leading System row keeps them pending
   (`lowering_unavailable`). A mob member's session belongs to its mob
-  (`MobHandle::set_operator_instruction`), and its own host's writes are
-  refused `owned_by_mob`.
+  (`MobHandle::set_operator_instruction`, `mob/set_instruction`), and its own
+  host's writes are refused `owned_by_mob`. Instruction activations
+  (`session/activate_instruction`) are deprecated since 0.9.11 in favour of
+  operator instructions.
 - System-row prune (0.9.9, Rust API):
   `SessionServiceTranscriptEditExt::prune_system_rows` removes ordinary
   System rows a host names (each by its 0-based index and the `sha256:`
@@ -434,13 +442,27 @@ Contract and limits: `docs/guides/durable-runs.mdx`.
   settle now: keep the hold and settle again. A settlement that did not
   commit, or that left the run's tail standing, is never `Settled`:
   `MobError::MemberReloadRequired` when its write failed (reload, settle
-  again) or its tail repair failed (reload; the member then keeps no run),
+  again; on a host store realm, a write the store refused or left unsettled
+  poisons the session's scopes, and the reload fails until the realm is
+  opened again, so the member stays held) or its tail repair failed
+  (reload; the member then keeps no run),
   `MobError::MemberSessionNotLive` when the session leaves the process
-  (another writer took its store fence, or an unregister ended the run
+  (its store realm lost its fence, or an unregister ended the run
   first: its inputs then stopped when it keeps queued work, a mob
-  Shutdown's default, and cancelled when it stops). A member not live
-  in this process is refused `MobError::MemberSessionNotLive` and never
-  woken. `MeerkatMachine::session_work_state` reads cold whether one session
+  Shutdown's default, and cancelled when it stops), and
+  `MobError::MemberInputTerminalNotYetReadable` when the run is no longer
+  kept but an input of it reads no committed terminal yet (settle again). A
+  member not live in this process is refused
+  `MobError::MemberSessionNotLive` and never woken. `MemberNotFound` (a
+  member the mob no longer holds; a release answers it too) and
+  `UnsupportedForMode` (a placed or session-less member, never held) answer
+  the same on every round: that member is done. A host store realm that
+  lost its fence (`SpiRealm::realm_poisoned`: no wake, reload or cold read
+  in this process serves a member until the realm is opened again), and a
+  mob destroyed or shut down (every command to its actor answers
+  `ActorCommandChannelClosed`),
+  end the recovery in this process.
+  `MeerkatMachine::session_work_state` reads cold whether one session
   holds the work a start wakes a member for, without loading or registering
   it: `Registered`, `Idle`,
   `HoldsWork(SessionDurableWork { recovery_work, pending_deliveries })` or

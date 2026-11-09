@@ -71,12 +71,21 @@ impl TokenStore for SaveBarrier {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
         self.inner.load(key).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.gate.enter().await;
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        self.inner.clear(key).await
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.inner.list().await
@@ -125,13 +134,22 @@ impl TokenStore for DescribeReadBarrier {
         }
         self.inner.load_for(key, access).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner.save(key, tokens).await
+        self.inner.save(fence, key, tokens).await
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.inner.list().await

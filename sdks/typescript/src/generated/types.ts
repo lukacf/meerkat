@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.9.10
+// Contract version: 0.9.11
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.9.10";
+export const CONTRACT_VERSION = "0.9.11";
 
 export type Value = unknown;
 
@@ -670,6 +670,8 @@ export type WireRunStopCompletion = "completed" | "completed_without_result" | "
 
 export type WireInputTerminalOutcome = "completed" | "abandoned" | "superseded" | "coalesced" | "cancelled";
 
+export type WireCompactionRequestOutcome = "requested" | "already_requested";
+
 export interface WireDeviceCompleteResultPending {
   state: "pending";
 }
@@ -883,7 +885,23 @@ export interface ToolGrantTargetFamily {
   kind: "family";
 }
 
-export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily;
+export interface ToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
+export type ToolGrantTargetRequest = ToolGrantTargetTool | ToolGrantTargetFamily | ToolGrantTargetMcpServer;
+
+export interface ToolGrantScopeWindow {
+  kind: "window";
+}
+
+export interface ToolGrantScopeCurrentRun {
+  kind: "current_run";
+}
+
+export type ToolGrantScopeRequest = ToolGrantScopeWindow | ToolGrantScopeCurrentRun;
 
 export interface WireToolGrantSubjectSession {
   kind: "session";
@@ -913,14 +931,21 @@ export interface WireToolGrantTargetFamily {
   names?: string[];
 }
 
+export interface WireToolGrantTargetMcpServer {
+  kind: "mcp_server";
+  server: string;
+  tools?: string[] | null;
+}
+
 export interface WireToolGrantTargetUnknown {
   kind: "unknown";
 }
 
-export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetUnknown;
+export type WireToolGrantTarget = WireToolGrantTargetTool | WireToolGrantTargetFamily | WireToolGrantTargetMcpServer | WireToolGrantTargetUnknown;
 
 export interface WireToolGrantIssuerOperator {
   caller?: string | null;
+  decision_ref?: string | null;
   kind: "operator";
 }
 
@@ -935,9 +960,24 @@ export interface WireToolGrantIssuerUnknown {
 
 export type WireToolGrantIssuer = WireToolGrantIssuerOperator | WireToolGrantIssuerApproval | WireToolGrantIssuerUnknown;
 
-export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "unknown";
+export interface WireToolGrantScopeWindow {
+  kind: "window";
+}
 
-export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "unknown";
+export interface WireToolGrantScopeCurrentRun {
+  kind: "current_run";
+  run_id: string;
+}
+
+export interface WireToolGrantScopeUnknown {
+  kind: "unknown";
+}
+
+export type WireToolGrantScope = WireToolGrantScopeWindow | WireToolGrantScopeCurrentRun | WireToolGrantScopeUnknown;
+
+export type WireToolGrantStatus = "active" | "expired" | "revoked" | "requested" | "declined" | "run_ended" | "unknown";
+
+export type WireToolGrantExpiryDriver = "timer" | "boundary" | "dispatch" | "read" | "revoke" | "run" | "recovery" | "build" | "unknown";
 
 export type WireToolGrantRefusalKind = "required" | "expired" | "revoked" | "unavailable" | "unknown";
 
@@ -947,6 +987,7 @@ export interface WireToolGrantAuditEventGranted {
   issuer: WireToolGrantIssuer;
   kind: "granted";
   reason?: string | null;
+  scope?: WireToolGrantScope;
   target: WireToolGrantTarget;
 }
 
@@ -975,11 +1016,119 @@ export interface WireToolGrantAuditEventRefused {
   tool: string;
 }
 
+export interface WireToolGrantAuditEventRunEnded {
+  driver: WireToolGrantExpiryDriver;
+  grant_id: string;
+  kind: "run_ended";
+  observed_at_ms: number;
+  run_id: string;
+}
+
 export interface WireToolGrantAuditEventUnknown {
   kind: "unknown";
 }
 
-export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventUnknown;
+export type WireToolGrantAuditEvent = WireToolGrantAuditEventGranted | WireToolGrantAuditEventExpired | WireToolGrantAuditEventRevoked | WireToolGrantAuditEventRefused | WireToolGrantAuditEventRunEnded | WireToolGrantAuditEventUnknown;
+
+export type WireToolGrantApplies = "now" | "not_mounted" | "at_next_build" | "unknown";
+
+export type InstructionSetErrorCode = "invalid_request" | "digest_mismatch" | "stale_revision" | "revision_conflict" | "unknown_slot" | "slot_limit_exceeded" | "body_too_large" | "active_set_budget_exceeded" | "owned_by_mob" | "owned_by_session" | "owned_by_other_mob" | "slot_managed_by_activation" | "durability_unavailable" | "mob_terminal" | "malformed_instruction_history" | "prepared_authorization_required";
+
+export type InstructionEffect = "absent" | "active";
+
+export type InstructionEntryKind = "delta" | "snapshot";
+
+export type WireInstructionPendingReason = "awaiting_run_start" | "leading_prefix_only_lowering" | "lowering_unavailable" | "session_unborn" | "delivery_owed";
+
+export type WireInstructionBlockReason = "member_host_unsupported" | "slot_managed_by_activation" | "durability_unavailable" | "owned_by_session" | "owned_by_other_mob";
+
+export type WireInstructionResidency = "live" | "dormant" | "unborn";
+
+export type WireInstructionLowering = "mid_conversation" | "leading_prefix_only" | "unavailable";
+
+export type WireSessionInstructionDisposition = "recorded" | "duplicate";
+
+export type WireMobInstructionDisposition = "committed" | "duplicate";
+
+export interface WireInstructionTargetMob {
+  kind: "mob";
+}
+
+export interface WireInstructionTargetProfile {
+  kind: "profile";
+  profile: string;
+}
+
+export interface WireInstructionTargetMember {
+  agent_identity: string;
+  kind: "member";
+}
+
+export type WireInstructionTarget = WireInstructionTargetMob | WireInstructionTargetProfile | WireInstructionTargetMember;
+
+export interface WireInstructionSlotStateEffective {
+  state: "effective";
+}
+
+export interface WireInstructionSlotStatePending {
+  reason: WireInstructionPendingReason;
+  state: "pending";
+}
+
+export interface WireInstructionSlotStateBlocked {
+  reason: WireInstructionBlockReason;
+  state: "blocked";
+}
+
+export interface WireInstructionSlotStateNotTargeted {
+  state: "not_targeted";
+}
+
+export type WireInstructionSlotState = WireInstructionSlotStateEffective | WireInstructionSlotStatePending | WireInstructionSlotStateBlocked | WireInstructionSlotStateNotTargeted;
+
+export interface WireInstructionTargetOwnerUnowned {
+  kind: "unowned";
+}
+
+export interface WireInstructionTargetOwnerSession {
+  kind: "session";
+}
+
+export interface WireInstructionTargetOwnerMob {
+  agent_identity: string;
+  kind: "mob";
+  mob_id: string;
+}
+
+export type WireInstructionTargetOwner = WireInstructionTargetOwnerUnowned | WireInstructionTargetOwnerSession | WireInstructionTargetOwnerMob;
+
+export interface WireMemberInstructionDeliveryStateCurrent {
+  state: "current";
+}
+
+export interface WireMemberInstructionDeliveryStateOwed {
+  generation: number;
+  last_failure?: string | null;
+  state: "owed";
+}
+
+export interface WireMemberInstructionDeliveryStateBlocked {
+  reason: WireInstructionBlockReason;
+  state: "blocked";
+}
+
+export type WireMemberInstructionDeliveryState = WireMemberInstructionDeliveryStateCurrent | WireMemberInstructionDeliveryStateOwed | WireMemberInstructionDeliveryStateBlocked;
+
+export interface WireInstructionEffectiveReadOk {
+  status: "ok";
+}
+
+export interface WireInstructionEffectiveReadUnreadable {
+  reason: string;
+  status: "unreadable";
+}
+
+export type WireInstructionEffectiveRead = WireInstructionEffectiveReadOk | WireInstructionEffectiveReadUnreadable;
 
 export interface DecisionAudienceApprover {
   approver_id: string;
@@ -1493,6 +1642,15 @@ export interface WireRunStopContributor {
   terminal?: WireInputTerminalOutcome | null;
 }
 
+export interface CompactSessionParams {
+  session_id: string;
+}
+
+export interface CompactSessionResult {
+  outcome: WireCompactionRequestOutcome;
+  session_id: string;
+}
+
 export interface ListSessionTranscriptRevisionsParams {
   limit?: number | null;
   offset?: number | null;
@@ -1733,6 +1891,7 @@ export interface WireToolGrant {
   issued_at_ms: number;
   issuer: WireToolGrantIssuer;
   reason?: string | null;
+  scope?: WireToolGrantScope;
   status: WireToolGrantStatus;
   subject: WireToolGrantSubject;
   target: WireToolGrantTarget;
@@ -1754,15 +1913,35 @@ export interface WireUnreadableToolGrantAuditRow {
   sequence: number;
 }
 
+export interface WireToolGrantGateEntries {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
+export interface WireToolGrantGateView {
+  gated?: WireToolGrantGateEntries;
+  not_mounted?: WireToolGrantGateEntries;
+}
+
+export interface WireMemberToolGrantGate {
+  next_build: WireToolGrantGateView;
+  running?: WireToolGrantGateView | null;
+}
+
 export interface GrantToolParams {
+  decision_ref?: string | null;
   duration_ms?: number | null;
   expires_at_ms?: number | null;
   reason?: string | null;
+  scope?: ToolGrantScopeRequest | null;
   subject: ToolGrantSubjectRequest;
   target: ToolGrantTargetRequest;
 }
 
 export interface GrantToolResult {
+  applies?: WireToolGrantApplies | null;
   grant: WireToolGrant;
 }
 
@@ -1782,6 +1961,7 @@ export interface ListToolGrantsParams {
 }
 
 export interface ListToolGrantsResult {
+  gate?: WireMemberToolGrantGate | null;
   grants: WireToolGrant[];
   unreadable?: WireUnreadableToolGrant[];
 }
@@ -1798,16 +1978,165 @@ export interface ToolGrantAuditResult {
   unreadable?: WireUnreadableToolGrantAuditRow[];
 }
 
+export interface InstructionSetErrorData {
+  instruction_set_code: InstructionSetErrorCode;
+}
+
+export interface WireInstructionSlotView {
+  effect: InstructionEffect;
+  revision: number;
+}
+
+export interface WireInstructionEffectiveSlot {
+  effect: InstructionEffect;
+  entry_sequence: number;
+  kind: InstructionEntryKind;
+  message_index: number;
+  revision: number;
+  run_id?: RunId | null;
+}
+
+export interface WireSessionInstructionSlot {
+  effective?: WireInstructionEffectiveSlot | null;
+  key: string;
+  namespace: string;
+  recorded?: WireInstructionSlotView | null;
+  state: WireInstructionSlotState;
+}
+
+export interface SetSessionInstructionParams {
+  body: string;
+  content_sha256?: string | null;
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+}
+
+export interface RevokeSessionInstructionParams {
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+}
+
+export interface SessionInstructionStatusParams {
+  session_id: string;
+}
+
+export interface SessionInstructionWriteResult {
+  disposition: WireSessionInstructionDisposition;
+  key: string;
+  namespace: string;
+  revision: number;
+  session_id: string;
+  target_generation: number;
+}
+
+export interface SessionInstructionStatusResult {
+  entry_sequence: number;
+  lowering?: WireInstructionLowering | null;
+  owner: WireInstructionTargetOwner;
+  session_id: string;
+  slots: WireSessionInstructionSlot[];
+  target_generation: number;
+}
+
+export interface WireInstructionRecord {
+  body_bytes?: number | null;
+  content_sha256?: string | null;
+  effect: InstructionEffect;
+  key: string;
+  namespace: string;
+  revision: number;
+  target: WireInstructionTarget;
+}
+
+export interface WireMemberInstructionSlot {
+  desired: WireInstructionSlotView;
+  effective?: WireInstructionEffectiveSlot | null;
+  key: string;
+  namespace: string;
+  recorded?: WireInstructionSlotView | null;
+  state: WireInstructionSlotState;
+}
+
+export interface WireMemberInstructionDelivery {
+  recorded_generation?: number | null;
+  state: WireMemberInstructionDeliveryState;
+}
+
+export interface WireMemberInstructionStatus {
+  agent_identity: string;
+  delivery: WireMemberInstructionDelivery;
+  effective_read: WireInstructionEffectiveRead;
+  live_channel_open: boolean;
+  profile: string;
+  residency: WireInstructionResidency;
+  slots: WireMemberInstructionSlot[];
+}
+
+export interface MobSetInstructionParams {
+  body: string;
+  content_sha256?: string | null;
+  key: string;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+  target: WireInstructionTarget;
+}
+
+export interface MobRevokeInstructionParams {
+  key: string;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+}
+
+export interface MobInstructionStatusParams {
+  agent_identity?: string | null;
+  key?: string | null;
+  limit?: number | null;
+  mob_id: string;
+  namespace?: string | null;
+  offset?: number | null;
+  profile?: string | null;
+}
+
+export interface MobInstructionWriteResult {
+  disposition: WireMobInstructionDisposition;
+  generation: number;
+  key: string;
+  matched_members: number;
+  mob_id: string;
+  namespace: string;
+  revision: number;
+}
+
+export interface MobInstructionStatusResult {
+  desired: WireInstructionRecord[];
+  generation: number;
+  members: WireMemberInstructionStatus[];
+  mob_id: string;
+  next_offset?: number | null;
+}
+
 export interface WireCanonicalPart {
   count: number;
   index: number;
   part_digest: string;
 }
 
+export interface WirePresentationLink {
+  reference: string;
+  served_digest: string;
+}
+
 export interface WirePresentationRecord {
   at_ms: number;
   audience: WirePresentationAudience;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];
@@ -1819,12 +2148,17 @@ export interface WireDecisionOutcome {
   tier: WireDecisionTier;
 }
 
+export interface WireDecisionEffect {
+  grant_id?: string | null;
+}
+
 export interface WireDecision {
   approver_id: string;
   created_at_ms: number;
   deadline_at_ms: number;
   decided_at_ms?: number | null;
   decision_id: string;
+  effect?: WireDecisionEffect | null;
   ended_at_ms?: number | null;
   execution_refusal?: string | null;
   first_presented_to_approver_at_ms?: number | null;
@@ -1855,6 +2189,7 @@ export interface DecisionPresentationRequest {
   at_ms: number;
   audience: DecisionAudienceRequest;
   channel_ref: string;
+  link?: WirePresentationLink | null;
   max_part_bytes?: number | null;
   message_ref: string;
   parts_shown: WireCanonicalPart[];
@@ -1924,6 +2259,19 @@ export interface WireDecisionNotice {
   phase: WireDecisionPhase;
   presentation?: WireDecisionNoticePresentation | null;
   requester: string;
+}
+
+export interface RequestToolGrantParams {
+  duration_ms: number;
+  reason?: string | null;
+  scope?: ToolGrantScopeRequest | null;
+  subject: ToolGrantSubjectRequest;
+  target: ToolGrantTargetRequest;
+}
+
+export interface RequestToolGrantResult {
+  decision: WireDecision;
+  grant: WireToolGrant;
 }
 
 export interface CallbackToolExecutionFast {
@@ -2231,7 +2579,7 @@ export interface MobCreateResult {
 export interface WireQuarantinedMob {
   attempts?: number;
   class: WireMobQuarantineClass;
-  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | null;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | "ADMISSION_IN_PROGRESS" | "ADMISSION_FENCE_UNAVAILABLE" | null;
   message: string;
   mob_id: string;
   retryable: boolean;
@@ -2246,7 +2594,7 @@ export interface MobListResult {
 
 export interface WireMobLifecycleFailure {
   cause: MobSpawnManyFailureCause;
-  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | null;
+  code?: "SESSION_NOT_FOUND" | "SCHEDULE_NOT_FOUND" | "SESSION_BUSY" | "SESSION_NOT_RUNNING" | "REQUEST_CANCELLED" | "PROVIDER_ERROR" | "BUDGET_EXHAUSTED" | "HOOK_DENIED" | "AGENT_ERROR" | "CAPABILITY_UNAVAILABLE" | "SKILL_NOT_FOUND" | "SKILL_RESOLUTION_FAILED" | "INVALID_PARAMS" | "INTERNAL_ERROR" | "DUPLICATE_INPUT" | "SUPERVISOR_ROTATION_INCOMPLETE" | "SCOPE_DENIED" | "HOST_UNAVAILABLE" | "STALE_CURSOR" | "STALE_FENCE" | "MEMBER_RELOAD_REQUIRED" | "INPUT_REFUSED" | "INPUT_NOT_READY" | "SESSION_RUNTIME_UNAVAILABLE" | "APPROVAL_STORE_UNAVAILABLE" | "APPROVAL_CONFLICT" | "APPROVAL_COMMIT_UNKNOWN" | "STALE_DELIVERY_SCOPE" | "FORK_INSTRUCTION_REFUSED" | "ADMISSION_IN_PROGRESS" | "ADMISSION_FENCE_UNAVAILABLE" | null;
   message: string;
   structured_data?: unknown;
 }
@@ -2391,10 +2739,18 @@ export interface WireMemberCustodyDeferral {
   restore: WireMemberCustodyRestore;
 }
 
+export interface WireGrantGatedTools {
+  families?: string[];
+  mcp_servers?: string[];
+  tools?: string[];
+  unconfigured_mcp_servers?: boolean;
+}
+
 export interface WireMobToolConfig {
   builtins?: boolean;
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -2788,6 +3144,23 @@ export interface MobHelperResult {
   usage: Record<string, unknown>;
 }
 
+export interface MobForkMemberParams {
+  agent_identity: string;
+  message_index?: number | null;
+  mob_id: string;
+  profile?: string | null;
+  runtime_mode?: WireMobRuntimeMode | null;
+  source_member_id: string;
+}
+
+export interface MobForkMemberResult {
+  agent_identity: string;
+  member_ref: WireMemberRef;
+  message_count: number;
+  session_id: string;
+  source_session_id: string;
+}
+
 export interface MobForceCancelResult {
   cancelled: boolean;
 }
@@ -2977,6 +3350,7 @@ export interface MobProfileDeleteResult {
 
 export interface MobStreamOpenParams {
   agent_identity?: string | null;
+  cursor?: MobStreamCursor | null;
   mob_id: string;
 }
 
@@ -3134,6 +3508,17 @@ export interface MobStopMemberRunResult {
   agent_identity: string;
   mob_id: string;
   receipt: WireRunStopReceipt;
+}
+
+export interface MobCompactMemberParams {
+  agent_identity: string;
+  mob_id: string;
+}
+
+export interface MobCompactMemberResult {
+  agent_identity: string;
+  mob_id: string;
+  outcome: WireCompactionRequestOutcome;
 }
 
 export interface MobMemberLiveOpenParams {
@@ -3311,6 +3696,7 @@ export interface MobToolConfigInput {
   bundles?: string[];
   comms?: boolean;
   deny?: string[];
+  grant_gated?: WireGrantGatedTools;
   image_generation?: boolean;
   mcp?: string[];
   memory?: boolean;
@@ -3543,6 +3929,11 @@ export interface WireProviderParamsOverride {
   temperature?: number | null;
   thinking_budget_tokens?: number | null;
   top_p?: number | null;
+}
+
+export interface MobStreamCursor {
+  epoch: string;
+  seq: number;
 }
 
 export interface AttentionBindingRequest {
@@ -4056,7 +4447,7 @@ export interface WireFlowTurnOutcomeInteractionFailed {
 
 export type WireFlowTurnOutcome = "run_completed" | "extraction_succeeded" | "interaction_complete" | "interaction_callback_pending" | "channel_closed" | WireFlowTurnOutcomeExtractionFailed | WireFlowTurnOutcomeRunFailed | WireFlowTurnOutcomeInteractionFailed;
 
-export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable";
+export type AuthErrorKind = "missing_secret" | "unsupported_combination" | "missing_required_metadata" | "workspace_mismatch" | "stale_credential" | "refresh_required" | "lease_absent" | "user_reauth_required" | "expired" | "refresh_failed" | "resolve_required" | "interactive_login_required" | "host_owned_unavailable" | "io" | "other" | "credential_access_denied" | "credential_interaction_required" | "credential_access_pending" | "credential_store_unavailable" | "source_unavailable";
 
 export type ConnectionTargetErrorKind = "missing_realm" | "unknown_realm" | "missing_default_binding" | "invalid_realm_id" | "invalid_binding_id" | "realm_config_invalid" | "binding_invalid" | "provider_mismatch" | "realm_chain";
 
@@ -5442,6 +5833,7 @@ export interface BridgeCommandMaterializeMember {
   fence_token: number;
   forked_participant_attachment?: Record<string, unknown> | null;
   generation: number;
+  instruction_target?: Record<string, unknown> | null;
   launch: { mode: "fresh" } | Record<string, unknown>;
   prompt_context_fork?: Record<string, unknown> | null;
   protocol_version: BridgeProtocolVersion;
@@ -5569,7 +5961,28 @@ export interface BridgeCommandReadMemberVisibleTools {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools;
+export interface BridgeCommandRecordMemberInstructionTarget {
+  binding_generation: number;
+  command: "record_member_instruction_target";
+  epoch: number;
+  member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+  target: Record<string, unknown>;
+}
+
+export interface BridgeCommandReleaseMemberInstructionTarget {
+  agent_identity: string;
+  binding_generation: number;
+  command: "release_member_instruction_target";
+  epoch: number;
+  member_session_id: string;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools | BridgeCommandRecordMemberInstructionTarget | BridgeCommandReleaseMemberInstructionTarget;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -5785,7 +6198,15 @@ export interface BridgeRejectionCauseForkInstructionRefused {
   fork_instruction_refused: BridgeRejectionCauseForkInstructionRefusedPayload;
 }
 
-export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused;
+export interface BridgeRejectionCauseInstructionTargetRefusedPayload {
+  code: "invalid_request" | "digest_mismatch" | "stale_revision" | "revision_conflict" | "unknown_slot" | "slot_limit_exceeded" | "body_too_large" | "active_set_budget_exceeded" | "owned_by_mob" | "owned_by_session" | "owned_by_other_mob" | "slot_managed_by_activation" | "durability_unavailable" | "mob_terminal" | "malformed_instruction_history" | "prepared_authorization_required";
+}
+
+export interface BridgeRejectionCauseInstructionTargetRefused {
+  instruction_target_refused: BridgeRejectionCauseInstructionTargetRefusedPayload;
+}
+
+export type BridgeRejectionCause = "forked_participant_not_found" | "forked_participant_tampered" | "forked_participant_expired" | "forked_participant_revoked" | "forked_participant_exhausted" | "forked_participant_busy" | "forked_participant_source_mismatch" | "forked_participant_route_mismatch" | "not_bound" | "stale_supervisor" | "sender_mismatch" | "already_bound" | "invalid_bootstrap_token" | "unsupported_protocol_version" | "forked_participant_protocol_unsupported" | "forked_participant_cleanup_debt" | "invalid_supervisor_spec" | "invalid_peer_spec" | "address_mismatch" | "unsupported" | "internal" | "bind_admission_outcome_unknown" | "stale_fence" | BridgeRejectionCauseStaleCursor | BridgeRejectionCauseOversizedEvent | BridgeRejectionCauseHistoryRowTooLarge | "unavailable" | BridgeRejectionCauseRuntimeRetirementInProgress | BridgeRejectionCauseScopeDenied | "spec_digest_mismatch" | BridgeRejectionCauseMaterializeBuildRejected | BridgeRejectionCauseModelUnresolvable | BridgeRejectionCauseAuthBindingUnresolvable | BridgeRejectionCauseMcpCommandMissing | "realm_backend_unavailable" | BridgeRejectionCauseEnvKeyMissing | BridgeRejectionCauseHostEngineVersionChanged | BridgeRejectionCauseModelNotRealtime | BridgeRejectionCauseLiveAdapterUnavailable | "live_transport_unavailable" | "live_channel_already_bound" | "live_channel_not_found" | BridgeRejectionCauseLiveTransportUnsupported | "resume_session_not_found" | BridgeRejectionCauseCapabilityMissing | "launch_mode_unsupported" | "launch_mode_placement_mismatch" | BridgeRejectionCauseSessionOwnershipConflict | BridgeRejectionCauseForkInstructionRefused | BridgeRejectionCauseInstructionTargetRefused;
 
 export interface BridgeReplyBindMember {
   address: string;
@@ -5988,7 +6409,18 @@ export interface BridgeReplyMemberVisibleTools {
   result: "member_visible_tools";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools;
+export interface BridgeReplyMemberInstructionTargetRecorded {
+  disposition: "recorded" | "already_recorded";
+  result: "member_instruction_target_recorded";
+  target_generation: number;
+}
+
+export interface BridgeReplyMemberInstructionTargetReleased {
+  disposition?: "released" | "already_unowned" | null;
+  result: "member_instruction_target_released";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools | BridgeReplyMemberInstructionTargetRecorded | BridgeReplyMemberInstructionTargetReleased;
 
 export interface ContentBlockText {
   text: string;
@@ -7491,7 +7923,12 @@ export interface WireAuthErrorCredentialStoreUnavailable {
   kind: "credential_store_unavailable";
 }
 
-export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable;
+export interface WireAuthErrorSourceUnavailable {
+  detail: string;
+  kind: "source_unavailable";
+}
+
+export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorResolveRequired | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther | WireAuthErrorCredentialAccessDenied | WireAuthErrorCredentialInteractionRequired | WireAuthErrorCredentialAccessPending | WireAuthErrorCredentialStoreUnavailable | WireAuthErrorSourceUnavailable;
 
 export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 

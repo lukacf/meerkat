@@ -7,6 +7,11 @@ pub enum SendState {
     Dispatching,
     Delivered,
     DeliveryFailed,
+    /// A governed send whose bind answered bound: its input is being
+    /// submitted, so it ends delivered or failed and is never held. It
+    /// comes between `Dispatching` and the settled states; it is declared
+    /// last so the earlier variants keep their discriminants.
+    Submitted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +20,19 @@ pub enum SendTransition {
     StartDispatch,
     MarkDelivered,
     MarkDeliveryFailed,
+    /// A governed dispatch held past its door's budget submitted nothing:
+    /// the send returns to accepted, its hold recorded, and a replay of its
+    /// key dispatches it again. Only a dispatch before its submission is
+    /// held.
+    MarkHeld,
+    /// A governed dispatch's bind answered bound, before its input is
+    /// submitted.
+    MarkSubmitted,
+    /// A governed dispatch's submission answered unresolved: its native
+    /// admission's answer was lost, and its input may have run. The send
+    /// stays submitted, recording the answer, until the runtime's evidence
+    /// settles it; it is neither failed nor held.
+    MarkUnresolved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,12 +57,24 @@ impl SendState {
                 Self::Dispatching,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::DispatchSend],
             )),
-            (Self::Dispatching, SendTransition::MarkDelivered) => Ok((
+            (Self::Dispatching, SendTransition::MarkSubmitted) => Ok((
+                Self::Submitted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
+            )),
+            (Self::Dispatching | Self::Submitted, SendTransition::MarkDelivered) => Ok((
                 Self::Delivered,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
             )),
-            (Self::Dispatching, SendTransition::MarkDeliveryFailed) => Ok((
+            (Self::Dispatching | Self::Submitted, SendTransition::MarkDeliveryFailed) => Ok((
                 Self::DeliveryFailed,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
+            )),
+            (Self::Dispatching, SendTransition::MarkHeld) => Ok((
+                Self::AcceptedPersisted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
+            )),
+            (Self::Submitted, SendTransition::MarkUnresolved) => Ok((
+                Self::Submitted,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
             )),
             _ => Err("illegal send state transition"),
@@ -60,49 +90,111 @@ impl SendState {
                 Some(Self::AcceptedPersisted)
             }
             ConsoleFrameStatus::Dispatching => Some(Self::Dispatching),
+            ConsoleFrameStatus::Submitted => Some(Self::Submitted),
             ConsoleFrameStatus::Delivered => Some(Self::Delivered),
             ConsoleFrameStatus::DeliveryFailed => Some(Self::DeliveryFailed),
             ConsoleFrameStatus::Completed => None,
         }
     }
 
-    /// Whether the send has not settled: accepted or dispatching.
+    /// The status a send frame records in this state; none before it is
+    /// accepted.
+    pub(crate) fn frame_status(self) -> Option<ConsoleFrameStatus> {
+        match self {
+            Self::Requested => None,
+            Self::AcceptedPersisted => Some(ConsoleFrameStatus::Accepted),
+            Self::Dispatching => Some(ConsoleFrameStatus::Dispatching),
+            Self::Submitted => Some(ConsoleFrameStatus::Submitted),
+            Self::Delivered => Some(ConsoleFrameStatus::Delivered),
+            Self::DeliveryFailed => Some(ConsoleFrameStatus::DeliveryFailed),
+        }
+    }
+
+    /// Whether the send has not settled: accepted, dispatching or submitted.
     pub(crate) fn is_unsettled(self) -> bool {
-        matches!(self, Self::AcceptedPersisted | Self::Dispatching)
+        matches!(
+            self,
+            Self::AcceptedPersisted | Self::Dispatching | Self::Submitted
+        )
     }
 
     /// Reconcile an unsettled send, whose dispatch no live owner holds, from
-    /// the runtime's admission evidence. Only native evidence settles it: an
-    /// admitted input is a delivery; an absent one is dispatched again under
-    /// the send's own delivery identity, into the session it recorded. Absent
-    /// evidence never settles a send as failed here.
+    /// the runtime's admission evidence and the send's own hold. An admitted
+    /// input is a delivery. An absent one is dispatched again under the
+    /// send's own delivery identity, into the session it recorded; a held
+    /// send is dispatched again on its hold, whatever the evidence short of
+    /// an admission. A submitted send is never dispatched again, and an
+    /// absent read of it is final only where no unresolved answer of its
+    /// submission was seen: with no owner left to finish its submission and
+    /// none of its input on the runtime, its outcome is unknown and it fails.
+    /// In the process that saw its submission answer unresolved its input
+    /// may still be admitted, so the read changes nothing: the send stays
+    /// submitted, with no effect, until evidence of an admission settles it
+    /// or a later process reads it absent.
     pub(crate) fn reconcile(
         self,
         evidence: SendEvidence,
     ) -> Result<(Self, Vec<SendEffect>), &'static str> {
         match (self, evidence) {
-            (Self::AcceptedPersisted | Self::Dispatching, SendEvidence::Admitted) => Ok((
+            (
+                Self::AcceptedPersisted | Self::Dispatching | Self::Submitted,
+                SendEvidence::Admitted,
+            ) => Ok((
                 Self::Delivered,
                 vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
             )),
             (
                 state @ (Self::AcceptedPersisted | Self::Dispatching),
-                SendEvidence::AbsentRedispatchable,
+                SendEvidence::AbsentRedispatchable | SendEvidence::Held,
             ) => Ok((state, vec![SendEffect::DispatchSend])),
+            (Self::Submitted, SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere)) => Ok((
+                Self::DeliveryFailed,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame],
+            )),
+            (Self::Submitted, SendEvidence::Absent(AbsentRead::SubmissionUnresolvedHere)) => {
+                Ok((Self::Submitted, Vec::new()))
+            }
             _ => Err("illegal send reconciliation"),
         }
     }
 }
 
-/// Native admission evidence for one unsettled console send.
+/// Native admission evidence, or the send's own hold, for one unsettled
+/// console send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SendEvidence {
-    /// The runtime holds an input under the send's delivery key.
+    /// The runtime holds an input as the send's own.
     Admitted,
+    /// The runtime's read answered and holds no input as the send's own,
+    /// read where [`AbsentRead`] says.
+    Absent(AbsentRead),
     /// The runtime holds no input under the send's delivery keys, and the
     /// send's delivery is keyed and pinned to the session it recorded, so
     /// dispatching it again cannot duplicate or retarget it.
     AbsentRedispatchable,
+    /// The send's frame records a hold, and the runtime's evidence shows no
+    /// admission (it reads absent, or it cannot be read: the send recorded
+    /// no session, no runtime serves it, the read failed or ran late). The
+    /// hold is recorded only when a governed dispatch was held before it
+    /// submitted anything, and it is taken (a compare-and-set) before any
+    /// dispatch again, so it is the record that nothing was submitted since:
+    /// the send is dispatched again under its own keyed input.
+    Held,
+}
+
+/// Where an absent read of a send's input was made, against the answers of
+/// the send's submission: the evidence on which the send machine decides
+/// whether the absence is final ([`SendState::reconcile`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbsentRead {
+    /// In the process that saw the send's submission answer unresolved (its
+    /// native admission's answer was lost): its input may still be admitted
+    /// there.
+    SubmissionUnresolvedHere,
+    /// In a process that saw no unresolved answer of the send's submission:
+    /// a later process, which starts with none, or one whose submission of
+    /// it ended otherwise.
+    NoUnresolvedAnswerHere,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,13 +354,58 @@ mod tests {
                 unsettled.reconcile(SendEvidence::AbsentRedispatchable),
                 Ok((unsettled, vec![SendEffect::DispatchSend]))
             );
+            assert_eq!(
+                unsettled.reconcile(SendEvidence::Held),
+                Ok((unsettled, vec![SendEffect::DispatchSend]))
+            );
+            for read in [
+                AbsentRead::NoUnresolvedAnswerHere,
+                AbsentRead::SubmissionUnresolvedHere,
+            ] {
+                assert_eq!(
+                    unsettled.reconcile(SendEvidence::Absent(read)),
+                    Err("illegal send reconciliation"),
+                    "{unsettled:?} {read:?}: absent alone settles nothing before a submission"
+                );
+            }
+        }
+        // A submitted send is delivered on an admission, fails on a read
+        // that found none of its input where no unresolved answer of its
+        // submission was seen, and is never dispatched again.
+        assert_eq!(
+            SendState::Submitted.reconcile(SendEvidence::Admitted),
+            Ok((
+                SendState::Delivered,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            ))
+        );
+        assert_eq!(
+            SendState::Submitted
+                .reconcile(SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere)),
+            Ok((
+                SendState::DeliveryFailed,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            ))
+        );
+        for evidence in [SendEvidence::AbsentRedispatchable, SendEvidence::Held] {
+            assert_eq!(
+                SendState::Submitted.reconcile(evidence),
+                Err("illegal send reconciliation"),
+                "{evidence:?}"
+            );
         }
         for settled in [
             SendState::Requested,
             SendState::Delivered,
             SendState::DeliveryFailed,
         ] {
-            for evidence in [SendEvidence::Admitted, SendEvidence::AbsentRedispatchable] {
+            for evidence in [
+                SendEvidence::Admitted,
+                SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere),
+                SendEvidence::Absent(AbsentRead::SubmissionUnresolvedHere),
+                SendEvidence::AbsentRedispatchable,
+                SendEvidence::Held,
+            ] {
                 assert_eq!(
                     settled.reconcile(evidence),
                     Err("illegal send reconciliation"),
@@ -276,6 +413,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Whether an absent read of a submitted send is final is the send
+    /// machine's own rule, on where the read was made. In the process that
+    /// saw the send's submission answer unresolved, its input may still be
+    /// admitted: the read changes nothing, with no effect. Anywhere else no
+    /// submission of it can still be admitted: it fails.
+    #[test]
+    fn an_absent_read_is_final_only_where_no_unresolved_answer_was_seen() {
+        assert_eq!(
+            SendState::Submitted
+                .reconcile(SendEvidence::Absent(AbsentRead::SubmissionUnresolvedHere)),
+            Ok((SendState::Submitted, Vec::new())),
+            "an absent read where the submission answered unresolved is not final"
+        );
+        assert_eq!(
+            SendState::Submitted
+                .reconcile(SendEvidence::Absent(AbsentRead::NoUnresolvedAnswerHere)),
+            Ok((
+                SendState::DeliveryFailed,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            )),
+            "an absent read anywhere else is final"
+        );
     }
 
     #[test]
@@ -293,6 +454,10 @@ mod tests {
             Some(SendState::Dispatching)
         );
         assert_eq!(
+            SendState::from_send_frame_status(ConsoleFrameStatus::Submitted),
+            Some(SendState::Submitted)
+        );
+        assert_eq!(
             SendState::from_send_frame_status(ConsoleFrameStatus::Delivered),
             Some(SendState::Delivered)
         );
@@ -306,8 +471,20 @@ mod tests {
         );
         assert!(SendState::AcceptedPersisted.is_unsettled());
         assert!(SendState::Dispatching.is_unsettled());
+        assert!(SendState::Submitted.is_unsettled());
         assert!(!SendState::Delivered.is_unsettled());
         assert!(!SendState::DeliveryFailed.is_unsettled());
+        for state in [
+            SendState::AcceptedPersisted,
+            SendState::Dispatching,
+            SendState::Submitted,
+            SendState::Delivered,
+            SendState::DeliveryFailed,
+        ] {
+            let status = state.frame_status().expect("a send frame's status");
+            assert_eq!(SendState::from_send_frame_status(status), Some(state));
+        }
+        assert_eq!(SendState::Requested.frame_status(), None);
     }
 
     #[test]
@@ -316,6 +493,105 @@ mod tests {
             SendState::Delivered.apply(SendTransition::StartDispatch),
             Err("illegal send state transition")
         );
+    }
+
+    /// A hold is recorded only on a dispatch held before it
+    /// submitted anything. `MarkHeld` leaves only `Dispatching`, back to
+    /// accepted; from every state before a dispatch began, and from every
+    /// state a submission settles (delivered, failed), it is refused.
+    #[test]
+    fn mark_held_is_refused_from_every_state_but_a_dispatch_in_flight() {
+        assert_eq!(
+            SendState::Dispatching.apply(SendTransition::MarkHeld),
+            Ok((
+                SendState::AcceptedPersisted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            ))
+        );
+        for state in [
+            SendState::Requested,
+            SendState::AcceptedPersisted,
+            SendState::Submitted,
+            SendState::Delivered,
+            SendState::DeliveryFailed,
+        ] {
+            assert_eq!(
+                state.apply(SendTransition::MarkHeld),
+                Err("illegal send state transition"),
+                "{state:?}"
+            );
+        }
+    }
+
+    /// A governed dispatch is submitted only from `Dispatching`,
+    /// when its bind answered bound; a submitted send is delivered or fails.
+    #[test]
+    fn a_submitted_send_comes_only_from_a_dispatch_and_settles_delivered_or_failed() {
+        assert_eq!(
+            SendState::Dispatching.apply(SendTransition::MarkSubmitted),
+            Ok((
+                SendState::Submitted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            ))
+        );
+        for state in [
+            SendState::Requested,
+            SendState::AcceptedPersisted,
+            SendState::Submitted,
+            SendState::Delivered,
+            SendState::DeliveryFailed,
+        ] {
+            assert_eq!(
+                state.apply(SendTransition::MarkSubmitted),
+                Err("illegal send state transition"),
+                "{state:?}"
+            );
+        }
+        for (transition, settled) in [
+            (SendTransition::MarkDelivered, SendState::Delivered),
+            (
+                SendTransition::MarkDeliveryFailed,
+                SendState::DeliveryFailed,
+            ),
+        ] {
+            assert_eq!(
+                SendState::Submitted.apply(transition),
+                Ok((
+                    settled,
+                    vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+                ))
+            );
+        }
+    }
+
+    /// A submitted send whose submission answered unresolved (its input may
+    /// have run) stays submitted, recording that answer: it is neither
+    /// failed nor held, and the runtime's evidence settles it. From every
+    /// other state the mark is refused.
+    ///
+    /// RED before the fix: the mark is refused from `Submitted` too.
+    #[test]
+    fn an_unresolved_submission_keeps_the_send_submitted() {
+        assert_eq!(
+            SendState::Submitted.apply(SendTransition::MarkUnresolved),
+            Ok((
+                SendState::Submitted,
+                vec![SendEffect::UpdateFrameStatus, SendEffect::EmitFrame]
+            ))
+        );
+        for state in [
+            SendState::Requested,
+            SendState::AcceptedPersisted,
+            SendState::Dispatching,
+            SendState::Delivered,
+            SendState::DeliveryFailed,
+        ] {
+            assert_eq!(
+                state.apply(SendTransition::MarkUnresolved),
+                Err("illegal send state transition"),
+                "{state:?}"
+            );
+        }
     }
 
     #[test]

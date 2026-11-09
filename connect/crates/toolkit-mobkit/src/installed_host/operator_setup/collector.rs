@@ -477,6 +477,7 @@ impl OperatorSetup {
                             return Err(HostLifetimeError::Denied);
                         }
                         Ok(grants.issue_root(
+                            &meerkat_core::AdmissionGuard::none(),
                             &self.operator,
                             id,
                             decision.intent.collector.clone(),
@@ -781,7 +782,12 @@ impl OperatorSetup {
                 self.lifetime
                     .with_current_setup(|| {
                         grants
-                            .revoke(&self.operator, &lineage[0], &mut custody)
+                            .revoke(
+                                &meerkat_core::AdmissionGuard::none(),
+                                &self.operator,
+                                &lineage[0],
+                                &mut custody,
+                            )
                             .map_err(|_| HostLifetimeError::Unavailable)
                     })
                     .map_err(|_| CollectorSetupError::PendingReconciliation)?;

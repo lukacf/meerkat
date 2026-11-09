@@ -307,6 +307,7 @@ fn configure_targets(
         let parent = match grants.issued_reference(&request.issuance_id)? {
             Some(parent) => parent,
             None => grants.issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 operator,
                 request.issuance_id.clone(),
                 native.grant_administrator.clone(),
@@ -333,6 +334,7 @@ fn configure_targets(
             let reference = match grants.issued_reference(&target.issuance_id)? {
                 Some(reference) => reference,
                 None => grants.issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
                     operator,
                     target.issuance_id.clone(),
                     native.grant_administrator.clone(),
@@ -378,7 +380,7 @@ fn configure_targets(
         GrantRefusal::Denied | GrantRefusal::Duplicate | GrantRefusal::ControllerInUse => {
             HostLifetimeError::Denied
         }
-        GrantRefusal::Unavailable => HostLifetimeError::Unavailable,
+        GrantRefusal::Unavailable | GrantRefusal::AdmissionFence => HostLifetimeError::Unavailable,
     })
 }
 

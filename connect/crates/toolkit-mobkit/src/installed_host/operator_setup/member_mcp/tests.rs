@@ -1476,6 +1476,7 @@ async fn lost_native_ack_is_reconciled_or_revoked_by_the_same_pre_retained_id() 
             .source
             .grants()
             .issue_root(
+                &meerkat_core::AdmissionGuard::none(),
                 &owner.operator,
                 native_id(&owner, &review),
                 record.intent.executor.clone(),

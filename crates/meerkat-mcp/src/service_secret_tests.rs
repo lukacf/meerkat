@@ -4,7 +4,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::*;
-use meerkat_core::auth::{McpServiceSecretRefusal, McpServiceSecretValues};
+use meerkat_core::auth::{
+    McpServiceSecretLaunch, McpServiceSecretRef, McpServiceSecretRefusal, McpServiceSecretValues,
+    McpServiceSecretWitness, load_mcp_service_secret_into, save_mcp_service_secret,
+};
 use meerkat_core::mcp_attachment::{McpAttachmentAuthority, McpAttachmentRefusal};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -471,5 +474,320 @@ async fn a_refused_secret_server_leaves_its_permitted_sibling_serving() {
     assert_eq!(
         meerkat_core::types::text_content(&result.expect("sibling call")),
         "still serving"
+    );
+}
+
+/// A credential source serving one stored row the way the realm custody
+/// does: the value read with the write that stored it, from the same row.
+struct StoredCustody {
+    store: meerkat_auth_core::auth_store::EphemeralTokenStore,
+    reference: McpServiceSecretRef,
+}
+
+impl StoredCustody {
+    fn for_server(config: &McpServerConfig) -> Arc<Self> {
+        Arc::new(Self {
+            store: meerkat_auth_core::auth_store::EphemeralTokenStore::new(),
+            reference: McpServiceSecretRef::for_definition(
+                meerkat_core::connection::RealmId::parse("team").unwrap(),
+                config,
+                SLOT,
+            )
+            .expect("declared slot"),
+        })
+    }
+
+    /// Store `value` as a write does, returning the write's witness.
+    async fn write(&self, value: &str) -> McpServiceSecretWitness {
+        let row = save_mcp_service_secret(
+            &meerkat_core::AdmissionGuard::none(),
+            &self.store,
+            &self.reference,
+            value,
+        )
+        .await
+        .expect("stored");
+        self.reference.witness_of(&row).expect("a named write")
+    }
+}
+
+#[async_trait]
+impl McpAuthResolver for StoredCustody {
+    async fn stored_bearer_token(
+        &self,
+        _target: &McpServerIdentity,
+    ) -> Result<Option<String>, McpOAuthError> {
+        Ok(None)
+    }
+
+    async fn interactive_login(
+        &self,
+        target: &McpServerIdentity,
+        _www_authenticate: Option<&str>,
+    ) -> Result<String, McpOAuthError> {
+        Err(McpOAuthError::HumanAuthorizationRequired {
+            server_name: target.server_name().to_owned(),
+        })
+    }
+
+    async fn stdio_service_secrets(
+        &self,
+        _server: &McpServerConfig,
+    ) -> Result<McpServiceSecretValues, McpServiceSecretRefusal> {
+        let mut values = McpServiceSecretValues::new();
+        match load_mcp_service_secret_into(&self.store, &self.reference, &mut values).await {
+            Ok(true) => Ok(values),
+            Ok(false) => Err(McpServiceSecretRefusal::NotStored {
+                env: SLOT.to_owned(),
+            }),
+            Err(error) => Err(McpServiceSecretRefusal::Unavailable {
+                reason: error.to_string(),
+            }),
+        }
+    }
+}
+
+/// The witness of the write whose value `connection`'s launch injected in
+/// `SLOT`.
+fn launched_write(connection: &McpConnection) -> Option<&McpServiceSecretWitness> {
+    connection
+        .service_secret_launch()
+        .and_then(|launch| launch.witness(SLOT))
+}
+
+#[tokio::test]
+async fn a_launch_records_the_write_it_injected_and_a_relaunch_after_a_rotation_the_new_one() {
+    let config = secret_server("search");
+    let custody = StoredCustody::for_server(&config);
+    let first = custody.write("first-value").await;
+    let resolver: Arc<dyn McpAuthResolver> = custody.clone();
+
+    let process = StdioChildCustody::default();
+    let (connection, _) = tokio::time::timeout(
+        BOUND,
+        launch(&config, Some(Arc::clone(&resolver)), &process, None),
+    )
+    .await
+    .unwrap()
+    .expect("protected launch");
+    // The process got exactly the value of the write the connection records.
+    assert_eq!(launched_digest(&connection).await, digest("first-value"));
+    let record = connection
+        .service_secret_launch()
+        .expect("a launch that injected secrets records them");
+    assert_eq!(
+        record.slots().collect::<Vec<_>>(),
+        vec![(SLOT, Some(&first))]
+    );
+    assert!(!format!("{record:?}").contains("first-value"));
+
+    // A rotation reaches neither the running process nor its record.
+    let second = custody.write("rotated-value").await;
+    assert_ne!(first, second);
+    assert_eq!(launched_write(&connection), Some(&first));
+    assert_eq!(launched_digest(&connection).await, digest("first-value"));
+    tokio::time::timeout(BOUND, connection.close_with_receipt())
+        .await
+        .unwrap()
+        .expect("joined close");
+
+    // The next launch injects the rotated value and records its write.
+    let restarted = StdioChildCustody::default();
+    let (connection, _) = launch(&config, Some(resolver), &restarted, None)
+        .await
+        .expect("relaunch");
+    assert_eq!(launched_digest(&connection).await, digest("rotated-value"));
+    assert_eq!(launched_write(&connection), Some(&second));
+    connection.close().await.expect("close");
+
+    // A value a host's own source supplies names no write; a server that
+    // declares no secrets records nothing.
+    let host = StdioChildCustody::default();
+    let (connection, _) = launch(
+        &config,
+        Some(Arc::new(Custody::storing("host-value")) as Arc<dyn McpAuthResolver>),
+        &host,
+        None,
+    )
+    .await
+    .expect("host-supplied launch");
+    assert_eq!(
+        connection
+            .service_secret_launch()
+            .map(|launch| launch.slots().collect::<Vec<_>>()),
+        Some(vec![(SLOT, None)])
+    );
+    connection.close().await.expect("close");
+    let plain = McpServerConfig::stdio(
+        "plain",
+        mcp_test_server::fixture_binary()
+            .to_string_lossy()
+            .to_string(),
+        Vec::new(),
+        HashMap::new(),
+    );
+    let process = StdioChildCustody::default();
+    let (connection, _) = launch(&plain, None, &process, None)
+        .await
+        .expect("plain launch");
+    assert!(connection.service_secret_launch().is_none());
+    connection.close().await.expect("close");
+}
+
+/// Each actual call's target, as a host's call preparation receives it.
+#[derive(Default)]
+struct CallTargets(std::sync::Mutex<Vec<Option<McpServiceSecretLaunch>>>);
+
+#[async_trait]
+impl crate::McpCallContextProvider for CallTargets {
+    async fn prepare(
+        &self,
+        target: crate::McpCallTarget<'_>,
+        _call: meerkat_core::types::ToolCallView<'_>,
+        _context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<Option<crate::McpCallContext>, crate::McpCallContextError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(target.service_secret_launch.cloned());
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn a_routed_connection_states_its_launch_record_to_observers_and_on_each_call() {
+    let config = secret_server("search");
+    let custody = StoredCustody::for_server(&config);
+    let witness = custody.write("routed-value").await;
+    let calls = Arc::new(CallTargets::default());
+    let handle = Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral());
+    let mut router = crate::McpRouter::new_with_surface_handle_and_stdio_profile(
+        handle,
+        crate::McpStdioLaunchProfile::trusted_host(),
+    )
+    .with_mcp_auth(
+        McpAuthMode::Stored,
+        Some(custody as Arc<dyn McpAuthResolver>),
+    )
+    .with_call_context_provider(Arc::clone(&calls) as Arc<dyn crate::McpCallContextProvider>);
+    router
+        .add_server(config.clone())
+        .await
+        .expect("protected launch");
+
+    // A host reading the server's operation learns the connection serving it
+    // and the writes that connection was launched with.
+    let meerkat_core::McpOperationObservation::Callable {
+        service_secret_launch: Some(launched),
+        ..
+    } = router.observe_operation("search", "env_digest")
+    else {
+        panic!("the launched server's operation is callable with its launch record");
+    };
+    assert_eq!(launched.witness(SLOT), Some(&witness));
+
+    // Each actual call over that connection is prepared with the same record.
+    let result = router.call_tool("env_digest", &serde_json::json!({})).await;
+    router.shutdown().await;
+    assert_eq!(
+        meerkat_core::types::text_content(&result.expect("call")),
+        digest("routed-value")
+    );
+    assert_eq!(*calls.0.lock().unwrap(), vec![Some(launched)]);
+}
+
+/// The fixture server reporting `SERVICE_TOKEN` and declaring one MCP Apps
+/// view, `ui://fixture/view.html`, through its `view` tool.
+fn secret_view_server(name: &str) -> McpServerConfig {
+    let mut server = secret_server(name);
+    if let McpTransportConfig::Stdio(stdio) = &mut server.transport {
+        stdio.args.push("--ui-view".to_owned());
+    }
+    server
+}
+
+/// Each resource read's target, as a host's resource preparation receives
+/// it: the URI read and the launch record the target names.
+#[derive(Default)]
+struct ResourceTargets(std::sync::Mutex<Vec<(String, Option<McpServiceSecretLaunch>)>>);
+
+#[async_trait]
+impl crate::McpCallContextProvider for ResourceTargets {
+    async fn prepare_resource(
+        &self,
+        target: crate::McpResourceTarget<'_>,
+        _context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<Option<crate::McpCallContext>, crate::McpCallContextError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((target.uri.to_owned(), target.service_secret_launch.cloned()));
+        Ok(None)
+    }
+
+    async fn prepare(
+        &self,
+        _target: crate::McpCallTarget<'_>,
+        _call: meerkat_core::types::ToolCallView<'_>,
+        _context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<Option<crate::McpCallContext>, crate::McpCallContextError> {
+        Ok(None)
+    }
+}
+
+/// A resource read over a launched connection is prepared with the
+/// connection's launch record, as its calls are: the router reads the MCP
+/// Apps view a tool declares (before the call), and the `McpResourceTarget`
+/// a host's resource preparation receives names the write whose value the
+/// connection's server was launched with.
+#[tokio::test]
+async fn a_resource_read_states_its_connections_launch_record() {
+    use meerkat_core::AgentToolDispatcher;
+    let config = secret_view_server("viewer");
+    let custody = StoredCustody::for_server(&config);
+    let witness = custody.write("view-value").await;
+    let reads = Arc::new(ResourceTargets::default());
+    let mut router = crate::McpRouter::new_with_surface_handle_and_stdio_profile(
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+        crate::McpStdioLaunchProfile::trusted_host(),
+    )
+    .with_client_service_factory(Arc::new(crate::apps::McpAppsClientServiceFactory))
+    .with_mcp_auth(
+        McpAuthMode::Stored,
+        Some(custody as Arc<dyn McpAuthResolver>),
+    )
+    .with_call_context_provider(Arc::clone(&reads) as Arc<dyn crate::McpCallContextProvider>);
+    router
+        .add_server(config.clone())
+        .await
+        .expect("protected launch");
+
+    let args = serde_json::value::to_raw_value(&serde_json::json!({})).unwrap();
+    let dispatched = tokio::time::timeout(
+        BOUND,
+        router.dispatch_with_context(
+            meerkat_core::types::ToolCallView {
+                id: "view-call",
+                name: "view",
+                args: &args,
+            },
+            &meerkat_core::ToolDispatchContext::default()
+                .with_runtime_identity(meerkat_core::SessionId::new(), None),
+        ),
+    )
+    .await
+    .expect("a bounded dispatch");
+    router.shutdown().await;
+    dispatched.expect("the view call");
+
+    let reads = reads.0.lock().unwrap().clone();
+    let [(uri, launch)] = reads.as_slice() else {
+        panic!("the declared view is read once, before the call: {reads:?}");
+    };
+    assert_eq!(uri, "ui://fixture/view.html");
+    assert_eq!(
+        launch.as_ref().and_then(|launch| launch.witness(SLOT)),
+        Some(&witness),
+        "the read's target names the write its connection was launched with"
     );
 }

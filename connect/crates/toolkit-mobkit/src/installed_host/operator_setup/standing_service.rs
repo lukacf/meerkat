@@ -337,7 +337,14 @@ impl OperatorSetup {
             let issue = || -> Result<_, ServiceOperationError> {
                 worker_current()?;
                 worker_progress.entering();
-                Ok(grants.issue_root(&operator, issuance_id, application, represented, requested))
+                Ok(grants.issue_root(
+                    &meerkat_core::AdmissionGuard::none(),
+                    &operator,
+                    issuance_id,
+                    application,
+                    represented,
+                    requested,
+                ))
             };
             lifetime
                 .with_current_setup(|| Ok(issue()))

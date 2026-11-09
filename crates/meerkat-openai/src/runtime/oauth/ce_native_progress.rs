@@ -663,6 +663,7 @@ async fn exercise(paused_refresh: bool) {
     );
     let controller = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("controller"),
             principal("executor"),
@@ -672,6 +673,7 @@ async fn exercise(paused_refresh: bool) {
         .unwrap();
     let operation = grants
         .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
             &principal("grant-owner"),
             id("operation"),
             principal("executor"),
@@ -706,6 +708,7 @@ async fn exercise(paused_refresh: bool) {
         MeerkatMachine::ephemeral()
             .with_local_grant_authorization(NativeGrantWorkConfiguration {
                 retained_resume: None,
+                kept_original: None,
                 require_scoped_destination: false,
                 grants,
                 ingress,
@@ -853,9 +856,10 @@ async fn exercise(paused_refresh: bool) {
             .unwrap();
         previous.release_prelock_lifecycle_guard();
         let prepare_binding = binding.clone();
-        let prepare: TokenPrepareFn = Box::new(move |locked, mode| {
+        let prepare: TokenPrepareFn = Box::new(move |fence, locked, mode| {
             Box::pin(async move {
                 prepare_managed_store_oauth_refresh_under_lock(
+                    fence,
                     &env,
                     &prepare_binding,
                     previous,

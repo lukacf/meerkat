@@ -41,6 +41,30 @@ impl ConfigStore for ObstructGenerationAfterPatch {
         tokio::fs::create_dir(&self.state_path).await?;
         Ok(config)
     }
+
+    fn admission_fence(&self) -> Option<meerkat_core::AdmissionFence> {
+        self.file.admission_fence()
+    }
+
+    async fn set_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        config: Config,
+    ) -> Result<(), ConfigError> {
+        self.file.set_held(guard, config).await
+    }
+
+    async fn patch_held(
+        &self,
+        guard: &meerkat_core::AdmissionGuard,
+        delta: ConfigDelta,
+    ) -> Result<Config, ConfigError> {
+        let config = self.file.patch_held(guard, delta).await?;
+        self.patched.fetch_add(1, Ordering::SeqCst);
+        // As `patch`: the native writer's held write, then the obstruction.
+        tokio::fs::create_dir(&self.state_path).await?;
+        Ok(config)
+    }
 }
 
 struct ApproveRenderedReview {
@@ -113,6 +137,9 @@ async fn partial_config_publication_scenario() {
         "tools":{"shell_enabled":false,"mcp_servers":[old_helper,unrelated.clone()]}})))
         .await
         .unwrap();
+    // The store's own write publishes a generation; this scenario reviews a
+    // document written by hand, at the initial generation zero.
+    std::fs::remove_file(&state_path).unwrap();
     let before_config = std::fs::read(&config_path).unwrap();
     let before_parent = std::fs::read(&global_path).unwrap();
     assert!(
@@ -304,18 +331,25 @@ async fn continuation_store_scenario(selected_store: bool) {
         server.access = Some(meerkat_core::McpServerAccess::allowing(["setup_guide"]));
         let unrelated = McpServerConfig::stdio("other-service", "/bin/true", vec!["keep".into()], Default::default());
         file.patch(ConfigDelta(serde_json::json!({"max_tokens":1234,"tools":{"mcp_servers":[server.clone(),unrelated.clone()]}}))).await.unwrap();
+        // The store's own writes publish generations; a reopen publishes none.
+        let state_path = config_path.with_file_name("config_state.json");
+        let published = || std::fs::read(&state_path).ok();
         let provider_store_root=selected_store.then(||directory.path().join("provider-credentials"));
         let key=meerkat_core::auth::token_store::TokenKey::from_auth_binding(&meerkat_core::AuthBindingRef {
             realm:storage.locator.realm.clone(),binding:meerkat_core::BindingId::parse("fixture").unwrap(),
             profile:None,origin:meerkat_core::BindingOrigin::Configured });
         if let Some(root)=&provider_store_root {
             let persistence=meerkat_auth_core::auth_store::TokenStoreBackend::File { root:root.clone() }.open_with_refresh_authority().unwrap();
-            persistence.token_store().save(&key,&meerkat_core::auth::token_store::PersistedTokens::api_key("fixture-store-marker")).await.unwrap();
+            let fence=meerkat_core::AdmissionGuard::try_acquire(vec![meerkat_core::AdmissionFence::credentials(root,key.realm()).unwrap()]).unwrap();
+            persistence.token_store().save(&fence,&key,&meerkat_core::auth::token_store::PersistedTokens::api_key("fixture-store-marker")).await.unwrap();
+            drop(fence);
         }
         let continuation = StandaloneContinuation { provider_store_root:provider_store_root.clone(), storage:storage.clone(), session_id:history.id().clone(), server:server.clone() };
         let owner_before = std::fs::read(&owner_path).unwrap();
         let config_before = std::fs::read(&config_path).unwrap();
+        let generation = published();
         let resumed = continuation.reopen().await.unwrap();
+        assert_eq!(published(), generation, "read-only reopen never publishes a configuration generation");
         assert_eq!(resumed.startup.provider_store_root,provider_store_root);
         if selected_store {
             assert!(resumed.startup.factory.resolution_provider_auth_persistence().unwrap().unwrap().token_store().load(&key).await.unwrap().is_some());
@@ -334,7 +368,9 @@ async fn continuation_store_scenario(selected_store: bool) {
         // A fresh opener reads unrelated operator changes, while the original
         // helper descriptor and session remain exact. This opens no actor/MCP.
         file.patch(ConfigDelta(serde_json::json!({"max_tokens":2345}))).await.unwrap();
+        let generation = published();
         let resumed = continuation.reopen().await.unwrap();
+        assert_eq!(published(), generation, "read-only reopen never publishes a configuration generation");
         assert_eq!(resumed.startup.config.max_tokens, Some(2345));
         assert_eq!(resumed.session.messages(), history.messages());
         drop(resumed);
@@ -346,17 +382,20 @@ async fn continuation_store_scenario(selected_store: bool) {
             let servers: Vec<_> = changed.into_iter().chain([unrelated.clone()]).collect();
             file.patch(ConfigDelta(serde_json::json!({"tools":{"mcp_servers":servers}}))).await.unwrap();
             let changed_config = std::fs::read(&config_path).unwrap();
+            let generation = published();
             let error = continuation.reopen().await.err().expect("changed descriptor must refuse the real opener");
+            assert_eq!(published(), generation, "read-only reopen never publishes a configuration generation");
             assert!(error.to_string().contains("originally reviewed setup connection"));
             assert_eq!(std::fs::read(&config_path).unwrap(), changed_config);
             assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before);
         }
         file.patch(ConfigDelta(serde_json::json!({"tools":{"mcp_servers":[server.clone(),unrelated]}}))).await.unwrap();
         let absent = StandaloneContinuation { provider_store_root:None, storage:storage.clone(), session_id:SessionId::new(), server };
+        let generation = published();
         let error = absent.reopen().await.err().expect("missing history is not a new setup session");
         assert!(error.to_string().contains("committed setup conversation is unavailable"));
         assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before);
-        assert!(!config_path.with_file_name("config_state.json").exists(), "read-only reopen never publishes a configuration generation");
+        assert_eq!(published(), generation, "read-only reopen never publishes a configuration generation");
     }).await.expect("ordinary reopen custody controls must settle");
 }
 

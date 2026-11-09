@@ -1535,6 +1535,7 @@ async fn record_seeded_member_endpoint_broken(
             bridge_session_id: entry.member_ref.bridge_session_id().cloned(),
             reason,
             hold: None,
+            cause_data: None,
             registration_refusal: None,
         },
     );
@@ -4108,6 +4109,50 @@ fn hosted_incarnations(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u
         .collect()
 }
 
+/// The retirements a host's adoption took its identity's declared entry
+/// over for, as their start rows record
+/// ([`crate::MemberRetirementCause::HostAdopted`]), by identity and
+/// generation.
+fn host_adopted_retirement_starts(events: &[crate::event::MobEvent]) -> BTreeSet<(String, u64)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            MobEventKind::MemberRetirementStarted {
+                agent_identity,
+                generation,
+                ..
+            } if event.kind.retirement_cause()
+                == Some(crate::MemberRetirementCause::HostAdopted) =>
+            {
+                Some((agent_identity.as_str().to_string(), generation.get()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Mark again, at replay, the Declared entry a host's adoption took over
+/// while its member retired (`RecoverIdentityEntryAdopting`): the end of the
+/// retirement then ends the entry, as it did live. Every such start row is
+/// passed; MobMachine marks only the identity's seated incarnation of a
+/// Declared entry.
+fn recover_host_adopted_retirement_mark(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    agent_identity: &AgentIdentity,
+    agent_runtime_id: &AgentRuntimeId,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    apply_seeded_mob_signal(
+        authority,
+        mob_dsl::MobMachineSignal::RecoverIdentityEntryAdopting {
+            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
+        },
+        "recover_identity_entry_adopting",
+    )
+}
+
 /// Mark again, at replay, the Declared entry whose member's retirement the
 /// declared apply's seal started (`RecoverIdentityEntryRetiring`): the end of
 /// the retirement then ends the entry, as it did live. Every unlisted start
@@ -4142,6 +4187,7 @@ fn seed_mob_authority_sync_from_events(
 
     let respawn_topology_ledger = respawn_topology_ledger(events)?;
     let unlisted_starts = unlisted_retirement_starts(events);
+    let host_adopted_starts = host_adopted_retirement_starts(events);
     let hosted_incarnations = hosted_incarnations(events);
 
     for event in events {
@@ -4331,6 +4377,26 @@ fn seed_mob_authority_sync_from_events(
                             ),
                         },
                         "recover_member_definition_wiring_exempt",
+                    )?;
+                }
+                // A member whose lineage runs under a host's tool dispatch
+                // admission: its row persists the record its seat made, and
+                // the replay records this incarnation in MobMachine again
+                // before the boot plan is sealed, so every build of it after
+                // the restart reads the record. A row without it (an earlier
+                // release wrote none) records nothing.
+                if member_spawned.dispatch_admission_lineage() {
+                    apply_seeded_mob_input(
+                        authority,
+                        mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(
+                                &member_spawned.agent_identity,
+                            ),
+                            agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(
+                                &member_spawned.agent_runtime_id,
+                            ),
+                        },
+                        "recover_member_dispatch_admission_lineage",
                     )?;
                 }
                 // The member of an identity entry: its row records the
@@ -4548,6 +4614,7 @@ fn seed_mob_authority_sync_from_events(
                 agent_identity,
                 generation,
                 session_archived,
+                facts,
                 ..
             } => {
                 let agent_runtime_id = AgentRuntimeId::new(agent_identity.clone(), *generation);
@@ -4566,6 +4633,15 @@ fn seed_mob_authority_sync_from_events(
                 if unlisted_starts.contains(&key) {
                     recover_unlisted_retirement_mark(authority, agent_identity, &agent_runtime_id)?;
                 }
+                // So does the end of a retirement a host's adoption took the
+                // entry over for.
+                if host_adopted_starts.contains(&key) {
+                    recover_host_adopted_retirement_mark(
+                        authority,
+                        agent_identity,
+                        &agent_runtime_id,
+                    )?;
+                }
                 apply_seeded_mob_signal(
                     authority,
                     mob_dsl::MobMachineSignal::RecoverRosterMemberRetired {
@@ -4579,6 +4655,17 @@ fn seed_mob_authority_sync_from_events(
                     },
                     "recover_member_retired",
                 )?;
+                // A retirement whose end ended its identity moved the
+                // identity's life marker; its replay moves it again.
+                if facts.identity_ended {
+                    apply_seeded_mob_signal(
+                        authority,
+                        mob_dsl::MobMachineSignal::EndIdentityLife {
+                            agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        },
+                        "recover_identity_life_end",
+                    )?;
+                }
             }
             MobEventKind::MemberKickoffUpdated { member, kickoff } => {
                 apply_seeded_mob_signal(
@@ -5023,6 +5110,21 @@ fn recover_identity_generation_highwaters(
             "recover_operator_instruction_generation_highwater",
         )?;
     }
+    // The reset part of every identity's life marker: the resets of the
+    // whole history. The epoch replay rebuilds the ends since the last one.
+    let resets = events
+        .iter()
+        .filter(|event| matches!(event.kind, MobEventKind::MobReset))
+        .count();
+    if resets > 0 {
+        apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::RecoverIdentityLifeResets {
+                resets: u64::try_from(resets).unwrap_or(u64::MAX),
+            },
+            "recover_identity_life_resets",
+        )?;
+    }
     seal_identity_generation_highwater(authority, "resume_seal_generation_highwater")
 }
 
@@ -5323,21 +5425,33 @@ async fn ensure_recovered_respawn_topology_abandonments(
     Ok(())
 }
 
+/// An identity a replayed respawn abandonment ended (MobMachine names the
+/// end, `IdentityEnded`), with the sessions MobMachine held for it before
+/// that step: the resume ends their scoped tool grants before the mob
+/// serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RecoveredIdentityEnd {
+    pub(super) identity: AgentIdentity,
+    pub(super) sessions: BTreeSet<SessionId>,
+}
+
 /// Replay only still-pending retirement anchors and their exact remote
 /// checkpoints after every member's placement/session carrier has been
 /// restored. A completed generation does not need these markers re-applied:
 /// `RecoverRosterMemberRetired` already folded the terminal carrier during the
-/// general lifecycle pass.
+/// general lifecycle pass. Answers the identities the replayed respawn
+/// abandonments ended, for the resume to end their grants.
 fn recover_pending_member_retirements(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     events: &[crate::event::MobEvent],
-) -> Result<(), MobError> {
+) -> Result<Vec<RecoveredIdentityEnd>, MobError> {
     use crate::machines::mob_machine as mob_dsl;
 
     // Validate the full stream here as well as in the general seeding pass.
     // Unit-level recovery callers and future alternate resume entrypoints must
     // never regain last-write-wins semantics for the durable preservation bit.
     let ledger = respawn_topology_ledger(events)?;
+    let mut ended = Vec::new();
 
     let completed = events
         .iter()
@@ -5388,6 +5502,16 @@ fn recover_pending_member_retirements(
                 if event.kind.retirement_cause() == Some(crate::MemberRetirementCause::Unlisted) {
                     recover_unlisted_retirement_mark(authority, agent_identity, agent_runtime_id)?;
                 }
+                // A retirement a host's adoption took the entry over for
+                // marks it again too.
+                if event.kind.retirement_cause() == Some(crate::MemberRetirementCause::HostAdopted)
+                {
+                    recover_host_adopted_retirement_mark(
+                        authority,
+                        agent_identity,
+                        agent_runtime_id,
+                    )?;
+                }
                 // The rotation the start row records, recorded again on the
                 // Retiring incarnation the row restored: the restarted mob's
                 // re-drive finishes it with no host record.
@@ -5428,16 +5552,31 @@ fn recover_pending_member_retirements(
                         "pending RespawnTopologyAbandoned for '{agent_identity}' omitted fence_token"
                     ))
                 })?;
-                apply_seeded_mob_signal(
+                let dsl_identity = mob_dsl::AgentIdentity::from_domain(agent_identity);
+                // Read before the step, as the live end reads them.
+                let sessions = super::actor::held_sessions_of(authority.state(), &dsl_identity)?;
+                let transition = apply_seeded_mob_signal_transition(
                     authority,
                     mob_dsl::MobMachineSignal::ObserveRespawnTopologyAbandoned {
-                        agent_identity: mob_dsl::AgentIdentity::from_domain(agent_identity),
+                        agent_identity: dsl_identity.clone(),
                         agent_runtime_id: mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id),
                         fence_token: mob_dsl::FenceToken::from_domain(fence_token),
                         generation: mob_dsl::Generation::from_domain(*generation),
                     },
                     "recover_pending_respawn_topology_abandoned",
                 )?;
+                if transition.effects().iter().any(|effect| {
+                    matches!(
+                        effect,
+                        mob_dsl::MobMachineEffect::IdentityEnded { agent_identity: ended_identity }
+                            if *ended_identity == dsl_identity
+                    )
+                }) {
+                    ended.push(RecoveredIdentityEnd {
+                        identity: agent_identity.clone(),
+                        sessions,
+                    });
+                }
             }
             MobEventKind::RemoteMemberRuntimeRetired {
                 agent_identity,
@@ -5547,7 +5686,7 @@ fn recover_pending_member_retirements(
             "converge_recovered_respawn_topology_after_carriers",
         )?;
     }
-    Ok(())
+    Ok(ended)
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -8351,6 +8490,19 @@ impl MobBuilder {
         self
     }
 
+    /// The host's rule for the members of this mob that another member's own
+    /// mob operator tools may not know of ([`super::MemberToolAudience`]):
+    /// `member_status`, `retire_member` and `force_cancel_member` answer a
+    /// member it hides from the calling member as a member the mob does not
+    /// hold. Without one, every member is known to every member's tools.
+    pub fn with_member_tool_audience(
+        mut self,
+        audience: Arc<dyn super::MemberToolAudience>,
+    ) -> Self {
+        self.member_residency.member_tool_audience = Some(audience);
+        self
+    }
+
     /// Bound on one member wake: the cold restore of a dormant member through
     /// its readiness and topology. Past it MobMachine resolves the attempt
     /// retryable (the member is Dormant again and the next delivery wakes it
@@ -8365,10 +8517,20 @@ impl MobBuilder {
 
     /// Backoff of the retry that wakes a member whose boot work is still
     /// owed after its boot wake was refused retryably (an unavailable resume
-    /// gate, a host that asked to retry its build preparation, the wake
-    /// bound): the mob wakes it again after `initial`, doubling up to `max`,
-    /// until it is live, its restore fails for good, or its obligation is
-    /// gone. A delivery to the member meanwhile wakes it at once.
+    /// gate, the wake bound): the mob wakes it again after `initial`,
+    /// doubling up to `max`, until it is live, its restore fails for good,
+    /// or its obligation is gone. A delivery to the member meanwhile wakes
+    /// it at once.
+    ///
+    /// A build preparation the host asked to retry
+    /// ([`super::MemberBuildPreparationRefusal::Retryable`]) has a retry
+    /// timer of its own on the same backoff, armed by the step that records
+    /// it: until it fires (or the host retries,
+    /// [`super::MobHandle::resolve_member_build_preparation`]) every wake of
+    /// the member, a delivery's included, is refused
+    /// ([`crate::MemberWakeRefusal::BuildPreparationRetry`]); when it fires,
+    /// work the member still owes wakes it, and a member that owes none
+    /// stays dormant until its next delivery.
     pub fn with_member_wake_retry_backoff(
         mut self,
         initial: std::time::Duration,
@@ -9406,15 +9568,19 @@ impl MobBuilder {
                 .iter()
                 .rposition(|event| matches!(event.kind, MobEventKind::MobReset))
                 .map_or(0, |pos| pos + 1);
-            if matches!(
+            // The identities the replayed respawn abandonments ended: their
+            // grants end once the preview handle below exists.
+            let recovered_ends = if matches!(
                 resumed_state,
                 MobState::Running | MobState::Stopped | MobState::Completed
             ) {
                 recover_pending_member_retirements(
                     initial_dsl_authority.as_mut(),
                     &mob_events[repaired_epoch_start..],
-                )?;
-            }
+                )?
+            } else {
+                Vec::new()
+            };
             let repaired_epoch_events = &mob_events[repaired_epoch_start..];
             // The identity store's created entry rows, after the replay and
             // before the member plan (`RecoverCreatedIdentityEntry`): a store
@@ -9536,6 +9702,7 @@ impl MobBuilder {
                 definition: definition.clone(),
                 events: storage.events.clone(),
                 identity_member: storage.identity_member.clone(),
+                identity: storage.identity.clone(),
                 member_binding_fold: Arc::default(),
                 run_store: storage.runs.clone(),
                 runtime_metadata: storage.runtime_metadata.clone(),
@@ -9576,7 +9743,40 @@ impl MobBuilder {
                     .member_session_authorities()
                     .unwrap_or_default(),
                 member_grant_mint: wiring.member_residency.member_grant_mint.clone(),
+                member_tool_audience: wiring.member_residency.member_tool_audience.clone(),
             };
+            // An identity a replayed respawn abandonment ended loses its
+            // scoped tool grants, and those of the sessions MobMachine held
+            // for it, before the mob serves: before the pre-activation read,
+            // any member registration and the actor. The grants name the
+            // mob's incarnation through the handle's witness
+            // (`MobHandle::live_incarnation`). A busy answer is retried
+            // within the abandonment's bound; another failure fails the
+            // resume, and the next resume replays the abandonment and ends
+            // them again (a grant already ended is left as it stands).
+            #[cfg(feature = "runtime-adapter")]
+            if let Some(runtime) = runtime_adapter.as_deref() {
+                let live_incarnation = preview_handle.live_incarnation();
+                for end in &recovered_ends {
+                    let reason = format!(
+                        "the identity '{}' ended: a resume abandoned its respawn",
+                        end.identity
+                    );
+                    super::actor::end_within_abandonment_bound(|| {
+                        super::actor::end_member_identity_tool_grants(
+                            runtime,
+                            definition.id.as_str(),
+                            &live_incarnation,
+                            &end.identity,
+                            &end.sessions,
+                            &reason,
+                        )
+                    })
+                    .await?;
+                }
+            }
+            #[cfg(not(feature = "runtime-adapter"))]
+            let _ = recovered_ends;
             // session_service is still live here (not consumed until start_runtime_with_components)
             if let Some(hook) = before_activation {
                 hook(preview_handle.read_handle()).await?;
@@ -11243,6 +11443,7 @@ impl MobBuilder {
                 definition: definition.clone(),
                 events: events.clone(),
                 identity_member: identity_member.clone(),
+                identity: Arc::clone(&identity),
                 member_binding_fold: Arc::default(),
                 run_store: run_store.clone(),
                 runtime_metadata: runtime_metadata.clone(),
@@ -11273,6 +11474,7 @@ impl MobBuilder {
                     .member_session_authorities()
                     .unwrap_or_default(),
                 member_grant_mint: member_residency.member_grant_mint.clone(),
+                member_tool_audience: member_residency.member_tool_audience.clone(),
             };
             if let Some(hook) = before_activation {
                 hook(handle.read_handle()).await?;
@@ -11882,7 +12084,12 @@ impl MobBuilder {
                 });
             }
             // The operator-instruction delivery owner: delivers every owed
-            // member's snapshot for the actor's lifetime.
+            // member's snapshot for the actor's lifetime. A non-authoritative
+            // composition (a host's candidate launch over the shared mob
+            // store) may not act on that store, so it delivers nothing: its
+            // owed members stay owed for the authoritative launch.
+            if actor.dsl_authority.state().composition_authority
+                == mob_dsl::CompositionAuthorityKind::Authoritative
             {
                 let delivery_task =
                     super::operator_instruction_delivery::OperatorInstructionDeliveryReconciler::run_owned(
@@ -12205,6 +12412,8 @@ pub(super) struct SeatedMemberRestore {
 pub(super) struct MemberRestoreSeating {
     overlay: Option<Arc<dyn AgentToolDispatcher>>,
     overlay_origin: super::fork_build::RetainedOverlayOrigin,
+    /// Whether the member is restored under a tool dispatch admission.
+    dispatch_admission: bool,
     profile_override: Option<crate::profile::Profile>,
     model_override: Option<String>,
 }
@@ -12291,8 +12500,8 @@ pub(super) enum RetryableRestoreCause {
     /// The host asked to retry the member's build preparation later
     /// ([`super::MemberBuildPreparationRefusal::Retryable`]).
     BuildPreparation,
-    /// A seat's first create met a session store, runtime authority or
-    /// hosting claim that is unavailable for now
+    /// A seat's first create met a session store, runtime authority, hosting
+    /// claim or provider credential that is unavailable for now
     /// ([`seat_create_failure_is_retryable`]): the member stays Dormant
     /// with its session unborn, and a later delivery wakes it again.
     SeatCreateUnavailable,
@@ -12318,7 +12527,7 @@ impl RetryableRestoreCause {
     /// The typed refusal a caller waiting on the wake gets.
     pub(super) fn wake_refusal(self) -> crate::MemberWakeRefusal {
         match self {
-            Self::BuildPreparation => crate::MemberWakeRefusal::HostPreparationPending,
+            Self::BuildPreparation => crate::MemberWakeRefusal::BuildPreparationRetry,
             Self::SeatCreateUnavailable | Self::RestoreUnavailable => {
                 crate::MemberWakeRefusal::ResumeGateUnavailable
             }
@@ -12348,15 +12557,21 @@ pub(super) fn restore_error_is_retryable(error: &MobError) -> bool {
 /// serve the request now
 /// ([`super::actor::SessionStoreFailureClass::Unavailable`]), the session was
 /// busy, its runtime authority was unavailable, another runtime owner holds
-/// its hosting claim (or the claim cannot be taken now), or its external
-/// write authority could not be checked without waiting. A malformed or
+/// its hosting claim (or the claim cannot be taken now), its external write
+/// authority could not be checked without waiting, or the session's build
+/// could not get its provider credential now: the facade's typed
+/// provider-auth failure names a kind that clears on its own
+/// ([`meerkat_core::AuthErrorKind::clears_on_its_own`]: the credential's
+/// source or the credential store cannot answer now, or a lookup of the
+/// credential is in flight). A malformed or
 /// refusing persisted state, a store that refuses the session until its realm
 /// is reopened (it answers the same until then), a durable tail held for or
 /// refused by its
 /// recovery (a hold is reported with the member Broken, so its host sees it),
 /// quarantined or diverged durable evidence (which needs its sanctioned
-/// repair), an agent fault and every other typed cause are terminal. The
-/// settlement diagnostics a failure carries never change its class.
+/// repair), an agent fault, a provider-auth failure of any other kind and
+/// every other typed cause are terminal. The settlement diagnostics a failure
+/// carries never change its class.
 pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionError) -> bool {
     use meerkat_core::service::SessionError;
 
@@ -12371,6 +12586,9 @@ pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionE
         | SessionError::ServedElsewhere { .. }
         | SessionError::HostingUnavailable { .. }
         | SessionError::ExternalWriteFenceBackoff { .. } => true,
+        SessionError::FailedWithData { .. } => error
+            .provider_auth_failure_data()
+            .is_some_and(|failure| failure.kind.clears_on_its_own()),
         SessionError::NotFound { .. }
         | SessionError::PersistenceDisabled
         | SessionError::CompactionDisabled
@@ -12380,7 +12598,6 @@ pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionE
         | SessionError::DurableEvidenceQuarantined { .. }
         | SessionError::WholeBlobAuditedEndpointDivergence { .. }
         | SessionError::Agent(_)
-        | SessionError::FailedWithData { .. }
         | SessionError::CapabilityUnavailable(_)
         | SessionError::Unsupported(_)
         | SessionError::ExternalWriteFenceConflict { .. }
@@ -12390,10 +12607,11 @@ pub(super) fn session_error_is_retryable(error: &meerkat_core::service::SessionE
 
 /// Whether a seat's first create failed for a cause that clears on its own
 /// ([`session_error_is_retryable`]): the store could not serve the write
-/// now, the session was busy, its runtime authority was unavailable, or
-/// another runtime owner held its hosting claim. Any other cause (a build the
-/// host or the factory refuses, a malformed or refusing persisted state, an
-/// internal fault) breaks the member.
+/// now, the session was busy, its runtime authority was unavailable, another
+/// runtime owner held its hosting claim, or the build could not get its
+/// provider credential now. Any other cause (a build the host or the factory
+/// refuses, a provider credential that needs an action, a malformed or
+/// refusing persisted state, an internal fault) breaks the member.
 #[cfg(feature = "runtime-adapter")]
 fn seat_create_failure_is_retryable(error: &MobError) -> bool {
     matches!(error, MobError::SessionError(error) if session_error_is_retryable(error))
@@ -12442,6 +12660,7 @@ pub(super) fn member_restore_failure(
         bridge_session_id: Some(bridge_session_id.clone()),
         reason,
         hold: None,
+        cause_data: None,
         registration_refusal: None,
     }
 }
@@ -13183,6 +13402,37 @@ pub(super) async fn restore_resumed_member(
     let restore_resume_from_role = restore_resume_from_role
         .clone()
         .or_else(|| candidate.resume_from_role.clone());
+    // The tool dispatch admission the member is restored under: the host's,
+    // derived for this build. MobMachine decides it from the member's
+    // recorded lineage on a fork of the authority that is never committed: a
+    // member whose lineage runs under an admission is restored under the one
+    // the host derives now, or not at all (its restore fails with the typed
+    // refusal as its diagnostic), and never runs ungated (see `fork_build`).
+    let mut restore_spec = restore_spec;
+    let mut verdicts = base.fork();
+    restore_spec.tool_dispatch_admission = match super::fork_build::rebuild_dispatch_admission(
+        &definition.id,
+        spawn_member_customizer.as_ref(),
+        entry,
+        &bridge_session_id,
+        &restore_spec,
+        |identity, lineage, host_answer| {
+            super::fork_build::resolve_dispatch_admission_on(
+                &mut verdicts,
+                identity,
+                lineage,
+                host_answer,
+            )
+        },
+    ) {
+        Ok(admission) => admission,
+        Err(error) => {
+            return Ok(MemberRestorePlan::Unseated(member_restore_failure(
+                &bridge_session_id,
+                error.to_string(),
+            )));
+        }
+    };
     // The overlay this member is restored with: the customizer's overlay for
     // its own identity, except for a fork-derived member seated with its
     // source's overlay whose source (and every in-mob ancestor that overlay
@@ -13260,6 +13510,7 @@ pub(super) async fn restore_resumed_member(
     let seating = MemberRestoreSeating {
         overlay: restore_overlay.clone(),
         overlay_origin: restore_overlay_origin,
+        dispatch_admission: restore_spec.tool_dispatch_admission.is_some(),
         profile_override: restore_spec.override_profile.clone(),
         model_override: restore_spec.model_override.clone(),
     };
@@ -13494,12 +13745,21 @@ pub(super) async fn provision_durable_member_restore(
         .default_external_tools_provider
         .as_ref()
         .and_then(|p| p());
+    let build_profile = super::member_grant_gate::member_build_profile(
+        ctx.tool_handle.identity.as_ref(),
+        definition,
+        ctx.realm_profile_store,
+        &entry.agent_identity,
+        &entry.role,
+        &profile,
+    )
+    .await?;
     let resumed_config = build::build_resumed_agent_config(build::BuildResumedAgentConfigParams {
         base: build::BuildAgentConfigParams {
             mob_id: &definition.id,
             profile_name: &entry.role,
             agent_identity: &entry.agent_identity,
-            profile: &profile,
+            profile: &build_profile,
             definition,
             realm_profile_store: ctx.realm_profile_store,
             external_tools: compose_external_tools_for_profile(
@@ -13750,6 +14010,7 @@ pub(super) async fn provision_durable_member_restore(
                     bridge_session_id: Some(bridge_session_id.clone()),
                     reason,
                     hold: None,
+                    cause_data: error.structured_data(),
                     registration_refusal,
                 })
             }
@@ -13873,10 +14134,10 @@ async fn provision_fresh_member_restore(
                     cause: RetryableRestoreCause::SeatCreateUnavailable,
                 }
             } else {
-                MemberRestoreProvisionOutcome::Failed(member_restore_failure(
-                    bridge_session_id,
-                    reason,
-                ))
+                MemberRestoreProvisionOutcome::Failed(super::handle::RestoreFailureDiagnostic {
+                    cause_data: error.structured_data(),
+                    ..member_restore_failure(bridge_session_id, reason)
+                })
             }
         }
         Err(error) => return Err(error),
@@ -13922,11 +14183,20 @@ async fn provision_fresh_member_session(
         .default_external_tools_provider
         .as_ref()
         .and_then(|p| p());
+    let build_profile = super::member_grant_gate::member_build_profile(
+        ctx.tool_handle.identity.as_ref(),
+        definition,
+        ctx.realm_profile_store,
+        &entry.agent_identity,
+        &entry.role,
+        profile,
+    )
+    .await?;
     let mut config = build::build_agent_config(build::BuildAgentConfigParams {
         mob_id: &definition.id,
         profile_name: &entry.role,
         agent_identity: &entry.agent_identity,
-        profile,
+        profile: &build_profile,
         definition,
         realm_profile_store: ctx.realm_profile_store,
         external_tools: compose_external_tools_for_profile(
@@ -14067,6 +14337,7 @@ async fn provision_fresh_member_session(
                         entry.agent_identity
                     ),
                     hold: None,
+                    cause_data: None,
                     registration_refusal: Some(registration_refusal),
                 },
             ));
@@ -14130,6 +14401,11 @@ pub(super) async fn apply_member_restore_plan(
         seating.overlay.clone(),
         seating.overlay_origin,
     );
+    // And whether it is restored under a tool dispatch admission: what a
+    // fork of it observes of its lineage.
+    commit
+        .per_spawn_external_tools_seed
+        .retain_dispatch_admission(&entry.agent_identity, seating.dispatch_admission);
     commit
         .restored_overlays
         .insert(entry.agent_identity.clone(), seating.overlay);
@@ -14738,6 +15014,7 @@ mod tests {
             model: "claude-sonnet-4-5".into(),
             provider: None,
             self_hosted_server_id: None,
+            auth_binding: None,
             image_generation_provider: None,
             auto_compact_threshold: None,
             resume_overrides: Vec::new(),
@@ -19280,6 +19557,265 @@ mod tests {
             1,
             "two resumes must retain one canonical abandonment marker"
         );
+    }
+
+    /// One journal row of the name `alpha`'s life `generation` (fence
+    /// `fence`): its spawn, its retirement start (preserving its topology
+    /// for a respawn or not), its terminal, or its respawn's abandonment.
+    fn alpha_life_row(generation: u64, fence: u64, row: AlphaLifeRow) -> MobEventKind {
+        let alpha = AgentIdentity::from("alpha");
+        let generation = Generation::new(generation);
+        let runtime = AgentRuntimeId::new(alpha.clone(), generation);
+        match row {
+            AlphaLifeRow::Spawned => MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                alpha,
+                generation,
+                FenceToken::new(fence),
+                runtime,
+                ProfileName::from("worker"),
+            )),
+            AlphaLifeRow::RetirementStarted { respawn } => MobEventKind::MemberRetirementStarted {
+                agent_identity: alpha,
+                agent_runtime_id: runtime,
+                generation,
+                role: ProfileName::from("worker"),
+                releasing: None,
+                session_id: None,
+                retiring_peer_endpoint: None,
+                preserve_machine_topology: respawn,
+                rotation: None,
+                cause: None,
+            },
+            AlphaLifeRow::Retired => MobEventKind::MemberRetired {
+                agent_identity: alpha,
+                generation,
+                role: ProfileName::from("worker"),
+                session_archived: true,
+                facts: crate::event::MemberRetiredFacts::default(),
+            },
+            AlphaLifeRow::RespawnAbandoned => MobEventKind::RespawnTopologyAbandoned {
+                agent_identity: alpha,
+                generation,
+                agent_runtime_id: Some(runtime),
+                fence_token: Some(FenceToken::new(fence)),
+            },
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum AlphaLifeRow {
+        Spawned,
+        RetirementStarted { respawn: bool },
+        Retired,
+        RespawnAbandoned,
+    }
+
+    /// A journal as 0.9.10 wrote it for `alpha`, wired to the live `beta`:
+    /// `alpha`'s first life (generation 0, fence 7) is respawned, the
+    /// respawn is abandoned, and then `later` follows (rows of later lives
+    /// of the name). The abandonment's row follows the old member's terminal
+    /// (the old member was archived when the replacement failed), or, with
+    /// `abandoned_while_retiring`, precedes it (the respawn was abandoned
+    /// while the old member was still Retiring, and its retirement then
+    /// finished as an ordinary terminal).
+    fn abandoned_respawn_journal(
+        definition: &MobDefinition,
+        abandoned_while_retiring: bool,
+        later: &[MobEventKind],
+    ) -> Vec<MobEvent> {
+        let mut kinds = vec![
+            alpha_life_row(0, 7, AlphaLifeRow::Spawned),
+            MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                AgentIdentity::from("beta"),
+                Generation::INITIAL,
+                FenceToken::new(9),
+                AgentRuntimeId::new(AgentIdentity::from("beta"), Generation::INITIAL),
+                ProfileName::from("worker"),
+            )),
+            MobEventKind::MembersWired {
+                a: AgentIdentity::from("alpha"),
+                b: AgentIdentity::from("beta"),
+            },
+            alpha_life_row(0, 7, AlphaLifeRow::RetirementStarted { respawn: true }),
+        ];
+        if abandoned_while_retiring {
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::RespawnAbandoned));
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::Retired));
+        } else {
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::Retired));
+            kinds.push(alpha_life_row(0, 7, AlphaLifeRow::RespawnAbandoned));
+        }
+        kinds.extend_from_slice(later);
+        kinds
+            .into_iter()
+            .zip(1..)
+            .map(|(kind, cursor)| test_event(&definition.id, cursor, kind))
+            .collect()
+    }
+
+    /// The later life (generation 1, fence 8): spawned, then retired by an
+    /// ordinary retirement.
+    fn retired_later_life() -> Vec<MobEventKind> {
+        vec![
+            alpha_life_row(1, 8, AlphaLifeRow::Spawned),
+            alpha_life_row(1, 8, AlphaLifeRow::RetirementStarted { respawn: false }),
+            alpha_life_row(1, 8, AlphaLifeRow::Retired),
+        ]
+    }
+
+    /// What a resume replays from `source`, a journal 0.9.10 wrote, over a
+    /// store holding it, in the resume's order: the recovered-abandonment
+    /// repair (the journal's abandonment is durable, so it writes nothing),
+    /// the generation high-water, the general replay, and the pending
+    /// replay, whose answer is returned with the authority.
+    async fn resume_replay_of_a_written_journal(
+        definition: &MobDefinition,
+        source: &[MobEvent],
+    ) -> (
+        crate::machines::mob_machine::MobMachineAuthority,
+        Result<Vec<RecoveredIdentityEnd>, MobError>,
+    ) {
+        let store = InMemoryMobEventStore::new();
+        let mut events = persist_event_kinds(&store, &definition.id, source).await;
+        ensure_recovered_respawn_topology_abandonments(
+            &store,
+            &definition.id,
+            &mut events,
+            &BTreeSet::new(),
+        )
+        .await
+        .expect("the recovered-abandonment repair");
+        assert_eq!(
+            store.replay_all().await.expect("the journal").len(),
+            source.len(),
+            "the repair writes nothing: the journal's abandonment is durable"
+        );
+        let mut authority = seed_mob_authority();
+        recover_identity_generation_highwaters(&mut authority, &events)
+            .expect("the generation high-water");
+        seed_mob_authority_sync_from_events(
+            &mut authority,
+            &events,
+            definition,
+            false,
+            &BTreeSet::new(),
+        )
+        .expect("the general replay");
+        let pending = recover_pending_member_retirements(&mut authority, &events);
+        (authority, pending)
+    }
+
+    /// The replayed mob holds nothing of `alpha` but its history at
+    /// `generation`: no member, no respawn hold, no abandonment tombstone,
+    /// and no edge to `beta`, which is still a member.
+    fn assert_alpha_ended_at(
+        authority: &crate::machines::mob_machine::MobMachineAuthority,
+        generation: u64,
+    ) {
+        let alpha = mob_dsl::AgentIdentity::from("alpha");
+        let beta = mob_dsl::AgentIdentity::from("beta");
+        let state = authority.state();
+        assert!(!state.identity_to_runtime.contains_key(&alpha));
+        assert_eq!(
+            state.identity_runtime_generations.get(&alpha),
+            Some(&mob_dsl::Generation(generation))
+        );
+        assert!(!state.pending_respawn_topology.contains(&alpha));
+        assert!(!state.abandoned_respawn_topology.contains_key(&alpha));
+        assert!(
+            !state
+                .wiring_edges
+                .contains(&mob_dsl::WiringEdge::new(alpha, beta.clone())),
+            "alpha's topology was pruned"
+        );
+        assert!(state.identity_to_runtime.contains_key(&beta));
+    }
+
+    /// A respawn abandoned after its old member's archive, the name spawned
+    /// again, and that later life retired, in a journal 0.9.10 wrote: the
+    /// marker names a generation the name has moved past, and the resume's
+    /// pending replay answers it as a no-op. Nothing is ended, and the name
+    /// is left free, its topology pruned.
+    #[tokio::test]
+    async fn a_written_journal_whose_abandoned_respawns_name_later_retired_replays() {
+        let definition = MobDefinition::explicit("abandoned-respawn-later-life-retired");
+        let source = abandoned_respawn_journal(&definition, false, &retired_later_life());
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert!(ends.is_empty(), "the stale marker ends nothing: {ends:?}");
+        assert_alpha_ended_at(&authority, 1);
+    }
+
+    /// The same when the respawn was abandoned while the old member was
+    /// still Retiring, its retirement then finishing as an ordinary terminal.
+    #[tokio::test]
+    async fn a_written_journal_whose_retiring_abandonments_name_later_retired_replays() {
+        let definition = MobDefinition::explicit("retiring-abandonment-later-life-retired");
+        let source = abandoned_respawn_journal(&definition, true, &retired_later_life());
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert!(ends.is_empty(), "the stale marker ends nothing: {ends:?}");
+        assert_alpha_ended_at(&authority, 1);
+    }
+
+    /// The later life was reset to a newer generation before it retired: the
+    /// marker is further behind the name's history, and still a no-op.
+    #[tokio::test]
+    async fn a_written_journal_whose_abandoned_respawns_name_was_reset_and_retired_replays() {
+        let definition = MobDefinition::explicit("abandoned-respawn-later-life-reset");
+        let alpha = AgentIdentity::from("alpha");
+        let later = [
+            alpha_life_row(1, 8, AlphaLifeRow::Spawned),
+            MobEventKind::MemberReset {
+                agent_identity: alpha.clone(),
+                previous_generation: Generation::new(1),
+                new_generation: Generation::new(2),
+                fence_token: FenceToken::new(10),
+                agent_runtime_id: AgentRuntimeId::new(alpha, Generation::new(2)),
+            },
+            alpha_life_row(2, 10, AlphaLifeRow::RetirementStarted { respawn: false }),
+            alpha_life_row(2, 10, AlphaLifeRow::Retired),
+        ];
+        let source = abandoned_respawn_journal(&definition, false, &later);
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert!(ends.is_empty(), "the stale marker ends nothing: {ends:?}");
+        assert_alpha_ended_at(&authority, 2);
+    }
+
+    /// The later life's own respawn was abandoned too, after its archive: two
+    /// markers. The first life's is stale and changes nothing; the later
+    /// life's names the name's last incarnation, so its replay still ends
+    /// the identity, once, and records that generation's tombstone.
+    #[tokio::test]
+    async fn a_written_journal_with_the_later_lifes_own_abandonment_ends_the_identity_once() {
+        let definition = MobDefinition::explicit("abandoned-respawn-twice");
+        let later = [
+            alpha_life_row(1, 8, AlphaLifeRow::Spawned),
+            alpha_life_row(1, 8, AlphaLifeRow::RetirementStarted { respawn: true }),
+            alpha_life_row(1, 8, AlphaLifeRow::Retired),
+            alpha_life_row(1, 8, AlphaLifeRow::RespawnAbandoned),
+        ];
+        let source = abandoned_respawn_journal(&definition, false, &later);
+        let (authority, pending) = resume_replay_of_a_written_journal(&definition, &source).await;
+        let ends = pending
+            .unwrap_or_else(|error| panic!("the pending replay refused the journal: {error}"));
+        assert_eq!(
+            ends.iter()
+                .map(|end| end.identity.clone())
+                .collect::<Vec<_>>(),
+            vec![AgentIdentity::from("alpha")],
+            "only the later life's abandonment ends the identity"
+        );
+        let alpha = mob_dsl::AgentIdentity::from("alpha");
+        assert_eq!(
+            authority.state().abandoned_respawn_topology.get(&alpha),
+            Some(&mob_dsl::Generation(1))
+        );
+        assert!(!authority.state().identity_to_runtime.contains_key(&alpha));
     }
 
     #[test]

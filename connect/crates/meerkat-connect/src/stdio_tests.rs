@@ -3810,7 +3810,9 @@ async fn connector_fixture(
     .unwrap();
     let persistence = ProviderAuthPersistence::new(
         Arc::new(FileTokenStore::new(root.join("credentials"))),
-        Arc::new(FileLockCoordinator::new(root.join("locks"))),
+        Arc::new(FileLockCoordinator::new(
+            root.join("credentials").join("refresh-locks"),
+        )),
     );
     connector_fixture_with_owners(root, issuer, storage, persistence, None).await
 }

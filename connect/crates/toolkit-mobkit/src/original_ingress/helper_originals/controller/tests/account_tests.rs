@@ -2,6 +2,37 @@
 //! These controls do not claim a native dispatch or protected human interaction.
 use super::*;
 
+/// The account check answers a lineage resolution the grant owner cannot
+/// answer now unavailable, never a denial, through the pure check it calls.
+#[tokio::test]
+async fn the_account_check_answers_an_owner_that_cannot_say_now_unavailable() {
+    let fixture = Fixture::with_account().await;
+    let candidate = fixture.candidate();
+    let intent = candidate
+        .account
+        .as_ref()
+        .expect("an account intent")
+        .native_account(&fixture.admitted.facts)
+        .unwrap();
+    assert_lineage_refusals(&intent);
+}
+
+/// The public service request check answers a lineage resolution the grant
+/// owner cannot answer now unavailable, never a denial, through the pure
+/// check it calls.
+#[tokio::test]
+async fn the_public_check_answers_an_owner_that_cannot_say_now_unavailable() {
+    let fixture = Fixture::with_public(false).await;
+    let candidate = fixture.candidate();
+    let intent = candidate
+        .public
+        .as_ref()
+        .expect("a public service request intent")
+        .native_public(&fixture.admitted.facts)
+        .unwrap();
+    assert_lineage_refusals(&intent);
+}
+
 fn issue(
     f: &Fixture,
     intent: &ChildGrantIntent,
@@ -15,6 +46,7 @@ fn issue(
             f.owner
                 .grants
                 .issue_child(
+                    &meerkat_core::AdmissionGuard::none(),
                     &intent.issuer,
                     intent.parent_lineage.last().unwrap(),
                     intent.id.clone(),
@@ -192,6 +224,7 @@ async fn account_selection_refuses_report_parent_and_retains_narrow_target_revoc
     f.owner
         .grants
         .revoke(
+            &meerkat_core::AdmissionGuard::none(),
             &account.issuer,
             account_lineage.last().unwrap(),
             &mut custody,
@@ -387,7 +420,12 @@ async fn public_request_child_is_independent_and_partial_settlement_recovers_the
         let mut custody = native.try_controller_grant_mutation().unwrap();
         f.owner
             .grants
-            .revoke(&public.issuer, public_lineage.last().unwrap(), &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &public.issuer,
+                public_lineage.last().unwrap(),
+                &mut custody,
+            )
             .unwrap();
         drop(custody);
         assert!(source.policy_source().is_ok());

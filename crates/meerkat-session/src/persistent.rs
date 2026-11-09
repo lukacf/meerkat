@@ -172,10 +172,11 @@ fn refusal_or_internal_error(
 }
 
 /// The error a failed WholeBlob checkpoint write (a round commit or a closing
-/// save) answers. A batch the host store left unsettled when its writer's
-/// fence window closed ([`RuntimeStoreError::UnsettledAtFenceWindow`]) may or
-/// may not have landed, so the live actor and the store can no longer be
-/// proved to be one image: the write answers the teardown class, which the
+/// save) answers. A batch the host store left unsettled, when its writer's
+/// fence window closed ([`RuntimeStoreError::UnsettledAtFenceWindow`]) or
+/// when its retry budget ran out ([`RuntimeStoreError::UnsettledPastRetryBudget`]),
+/// may or may not have landed, so the live actor and the store can no longer
+/// be proved to be one image: the write answers the teardown class, which the
 /// checkpoint returns at once, and the actor is reloaded from what the store
 /// holds (what a reopen of the realm loads). Such a write is never taken for
 /// one the stopped writer refused before it changed anything: it is not
@@ -186,7 +187,8 @@ fn whole_blob_checkpoint_write_error(
     error: RuntimeStoreError,
 ) -> AgentError {
     match error {
-        error @ RuntimeStoreError::UnsettledAtFenceWindow { .. } => {
+        error @ (RuntimeStoreError::UnsettledAtFenceWindow { .. }
+        | RuntimeStoreError::UnsettledPastRetryBudget { .. }) => {
             AgentError::session_durable_projection_authority_unknown(format!(
                 "session {session_id}: its checkpoint may or may not have landed ({error}); \
                  live actor reload required"
@@ -422,13 +424,15 @@ const OBSERVATION_LOAD_ATTEMPTS: usize = 8;
 /// Bound on the wait for a session's turn-finalization boundary before a
 /// tail settle that does not hold it: a strict read running a settle an
 /// observation deferred (`settle_deferred_ended_tail_for_strict_read`), and a
-/// cold attach's settle (`prepare_cold_attach_hosted`). A settle commits only
-/// between runtime loop laps; this covers the short holders while a tail
-/// stands: the post-commit work of a finished lap, a lap whose run the
-/// standing tail refuses before its model call, and a lap whose resumed-run
-/// admission answers once a stop or retire settled that run. A boundary
-/// still held after it leaves the tail standing, and the caller's committed
-/// read refuses as before.
+/// cold attach's settle (`prepare_cold_attach_hosted`). The cold settle of a
+/// session's owed compaction projections
+/// (`settle_owed_compaction_projections_hosted`) waits as long, and refuses
+/// busy past it. A settle commits only between runtime loop laps; this
+/// covers the short holders while a tail stands: the post-commit work of a
+/// finished lap, a lap whose run the standing tail refuses before its model
+/// call, and a lap whose resumed-run admission answers once a stop or retire
+/// settled that run. A boundary still held after it leaves the tail
+/// standing, and the caller's committed read refuses as before.
 const TAIL_SETTLE_BOUNDARY_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How the settle of an ended turn's tail takes the per-session recovery
@@ -8386,6 +8390,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// committed transcript observed by the fork is stable without a lock of
     /// its own. The stale-live-session discard is skipped because the source's
     /// live session is in use by that running turn.
+    ///
+    /// An empty-prefix fork (`DurableForkSourceAdmission::EmptyPrefix`) takes
+    /// this guard too: it takes no message, and its build comes from one
+    /// committed snapshot read whole, so a concurrent writer of the source
+    /// changes nothing the child takes from it; a running source's live
+    /// session stays its turn's.
     fn caller_turn_fork_mutation_guard() -> SessionMutationGuard {
         SessionMutationGuard {
             _turn_finalization_guard: None,
@@ -9016,10 +9026,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             boundary,
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn)
         );
+        let empty_prefix = matches!(
+            boundary,
+            ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::EmptyPrefix)
+        );
         let quiescent = matches!(
             boundary,
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::Quiescent)
         );
+        // An empty-prefix fork takes nothing of the transcript, which is
+        // why it may skip the source's turn: any other count is refused
+        // before anything is read.
+        if empty_prefix && message_count != Some(0) {
+            return Err(SessionError::Unsupported(
+                "an empty-prefix fork takes no message of its source: its message count must be 0"
+                    .into(),
+            ));
+        }
         let _mutation_guard = match boundary {
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::Quiescent) => {
                 self.quiescent_fork_mutation_guard(source_session_id)
@@ -9028,6 +9051,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             ForkSourceBoundary::Admission(meerkat_core::DurableForkSourceAdmission::CallerTurn) => {
                 Self::caller_turn_fork_mutation_guard()
             }
+            // Nothing the source's turn could extend is observed: no lock,
+            // and no running source is refused or waited for.
+            ForkSourceBoundary::Admission(
+                meerkat_core::DurableForkSourceAdmission::EmptyPrefix,
+            ) => Self::caller_turn_fork_mutation_guard(),
             ForkSourceBoundary::HeldTurnBoundary {
                 turn_finalization_guard,
                 recovery_gate_bound,
@@ -9040,7 +9068,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await?
             }
         };
-        let source = if caller_turn {
+        // Both read the committed snapshot whole, through a running turn's
+        // provisional tail, and never write the source.
+        let source = if caller_turn || empty_prefix {
             self.source_session_for_caller_turn_fork_locked(source_session_id)
                 .await?
         } else {
@@ -12004,6 +12034,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
     ) -> Result<Arc<MeerkatMachine>, meerkat_runtime::RuntimeDriverError> {
         self.acquire_canonical_runtime_adapter(None)
+    }
+
+    /// Whether this service's runtime is governed: the runtime machine bound
+    /// to it has a native work authorization host. A service with no machine
+    /// bound yet is not: a governed composition binds its machine before it
+    /// hosts any session, and a service constructed directly creates an
+    /// ungoverned one on first use.
+    fn runtime_is_governed(&self) -> bool {
+        self.runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|machine| machine.has_native_work_authorization_host())
     }
 
     /// Acquire this service's one runtime owner. Failed initialization leaves
@@ -20820,6 +20863,14 @@ impl<B: SessionAgentBuilder + 'static> meerkat_core::service::SessionServiceInst
         meerkat_core::SessionInstructionReceipt,
         meerkat_core::service::SessionInstructionError,
     > {
+        // A governed runtime admits an operator-instruction write only with
+        // prepared authorization, which nothing mints for one yet: the write
+        // is refused before anything is read or written, as a plain System
+        // context append is refused there. The refusal is final for the
+        // write; a retry is refused the same way.
+        if self.runtime_is_governed() {
+            return Err(meerkat_core::InstructionWriteError::PreparedAuthorizationRequired.into());
+        }
         match self
             .operator_instruction_control(id, OperatorInstructionControl::Set(write))
             .await?
@@ -21246,7 +21297,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return;
         }
         let _settlement_guard = self.tool_application_settlement_gate.write().await;
-        self.inner.shutdown().await;
+        match self.inner.try_shutdown().await {
+            Ok(()) => self.release_realm_custody(),
+            Err(error) => {
+                tracing::error!(%error, "best-effort session service shutdown was incomplete");
+            }
+        }
     }
 
     /// Wait until every actor removed for `id` has exited, so its hosting
@@ -21270,10 +21326,30 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     }
 
     /// Shut down all sessions, returning the first typed authorization failure.
+    ///
+    /// The shutdown is terminal: once every removed actor finished its last
+    /// durable write, it ends the custody the realm's open took of the
+    /// realm's grant owner ([`MeerkatMachine::release_realm_custody`]), so a
+    /// same-process successor restores that owner at once.
     pub async fn try_shutdown(&self) -> Result<(), SessionError> {
         self.inner.drain_tool_applications_for_shutdown().await?;
         let _settlement_guard = self.tool_application_settlement_gate.write().await;
-        self.inner.try_shutdown().await
+        self.inner.try_shutdown().await?;
+        self.release_realm_custody();
+        Ok(())
+    }
+
+    /// The realm's terminal close on the machine this service is bound to.
+    /// A service with no bound machine ends nothing.
+    fn release_realm_custody(&self) {
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(adapter) = adapter {
+            adapter.release_realm_custody();
+        }
     }
 
     /// Cancel all active checkpointer gates.
@@ -21900,6 +21976,202 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 ColdAttachSettlement::Settled
             }
         }
+    }
+
+    /// Settle `session_id`'s owed compaction projections cold: finalize each
+    /// memory batch the runtime's compaction outbox still owes, acknowledge
+    /// its row, and answer the finalized batches. It registers nothing,
+    /// wakes nothing and makes no model request.
+    ///
+    /// A compaction's transcript rewrite and its memory projection are a
+    /// pair: the run boundary that commits the rewrite inserts a pending
+    /// outbox row, and the batch waits staged and invisible. A live agent
+    /// finalizes it at its next boundary, or at its startup reconciliation
+    /// when it is revived. A session that is never revived again (a dormant
+    /// member that is rotated or deleted) is settled here instead, before it
+    /// ends, so its discards still reach the caller.
+    ///
+    /// - A session this service hosts (a live actor, or a registration on
+    ///   its runtime machine) answers
+    ///   [`OwedCompactionSettlement::Live`](crate::OwedCompactionSettlement::Live):
+    ///   its live agent owns the finalization. Nothing is written.
+    /// - No pending row answers
+    ///   [`OwedCompactionSettlement::NothingOwed`](crate::OwedCompactionSettlement::NothingOwed),
+    ///   so a second settle owes nothing and changes nothing.
+    /// - Otherwise each row is the commit authority of its projection (only
+    ///   a commit inserted it): the builder finalizes the batch
+    ///   ([`SessionAgentBuilder::finalize_absent_session_compaction_stages`])
+    ///   and the store acknowledges the row, which removes the intent from
+    ///   the authoritative session in the same transaction, so a later
+    ///   revival's reconciliation sees a consistent pair. Every store that
+    ///   keeps WholeBlob documents cleans the committed document and marks
+    ///   the row in that one transaction (or under one lock), so no other
+    ///   copy of the session is refreshed here. The answer is
+    ///   [`OwedCompactionSettlement::Settled`](crate::OwedCompactionSettlement::Settled),
+    ///   in outbox order.
+    ///
+    /// It runs under this runtime owner's hosting claim for the session
+    /// (#1813): a session another runtime owner hosts is refused with
+    /// [`SessionError::ServedElsewhere`] before anything is read. It then
+    /// takes the session's turn-finalization boundary, waiting for it as
+    /// long as the durable-tail settle does: a runtime loop lap that holds
+    /// it longer refuses the settle [`SessionError::Busy`]. Under the
+    /// session's recovery gate a concurrent materialization waits, and an
+    /// actor that went live first answers `Live`. While a run's provisional
+    /// tail stands ahead of the committed boundary, the run owns that
+    /// boundary: the settle is refused [`SessionError::Busy`] and writes
+    /// nothing.
+    pub async fn settle_owed_compaction_projections(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::OwedCompactionSettlement, SessionError> {
+        // #1813: the settle writes the session's durable rows (the batch's
+        // publication, the outbox acknowledgement and the session's intent),
+        // so it holds this owner's hosting claim for its duration, inside its
+        // blocking store writes too.
+        let hosting = self.grant_session_hosting(session_id)?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.settle_owed_compaction_projections_hosted(session_id),
+        )
+        .await
+    }
+
+    /// [`Self::settle_owed_compaction_projections`] under the hosting claim.
+    async fn settle_owed_compaction_projections_hosted(
+        &self,
+        id: &SessionId,
+    ) -> Result<crate::OwedCompactionSettlement, SessionError> {
+        if self.session_hosted_in_process(id).await? {
+            return Ok(crate::OwedCompactionSettlement::Live);
+        }
+        // The session's mutation boundary, which every non-turn writer takes
+        // before the recovery gate: a runtime loop lap that outlived its
+        // actor holds it, and the settle waits for it, bounded.
+        let turn_finalization_gate = self.turn_finalization_gate_for_session(id).await;
+        let Ok(_turn_finalization_guard) = tokio::time::timeout(
+            TAIL_SETTLE_BOUNDARY_BOUND,
+            turn_finalization_gate.lock_owned(),
+        )
+        .await
+        else {
+            return Err(SessionError::Busy { id: id.clone() });
+        };
+        // A materialization waits here; one that went live first owns the
+        // finalization.
+        let recovery_gate = self.recovery_gate_for_session(id).await;
+        let _recovery_guard = recovery_gate.lock_owned().await;
+        if self.session_hosted_in_process(id).await? {
+            return Ok(crate::OwedCompactionSettlement::Live);
+        }
+        if !self.runtime_store.supports_compaction_projection_outbox() {
+            return Ok(crate::OwedCompactionSettlement::NothingOwed);
+        }
+        let runtime_id = Self::runtime_id_for_session(id);
+        let intents = self
+            .runtime_store
+            .load_pending_compaction_projections(&runtime_id)
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to read the compaction outbox of session {id}: {error}"
+                )))
+            })?;
+        if intents.is_empty() {
+            return Ok(crate::OwedCompactionSettlement::NothingOwed);
+        }
+        // A run's provisional tail stands ahead of the committed boundary the
+        // rows were committed at: that run owns the boundary, and an
+        // acknowledgement now would move the base its round commits chain
+        // from. Its settlement (a resume, or the recovery at the session's
+        // next materialization) finalizes the projections.
+        if self.provisional_tail_stands(id).await? {
+            tracing::warn!(
+                session_id = %id,
+                owed = intents.len(),
+                "a provisional tail stands over the session's owed compaction projections; the cold settle refuses busy"
+            );
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+        if let Some(foreign) = intents
+            .iter()
+            .find(|intent| intent.projection.session_id() != id)
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the compaction outbox of session {id} holds a projection of session {}",
+                foreign.projection.session_id()
+            ))));
+        }
+        let projections = intents
+            .iter()
+            .map(|intent| intent.projection.clone())
+            .collect::<Vec<_>>();
+        // Each pending row is the commit authority of its projection: only a
+        // runtime commit inserts it. A cold settle has no executor to fence,
+        // so the hosting claim, the gates and the unregistered state are the
+        // fence.
+        let published = self
+            .inner
+            .finalize_absent_session_compaction_stages(id, &projections)
+            .await?;
+        if published.len() != projections.len() {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the builder finalized {} compaction batches of session {id} for {} owed projections",
+                published.len(),
+                projections.len()
+            ))));
+        }
+        for projection in &projections {
+            self.runtime_store
+                .mark_compaction_projection_finalized(&runtime_id, projection)
+                .await
+                .map_err(|error| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "failed to acknowledge the finalized compaction projection {} of session {id}: {error}",
+                        projection.revision()
+                    )))
+                })?;
+        }
+        // The acknowledgement rewrote the committed session without the
+        // intents: a body this service verified before it is not current.
+        self.forget_whole_blob_body(id);
+        tracing::info!(
+            session_id = %id,
+            projections = projections.len(),
+            "settled the session's owed compaction projections cold"
+        );
+        Ok(crate::OwedCompactionSettlement::Settled {
+            projections: intents
+                .into_iter()
+                .zip(published)
+                .map(|(intent, entries)| {
+                    crate::SettledCompactionProjection::new(
+                        intent.projection,
+                        intent.summary_tokens,
+                        intent.messages_before,
+                        intent.messages_after,
+                        entries,
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// Whether this service hosts `id` in this process: a live actor, or a
+    /// registration on its runtime machine. Never creates a machine.
+    async fn session_hosted_in_process(&self, id: &SessionId) -> Result<bool, SessionError> {
+        if self.inner.has_live_session(id).await? {
+            return Ok(true);
+        }
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(match adapter {
+            Some(adapter) => adapter.contains_session(id).await,
+            None => false,
+        })
     }
 
     /// Observe the exact committed RuntimeStore body without reconciling the
@@ -31726,10 +31998,14 @@ mod tests {
     }
 
     /// A host store whose renews always fail: the realm's first renew
-    /// stops its writer, and its self-fence window closes.
+    /// stops its writer, and its self-fence window closes. Each acquire is
+    /// granted a token above every earlier grant, as a store's token order
+    /// requires.
     #[cfg(not(target_arch = "wasm32"))]
-    #[derive(Debug)]
-    struct RenewFailingHost;
+    #[derive(Debug, Default)]
+    struct RenewFailingHost {
+        granted: std::sync::atomic::AtomicU64,
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[async_trait::async_trait]
@@ -31739,8 +32015,12 @@ mod tests {
             _mode: meerkat_core::host_store::AcquireMode,
         ) -> Result<meerkat_core::host_store::FenceGrant, meerkat_core::host_store::HostStoreError>
         {
+            let token = self
+                .granted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
             Ok(meerkat_core::host_store::FenceGrant {
-                token: meerkat_core::host_store::FenceToken::new(1),
+                token: meerkat_core::host_store::FenceToken::new(token),
                 superseded_lease: std::time::Duration::ZERO,
             })
         }
@@ -31779,10 +32059,7 @@ mod tests {
             _limit: usize,
         ) -> Result<meerkat_core::host_store::HeadPage, meerkat_core::host_store::HostStoreError>
         {
-            Ok(meerkat_core::host_store::HeadPage {
-                heads: Vec::new(),
-                next: None,
-            })
+            Ok(meerkat_core::host_store::HeadPage::new(Vec::new(), None))
         }
 
         async fn read_rows(
@@ -31838,9 +32115,12 @@ mod tests {
             run_suspension: std::sync::OnceLock::new(),
             rewrite_audit: None,
         };
-        let realm = SpiRealm::open(Arc::new(RenewFailingHost), SpiRealmConfig::default())
-            .await
-            .expect("the realm opens");
+        let realm = SpiRealm::open(
+            Arc::new(RenewFailingHost::default()),
+            SpiRealmConfig::default(),
+        )
+        .await
+        .expect("the realm opens");
         let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
             SpiRuntimeStore::open(realm)
                 .await
@@ -32227,6 +32507,208 @@ mod tests {
         );
         let error = outcome.expect_err("the round commit's outcome is unknown");
         assert_teardown_required_projection_authority(error, "self-fence window");
+    }
+
+    /// A host store whose commits, once `unsettle` is set, answer
+    /// `Indeterminate` first (applying nothing) and `Unavailable` after,
+    /// while every head read fails: nothing the writer asks settles a batch.
+    /// Renews succeed, so the writer's window stays open. It records the
+    /// commit id of every attempt.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Debug, Default)]
+    struct UnsettlingHost {
+        unsettle: std::sync::atomic::AtomicBool,
+        answered_unknown: std::sync::atomic::AtomicBool,
+        attempts: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl meerkat_core::host_store::HostStore for UnsettlingHost {
+        async fn acquire_fence(
+            &self,
+            _mode: meerkat_core::host_store::AcquireMode,
+        ) -> Result<meerkat_core::host_store::FenceGrant, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(meerkat_core::host_store::FenceGrant {
+                token: meerkat_core::host_store::FenceToken::new(1),
+                superseded_lease: std::time::Duration::ZERO,
+            })
+        }
+
+        async fn renew_fence(
+            &self,
+            _token: meerkat_core::host_store::FenceToken,
+        ) -> Result<(), meerkat_core::host_store::HostStoreError> {
+            Ok(())
+        }
+
+        fn fence_timing(&self) -> meerkat_core::host_store::FenceTiming {
+            meerkat_core::host_store::FenceTiming::default()
+        }
+
+        async fn load_head(
+            &self,
+            _scope: &meerkat_core::host_store::ScopeRef,
+        ) -> Result<
+            Option<meerkat_core::host_store::VersionedHead>,
+            meerkat_core::host_store::HostStoreError,
+        > {
+            if self.unsettle.load(Ordering::SeqCst) {
+                return Err(meerkat_core::host_store::HostStoreError::Unavailable(
+                    "the row keeps the batch unsettled".to_string(),
+                ));
+            }
+            Ok(None)
+        }
+
+        async fn list_heads(
+            &self,
+            _kind: meerkat_core::host_store::ScopeKind,
+            _after: Option<&meerkat_core::host_store::ScopeName>,
+            _limit: usize,
+        ) -> Result<meerkat_core::host_store::HeadPage, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(meerkat_core::host_store::HeadPage::new(Vec::new(), None))
+        }
+
+        async fn read_rows(
+            &self,
+            _scope: &meerkat_core::host_store::ScopeRef,
+            _from: meerkat_core::host_store::RowIndex,
+            _limit: usize,
+        ) -> Result<Vec<meerkat_core::host_store::Row>, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn commit(
+            &self,
+            batch: &meerkat_core::host_store::CommitBatch,
+        ) -> Result<(), meerkat_core::host_store::HostStoreError> {
+            if !self.unsettle.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.attempts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(batch.commit_id().as_str().to_string());
+            if self.answered_unknown.swap(true, Ordering::SeqCst) {
+                Err(meerkat_core::host_store::HostStoreError::Unavailable(
+                    "the row keeps the batch unsettled".to_string(),
+                ))
+            } else {
+                Err(meerkat_core::host_store::HostStoreError::Indeterminate(
+                    "the row's store applied nothing".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// A round commit whose batch the host store leaves unsettled past its
+    /// retry budget, its writer's window open throughout (the store answered
+    /// `Indeterminate`, then `Unavailable` to every retry and head read), may
+    /// or may not have landed, exactly as one stopped at its fence window. The
+    /// write answers a typed outcome-unknown store error, and the checkpoint
+    /// answers the teardown class at once, so the live actor is reloaded from
+    /// what the store holds after the reopen; the batch is never written
+    /// again. Before, the write answered `WriteFailed` and the checkpoint an
+    /// internal error, which fails the run as a crash would (class internal)
+    /// while the live actor stays loaded over a scope that refuses it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn a_round_commit_unsettled_past_its_retry_budget_answers_the_teardown_class_at_once() {
+        use meerkat_runtime::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
+        let host = Arc::new(UnsettlingHost::default());
+        let realm = SpiRealm::open(
+            Arc::clone(&host) as Arc<dyn meerkat_core::host_store::HostStore>,
+            SpiRealmConfig {
+                commit_retry_budget: std::time::Duration::from_secs(2),
+                ..SpiRealmConfig::default()
+            },
+        )
+        .await
+        .expect("the realm opens");
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
+            SpiRuntimeStore::open(Arc::clone(&realm))
+                .await
+                .expect("the runtime store opens"),
+        );
+        let mut session = Session::new();
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        let artifact = session
+            .to_persisted_artifact()
+            .expect("encode initial WholeBlob session");
+        runtime_store
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: artifact.bytes_arc(),
+                },
+            )
+            .await
+            .expect("commit initial WholeBlob authority");
+        let authority = runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .expect("load initial WholeBlob authority")
+            .expect("initial WholeBlob authority should exist");
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(Some(authority)),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            runtime_run: std::sync::Mutex::new(None),
+            service_turn: std::sync::Mutex::new(ServiceTurnSlot::Closed),
+            run_suspension: std::sync::OnceLock::new(),
+            rewrite_audit: None,
+        };
+        let run_id = RunId::new();
+        session.push(Message::User(UserMessage::text("a round's prompt")));
+        session
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                0,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            ))
+            .expect("the run's cursor");
+        host.unsettle.store(true, Ordering::SeqCst);
+
+        let outcome = meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            None,
+        )
+        .await;
+        let attempts = host
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            attempts.len() >= 2 && attempts.iter().all(|id| *id == attempts[0]),
+            "one batch, retried within its budget and never written again: {attempts:?} \
+             ({outcome:?})"
+        );
+        assert!(
+            realm.realm_poisoned().is_none(),
+            "the realm keeps its fence"
+        );
+        assert!(realm.lease_is_live(), "the writer's window stays open");
+        let error = outcome.expect_err("the round commit's outcome is unknown");
+        assert_teardown_required_projection_authority(error, "retry budget");
     }
 
     struct WholeBlobAuthorityReadProbe {
@@ -59300,6 +59782,71 @@ mod tests {
             assert_eq!(error.code(), Some(InstructionSetErrorCode::OwnedByMob));
         }
 
+        /// On a governed runtime (the service's runtime owner has a native
+        /// work authorization host installed) a host's session-level write
+        /// needs prepared authorization, which this release does not mint:
+        /// the write is refused typed, live or dormant, a retry is refused the
+        /// same way, and nothing is recorded. The same write records on an
+        /// ungoverned service.
+        #[tokio::test]
+        async fn governed_realm_write_requires_prepared_authorization() {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (service, _builds) = counting_service(Arc::clone(&runtime_store));
+            let service = Arc::new(service);
+            let governed =
+                meerkat_runtime::MeerkatMachine::persistent_with_unavailable_scoped_governance(
+                    Arc::clone(&runtime_store),
+                    None,
+                )
+                .expect("a governed machine over the service's store");
+            service
+                .acquire_canonical_runtime_adapter(Some(Arc::new(governed)))
+                .expect("the service's runtime owner is the governed machine");
+            let live = service
+                .create_session(create_request("hello", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed")
+                .session_id;
+            let dormant = dormant_session(service.as_ref()).await;
+
+            for id in [&live, &dormant] {
+                for attempt in 0..2 {
+                    let error = Arc::clone(&service)
+                        .set_session_instruction(id, write("tone", 1, "Answer formally."))
+                        .await
+                        .expect_err("a governed runtime refuses an unauthorized write");
+                    assert!(
+                        matches!(
+                            error,
+                            SessionInstructionError::Refused(
+                                meerkat_core::InstructionWriteError::PreparedAuthorizationRequired
+                            )
+                        ),
+                        "attempt {attempt}: {error:?}"
+                    );
+                    assert_eq!(
+                        error.code(),
+                        Some(InstructionSetErrorCode::PreparedAuthorizationRequired)
+                    );
+                }
+                let read = service
+                    .read_session_instructions(id)
+                    .await
+                    .expect("the committed read");
+                assert_eq!(read.target, None, "nothing was recorded");
+            }
+
+            let ungoverned_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let (ungoverned, _builds) = counting_service(ungoverned_store);
+            let ungoverned = Arc::new(ungoverned);
+            let id = dormant_session(ungoverned.as_ref()).await;
+            let receipt = Arc::clone(&ungoverned)
+                .set_session_instruction(&id, write("tone", 1, "Answer formally."))
+                .await
+                .expect("an ungoverned runtime records the write");
+            assert_eq!(receipt.disposition, InstructionWriteDisposition::Recorded);
+        }
+
         #[tokio::test]
         async fn dormant_session_target_record_registers_nothing_and_wakes_nothing() {
             let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
@@ -60496,6 +61043,399 @@ mod tests {
                 "{error:?}"
             );
             assert_eq!(history(&service, &id).await, before, "nothing is written");
+        }
+    }
+
+    /// The cold settle of a session's owed compaction projections over the
+    /// in-memory runtime store, whose sessions persist WholeBlob documents.
+    mod owed_compaction_settle_service {
+        use super::*;
+
+        /// Holds every checkpointer it hands out (so the session's actor can
+        /// write its runs) and finalizes each owed stage it is asked to,
+        /// answering one record per projection.
+        struct FinalizingBuilder {
+            inner: CheckpointerHoldingBuilder<DummyBuilder>,
+            finalizations: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl SessionAgentBuilder for FinalizingBuilder {
+            type Agent = DummyAgent;
+
+            fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+                self.inner.session_comms_identity_root()
+            }
+
+            async fn build_agent(
+                &self,
+                req: &CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                self.inner.build_agent(req, event_tx).await
+            }
+
+            async fn build_agent_taking_tools(
+                &self,
+                req: &mut CreateSessionRequest,
+                event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+            ) -> Result<Self::Agent, SessionError> {
+                self.inner.build_agent_taking_tools(req, event_tx).await
+            }
+
+            async fn finalize_absent_session_compaction_stages(
+                &self,
+                session_id: &SessionId,
+                projections: &[meerkat_core::memory::CompactionProjectionId],
+            ) -> Result<Vec<Vec<meerkat_core::memory::MemoryRecord>>, SessionError> {
+                self.finalizations.fetch_add(1, Ordering::SeqCst);
+                Ok(projections
+                    .iter()
+                    .map(|_| {
+                        vec![meerkat_core::memory::MemoryRecord {
+                            content: "an owed compaction's discard".to_string(),
+                            metadata: meerkat_core::memory::MemoryMetadata {
+                                session_id: session_id.clone(),
+                                source: meerkat_core::memory::MemorySource::Compaction {
+                                    source_range: meerkat_core::memory::MessageRange::new(0, 2)
+                                        .expect("a message range"),
+                                },
+                                indexed_at: std::time::SystemTime::now(),
+                            },
+                        }]
+                    })
+                    .collect())
+            }
+        }
+
+        /// A session whose committed boundary owes one compaction
+        /// projection (its outbox row pending) and that no actor hosts;
+        /// with `tail`, a later run's round commit stands over that boundary
+        /// as the provisional tail.
+        async fn owed_whole_blob_session(
+            tail: bool,
+        ) -> (
+            PersistentSessionService<FinalizingBuilder>,
+            Arc<dyn RuntimeStore>,
+            SessionId,
+            meerkat_core::CompactionProjectionIntent,
+            Arc<AtomicUsize>,
+        ) {
+            let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+            let finalizations = Arc::new(AtomicUsize::new(0));
+            let service = PersistentSessionService::new(
+                FinalizingBuilder {
+                    inner: CheckpointerHoldingBuilder::new(DummyBuilder),
+                    finalizations: Arc::clone(&finalizations),
+                },
+                4,
+                Arc::new(MemoryStore::new()),
+                Arc::clone(&runtime_store),
+                memory_blob_store(),
+            );
+            let created = service
+                .create_session(create_request("seed", InitialTurnPolicy::Defer))
+                .await
+                .expect("create the session");
+            let id = created.session_id;
+            let runtime_id =
+                PersistentSessionService::<FinalizingBuilder>::runtime_id_for_session(&id);
+            let checkpointer = service
+                .live_checkpointers
+                .lock()
+                .await
+                .get(&id)
+                .cloned()
+                .and_then(|checkpointer| checkpointer.upgrade())
+                .expect("the live actor keeps its checkpointer");
+            let committed = runtime_store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .expect("load the committed document")
+                .expect("the committed document exists");
+
+            // A run that compacted: its boundary commits the rewrite and
+            // the compaction's intent.
+            let mut compacted = committed.session().clone();
+            compacted.push(Message::User(UserMessage::text(
+                "verbose context one".to_string(),
+            )));
+            compacted.push(Message::User(UserMessage::text(
+                "verbose context two".to_string(),
+            )));
+            let (_rewrite, intent) = compacted
+                .stage_validated_compaction_for_test(
+                    vec![Message::User(UserMessage::compaction_summary(
+                        "compacted context",
+                    ))],
+                    2,
+                )
+                .expect("a typed compaction fixture");
+            let run = RunId::new();
+            let checkpoint = meerkat_core::SessionCheckpointer::checkpoint_run(
+                checkpointer.as_ref(),
+                &mut compacted,
+                &run,
+                None,
+            )
+            .await
+            .expect("write the run's provisional candidate")
+            .expect("the WholeBlob checkpoint answers a receipt");
+            let receipt = meerkat_core::lifecycle::RunBoundaryReceipt {
+                run_id: run.clone(),
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: Vec::new(),
+                conversation_digest: Some(checkpoint.conversation_digest().to_string()),
+                message_count: usize::try_from(checkpoint.message_count()).expect("the count fits"),
+                sequence: 1,
+                owner_contributions: Vec::new(),
+            };
+            let promotion = meerkat_runtime::store::PreparedWholeBlobProvisionalPromotion::prepare(
+                checkpoint, &run,
+            )
+            .expect("prepare the promotion");
+            let promoted = runtime_store
+                .commit_prepared_session_boundary(
+                    &runtime_id,
+                    meerkat_runtime::store::PreparedRuntimeSessionCommit::promote_whole_blob_success(
+                        promotion,
+                        receipt,
+                        Vec::new(),
+                        id.clone(),
+                    )
+                    .expect("bind the boundary"),
+                )
+                .await
+                .expect("commit the run's boundary");
+            let authority = promoted
+                .authority()
+                .and_then(RuntimeSessionAuthority::whole_blob)
+                .expect("the commit answers WholeBlob authority")
+                .clone();
+            service
+                .acknowledge_provisional_runtime_session_boundary_under_runtime_turn_boundary(
+                    &id,
+                    authority.store_revision(),
+                    authority.blob_sha256(),
+                )
+                .await
+                .expect("the actor adopts the committed boundary");
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("read the outbox"),
+                vec![intent.clone()],
+                "the committed boundary owes the compaction's projection"
+            );
+
+            if tail {
+                let mut later = compacted.clone();
+                later.push(Message::User(UserMessage::text(
+                    "a later run's round".to_string(),
+                )));
+                meerkat_core::SessionCheckpointer::checkpoint_run(
+                    checkpointer.as_ref(),
+                    &mut later,
+                    &RunId::new(),
+                    None,
+                )
+                .await
+                .expect("write the later run's round")
+                .expect("the WholeBlob checkpoint answers a receipt");
+            }
+            service
+                .discard_live_session_unfenced(&id)
+                .await
+                .expect("the live actor is discarded");
+            assert!(
+                !service.has_live_session(&id).await.expect("presence read"),
+                "no actor hosts the session"
+            );
+            assert_eq!(
+                service
+                    .provisional_tail_stands(&id)
+                    .await
+                    .expect("the tail presence reads"),
+                tail,
+                "a provisional tail stands exactly when the fixture wrote one"
+            );
+            (service, runtime_store, id, intent, finalizations)
+        }
+
+        /// While a run's provisional tail stands over the boundary that owes
+        /// the compaction's projection, that run owns the boundary: the cold
+        /// settle refuses busy, finalizes nothing and acknowledges nothing.
+        #[tokio::test]
+        async fn the_cold_settle_refuses_busy_while_a_provisional_tail_stands() {
+            let (service, runtime_store, id, intent, finalizations) =
+                owed_whole_blob_session(true).await;
+            let runtime_id =
+                PersistentSessionService::<FinalizingBuilder>::runtime_id_for_session(&id);
+
+            let refused = service.settle_owed_compaction_projections(&id).await;
+            assert!(
+                matches!(refused, Err(SessionError::Busy { .. })),
+                "a standing provisional tail refuses the cold settle busy: {refused:?}"
+            );
+            assert_eq!(
+                finalizations.load(Ordering::SeqCst),
+                0,
+                "the refused settle finalizes nothing"
+            );
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("read the outbox"),
+                vec![intent],
+                "the outbox still owes the projection"
+            );
+        }
+
+        /// The cold settle takes the session's turn-finalization boundary
+        /// first: while another writer holds it past the bound, the settle
+        /// refuses busy, having finalized and acknowledged nothing; once the
+        /// boundary is free, the settle finalizes the batch.
+        #[tokio::test]
+        async fn the_cold_settle_refuses_busy_behind_a_held_turn_boundary() {
+            let (service, runtime_store, id, intent, finalizations) =
+                owed_whole_blob_session(false).await;
+            let runtime_id =
+                PersistentSessionService::<FinalizingBuilder>::runtime_id_for_session(&id);
+
+            let held = service.acquire_runtime_turn_finalization_guard(&id).await;
+            let started = std::time::Instant::now();
+            let refused = service.settle_owed_compaction_projections(&id).await;
+            assert!(
+                matches!(refused, Err(SessionError::Busy { .. })),
+                "a held turn boundary refuses the cold settle busy: {refused:?}"
+            );
+            assert!(
+                started.elapsed() >= TAIL_SETTLE_BOUNDARY_BOUND,
+                "the settle waited for the boundary, bounded"
+            );
+            assert_eq!(
+                finalizations.load(Ordering::SeqCst),
+                0,
+                "the refused settle finalizes nothing"
+            );
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("read the outbox"),
+                vec![intent],
+                "the outbox still owes the projection"
+            );
+
+            drop(held);
+            let settled = service
+                .settle_owed_compaction_projections(&id)
+                .await
+                .expect("a free boundary lets the settle through");
+            assert!(
+                matches!(settled, crate::OwedCompactionSettlement::Settled { .. }),
+                "the settle finalizes the owed batch: {settled:?}"
+            );
+            assert_eq!(finalizations.load(Ordering::SeqCst), 1);
+            assert!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("read the outbox")
+                    .is_empty(),
+                "the outbox owes nothing"
+            );
+        }
+
+        /// On a WholeBlob store the acknowledgement cleans the committed
+        /// document and marks the outbox row in one step: after the cold
+        /// settle the outbox owes nothing, the committed document carries no
+        /// compaction intent, and a later wake's resume preparation of the
+        /// session succeeds.
+        #[tokio::test]
+        async fn the_cold_settle_leaves_a_clean_whole_blob_document_a_later_wake_resumes() {
+            let (service, runtime_store, id, _intent, _finalizations) =
+                owed_whole_blob_session(false).await;
+            let runtime_id =
+                PersistentSessionService::<FinalizingBuilder>::runtime_id_for_session(&id);
+
+            let settled = service
+                .settle_owed_compaction_projections(&id)
+                .await
+                .expect("the cold settle answers");
+            assert!(
+                matches!(settled, crate::OwedCompactionSettlement::Settled { .. }),
+                "the settle finalizes the owed batch: {settled:?}"
+            );
+            assert!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("read the outbox")
+                    .is_empty(),
+                "the outbox owes nothing"
+            );
+            let committed = runtime_store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .expect("load the committed document")
+                .expect("the committed document exists");
+            assert!(
+                committed
+                    .session()
+                    .validated_compaction_projection_intents()
+                    .expect("the intents read")
+                    .is_empty(),
+                "the committed document carries no compaction intent"
+            );
+            service
+                .prepare_committed_boundary_resume(&id)
+                .await
+                .expect("a later wake prepares the session's resume");
+        }
+
+        /// A materialization holds the session's recovery gate while it
+        /// makes the session live. The cold settle waits behind it,
+        /// finalizing and acknowledging nothing, and settles once the gate
+        /// is free.
+        #[tokio::test]
+        async fn the_cold_settle_waits_behind_a_held_recovery_gate() {
+            let (service, runtime_store, id, intent, finalizations) =
+                owed_whole_blob_session(false).await;
+            let runtime_id =
+                PersistentSessionService::<FinalizingBuilder>::runtime_id_for_session(&id);
+            let gate = service.recovery_gate_for_session(&id).await;
+            let held = gate.lock_owned().await;
+            let mut settle = Box::pin(service.settle_owed_compaction_projections(&id));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(500), &mut settle)
+                    .await
+                    .is_err(),
+                "the settle waits behind the held recovery gate"
+            );
+            assert_eq!(
+                finalizations.load(Ordering::SeqCst),
+                0,
+                "the waiting settle finalizes nothing"
+            );
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("read the outbox"),
+                vec![intent],
+                "the outbox still owes the projection"
+            );
+            drop(held);
+            let settled = settle
+                .await
+                .expect("the settle answers once the gate is free");
+            assert!(
+                matches!(settled, crate::OwedCompactionSettlement::Settled { .. }),
+                "the settle finalizes the owed batch: {settled:?}"
+            );
         }
     }
 }

@@ -21,8 +21,17 @@ import { randomUUID } from "node:crypto";
 import type { MetaBuilderConfig } from "./builder.js";
 import {
   CallbackDispatcher,
+  type DecisionNoticeHandler,
   type SessionAgentBuilder,
 } from "./agent-builder.js";
+import {
+  type DecisionDecideOptions,
+  type DecisionListOptions,
+  decisionDecideParams,
+  decisionIngressesOption,
+  decisionListParams,
+  refuseInsideToolCallback,
+} from "./decisions.js";
 import {
   MOB_EVENTS_STALE_CURSOR_CODE,
   CAPABILITY_UNAVAILABLE_CODE,
@@ -39,6 +48,10 @@ import {
   FLOW_RUN_IDEMPOTENCY_CONFLICT_KIND,
   SYSTEM_ROW_PRUNE_REFUSED_KIND,
   TRANSCRIPT_REVISION_CONFLICT_KIND,
+  TOOL_GRANT_REQUEST_REFUSED_KIND,
+  REALM_MCP_OUTCOME_UNKNOWN_KIND,
+  REALM_MCP_REFUSED_KIND,
+  REALM_MCP_UNAVAILABLE_KIND,
   WORKGRAPH_UNAVAILABLE_CODE,
   WORKGRAPH_CONFLICT_CODE,
   IDENTITY_UNRESUMABLE_CODE,
@@ -53,6 +66,10 @@ import {
   MemberReloadRequiredError,
   SystemRowPruneRefusedError,
   TranscriptRevisionConflictError,
+  ToolGrantRequestRefusedError,
+  RealmMcpOutcomeUnknownError,
+  RealmMcpRefusedError,
+  RealmMcpUnavailableError,
   ConsoleTimelineReplayUnavailableError,
   RegisteredSpecChangedError,
   StaleScopeError,
@@ -926,6 +943,19 @@ function rpcErrorFromPayload(
 ): Error {
   const code = Number(err.code ?? -1);
   const message = String(err.message ?? String(err));
+  const dataKind =
+    typeof err.data === "object" && err.data !== null
+      ? (err.data as Record<string, unknown>).kind
+      : undefined;
+  if (code === CAPABILITY_UNAVAILABLE_CODE && dataKind === REALM_MCP_UNAVAILABLE_KIND) {
+    return new RealmMcpUnavailableError(message, rid, method, err.data);
+  }
+  if (code === -32603 && dataKind === REALM_MCP_OUTCOME_UNKNOWN_KIND) {
+    return new RealmMcpOutcomeUnknownError(message, rid, method, err.data);
+  }
+  if (code === -32602 && dataKind === REALM_MCP_REFUSED_KIND) {
+    return new RealmMcpRefusedError(message, rid, method, err.data);
+  }
   if (code === CAPABILITY_UNAVAILABLE_CODE) {
     return new CapabilityUnavailableError(message, rid, method, err.data);
   }
@@ -990,6 +1020,14 @@ function rpcErrorFromPayload(
   ) {
     return new TranscriptRevisionConflictError(message, rid, method, err.data);
   }
+  if (
+    code === -32602 &&
+    typeof err.data === "object" &&
+    err.data !== null &&
+    (err.data as Record<string, unknown>).kind === TOOL_GRANT_REQUEST_REFUSED_KIND
+  ) {
+    return new ToolGrantRequestRefusedError(message, rid, method, err.data);
+  }
   if (code === WORKGRAPH_UNAVAILABLE_CODE) {
     return new WorkGraphUnavailableError(message, rid, method, err.data);
   }
@@ -1020,6 +1058,19 @@ function rpcErrorFromPayload(
     return MobEventsStaleError.fromRpcError(rpcError);
   }
   return rpcError;
+}
+
+/**
+ * Options of {@link MetaRuntime.grantTool}: exactly one of `tool` and
+ * `family`, and exactly one of `durationMs` and `expiresAtMs`.
+ */
+export interface GrantToolOptions {
+  tool?: string;
+  family?: string;
+  durationMs?: number;
+  expiresAtMs?: number;
+  reason?: string;
+  decisionRef?: string;
 }
 
 /**
@@ -1424,6 +1475,9 @@ export class MetaRuntime {
     if (this._config.forkInstructionPolicy !== null) {
       runtimeOptions.fork_instruction_policy = this._config.forkInstructionPolicy;
     }
+    if (this._config.decisionIngresses != null) {
+      runtimeOptions.decisions = decisionIngressesOption(this._config.decisionIngresses);
+    }
     if (this._config.memberRestore != null) {
       runtimeOptions.member_restore = this._config.memberRestore;
     }
@@ -1611,6 +1665,16 @@ export class MetaRuntime {
 
   mobHandle(): MobHandle {
     return new MobHandle(this);
+  }
+
+  /**
+   * Receive each `meta/decisions/notice` the stdio gateway writes: one open
+   * durable decision, noticed once per connection when the host lists it.
+   * `event` is `held` (nothing of its content shown) or `presented` (shown to
+   * the stdio operator, with the rendering).
+   */
+  onDecisionNotice(handler: DecisionNoticeHandler): void {
+    this._dispatcher.registerDecisionNoticeHandler(handler);
   }
 
   sseBridge(): SseBridge {
@@ -2572,6 +2636,9 @@ export class MetaRuntime {
    * times out, the activation may still apply at the boundary: re-send the
    * identical activation, which answers `"applied"`, `"duplicate"` or the
    * typed refusal.
+   *
+   * @deprecated Since 0.9.11: keep standing instructions with
+   * {@link setInstruction}. This method keeps working.
    */
   async activateMemberInstruction(
     identity: string,
@@ -2600,6 +2667,94 @@ export class MetaRuntime {
       if (value !== undefined) params[name] = value;
     }
     const raw = await this._rpc("meta/member_instruction_activations", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Write one operator instruction for the members `target` selects.
+   *
+   * Host-only. `target` is `{ kind: "mob" }` (every member of the gateway's
+   * mob), `{ kind: "profile", profile }` or `{ kind: "member", identity }`.
+   * The slot is `namespace` (one your host owns) and `key`; `revision` is at
+   * least 1 and strictly increasing per slot; `body` is the exact text, at
+   * most 256 KiB. `options.contentSha256` (`"sha256:<hex>"` of the body),
+   * when given, must be the body's.
+   *
+   * Resolves to Meerkat's write receipt once the record is durable:
+   * `disposition` (`"committed"`, or `"duplicate"` for an exact repeat),
+   * `generation` and `matched_members`. Each selected member receives the
+   * instruction at its next run start, never inside a run;
+   * {@link instructionStatus} reports it. A refusal rejects with an RPC
+   * error whose `data.instruction_set_code` names it, for example
+   * `"stale_revision"` or `"body_too_large"`.
+   */
+  async setInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+    body: string,
+    target:
+      | { kind: "mob" }
+      | { kind: "profile"; profile: string }
+      | { kind: "member"; identity: string },
+    options: { contentSha256?: string } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {
+      namespace,
+      key,
+      revision,
+      body,
+      target: { ...target },
+    };
+    if (options.contentSha256 !== undefined) params.content_sha256 = options.contentSha256;
+    const raw = await this._rpc("meta/set_instruction", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Revoke one operator instruction at a higher revision.
+   *
+   * Host-only. The record keeps its target; the members it selected drop the
+   * instruction at their next run start. Resolves to Meerkat's write
+   * receipt, as {@link setInstruction} does.
+   */
+  async revokeInstruction(
+    namespace: string,
+    key: string,
+    revision: number,
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/revoke_instruction", { namespace, key, revision });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Read the operator instructions of the gateway's mob and one page of
+   * members.
+   *
+   * Host-only; read from committed state, so no member is woken. `namespace`
+   * and `key` narrow the records; `identity` or `profile` narrows the
+   * members; `offset` and `limit` (1 to 200, 100 by default) page them.
+   * Resolves to `{ mob_id, generation, desired, members }` (plus
+   * `next_offset` when there is another page): each record with its
+   * `target`, and each member, named by its `identity`, with its delivery and
+   * per-slot state. Advisory values such as a pending reason can be new to
+   * this SDK: keep an unknown one as it is.
+   */
+  async instructionStatus(
+    query: {
+      namespace?: string;
+      key?: string;
+      identity?: string;
+      profile?: string;
+      offset?: number;
+      limit?: number;
+    } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(query)) {
+      if (value !== undefined) params[name] = value;
+    }
+    const raw = await this._rpc("meta/instruction_status", params);
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 
@@ -2651,6 +2806,162 @@ export class MetaRuntime {
     }
     if (options.note !== undefined) params.note = options.note;
     const raw = await this._rpc("meta/prune_member_system_rows", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Grant one of an identity's grant-gated tool names or tool families.
+   *
+   * Name exactly one of `tool` and `family`: the gate the member's next
+   * build resolves (its profile's `tools.grant_gated` joined with its
+   * role's) must name it. Bound the grant by exactly one of `durationMs` and
+   * `expiresAtMs` (UNIX ms), at most the gateway's maximum lifetime.
+   * `decisionRef` records your own reference to the decision you made before
+   * issuing, as attribution. The grant applies across the member's respawns
+   * and the gateway's restarts, opens the tool at the member's next model
+   * request and wakes nothing. Resolves `{grant}`; a refused request rejects
+   * with {@link ToolGrantRequestRefusedError}.
+   */
+  async grantTool(
+    identity: string,
+    options: GrantToolOptions,
+  ): Promise<Record<string, unknown>> {
+    if ((options.tool === undefined) === (options.family === undefined)) {
+      throw new TypeError("grantTool names exactly one of tool and family");
+    }
+    const params: Record<string, unknown> = {
+      identity,
+      target:
+        options.tool !== undefined
+          ? { kind: "tool", name: options.tool }
+          : { kind: "family", family: options.family },
+    };
+    if (options.durationMs !== undefined) params.duration_ms = options.durationMs;
+    if (options.expiresAtMs !== undefined) params.expires_at_ms = options.expiresAtMs;
+    if (options.reason !== undefined) params.reason = options.reason;
+    if (options.decisionRef !== undefined) params.decision_ref = options.decisionRef;
+    const raw = await this._rpc("meta/tool_grants/grant", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Revoke one of this gateway's identity grants. Idempotent: revoking a
+   * grant that already ended answers it as it stands. Resolves
+   * `{grant, changed}`; a grant this gateway's mob does not hold rejects
+   * with {@link ToolGrantRequestRefusedError} (`not_found`).
+   */
+  async revokeToolGrant(
+    grantId: string,
+    options: { reason?: string } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { grant_id: grantId };
+    if (options.reason !== undefined) params.reason = options.reason;
+    const raw = await this._rpc("meta/tool_grants/revoke", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * List an identity's scoped tool grants, each due one read as expired.
+   * Ended grants are listed only with `includeEnded`. Resolves
+   * `{grants, unreadable?}`.
+   */
+  async listToolGrants(
+    identity: string,
+    options: { includeEnded?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/tool_grants/list", {
+      identity,
+      include_ended: options.includeEnded ?? false,
+    });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Read one page of an identity's grant audit log. Resolves
+   * `{rows, unreadable?, next_sequence?}`; pass `next_sequence` as
+   * `afterSequence` to read the next page.
+   */
+  async toolGrantAudit(
+    identity: string,
+    options: { afterSequence?: number; limit?: number } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { identity };
+    if (options.afterSequence !== undefined) params.after_sequence = options.afterSequence;
+    if (options.limit !== undefined) params.limit = options.limit;
+    const raw = await this._rpc("meta/tool_grants/audit", params);
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * List the installation realm's own MCP servers, for review. Resolves
+   * `{servers, generation}`: the definitions the realm's own config document
+   * lists (never the ones it inherits), which name their secret slots and
+   * hold no value, and the document's generation, which
+   * {@link MetaRuntime.realmMcpInstall} checks. Served by the stdio gateway
+   * only.
+   */
+  async realmMcpServers(): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/realm_mcp/servers", {});
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Add a reviewed server definition to the realm's own document, written
+   * only while the document is still at `expectedGeneration` (the generation
+   * {@link MetaRuntime.realmMcpServers} read) and lists no server of that
+   * name. Resolves `{generation}`, the next one. Rejects with
+   * {@link RealmMcpRefusedError} (`generation_conflict`, `server_exists`,
+   * `invalid_server`, `no_document`) with nothing written, and with
+   * {@link RealmMcpOutcomeUnknownError} when the write began and its result
+   * is not known.
+   */
+  async realmMcpInstall(
+    server: Record<string, unknown>,
+    options: { expectedGeneration: number },
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/realm_mcp/install", {
+      server,
+      expected_generation: options.expectedGeneration,
+    });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Store the value of secret slot `env` of a reviewed definition. `server`
+   * is the definition as {@link MetaRuntime.realmMcpServers} listed it: the
+   * value binds to exactly that definition, and is refused
+   * (`definition_changed`) once the document no longer lists it. Setting
+   * again replaces the value. The value is sent once, in this request, and
+   * appears in no answer or error. Resolves `{}`; rejects with
+   * {@link RealmMcpUnavailableError} on a launch whose credential store did
+   * not open.
+   */
+  async realmMcpSetSecret(
+    server: Record<string, unknown>,
+    env: string,
+    value: string,
+  ): Promise<Record<string, unknown>> {
+    const raw = await this._rpc("meta/realm_mcp/set_secret", { server, env, value });
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  }
+
+  /**
+   * Remove the value of secret slot `env` of a reviewed definition.
+   * `removal` is `"current"` (the default: the document still lists exactly
+   * the definition) or `"obsolete"` (cleanup after the definition was
+   * replaced or removed: refused `still_current` while the document lists a
+   * definition that launches as this one did). Resolves `{}`.
+   */
+  async realmMcpRemoveSecret(
+    server: Record<string, unknown>,
+    env: string,
+    options: { removal?: "current" | "obsolete" } = {},
+  ): Promise<Record<string, unknown>> {
+    const removal = options.removal ?? "current";
+    if (removal !== "current" && removal !== "obsolete") {
+      throw new TypeError('realmMcpRemoveSecret removal is "current" or "obsolete"');
+    }
+    const raw = await this._rpc("meta/realm_mcp/remove_secret", { server, env, removal });
     return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   }
 
@@ -3979,6 +4290,93 @@ export class MobHandle {
         ? (((raw as Record<string, unknown>).entries as unknown[]) ?? [])
         : [];
     return (entries as unknown[]).map(parseGatingAuditEntry);
+  }
+
+  // -- Durable decisions (the stdio host's `meta/decisions/*`) --------------
+
+  /**
+   * One page of durable decisions, in decision id order. Before the gateway
+   * answers, it writes one `meta/decisions/notice` for each open decision of
+   * the page it has not noticed on this connection (see
+   * `MetaRuntime.onDecisionNotice`), and presents to the stdio operator those
+   * the approver map lets it decide. The answer carries `decisions`,
+   * `statuses`, `unreadable` and `next_after`.
+   */
+  async decisionsList(
+    options: DecisionListOptions = {},
+  ): Promise<Record<string, unknown>> {
+    return (await this._runtime._rpc(
+      "meta/decisions/list",
+      decisionListParams(options),
+    )) as Record<string, unknown>;
+  }
+
+  /** One durable decision (`{decision}`), with its held request when asked. */
+  async decisionsGet(
+    decisionId: string,
+    options: { includeRequest?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { decision_id: decisionId };
+    if (options.includeRequest === true) params.include_request = true;
+    return (await this._runtime._rpc("meta/decisions/get", params)) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  /** A decision's one canonical rendering and its parts for `maxPartBytes`. */
+  async decisionsRendering(
+    decisionId: string,
+    options: { maxPartBytes?: number } = {},
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = { decision_id: decisionId };
+    if (options.maxPartBytes !== undefined) {
+      params.max_part_bytes = options.maxPartBytes;
+    }
+    return (await this._runtime._rpc(
+      "meta/decisions/rendering",
+      params,
+    )) as Record<string, unknown>;
+  }
+
+  /**
+   * Record what the host presenter showed on its channel: the audience, the
+   * subject digest, the parts shown, the channel and message references, and
+   * the host clock reading `at_ms`.
+   */
+  async decisionsPresent(
+    decisionId: string,
+    presentation: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return (await this._runtime._rpc("meta/decisions/present", {
+      decision_id: decisionId,
+      presentation,
+    })) as Record<string, unknown>;
+  }
+
+  /** Withdraw an open decision as the host. */
+  async decisionsWithdraw(decisionId: string): Promise<Record<string, unknown>> {
+    return (await this._runtime._rpc("meta/decisions/withdraw", {
+      decision_id: decisionId,
+    })) as Record<string, unknown>;
+  }
+
+  /**
+   * Decide an open decision. Without an attestation the stdio operator
+   * decides, eligible only for a decision the gateway presented to it on this
+   * connection; with one, a declared decision ingress attests the person who
+   * decided. Refused while this SDK serves a host tool callback
+   * (`DecideInsideToolCallbackError`): an agent's tool call never decides.
+   */
+  async decisionsDecide(
+    decisionId: string,
+    options: DecisionDecideOptions,
+  ): Promise<Record<string, unknown>> {
+    refuseInsideToolCallback();
+    return (await this._runtime._rpc(
+      "meta/decisions/decide",
+      decisionDecideParams(decisionId, options),
+    )) as Record<string, unknown>;
   }
 
   // -- WorkGraph ------------------------------------------------------------

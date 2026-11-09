@@ -538,6 +538,7 @@ async fn public_review_refuses_changed_session_revocation_and_cancellation_witho
                 .owner
                 .grants()
                 .revoke(
+                    &meerkat_core::AdmissionGuard::none(),
                     &selected.parent[0].root_authority,
                     &selected.parent[0],
                     &mut custody,

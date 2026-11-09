@@ -677,6 +677,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ClassifyPeerNotice { .. }
             | mob_dsl::MobMachineInput::CommitDormantSeat { .. }
             | mob_dsl::MobMachineInput::ResolveMemberHostPreparation { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberBuildPreparation { .. }
             | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
             | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }
@@ -695,6 +696,17 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::SettleHostPreparation { .. }
             | mob_dsl::MobMachineInput::EndPreparationConstruction { .. }
             | mob_dsl::MobMachineInput::UnlistIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::TakeOverIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::DeclareOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::EndOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::AdmitMemberUnwire { .. }
+            | mob_dsl::MobMachineInput::AdoptIdentityIntoStore { .. }
+            | mob_dsl::MobMachineInput::PurgeIdentityRows { .. }
+            | mob_dsl::MobMachineInput::ImportIdentityRecord { .. }
+            | mob_dsl::MobMachineInput::AdmitOwnedEdgeRealization { .. }
+            | mob_dsl::MobMachineInput::RestoreOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -1983,6 +1995,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ClassifyPeerNotice { .. }
             | mob_dsl::MobMachineInput::CommitDormantSeat { .. }
             | mob_dsl::MobMachineInput::ResolveMemberHostPreparation { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberBuildPreparation { .. }
             | mob_dsl::MobMachineInput::BeginMemberRotation { .. }
             | mob_dsl::MobMachineInput::CommitMemberRotation { .. }
             | mob_dsl::MobMachineInput::ClassifyMemberRelease { .. }
@@ -2001,6 +2014,17 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::SettleHostPreparation { .. }
             | mob_dsl::MobMachineInput::EndPreparationConstruction { .. }
             | mob_dsl::MobMachineInput::UnlistIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::TakeOverIdentityEntry { .. }
+            | mob_dsl::MobMachineInput::DeclareOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::EndOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::AdmitMemberUnwire { .. }
+            | mob_dsl::MobMachineInput::AdoptIdentityIntoStore { .. }
+            | mob_dsl::MobMachineInput::PurgeIdentityRows { .. }
+            | mob_dsl::MobMachineInput::ImportIdentityRecord { .. }
+            | mob_dsl::MobMachineInput::AdmitOwnedEdgeRealization { .. }
+            | mob_dsl::MobMachineInput::RestoreOwnedIdentityEdge { .. }
+            | mob_dsl::MobMachineInput::ResolveMemberDispatchAdmission { .. }
+            | mob_dsl::MobMachineInput::RecordMemberDispatchAdmissionLineage { .. }
             | mob_dsl::MobMachineInput::OpenDeclaredApply
             | mob_dsl::MobMachineInput::CloseDeclaredApply
             | mob_dsl::MobMachineInput::FinishExplicitResume { .. }
@@ -7194,6 +7218,7 @@ mod tests {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
@@ -7216,6 +7241,7 @@ mod tests {
                 model: "model".to_string(),
                 provider: None,
                 self_hosted_server_id: None,
+                auth_binding: None,
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),

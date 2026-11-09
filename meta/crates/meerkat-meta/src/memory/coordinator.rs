@@ -142,74 +142,12 @@ pub fn compose_identity_scope_set_with_bindings(
     scopes
 }
 
-/// §7.2 / §16 Q1 — PROVISIONAL operator keying seam.
-///
-/// `OperatorId` keying is an explicitly open question (§16 Q1); the
-/// provisional answer is "the console auth principal", resolved through this
-/// trait so the keying decision stays swappable. Deployments activate the
-/// scope with `agent_memory.operator_scope = "provisional"`; without a
-/// resolver installed the scope stays **inert** (composition is unchanged),
-/// so activation is always config AND resolver, never config alone. The
-/// console-auth-principal implementation is one line of wiring where the
-/// console principal is known; this module only defines the seam.
-pub trait OperatorResolver: Send + Sync {
-    /// The active operator for `identity`'s turns in `realm`, or `None`
-    /// when no operator is resolvable right now. Implementations must key
-    /// within the given realm only — cross-realm operator profiles are
-    /// explicitly future work (§7.2).
-    fn active_operator(&self, realm: &str, identity: &str) -> Option<String>;
-}
-
-/// The provisional §16 Q1 keying, decided 2026-07-04: **OperatorId = console
-/// auth principal.** The console send path notes "principal P is speaking to
-/// identity I" whenever an authenticated principal sends; recall composition
-/// then attributes identity turns to the last such principal (sticky until a
-/// different principal speaks). Identity-keyed, not realm-keyed: the console
-/// does not know memory realms, and the coordinator only ever consults its
-/// own realm's scopes, so single-realm gateways (every shipped deployment)
-/// get exact semantics; multi-realm hosts share the binding across realms —
-/// acceptable for the provisional keying, revisit with explicit operator
-/// registration.
-///
-/// Unauthenticated consoles never note anything, so activation remains
-/// config AND resolver AND a real principal — never config alone.
-#[derive(Default)]
-pub struct ConsolePrincipalOperatorResolver {
-    active: std::sync::RwLock<std::collections::HashMap<String, String>>,
-}
-
-impl ConsolePrincipalOperatorResolver {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Record that authenticated console `principal` addressed `identity`.
-    pub fn note_interaction(&self, identity: &str, principal: &str) {
-        if principal.is_empty() {
-            return;
-        }
-        if let Ok(mut active) = self.active.write() {
-            active.insert(identity.to_string(), principal.to_string());
-        }
-    }
-}
-
-impl OperatorResolver for ConsolePrincipalOperatorResolver {
-    fn active_operator(&self, _realm: &str, identity: &str) -> Option<String> {
-        self.active
-            .read()
-            .ok()
-            .and_then(|active| active.get(identity).cloned())
-    }
-}
-
-/// §7.2 identity→mob binding seam, mirroring [`OperatorResolver`]. The
-/// hosting runtime knows which mob(s) an identity serves (the same source
-/// that pins `MemoryRecorder::mob` for `propose_to_mob`); this trait keeps
-/// the coordinator free of roster coupling. Without a resolver installed —
-/// or when it yields no mobs — composition is unchanged, so mob-scope
-/// reads activate exactly when a binding exists.
+/// §7.2 identity→mob binding seam. The hosting runtime knows which mob(s) an
+/// identity serves (the same source that pins `MemoryRecorder::mob` for
+/// `propose_to_mob`); this trait keeps the coordinator free of roster
+/// coupling. Without a resolver installed, or when it yields no mobs,
+/// composition is unchanged, so mob-scope reads activate exactly when a
+/// binding exists.
 pub trait MobScopeResolver: Send + Sync {
     /// The mobs `identity` is currently bound to in `realm` (§7.2 "Mob
     /// (bound mobs)" — plural). Empty means no mob scope joins composition.
@@ -378,10 +316,6 @@ pub struct RecallCoordinator {
     // Per-(identity, session) envelope nonce (§9.1). Same wholesale-clear
     // bound as session_state; a cleared nonce simply re-mints on next use.
     nonces: Arc<Mutex<HashMap<String, NonceState>>>,
-    // §7.2 operator scope (P4): consulted per composition when
-    // `operator_scope = provisional`. None (the default) keeps the scope
-    // inert regardless of config.
-    operator_resolver: Option<Arc<dyn OperatorResolver>>,
     // §7.2 identity→mob binding: consulted per composition. None (the
     // default) keeps mob scope out of read composition.
     mob_resolver: Option<Arc<dyn MobScopeResolver>>,
@@ -395,17 +329,8 @@ impl RecallCoordinator {
             session_state: Arc::new(Mutex::new(HashMap::new())),
             noted_skips: Arc::new(Mutex::new(HashSet::new())),
             nonces: Arc::new(Mutex::new(HashMap::new())),
-            operator_resolver: None,
             mob_resolver: None,
         }
-    }
-
-    /// Install the §7.2 provisional operator resolver. Effective only when
-    /// the config also opts in (`operator_scope = "provisional"`); either
-    /// half alone leaves composition unchanged.
-    pub fn with_operator_resolver(mut self, resolver: Option<Arc<dyn OperatorResolver>>) -> Self {
-        self.operator_resolver = resolver;
-        self
     }
 
     /// Install the §7.2 identity→mob binding resolver so mob scope joins
@@ -417,29 +342,27 @@ impl RecallCoordinator {
         self
     }
 
-    /// The identity's composed readable scope set for this assembly (§7.2):
-    /// `Identity ∪ Mob(bound mobs) ∪ Operator(provisional, resolver-yielded)
-    /// ∪ Realm`.
+    /// The identity's composed readable scope set for a build (§7.2):
+    /// `Identity ∪ Mob(bound mobs) ∪ Realm`. The operator scope never joins
+    /// it: a build serves every run of its member, whoever asked. A turn
+    /// gets the operator memory of the person who asked, request-only
+    /// ([`Self::operator_context_for_turn`]).
     fn scope_set(&self, identity: &AgentIdentity) -> Vec<MemoryScope> {
-        let mobs = self
-            .mob_resolver
-            .as_ref()
-            .map(|resolver| resolver.active_mobs(&self.config.realm, identity.as_str()))
-            .unwrap_or_default();
-        let operator = match self.config.operator_scope {
-            AgentMemoryOperatorScope::Off => None,
-            AgentMemoryOperatorScope::Provisional => {
-                self.operator_resolver.as_ref().and_then(|resolver| {
-                    resolver.active_operator(&self.config.realm, identity.as_str())
-                })
-            }
-        };
         compose_identity_scope_set_with_bindings(
             &self.config.realm,
             identity,
-            &mobs,
-            operator.as_deref(),
+            &self.bound_mobs(identity),
+            None,
         )
+    }
+
+    /// The mobs `identity` is bound to in this realm (the mob resolver's
+    /// answer; none without one).
+    fn bound_mobs(&self, identity: &AgentIdentity) -> Vec<String> {
+        self.mob_resolver
+            .as_ref()
+            .map(|resolver| resolver.active_mobs(&self.config.realm, identity.as_str()))
+            .unwrap_or_default()
     }
 
     /// §9.1 "index-only until compaction": clear this session's cross-turn
@@ -672,6 +595,76 @@ impl RecallCoordinator {
         ]))
     }
 
+    /// The request-only operator section of one turn: the operator memory
+    /// index of the person who directly requested the turn, inside the
+    /// memory envelope, for the turn's
+    /// `RuntimeTurnMetadata.request_only_context`. It reaches only that
+    /// turn's model requests and never its transcript, so another person's
+    /// later turn, a session read and a rebuilt member see none of it.
+    ///
+    /// `None` when the operator scope is off, when per-turn injection is off
+    /// (`per_turn_injection = "off"` turns off every per-turn push, this
+    /// section included), when the turn has no direct person requester (a
+    /// requester carried across a peer hop, a schedule without a person, a
+    /// peer, a service principal), when the provider keeps no manifest, or
+    /// when the person has no operator records. Every turn of the person
+    /// gets the section again (request-only context does not persist, so
+    /// there is no per-session dedup).
+    pub async fn operator_context_for_turn(
+        &self,
+        identity: &AgentIdentity,
+        session_key: Option<&str>,
+        requester: Option<&meerkat_core::TurnRequester>,
+    ) -> Result<Option<meerkat_core::lifecycle::TurnRequestContext>, AgentMemoryError> {
+        if self.config.operator_scope == AgentMemoryOperatorScope::Off
+            || self.config.per_turn_injection == AgentMemoryPerTurnInjection::Off
+            || !self.provider.supports_manifest()
+        {
+            return Ok(None);
+        }
+        let Some(operator) = requester
+            .and_then(meerkat_core::TurnRequester::direct_principal)
+            .and_then(crate::http_console::person_caller_scope)
+        else {
+            return Ok(None);
+        };
+        // The operator scope's share of the index budget: what it would get
+        // beside the identity's other scopes in one composed index.
+        let scopes = compose_identity_scope_set_with_bindings(
+            &self.config.realm,
+            identity,
+            &self.bound_mobs(identity),
+            Some(&operator),
+        );
+        let Some(ScopeBudget {
+            scope,
+            budget_bytes,
+        }) = compose_scope_budgets(&scopes, BUILD_INDEX_BUDGET_BYTES)
+            .into_iter()
+            .find(|budget| matches!(budget.scope, MemoryScope::Operator { .. }))
+        else {
+            return Ok(None);
+        };
+        let Some(section) = self.render_scope_rows(&scope, budget_bytes).await? else {
+            return Ok(None);
+        };
+        let nonce = self.nonce_for(identity, session_key);
+        let Some(rendered) = render_injection_annotated(
+            &self.config,
+            identity,
+            &nonce,
+            &[format!(
+                "Memory index of the person who sent this turn's message (metadata only):\n{section}"
+            )],
+            &[],
+            None,
+            MAX_INJECTED_ASSEMBLY_BYTES,
+        ) else {
+            return Ok(None);
+        };
+        Ok(meerkat_core::lifecycle::TurnRequestContext::new(rendered.text).ok())
+    }
+
     // -----------------------------------------------------------------------
     // Build-time assembly (§9.1 echo-safe surface)
     // -----------------------------------------------------------------------
@@ -754,21 +747,7 @@ impl RecallCoordinator {
             budget_bytes,
         } in budgets
         {
-            let metas = manifest_for_injection(&self.provider, &self.config, &scope).await?;
-            if metas.is_empty() {
-                continue;
-            }
-            let mut section = format!("{}:", scope_label(&scope));
-            let mut rows = 0usize;
-            for meta in &metas {
-                let row = render_index_row(meta);
-                if section.len() + row.len() > budget_bytes {
-                    break;
-                }
-                section.push_str(&row);
-                rows += 1;
-            }
-            if rows > 0 {
+            if let Some(section) = self.render_scope_rows(&scope, budget_bytes).await? {
                 sections.push(section);
             }
         }
@@ -779,6 +758,28 @@ impl RecallCoordinator {
             "Memory index (metadata only; bodies are not loaded):\n{}",
             sections.join("\n\n")
         )))
+    }
+
+    /// One scope's section of a memory index: its label and the metadata
+    /// rows of its working set that fit `budget_bytes`, or `None` when no
+    /// row does.
+    async fn render_scope_rows(
+        &self,
+        scope: &MemoryScope,
+        budget_bytes: usize,
+    ) -> Result<Option<String>, AgentMemoryError> {
+        let metas = manifest_for_injection(&self.provider, &self.config, scope).await?;
+        let mut section = format!("{}:", scope_label(scope));
+        let mut rows = 0usize;
+        for meta in &metas {
+            let row = render_index_row(meta);
+            if section.len() + row.len() > budget_bytes {
+                break;
+            }
+            section.push_str(&row);
+            rows += 1;
+        }
+        Ok((rows > 0).then_some(section))
     }
 
     // -----------------------------------------------------------------------
@@ -1585,100 +1586,30 @@ mod tests {
         Ok(())
     }
 
-    /// The provisional console-principal resolver: sticky last-principal
-    /// per identity; empty principals and unknown identities resolve None.
+    /// The build-time scope set never composes an operator scope, with the
+    /// operator scope on or off: a build serves every run of its member,
+    /// whoever asked.
     #[test]
-    fn console_principal_resolver_tracks_last_authenticated_principal() {
-        let resolver = ConsolePrincipalOperatorResolver::new();
-        assert_eq!(resolver.active_operator("realm-a", "personal:alice"), None);
-
-        resolver.note_interaction("personal:alice", "user@example.com");
-        assert_eq!(
-            resolver.active_operator("realm-a", "personal:alice"),
-            Some("user@example.com".to_string())
-        );
-        // Identity-keyed provisional semantics: realm does not partition.
-        assert_eq!(
-            resolver.active_operator("realm-b", "personal:alice"),
-            Some("user@example.com".to_string())
-        );
-        // Sticky until a DIFFERENT principal speaks.
-        resolver.note_interaction("personal:alice", "ops@example.com");
-        assert_eq!(
-            resolver.active_operator("realm-a", "personal:alice"),
-            Some("ops@example.com".to_string())
-        );
-        // Empty principals never bind (unauthenticated consoles).
-        resolver.note_interaction("personal:bob", "");
-        assert_eq!(resolver.active_operator("realm-a", "personal:bob"), None);
-    }
-
-    struct FixedOperator(&'static str);
-
-    impl OperatorResolver for FixedOperator {
-        fn active_operator(&self, realm: &str, _identity: &str) -> Option<String> {
-            // Same-realm law: a resolver keyed for another realm yields
-            // nothing — composition stays confined by construction.
-            (realm == "team").then(|| self.0.to_string())
-        }
-    }
-
-    #[test]
-    fn coordinator_scope_set_activation_matrix() -> Result<(), Box<dyn Error>> {
+    fn build_scope_set_never_composes_an_operator_scope() -> Result<(), Box<dyn Error>> {
         let id = identity()?;
         let provider = Arc::new(FakeProvider::with_manifest(vec![], vec![], vec![]));
-        let config = |scope: AgentMemoryOperatorScope| AgentMemoryConfig {
-            realm: "team".to_string(),
-            operator_scope: scope,
-            ..AgentMemoryConfig::default()
-        };
-        let operator = MemoryScope::Operator {
-            realm: "team".to_string(),
-            operator: "op:luka".to_string(),
-        };
-
-        // provisional + resolver ⇒ operator scope joins.
-        let coordinator = RecallCoordinator::new(
-            provider.clone(),
-            config(AgentMemoryOperatorScope::Provisional),
-        )
-        .with_operator_resolver(Some(Arc::new(FixedOperator("op:luka"))));
-        assert!(coordinator.scope_set(&id).contains(&operator));
-
-        // provisional + NO resolver ⇒ inert (the scope's activation is
-        // config AND resolver, never config alone).
-        let coordinator = RecallCoordinator::new(
-            provider.clone(),
-            config(AgentMemoryOperatorScope::Provisional),
-        );
-        assert_eq!(
-            coordinator.scope_set(&id),
-            compose_identity_scope_set("team", &id)
-        );
-
-        // off + resolver ⇒ inert (the resolver alone activates nothing).
-        let coordinator =
-            RecallCoordinator::new(provider.clone(), config(AgentMemoryOperatorScope::Off))
-                .with_operator_resolver(Some(Arc::new(FixedOperator("op:luka"))));
-        assert_eq!(
-            coordinator.scope_set(&id),
-            compose_identity_scope_set("team", &id)
-        );
-
-        // provisional + resolver that yields nothing for this realm ⇒ inert.
-        let coordinator = RecallCoordinator::new(
-            provider,
-            AgentMemoryConfig {
-                realm: "other".to_string(),
-                operator_scope: AgentMemoryOperatorScope::Provisional,
-                ..AgentMemoryConfig::default()
-            },
-        )
-        .with_operator_resolver(Some(Arc::new(FixedOperator("op:luka"))));
-        assert_eq!(
-            coordinator.scope_set(&id),
-            compose_identity_scope_set("other", &id)
-        );
+        for operator_scope in [
+            AgentMemoryOperatorScope::Provisional,
+            AgentMemoryOperatorScope::Off,
+        ] {
+            let coordinator = RecallCoordinator::new(
+                provider.clone(),
+                AgentMemoryConfig {
+                    realm: "team".to_string(),
+                    operator_scope,
+                    ..AgentMemoryConfig::default()
+                },
+            );
+            assert_eq!(
+                coordinator.scope_set(&id),
+                compose_identity_scope_set("team", &id)
+            );
+        }
         Ok(())
     }
 
@@ -2946,5 +2877,295 @@ mod tests {
             vec!["mob-alpha".to_string()]
         );
         assert!(binding.active_mobs("other-realm", "identity:x").is_empty());
+    }
+
+    /// Per-person operator memory. Each row models one member over a SQLite
+    /// store: its build (the memory its build instructions carry, which
+    /// stands for every run until the next build) and its turns. A turn
+    /// recalls the member's latest build, the memory its delivery injects
+    /// (injected context, which becomes a transcript row every later run and
+    /// viewer shares) and its request-only section (which reaches only that
+    /// turn's model requests and never a row).
+    mod person_operator_memory {
+        use super::*;
+        use crate::memory::SqliteAgentMemoryStore;
+        use crate::memory::records::{MemoryAuthor, NewMemoryRecord};
+        use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId, TurnRequester};
+
+        const REALM: &str = "default";
+        const ISSUER: &str = "https://issuer.example.test";
+        const ALICE_FACT: &str = "Alice prefers terse status notes";
+        const BOB_FACT: &str = "Bob wants every figure in metric units";
+        const PAT_FACT: &str = "Pat reviews releases on Fridays";
+
+        /// A person as a Console send names its requester: a `Human` with
+        /// the verified `sub`, in the trust domain of the verified issuer.
+        fn person(subject: &str) -> Result<PrincipalRef, Box<dyn Error>> {
+            let domain = TrustDomainId::new(format!(
+                "{}{ISSUER}",
+                crate::runtime::CONSOLE_HUMAN_TRUST_DOMAIN_PREFIX
+            ))?;
+            Ok(PrincipalRef::in_domain(
+                PrincipalKind::Human,
+                subject,
+                domain,
+            )?)
+        }
+
+        struct Member {
+            coordinator: RecallCoordinator,
+            identity: AgentIdentity,
+            build: String,
+            _store_dir: tempfile::TempDir,
+        }
+
+        impl Member {
+            /// A member whose store holds one operator fact for each person
+            /// in `facts`, in that person's operator scope, with the operator
+            /// scope on. It is built once before any turn.
+            async fn new(facts: &[(&PrincipalRef, &str)]) -> Result<Self, Box<dyn Error>> {
+                let store_dir = tempfile::tempdir()?;
+                let store = SqliteAgentMemoryStore::open(store_dir.path())?;
+                for (person, title) in facts {
+                    let operator = crate::http_console::person_caller_scope(person)
+                        .ok_or("a person has a caller scope")?;
+                    store
+                        .remember_authored(
+                            &MemoryScope::Operator {
+                                realm: REALM.to_string(),
+                                operator,
+                            },
+                            NewMemoryRecord {
+                                kind: MemoryKind::Preference,
+                                title: (*title).to_string(),
+                                description: String::new(),
+                                body: format!("{title}."),
+                                tags: Vec::new(),
+                                evidence: Vec::new(),
+                                verification: None,
+                            },
+                            MemoryAuthor::Operator { principal: None },
+                        )
+                        .await?;
+                }
+                let coordinator = RecallCoordinator::new(
+                    Arc::new(store),
+                    AgentMemoryConfig {
+                        realm: REALM.to_string(),
+                        operator_scope: AgentMemoryOperatorScope::Provisional,
+                        per_turn_injection: AgentMemoryPerTurnInjection::Budgeted,
+                        ..AgentMemoryConfig::default()
+                    },
+                );
+                let mut member = Self {
+                    coordinator,
+                    identity: AgentIdentity::parse("identity:shared")?,
+                    build: String::new(),
+                    _store_dir: store_dir,
+                };
+                member.rebuild().await?;
+                Ok(member)
+            }
+
+            /// The member is built again: a wake, a reload or a respawn.
+            async fn rebuild(&mut self) -> Result<(), Box<dyn Error>> {
+                self.build = self
+                    .coordinator
+                    .assemble_build_injection(
+                        &self.identity,
+                        Some("shared work".to_string()),
+                        Vec::new(),
+                    )
+                    .await?
+                    .unwrap_or_default();
+                Ok(())
+            }
+
+            /// What a turn whose input carries `requester` recalls, by where
+            /// it rides.
+            async fn turn(
+                &self,
+                requester: Option<&TurnRequester>,
+            ) -> Result<Turn, Box<dyn Error>> {
+                let injected = self
+                    .coordinator
+                    .inject_for_turn(
+                        &self.identity,
+                        None,
+                        &meerkat_core::ContentInput::Text("What should we do next?".to_string()),
+                    )
+                    .await?;
+                let request_only = self
+                    .coordinator
+                    .operator_context_for_turn(&self.identity, None, requester)
+                    .await?;
+                Ok(Turn {
+                    build: self.build.clone(),
+                    injected: injected.text_content(),
+                    request_only: request_only
+                        .map(|section| section.as_str().to_string())
+                        .unwrap_or_default(),
+                })
+            }
+        }
+
+        /// One turn's recall: the member's latest build, the turn's injected
+        /// context and its request-only section.
+        #[derive(Debug)]
+        struct Turn {
+            build: String,
+            injected: String,
+            request_only: String,
+        }
+
+        impl Turn {
+            fn recalls(&self, fact: &str) -> bool {
+                self.build.contains(fact)
+                    || self.injected.contains(fact)
+                    || self.request_only.contains(fact)
+            }
+
+            /// The turn recalls `fact` in its request-only section only.
+            fn recalls_request_only(&self, fact: &str) -> bool {
+                self.request_only.contains(fact)
+                    && !self.build.contains(fact)
+                    && !self.injected.contains(fact)
+            }
+        }
+
+        /// A's turn, B's turn, a rebuild, then A's next turn. Each person's
+        /// turn recalls that person's operator facts and none of the
+        /// other's, and only in its request-only section: no build and no
+        /// injected context carries operator facts (a build serves every run
+        /// of its member, and injected context becomes a shared row).
+        #[tokio::test]
+        async fn operator_scope_follows_turn_requester() -> Result<(), Box<dyn Error>> {
+            let alice = person("alice")?;
+            let bob = person("bob")?;
+            let mut member = Member::new(&[(&alice, ALICE_FACT), (&bob, BOB_FACT)]).await?;
+            let alice_turn = member
+                .turn(Some(&TurnRequester::direct(alice.clone())))
+                .await?;
+            let bob_turn = member.turn(Some(&TurnRequester::direct(bob))).await?;
+            member.rebuild().await?;
+            let alice_next = member.turn(Some(&TurnRequester::direct(alice))).await?;
+            for (label, turn, own, other) in [
+                ("A's next turn", &alice_next, ALICE_FACT, BOB_FACT),
+                ("A's turn", &alice_turn, ALICE_FACT, BOB_FACT),
+                ("B's turn", &bob_turn, BOB_FACT, ALICE_FACT),
+            ] {
+                assert!(
+                    !turn.recalls(other),
+                    "{label} recalls none of the other person's operator facts: {turn:?}"
+                );
+                assert!(
+                    turn.recalls_request_only(own),
+                    "{label} recalls its requester's operator facts, request-only: {turn:?}"
+                );
+            }
+            Ok(())
+        }
+
+        /// After A's turn and a rebuild, a turn without a person requester
+        /// recalls no operator facts: a schedule fire or a peer message
+        /// (no requester), or a service (a principal that names no person).
+        #[tokio::test]
+        async fn no_human_requester_no_operator_scope() -> Result<(), Box<dyn Error>> {
+            let alice = person("alice")?;
+            let mut member = Member::new(&[(&alice, ALICE_FACT)]).await?;
+            let alice_turn = member.turn(Some(&TurnRequester::direct(alice))).await?;
+            member.rebuild().await?;
+            let requester_less = member.turn(None).await?;
+            assert!(
+                !requester_less.recalls(ALICE_FACT),
+                "a turn without a requester recalls no operator facts: {requester_less:?}"
+            );
+            let service = PrincipalRef::in_domain(
+                PrincipalKind::ServiceAccount,
+                "svc:reporter",
+                TrustDomainId::new("service-issuer:reporting")?,
+            )?;
+            let service_turn = member.turn(Some(&TurnRequester::direct(service))).await?;
+            assert!(
+                !service_turn.recalls(ALICE_FACT),
+                "a service's turn recalls no operator facts: {service_turn:?}"
+            );
+            assert!(
+                alice_turn.recalls_request_only(ALICE_FACT),
+                "A's own turn recalls A's operator facts, request-only: {alice_turn:?}"
+            );
+            Ok(())
+        }
+
+        /// A turn whose requester P was carried across a peer hop recalls
+        /// none of P's operator facts; P's own direct turn does.
+        #[tokio::test]
+        async fn carried_requester_recalls_no_operator_memory() -> Result<(), Box<dyn Error>> {
+            let pat = person("pat")?;
+            let mut member = Member::new(&[(&pat, PAT_FACT)]).await?;
+            let direct = member
+                .turn(Some(&TurnRequester::direct(pat.clone())))
+                .await?;
+            member.rebuild().await?;
+            let carried = member.turn(Some(&TurnRequester::carried(pat))).await?;
+            assert!(
+                !carried.recalls(PAT_FACT),
+                "a carried requester recalls none of P's operator facts: {carried:?}"
+            );
+            assert!(
+                direct.recalls_request_only(PAT_FACT),
+                "P's direct turn recalls P's operator facts, request-only: {direct:?}"
+            );
+            Ok(())
+        }
+
+        /// With the operator scope off, a person's own turn recalls none of
+        /// their operator facts.
+        #[tokio::test]
+        async fn operator_scope_off_recalls_no_operator_memory() -> Result<(), Box<dyn Error>> {
+            let alice = person("alice")?;
+            let mut member = Member::new(&[(&alice, ALICE_FACT)]).await?;
+            member.coordinator = RecallCoordinator::new(
+                member.coordinator.provider(),
+                AgentMemoryConfig {
+                    realm: REALM.to_string(),
+                    operator_scope: AgentMemoryOperatorScope::Off,
+                    per_turn_injection: AgentMemoryPerTurnInjection::Budgeted,
+                    ..AgentMemoryConfig::default()
+                },
+            );
+            member.rebuild().await?;
+            let turn = member.turn(Some(&TurnRequester::direct(alice))).await?;
+            assert!(
+                !turn.recalls(ALICE_FACT),
+                "the operator scope is off: {turn:?}"
+            );
+            Ok(())
+        }
+
+        /// `per_turn_injection = "off"` turns off every per-turn push, the
+        /// person's operator section included: with the operator scope on,
+        /// a person's own turn recalls none of their operator facts.
+        #[tokio::test]
+        async fn per_turn_injection_off_pushes_no_operator_section() -> Result<(), Box<dyn Error>> {
+            let alice = person("alice")?;
+            let mut member = Member::new(&[(&alice, ALICE_FACT)]).await?;
+            member.coordinator = RecallCoordinator::new(
+                member.coordinator.provider(),
+                AgentMemoryConfig {
+                    realm: REALM.to_string(),
+                    operator_scope: AgentMemoryOperatorScope::Provisional,
+                    per_turn_injection: AgentMemoryPerTurnInjection::Off,
+                    ..AgentMemoryConfig::default()
+                },
+            );
+            member.rebuild().await?;
+            let turn = member.turn(Some(&TurnRequester::direct(alice))).await?;
+            assert!(
+                !turn.recalls(ALICE_FACT),
+                "per-turn injection is off, so no operator section is pushed: {turn:?}"
+            );
+            Ok(())
+        }
     }
 }

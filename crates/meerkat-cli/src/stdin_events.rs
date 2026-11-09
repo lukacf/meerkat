@@ -46,6 +46,7 @@ fn make_stdin_external_event_input(
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            requester: None,
         },
         event_type: "stdin".to_string(),
         // Text mode is literal by contract. JSON mode preserves structured JSON

@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Check the driver composition: RED legs first, then GREEN.
+
+Usage: verify-driver-composition GENERATED_DIRECTORY NEW_RESULT_DIRECTORY
+Generate with generate-driver-composition first. Every mutant must violate
+exactly its attributed invariant (or the I8 action property) with the intended
+final state, every row must be reachable, then the clean base must pass with
+every non-fault action taken. Generic deadlock checking stays on.
+"""
+
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+SUMMARY = r'^.*states generated, .*distinct states found, .*states left on queue\.$'
+PROPERTIES = {'I8_MachineOnlyLifecycle'}
+FAULT_ONLY_ACTIONS = {'Reprepare'}
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def final_state(text):
+    states = re.split(r'^State \d+:.*\n', text, flags=re.MULTILINE)[1:]
+    if not states:
+        states = re.split(r'^Error: Invariant \w+ is violated by the initial state:\n', text,
+                          flags=re.MULTILINE)[1:]
+    if not states:
+        raise ValueError('missing counterexample')
+    fields, current = {}, None
+    for line in states[-1].split('\n\n', 1)[0].splitlines():
+        match = re.match(r'^/\\ (\w+) = (.*)$', line)
+        if match:
+            current = match[1]
+            fields[current] = match[2].strip()
+        elif current is not None:
+            fields[current] += ' ' + line.strip()
+    fields = {name: re.sub(r'\s+', ' ', value) for name, value in fields.items()}
+    actions = re.findall(r'^State \d+: <(\w+)', text, re.MULTILINE)
+    return fields, actions
+
+
+def witness(name, f, actions):
+    last = actions[-1] if actions else 'Initial'
+    checks = {
+        'omit-driver-undeclared': f.get('mode') == '"undeclared"',
+        'drop-mutates-phase': last == 'DropGuard' and f.get('offer_phase') == '"Withdrawn"'
+            and f.get('dropped') == 'TRUE',
+        'admit-after-close': last in ('Prepare', 'Commit') and f.get('life_phase') == '"Closing"'
+            and f.get('entered_after_close') == 'TRUE',
+        'close-without-join': last == 'LifeSettle' and f.get('life_phase') == '"Closed"'
+            and f.get('joined') == 'FALSE',
+        'close-forgets-unresolved': last == 'LifeSettle' and f.get('life_phase') == '"Closed"'
+            and f.get('joined') == 'TRUE' and f.get('offer_phase') == '"Offered"'
+            and f.get('offer_close_epoch') == '0',
+        'skip-restart-scan': last == 'Scan' and f.get('epoch') == '2' and f.get('offer_phase') == '"Offered"'
+            and f.get('parked') == 'FALSE',
+        'lost-reply-reprepare': last == 'Reprepare' and f.get('prepared_count') == '2'
+            and f.get('lost_seen') == 'TRUE',
+        'no-relookup-b': f.get('prep_refused') == 'TRUE' and f.get('dup_seen') == 'TRUE'
+            and f.get('p_current') == '"Refused"' and f.get('grant_issues') == '1',
+        'row-production-claimed': f.get('mode') == '"production"' and f.get('claimed') == 'TRUE'
+            and f.get('offer_phase') == '"CoreObserved"',
+        'row-fixture-unclaimed': f.get('mode') == '"fixture"' and f.get('claimed') == 'FALSE'
+            and f.get('offer_phase') == '"CoreObserved"' and 'FixtureDispatch' in actions
+            and 'Dispatch' not in actions,
+        'row-close-records-unresolved': f.get('life_phase') == '"Closed"' and f.get('offer_phase') == '"Offered"'
+            and f.get('offer_close_epoch') not in (None, '0') and 'JoinDriver' in actions,
+        'row-lost-reply-readback': f.get('lost_seen') == 'TRUE' and f.get('offer_phase') == '"CoreObserved"'
+            and f.get('prepared_count') == '1' and 'ReadBack' in actions,
+        'row-restart-redrive': f.get('epoch') == '2' and f.get('crashed_offered') == 'TRUE'
+            and f.get('offer_phase') == '"CoreObserved"' and f.get('native_keys') == '{"session1:key1"}'
+            and 'Scan' in actions,
+        'row-b-duplicate-relookup': f.get('dup_seen') == 'TRUE' and f.get('prep_refused') == 'FALSE'
+            and f.get('p_current') == '"Done"' and f.get('p_orphan') == '"Done"' and f.get('grant_issues') == '1',
+    }
+    if name not in checks:
+        raise ValueError('no final-state predicate for ' + name)
+    if not checks[name]:
+        raise ValueError('wrong final state for ' + name)
+
+
+def main():
+    generated, run = [Path(arg).resolve() for arg in sys.argv[1:]]
+    manifest = json.loads((generated / 'manifest.json').read_text())
+    generator = Path(__file__).with_name('generate-driver-composition')
+    if sha(generator) != manifest['generator_sha256']:
+        raise ValueError('generator changed after export')
+    artifacts = manifest['artifact_hashes']
+    if any(sha(generated / name) != digest for name, digest in artifacts.items()):
+        raise ValueError('export changed')
+    for name in manifest['profiles']:
+        if re.search(r'CHECK_DEADLOCK\s+FALSE', (generated / (name + '.cfg')).read_text()):
+            raise ValueError('generic deadlock checking must stay on')
+    run.mkdir(exist_ok=False)
+    inputs = run / 'inputs'
+    shutil.copytree(generated, inputs)
+    result = {'started_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'scope': manifest['scope'], 'full_b1_acceptance': False,
+              'manifest_sha256': sha(generated / 'manifest.json'),
+              'verifier_sha256': sha(Path(__file__)), 'profiles': {},
+              'resources': {'workers': 1, 'heap_mib': 1024, 'timeout_seconds': 900,
+                            'sequential': True, 'generic_deadlock_checking': 'ON'}}
+    save(run / 'STARTED.json', result)
+    env = os.environ.copy()
+    env['JAVA_TOOL_OPTIONS'] = '-Xmx1024m'
+    profiles = manifest['profiles']
+    order = ([n for n, p in profiles.items() if p['expected'] is not None]
+             + [n for n, p in profiles.items() if p['expected'] is None])
+    passed = True
+    for name in order:
+        profile = profiles[name]
+        expected = profile['expected']
+        log = run / (name + '.log')
+        command = ['tlc', '-workers', '1', '-seed', '1', '-coverage', '1',
+                   '-metadir', str(run / (name + '-states')),
+                   '-config', str(inputs / (name + '.cfg')), str(inputs / 'driver_composition.tla')]
+        row = {'kind': profile['kind'], 'command': command, 'expected': expected}
+        try:
+            with log.open('wb') as out:
+                process = subprocess.run(command, cwd=inputs, stdout=out, stderr=subprocess.STDOUT,
+                                         env=env, timeout=900, check=False)
+            text = log.read_text()
+            row['exit_code'] = process.returncode
+            row['states'] = re.findall(SUMMARY, text, re.MULTILINE)
+            if expected is None:
+                if process.returncode != 0 or 'Model checking completed. No error has been found.' not in text:
+                    raise ValueError('expected a clean pass')
+                counts = {action: {'distinct': int(d), 'total': int(t)} for action, d, t in re.findall(
+                    r'^<(\w+) line \d+, col \d+ to line \d+, col \d+ of module driver_composition>: (\d+):(\d+)$',
+                    text, re.MULTILINE) if action in manifest['actions']}
+                required = set(manifest['actions']) - FAULT_ONLY_ACTIONS
+                if set(counts) != set(manifest['actions']) or any(counts[a]['total'] == 0 for a in required):
+                    raise ValueError('not every non-fault action was taken')
+                if any(counts[a]['total'] != 0 for a in FAULT_ONLY_ACTIONS):
+                    raise ValueError('a fault-only action ran in the clean base')
+                row['action_coverage'] = counts
+            else:
+                if expected in PROPERTIES:
+                    ok = process.returncode == 13 and f'Action property {expected} is violated' in text
+                else:
+                    ok = process.returncode == 12 and f'Invariant {expected} is violated' in text
+                if not ok:
+                    raise ValueError('did not violate its attributed invariant or property')
+                fields, actions = final_state(text)
+                witness(name, fields, actions)
+                row['final_state'] = fields
+                row['actions'] = actions
+            row['passed'] = True
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            row.update(passed=False, error=str(error))
+            passed = False
+        row['log_sha256'] = sha(log)
+        result['profiles'][name] = row
+        save(run / 'PROGRESS.json', result)
+        print(json.dumps({'profile': name, 'kind': profile['kind'], 'passed': row['passed'],
+                          'exit': row.get('exit_code'), 'states': row.get('states'),
+                          'error': row.get('error')}), flush=True)
+    result['export_unchanged'] = all(sha(generated / n) == d for n, d in artifacts.items())
+    result['inputs_unchanged'] = all(sha(inputs / n) == d for n, d in artifacts.items())
+    result['generator_unchanged'] = sha(generator) == manifest['generator_sha256']
+    result['verifier_unchanged'] = sha(Path(__file__)) == result['verifier_sha256']
+    passed &= (len(result['profiles']) == len(profiles)
+               and all(value for key, value in result.items() if key.endswith('_unchanged')))
+    result['result'] = 'passed_slice' if passed else 'failed_or_incomplete'
+    result['at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save(run / 'RESULT.json', result)
+    return 0 if passed else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

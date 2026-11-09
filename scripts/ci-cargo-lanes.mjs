@@ -143,9 +143,10 @@
 // current estimates require comparison with hosted results. On d1dda1482 the
 // runtime unit lane models 15.1 minutes, not a measured completion guarantee.
 // The pull-request unit plan must stay under PR_UNIT_BUDGET_MINUTES, a
-// surrogate packing cap and not a measured timing. It is 20, since the
-// runtime lane models 18.3 minutes at 8ef2d8b939 (17.1 when the cap became
-// 18). Measured, the runtime lane alone took 790 and 839 s on the green
+// surrogate packing cap and not a measured timing. It is 21, since the
+// runtime lane models 20.1 minutes on the 0.9.11 release line (18.3 at
+// 8ef2d8b939, when the cap became 20, and 17.1 when it became 18). Measured,
+// the runtime lane alone took 790 and 839 s on the green
 // release pull-request runs 40055499505 and 40073579948, about 0.78 of its
 // modelled time at a model of about 18 minutes; earlier pull-request runs
 // took 359-715 s (39337274765, 39360046041, 39388235216 and 39394366439).
@@ -155,7 +156,9 @@
 // 1114 and 1173 s at a model of 18.3 minutes (a ratio of 1.01-1.07),
 // 448-488 s of it running tests the model does not count, and its execution
 // path reached 1146 and 1207 s. Runtime's lane therefore runs as two hash
-// partitions (PARTITIONED_UNIT_PACKAGES below). The cap sits above the
+// partitions (PARTITIONED_UNIT_PACKAGES below). Every partition's row builds
+// the whole crate, so each row models the lane's whole build, and another
+// partition would not lower it. The cap sits above the
 // gate's 18-minute execution budget because it is a model threshold; the
 // gate itself is unchanged.
 // The enforced limits are the CI gate's: 1080 s of lane execution and 1200 s
@@ -312,7 +315,7 @@ const NULL_SHA = "0000000000000000000000000000000000000000";
 const LINK_COST_PER_DEP = 8000;
 const COST_UNITS_PER_MINUTE = 35000;
 const LANE_SETUP_MINUTES = 1;
-export const PR_UNIT_BUDGET_MINUTES = 20;
+export const PR_UNIT_BUDGET_MINUTES = 21;
 // Packages whose unit tests run long get a unit lane of their own, so their
 // test time does not stack on other crates' builds; the line-and-closure
 // model counts only the build. xtask's lib and bin tests (the governance
@@ -479,7 +482,6 @@ export const TOOLKIT_MOBKIT_KNOWN_REDS = [
   ["private_originals::service_grants::mcp::tests::whole_set_replays_without_reissue_and_matches_only_its_access_bound_source", STALE],
   ["private_originals::governed_submit::tests::first_input_tests::acquisition_approved::reviewed_original_runs_enrolled_acquisition_and_one_controller_only_helper", STALE],
   ["private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer", "decision-source-unknown-field"],
-  ["private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder", "governed-origin-requester"],
   ["installed_host::acquisition::continuation::owner_tests::cold_source_tests::custody_recovery_wake_tests::terminal_census_wakes_existing_completion_after_native_source_restore", INTERMITTENT, { intermittent: true }],
   ["private_originals::service_approved_input::attachment::tests::native::actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation", INTERMITTENT, { intermittent: true }],
   ["private_originals::governed_submit::tests::first_input_tests::helper_entry_native::fresh_helper_reset_catalog_calls_require_explicit_successor_parent", INTERMITTENT, { intermittent: true }],

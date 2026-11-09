@@ -46,6 +46,15 @@ fn write_counter(path: &PathBuf, value: u64) {
     std::fs::write(path, value.to_string()).unwrap();
 }
 
+/// A guard over the credential fence of `key`'s realm under `root`, for a
+/// seeding write outside any coordinator.
+fn covering(root: &std::path::Path, key: &TokenKey) -> Arc<meerkat_core::AdmissionGuard> {
+    meerkat_core::AdmissionGuard::try_acquire(vec![
+        meerkat_core::AdmissionFence::credentials(root, key.realm()).unwrap(),
+    ])
+    .unwrap()
+}
+
 #[tokio::test]
 async fn crossproc_child_runner() {
     // In child mode: perform a locked read-modify-write on the counter,
@@ -66,7 +75,7 @@ async fn crossproc_child_runner() {
     let result = coord
         .with_refresh(
             key,
-            Box::new(move || {
+            Box::new(move |_fence| {
                 async move {
                     let current = read_counter(&counter_inside);
                     // Delay inside the critical section to force contention.
@@ -146,7 +155,7 @@ async fn in_process_two_coordinators_share_lock_dir() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let lock_dir = temp.path().to_path_buf();
+    let lock_dir = temp.path().join("refresh-locks");
     let a = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
     let b = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
     let key = TokenKey::parse("dev", "x").expect("valid slugs");
@@ -165,7 +174,7 @@ async fn in_process_two_coordinators_share_lock_dir() {
             coord
                 .with_exclusive_mutation(
                     key,
-                    Box::new(move || {
+                    Box::new(move |_fence| {
                         async move {
                             let cur =
                                 in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -202,14 +211,20 @@ async fn coordinated_logout_cannot_be_followed_by_stale_refresh_save() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let lock_dir = temp.path().join("locks");
-    let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(temp.path().join("credentials")));
+    // The store's credential root and its coordinator's: the coordinator
+    // fences the store's writes from its lock directory's parent.
+    let root = temp.path().join("credentials");
+    let lock_dir = root.join("refresh-locks");
+    let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(&root));
     let refresh_coordinator = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
     let logout_coordinator = Arc::new(FileLockCoordinator::new(lock_dir));
     let key = TokenKey::parse("dev", "openai").expect("valid key");
     let original = PersistedTokens::api_key("credential-a");
     let refreshed = PersistedTokens::api_key("credential-b");
-    store.save(&key, &original).await.unwrap();
+    store
+        .save(&covering(&root, &key), &key, &original)
+        .await
+        .unwrap();
 
     let (refresh_entered_tx, refresh_entered_rx) = tokio::sync::oneshot::channel();
     let release_refresh = Arc::new(tokio::sync::Notify::new());
@@ -222,13 +237,13 @@ async fn coordinated_logout_cannot_be_followed_by_stale_refresh_save() {
             refresh_coordinator
                 .with_refresh(
                     key.clone(),
-                    Box::new(move || {
+                    Box::new(move |fence| {
                         async move {
                             let loaded = store.load(&key).await.unwrap();
                             assert_eq!(loaded, Some(original));
                             refresh_entered_tx.send(()).unwrap();
                             release_refresh.notified().await;
-                            store.save(&key, &refreshed).await.unwrap();
+                            store.save(&fence, &key, &refreshed).await.unwrap();
                             Ok::<_, RefreshError>(refreshed)
                         }
                         .boxed()
@@ -250,14 +265,14 @@ async fn coordinated_logout_cannot_be_followed_by_stale_refresh_save() {
             logout_coordinator
                 .with_exclusive_mutation(
                     key.clone(),
-                    Box::new(move || {
+                    Box::new(move |fence| {
                         async move {
                             logout_entered.store(true, Ordering::SeqCst);
                             assert_eq!(
                                 store.load(&key).await.unwrap(),
                                 Some(PersistedTokens::api_key("credential-b"))
                             );
-                            store.clear(&key).await.unwrap();
+                            store.clear(&fence, &key).await.unwrap();
                             Ok::<_, CredentialMutationError>(CredentialMutationOutcome::Cleared)
                         }
                         .boxed()
@@ -289,15 +304,21 @@ async fn replacement_login_cannot_be_overwritten_by_stale_refresh() {
     }
 
     let temp = tempfile::tempdir().unwrap();
-    let lock_dir = temp.path().join("locks");
-    let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(temp.path().join("credentials")));
+    // The store's credential root and its coordinator's: the coordinator
+    // fences the store's writes from its lock directory's parent.
+    let root = temp.path().join("credentials");
+    let lock_dir = root.join("refresh-locks");
+    let store: Arc<dyn TokenStore> = Arc::new(FileTokenStore::new(&root));
     let refresh_coordinator = Arc::new(FileLockCoordinator::new(lock_dir.clone()));
     let login_coordinator = Arc::new(FileLockCoordinator::new(lock_dir));
     let key = TokenKey::parse("dev", "anthropic").expect("valid key");
     let original = PersistedTokens::api_key("credential-a");
     let refreshed = PersistedTokens::api_key("credential-b");
     let replacement = PersistedTokens::api_key("credential-c");
-    store.save(&key, &original).await.unwrap();
+    store
+        .save(&covering(&root, &key), &key, &original)
+        .await
+        .unwrap();
 
     let (refresh_entered_tx, refresh_entered_rx) = tokio::sync::oneshot::channel();
     let release_refresh = Arc::new(tokio::sync::Notify::new());
@@ -310,13 +331,13 @@ async fn replacement_login_cannot_be_overwritten_by_stale_refresh() {
             refresh_coordinator
                 .with_refresh(
                     key.clone(),
-                    Box::new(move || {
+                    Box::new(move |fence| {
                         async move {
                             let loaded = store.load(&key).await.unwrap();
                             assert_eq!(loaded, Some(original));
                             refresh_entered_tx.send(()).unwrap();
                             release_refresh.notified().await;
-                            store.save(&key, &refreshed).await.unwrap();
+                            store.save(&fence, &key, &refreshed).await.unwrap();
                             Ok::<_, RefreshError>(refreshed)
                         }
                         .boxed()
@@ -339,14 +360,14 @@ async fn replacement_login_cannot_be_overwritten_by_stale_refresh() {
             login_coordinator
                 .with_exclusive_mutation(
                     key.clone(),
-                    Box::new(move || {
+                    Box::new(move |fence| {
                         async move {
                             login_entered.store(true, Ordering::SeqCst);
                             assert_eq!(
                                 store.load(&key).await.unwrap(),
                                 Some(PersistedTokens::api_key("credential-b"))
                             );
-                            store.save(&key, &replacement).await.unwrap();
+                            store.save(&fence, &key, &replacement).await.unwrap();
                             Ok::<_, CredentialMutationError>(CredentialMutationOutcome::Persisted(
                                 replacement,
                             ))

@@ -163,6 +163,9 @@ async fn dedicated_held_member_admits_exact_g_and_refuses_foreign_history() {
         );
         let a = f.submit().await;
         f.finish(&a).await.unwrap();
+        // A's custody settles in the background after its turn: P's first
+        // send starts once it is promoted, as G's launch does below.
+        custody_promoted(f, f.original_reference()).await;
         let dispatch = f.probe.as_ref().unwrap().captured();
         let original = f.source.acquisition_original(&dispatch).await.unwrap();
         let p = f

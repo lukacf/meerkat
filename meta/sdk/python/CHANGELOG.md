@@ -4,6 +4,74 @@ All notable changes to the Python SDK are documented here.
 
 ## Unreleased
 
+## 0.9.11
+
+- `MetaRuntime.grant_tool(identity, *, tool=None, family=None,
+  duration_ms=None, expires_at_ms=None, reason=None, decision_ref=None)`,
+  `revoke_tool_grant(grant_id, *, reason=None)`,
+  `list_tool_grants(identity, *, include_ended=False)` and
+  `tool_grant_audit(identity, *, after_sequence=None, limit=None)` call
+  `meta/tool_grants/{grant, revoke, list, audit}`: the scoped tool grants of
+  the identities a gateway serves. A grant names exactly one of `tool` and
+  `family` (a `ValueError` otherwise, nothing sent). A refused request
+  raises `ToolGrantRequestRefusedError` (`refusal`, `refusal_kind`; the
+  constants `TOOL_GRANT_REQUEST_REFUSED_KIND` and the closed
+  `TOOL_GRANT_REQUEST_REFUSAL_KINDS`).
+- `MetaRuntime.realm_mcp_servers()`,
+  `realm_mcp_install(server, *, expected_generation)`,
+  `realm_mcp_set_secret(server, env, value)` and
+  `realm_mcp_remove_secret(server, env, *, removal="current")` call the stdio
+  gateway's `meta/realm_mcp/{servers, install, set_secret, remove_secret}`.
+  A removal other than `"current"` or `"obsolete"` is a `ValueError`, nothing
+  sent. The outcomes raise `RealmMcpRefusedError` (`refusal`, `refusal_kind`;
+  the closed `REALM_MCP_REFUSAL_KINDS`), `RealmMcpUnavailableError` (a
+  `CapabilityUnavailableError`) and `RealmMcpOutcomeUnknownError`; a secret
+  value appears in none of them and in no log record.
+- `ToolCallRequester` and `RequesterPrincipal`: the original requester of the
+  run a callback serves, which the gateway names on `callback/call_tool` and
+  `callback/job/start`. A tool handler that declares a `requester` parameter
+  receives it (`None` when the run has none); a handler without the
+  parameter is called as before. `DetachedJobContext.requester` is the
+  requester of the run that submitted the job. `ToolCallRequester.from_wire`
+  reads it as the runtime's grammar does, and a malformed value is `None`, so
+  a person-scoped tool fails closed. A tool that acts in one person's name
+  compares `requester.direct_principal` with its owner's principal (`kind`,
+  `id` and `trust_domain_id`).
+
+- Durable decisions: `MobHandle.decisions_list(kind=, phase=, approver_id=,
+  requester=, after=, limit=)`, `decisions_get(decision_id,
+  include_request=False)`, `decisions_rendering(decision_id,
+  max_part_bytes=None)`, `decisions_present(decision_id, presentation)`,
+  `decisions_withdraw(decision_id)` and `decisions_decide(decision_id, *,
+  approve, presented_digest, reason=None, attestation=None)` call the
+  gateway's `meta/decisions/*` methods. `DecisionAttestation(ingress,
+  subject, scope, event_ref, observed_at_ms, presentation=None)` carries a
+  declared ingress's attestation of the person who decided.
+  `MetaRuntime.on_decision_notice(handler)` receives each
+  `meta/decisions/notice`, and `MetaBuilder.decision_ingresses([...])`
+  declares the ingresses as `runtime_options.decisions`.
+- A decide called while the SDK serves a host tool callback raises
+  `DecideInsideToolCallbackError` (`DECIDE_INSIDE_TOOL_CALLBACK_KIND`,
+  `"decide_inside_tool_callback"`) and sends nothing.
+
+- `MetaRuntime.set_instruction(namespace, key, revision, body, target, *,
+  content_sha256=None)`, `MetaRuntime.revoke_instruction(namespace, key,
+  revision)` and `MetaRuntime.instruction_status(*, namespace, key,
+  identity, profile, offset, limit)` call `meta/set_instruction`,
+  `meta/revoke_instruction` and `meta/instruction_status`: operator
+  instructions for the members of the gateway's mob, by slot and revision,
+  for every member (`{"kind": "mob"}`), one profile (`{"kind": "profile",
+  "profile": ...}`) or one identity (`{"kind": "member", "identity": ...}`).
+  The results are the gateway's, unchanged; a refusal raises `RpcError`
+  with `data["instruction_set_code"]`.
+- `MetaRuntime.activate_member_instruction` is deprecated in favour of
+  `set_instruction` in the docs; it keeps working.
+
+- `ErrorEvent.from_dict`: the message of a `lifecycle_effect_failed` event
+  of the `compaction_harvest` effect (the harvest of the compactions a
+  retired session holds failed) does not say the effect is not run again:
+  its error says whether a fallback harvest follows.
+
 ## 0.9.10
 
 No SDK API changes; released with Meta 0.9.10.

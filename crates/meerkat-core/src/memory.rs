@@ -52,7 +52,7 @@ struct LegacyCompactionCommitFingerprint<'a> {
 
 /// Exact post-commit projection work carried by the session snapshot into the
 /// runtime's atomic-apply outbox.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionProjectionIntent {
     pub projection: CompactionProjectionId,
     pub summary_tokens: u64,
@@ -68,7 +68,39 @@ pub struct CompactionProjectionIntent {
     /// when the rewritten history could not be measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_history_tokens_after: Option<u64>,
+    /// The operator-instruction snapshot entry the compaction's fold
+    /// inserted, observed as `OperatorInstructionsApplied` when the commit
+    /// is finalized, right after its `CompactionCompleted`; a rollback drops
+    /// it with the intent, so nothing observes it. `None` when the fold
+    /// inserted no snapshot, and for an intent staged before 0.9.11 (an
+    /// older reader ignores the field). The rewrite the projection identity
+    /// pins fixes it, so it takes no part in the intent's equality: a copy an
+    /// older reader decoded without it still compares equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_snapshot: Option<crate::session::InstructionEntryIdentity>,
 }
+
+impl PartialEq for CompactionProjectionIntent {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            projection,
+            summary_tokens,
+            messages_before,
+            messages_after,
+            summary_source,
+            estimated_history_tokens_after,
+            instruction_snapshot: _,
+        } = self;
+        *projection == other.projection
+            && *summary_tokens == other.summary_tokens
+            && *messages_before == other.messages_before
+            && *messages_after == other.messages_after
+            && *summary_source == other.summary_source
+            && *estimated_history_tokens_after == other.estimated_history_tokens_after
+    }
+}
+
+impl Eq for CompactionProjectionIntent {}
 
 impl CompactionProjectionId {
     /// Mint the projection identity for the exact validated compaction rewrite.
@@ -924,6 +956,25 @@ pub trait MemoryStore: Send + Sync {
         })
     }
 
+    /// [`Self::finalize_compaction_batch`], answering the records this call
+    /// published: the batch's entries, in stage order, exactly as
+    /// [`Self::enumerate_scoped`] then reads them. A call that finds the
+    /// stage already finalized, or the scope dropped, publishes nothing and
+    /// answers no record.
+    ///
+    /// A cold settle of a session no live agent hosts uses it: the batch's
+    /// discards reach the caller without a second read of the scope.
+    /// Unsupported by default.
+    async fn finalize_compaction_batch_reporting(
+        &self,
+        projection: &CompactionProjectionId,
+    ) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+        let _ = projection;
+        Err(MemoryStoreError::Unsupported {
+            operation: "finalize_compaction_batch_reporting",
+        })
+    }
+
     /// Idempotently discard one uncommitted invisible stage.
     async fn abort_compaction_batch(
         &self,
@@ -1143,6 +1194,81 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<CompactionProjectionIntent>(encoded).unwrap(),
             current
+        );
+    }
+
+    /// The operator-instruction snapshot an intent carries round-trips; an
+    /// intent written before it (or decoded by a reader that drops it) reads
+    /// with none; and the snapshot takes no part in the intent's equality, so
+    /// a copy decoded without it compares equal to one with it.
+    #[test]
+    fn compaction_projection_intent_snapshot_round_trips_and_takes_no_part_in_equality() {
+        let session_id = crate::types::SessionId::new();
+        let older_form = serde_json::json!({
+            "projection": {
+                "session_id": session_id,
+                "parent_revision": "parent",
+                "revision": "child",
+                "commit_fingerprint": "sha256:snapshot-intent",
+            },
+            "summary_tokens": 4,
+            "messages_before": 6,
+            "messages_after": 2,
+        });
+        let mut current_form = older_form.clone();
+        current_form["instruction_snapshot"] = serde_json::json!({
+            "render_version": 1,
+            "origin_session_id": session_id,
+            "entry_sequence": 3,
+            "kind": "snapshot",
+            "target_generation": 2,
+        });
+        let older: CompactionProjectionIntent = serde_json::from_value(older_form).unwrap();
+        let current: CompactionProjectionIntent =
+            serde_json::from_value(current_form.clone()).unwrap();
+        assert_eq!(older.instruction_snapshot, None);
+        let snapshot = current
+            .instruction_snapshot
+            .as_ref()
+            .expect("the snapshot reads");
+        assert_eq!(snapshot.entry_sequence(), 3);
+        assert_eq!(
+            serde_json::to_value(&current).unwrap(),
+            current_form,
+            "the snapshot round-trips"
+        );
+        assert_eq!(
+            older, current,
+            "the snapshot takes no part in the intent's equality"
+        );
+    }
+
+    /// The premise of the intent's equality: the transcript digest (what a
+    /// projection's revision is) covers an operator-instruction entry's
+    /// identity, so two transcripts whose snapshot entry differs only in its
+    /// identity, here its entry sequence, have different revisions. Two
+    /// intents with one projection therefore carry one snapshot.
+    #[test]
+    fn the_transcript_digest_covers_an_instruction_entry_identity() {
+        let session_id = crate::types::SessionId::new();
+        let row = |sequence: u64| {
+            let mut system = crate::types::SystemMessage::new("operator instructions");
+            system.instruction_entry = Some(
+                serde_json::from_value(serde_json::json!({
+                    "render_version": 1,
+                    "origin_session_id": session_id,
+                    "entry_sequence": sequence,
+                    "kind": "snapshot",
+                    "target_generation": 2,
+                }))
+                .unwrap(),
+            );
+            crate::types::Message::System(system)
+        };
+        assert_ne!(
+            crate::session::transcript_messages_digest(&[row(3)]).unwrap(),
+            crate::session::transcript_messages_digest(&[row(4)]).unwrap(),
+            "the transcript digest covers the entry's identity"
         );
     }
 

@@ -10,7 +10,7 @@ use nix::{
 };
 use std::{
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -85,14 +85,8 @@ async fn put(
     persistence: &ProviderAuthPersistence,
     config: ConnectorClientConfig,
 ) {
-    let path = crate::realm::config_source(storage)
-        .unwrap()
-        .config_doc_path(&storage.locator.realm);
     meerkat::put_connector_client(
-        Arc::new(meerkat_core::FileConfigStore::new(
-            path,
-            meerkat_models::canonical(),
-        )),
+        crate::realm::config_source(storage).unwrap(),
         persistence,
         &storage.locator.realm,
         "mail",
@@ -113,14 +107,23 @@ impl TokenStore for HeldStore {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
         self.inner.load(key).await
     }
-    async fn save(&self, key: &TokenKey, value: &PersistedTokens) -> Result<(), TokenStoreError> {
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        value: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         self.release.acquire().await.unwrap().forget();
-        self.inner.save(key, value).await
+        self.inner.save(fence, key, value).await
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
-        self.inner.clear(key).await
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.inner.list().await
@@ -156,7 +159,9 @@ async fn guided_missing_profile_uses_same_realm_native_owners_and_joins_entered_
         });
         let persistence = ProviderAuthPersistence::new(
             held.clone(),
-            Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                directory.path().join("credentials").join("refresh-locks"),
+            )),
         );
         let factory = meerkat::AgentFactory::new(directory.path().join("factory"))
             .with_provider_auth_persistence(persistence);
@@ -332,7 +337,9 @@ async fn live_native_selection_inherits_then_refuses_changed_binding_without_res
     let source = native_source(&own);
     let persistence = ProviderAuthPersistence::new(
         Arc::new(FileTokenStore::new(directory.path().join("credentials"))),
-        Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+        Arc::new(FileLockCoordinator::new(
+            directory.path().join("credentials").join("refresh-locks"),
+        )),
     );
     assert!(selected(&source, &target).await.unwrap().is_none());
     put(&global, &persistence, definition(&target)).await;
@@ -422,7 +429,9 @@ async fn profile_changed_during_account_review_cannot_qualify_the_retained_conse
     let source = native_source(&storage);
     let persistence = ProviderAuthPersistence::new(
         Arc::new(FileTokenStore::new(directory.path().join("credentials"))),
-        Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+        Arc::new(FileLockCoordinator::new(
+            directory.path().join("credentials").join("refresh-locks"),
+        )),
     );
     put(&storage, &persistence, definition(&target)).await;
     let snapshot = selected(&source, &target).await.unwrap().unwrap();
@@ -502,18 +511,14 @@ async fn missing_secret_repair_preserves_exact_defining_realm_and_denial_has_no_
         let tokens = Arc::new(FileTokenStore::new(directory.path().join("credentials")));
         let persistence = ProviderAuthPersistence::new(
             tokens.clone(),
-            Arc::new(FileLockCoordinator::new(directory.path().join("locks"))),
+            Arc::new(FileLockCoordinator::new(
+                directory.path().join("credentials").join("refresh-locks"),
+            )),
         );
         let mut client = definition(&target);
         client.client_auth = ConnectorClientAuthMethod::ClientSecretPost;
-        let path = crate::realm::config_source(&defining_storage)
-            .unwrap()
-            .config_doc_path(&defining_storage.locator.realm);
         meerkat::put_connector_client(
-            Arc::new(meerkat_core::FileConfigStore::new(
-                path,
-                meerkat_models::canonical(),
-            )),
+            crate::realm::config_source(&defining_storage).unwrap(),
             &persistence,
             &defining_storage.locator.realm,
             "mail",
@@ -528,7 +533,18 @@ async fn missing_secret_repair_preserves_exact_defining_realm_and_denial_has_no_
             &before.binding(),
         )
         .unwrap();
-        tokens.clear(&key).await.unwrap();
+        // A direct clear outside any coordinator takes the credential fence of
+        // the key's realm under the store's root itself.
+        let fence = meerkat_core::AdmissionGuard::try_acquire(vec![
+            meerkat_core::AdmissionFence::credentials(
+                &directory.path().join("credentials"),
+                key.realm(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        tokens.clear(&fence, &key).await.unwrap();
+        drop(fence);
         assert!(
             meerkat::load_connector_client_secret(
                 tokens.as_ref(),

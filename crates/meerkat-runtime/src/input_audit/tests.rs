@@ -285,6 +285,10 @@ impl meerkat_core::authorization::PreparedOperationAuthorization for Infrastruct
         }
         self.sink.append(event)
     }
+
+    fn spend_at_entry(&self) -> Result<(), meerkat_core::OperationAuthorizationError> {
+        Ok(())
+    }
 }
 fn infrastructure_entry_check(
     sink: Arc<dyn AuthorizationAuditSink>,

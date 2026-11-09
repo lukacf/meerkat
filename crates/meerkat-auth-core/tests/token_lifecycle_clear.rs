@@ -75,7 +75,10 @@ async fn publish_and_save(
     )
     .expect("mark lifecycle published");
     let key = TokenKey::from_auth_binding(auth_binding);
-    store.save(&key, &marked).await.expect("save tokens");
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .expect("save tokens");
     key
 }
 
@@ -102,16 +105,25 @@ impl TokenStore for FailingClearStore {
     async fn load(&self, key: &TokenKey) -> Result<Option<PersistedTokens>, TokenStoreError> {
         self.inner.load(key).await
     }
-    async fn save(&self, key: &TokenKey, tokens: &PersistedTokens) -> Result<(), TokenStoreError> {
-        self.inner.save(key, tokens).await
+    async fn save(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+        tokens: &PersistedTokens,
+    ) -> Result<(), TokenStoreError> {
+        self.inner.save(fence, key, tokens).await
     }
-    async fn clear(&self, key: &TokenKey) -> Result<(), TokenStoreError> {
+    async fn clear(
+        &self,
+        fence: &meerkat_core::AdmissionGuard,
+        key: &TokenKey,
+    ) -> Result<(), TokenStoreError> {
         if self.fail_clear.load(Ordering::Acquire) {
             return Err(TokenStoreError::Unavailable(
                 "injected clear failure".into(),
             ));
         }
-        self.inner.clear(key).await
+        self.inner.clear(fence, key).await
     }
     async fn list(&self) -> Result<Vec<TokenKey>, TokenStoreError> {
         self.inner.list().await
@@ -163,7 +175,10 @@ async fn account_clear_destroys_the_shared_credential_and_lease() {
         .expect("acquire account lease");
     let marked = mark_tokens_lifecycle_published_for_transition(&key, &tokens, &transition)
         .expect("mark account token");
-    store.save(&key, &marked).await.expect("save account token");
+    store
+        .save(&meerkat_core::AdmissionGuard::none(), &key, &marked)
+        .await
+        .expect("save account token");
 
     clear_tokens_and_publish_lifecycle_released_coordinated_for_identity(
         ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())),

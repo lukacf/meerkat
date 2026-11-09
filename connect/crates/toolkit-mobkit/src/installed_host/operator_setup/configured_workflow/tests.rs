@@ -240,6 +240,7 @@ async fn late_helper_exact_mcp_target_records_connector_without_widening_base() 
     .unwrap();
     let leaf = grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             application,
             &root,
             EvidenceId::new("targeted-g-leaf").unwrap(),
@@ -419,7 +420,12 @@ async fn late_helper_exact_mcp_target_records_connector_without_widening_base() 
     {
         let mut custody = machine.try_controller_grant_mutation().unwrap();
         grants
-            .revoke(&owner.operator, &target[0], &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &owner.operator,
+                &target[0],
+                &mut custody,
+            )
             .unwrap();
     }
     assert!(selected.check_current().is_err());
@@ -516,6 +522,7 @@ async fn workflow_public_child_preserves_legacy_replay_and_target_local_revocati
     .unwrap();
     let leaf = grants
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             application,
             &root,
             EvidenceId::new("public-g-base-leaf").unwrap(),
@@ -630,7 +637,12 @@ async fn workflow_public_child_preserves_legacy_replay_and_target_local_revocati
     {
         let mut custody = machine.try_controller_grant_mutation().unwrap();
         grants
-            .revoke(&owner.operator, &public[1], &mut custody)
+            .revoke(
+                &meerkat_core::AdmissionGuard::none(),
+                &owner.operator,
+                &public[1],
+                &mut custody,
+            )
             .unwrap();
     }
     let revoked = std::fs::read(&path).unwrap();

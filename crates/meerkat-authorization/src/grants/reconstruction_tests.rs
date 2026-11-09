@@ -55,7 +55,14 @@ fn issue(
     restrictions: ExecutionRestrictions,
 ) -> GrantLineageRef {
     owner
-        .issue_root(&who("root"), id(name), who("holder"), None, restrictions)
+        .issue_root(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            id(name),
+            who("holder"),
+            None,
+            restrictions,
+        )
         .expect("issue")
 }
 fn poison_only_owner(owner: &LocalGrantAuthority) {
@@ -72,7 +79,12 @@ fn reconstruction_preserves_revocations_and_retires_healthy_old_publication() {
     let allowed = issue(&owner, "allowed", ExecutionRestrictions::unrestricted());
     let revoked = issue(&owner, "revoked", ExecutionRestrictions::unrestricted());
     owner
-        .revoke(&who("root"), &revoked, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &revoked,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     let before = owner.owner.lock().expect("owner").state().clone();
     let old = owner.publication.clone();
@@ -113,6 +125,7 @@ fn actual_prewrite_panic_reconstructs_without_replaying_the_failed_child() {
     clock.0.store(true, Ordering::SeqCst);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = owner.issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("unissued"),
@@ -159,6 +172,7 @@ fn reconstruction_preserves_a_real_narrowed_three_level_chain() {
     );
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &root,
             id("child"),
@@ -168,6 +182,7 @@ fn reconstruction_preserves_a_real_narrowed_three_level_chain() {
         .expect("first actual narrowing");
     let leaf = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("child"),
             &child,
             id("leaf"),
@@ -199,6 +214,7 @@ fn failed_reconstruction_keeps_the_actual_unverifiable_owner_and_revocation() {
     let parent = issue(&owner, "parent", ExecutionRestrictions::unrestricted());
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),
@@ -208,7 +224,12 @@ fn failed_reconstruction_keeps_the_actual_unverifiable_owner_and_revocation() {
         .expect("child");
     let revoked = issue(&owner, "revoked", ExecutionRestrictions::unrestricted());
     owner
-        .revoke(&who("root"), &revoked, &mut IsolatedGrantTestCustody)
+        .revoke(
+            &meerkat_core::AdmissionGuard::none(),
+            &who("root"),
+            &revoked,
+            &mut IsolatedGrantTestCustody,
+        )
         .expect("revoke");
     let mut corrupt = owner.owner.lock().expect("owner").state().clone();
     // Test-only retained-state corruption: shape is valid but the immutable
@@ -259,6 +280,7 @@ fn reconstruction_rejects_a_widened_retained_child() {
     );
     let child = owner
         .issue_child(
+            &meerkat_core::AdmissionGuard::none(),
             &who("holder"),
             &parent,
             id("child"),

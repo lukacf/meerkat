@@ -425,6 +425,38 @@ test("normalizeAgents carries a side chat's source from the experience row", () 
   assert.equal("side_chat_of" in (agents.find((agent) => agent.member_id === "beta") ?? {}), false);
 });
 
+test("normalizeAgents carries the audience the server named for a side chat, and no other", () => {
+  const row = (member: string, audience: unknown) => ({
+    agent_id: member,
+    member_id: member,
+    identity: member,
+    label: member,
+    kind: "mob_agent",
+    side_chat_of: "alpha",
+    side_chat_audience: audience,
+  });
+  const agents = normalizeAgents(
+    {
+      agent_sidebar: {
+        live_snapshot: {
+          agents: [
+            row("mine", "private_to_you"),
+            row("theirs", "private_to_creator"),
+            row("shared", "shared"),
+            row("unknown", "public"),
+          ],
+        },
+      },
+    },
+    [],
+  );
+  const audience = (member: string) => agents.find((agent) => agent.member_id === member)?.side_chat_audience;
+  assert.equal(audience("mine"), "private_to_you");
+  assert.equal(audience("theirs"), "private_to_creator");
+  assert.equal(audience("shared"), "shared");
+  assert.equal("side_chat_audience" in (agents.find((agent) => agent.member_id === "unknown") ?? {}), false);
+});
+
 test("agentDisplayTitle keeps a display name and gives an agent without one a human name", () => {
   const agent = (label: string, extra: Record<string, unknown> = {}) => ({
     agent_id: "router:main",

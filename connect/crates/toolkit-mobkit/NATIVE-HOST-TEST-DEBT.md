@@ -24,7 +24,11 @@ Status: open. Kind: product or test fixture, not yet diagnosed.
 A cold restore refuses (`OwnerUnavailable`, `Unavailable` or `Conflict`)
 where the test expects the recovery to go on. One instrumented run with a
 diagnostic before each check in `cold_setup_admission.rs` and
-`custody_recovery/cold.rs` names the refusing step; then fix that step.
+`custody_recovery/cold.rs` names the refusing step; then fix that step. The
+refusing step can vary with load: the two `custody_recovery_helper_cold_tests`
+fail at the first original's promoted-custody restore when run alone, and at
+the helper's restore in the parallel known-red run, with the same refusal
+(`Unavailable`), so the diagnostic run should cover both.
 
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::cold_setup_a_historical_custody_cannot_validate_another_run_or_submission`
 - `installed_host::acquisition::continuation::owner_tests::cold_source_tests::durable_owner_reopen_drains_same_pending_completion_after_source_recovery`
@@ -75,26 +79,6 @@ make the variant `StandingRuleDecision {}` and update its match in
 `meerkat-connect`; the wire form does not change.
 
 - `private_host::tests::service_parent_controls::service_result_and_retire_cannot_supply_an_authorization_answer`
-
-## Governed origin requester
-
-Status: open. Kind: product gap, not test debt.
-
-Core keeps the original requester of an in-process peer delivery sent from
-governed work: it refuses, as malformed, a binding of such a delivery that
-does not keep the sending work's requester, name the sending agent as its
-ingress actor and name every work of the sending work as a contributor (the
-`GovernedDelivery` pin of `check_bound_original` in `meerkat-runtime`, Core
-commit 263280d604). Connect's `bind_peer_delivery`
-(`private_originals/peer_ingress.rs`) binds every peer delivery under the
-receiving member's standing grants with no contributors. Core therefore
-refuses Connect's binding of the reply a receiving member's governed run
-sends back, and that run's `reply_to_peer` call returns an error. Fix:
-`bind_peer_delivery` binds a governed in-process delivery under the
-origin's requester, or leaves it to Core's `OriginalRequesterPeerBinder`;
-the test then moves to that contract and leaves this page.
-
-- `private_originals::governed_submit::tests::dynamic_member_native_tests::peer_ingress_tests::added_receiver_uses_own_delivery_grants_for_native_reply_and_recorder`
 
 ## Intermittent races
 

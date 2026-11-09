@@ -876,10 +876,74 @@ def verify_run(run_id, attempt, sha, *, ci=False, collecting=False, legacy_tag=N
     if collecting:
         if value["status"] != "in_progress":
             raise RunNotInProgress("collection requires its in-progress candidate run", value["status"])
+    elif ci and value["status"] == "completed" and value["conclusion"] == "failure":
+        # A red main CI run counts when it counted for meta-release.yml's
+        # gate: the same reader and rule, re-checked wherever the bound run is.
+        require_meta_scoped(value, sha)
     else:
         require(value["status"] == "completed" and value["conclusion"] == "success",
                 "run is not completed-success")
     return value
+
+
+# The root's product-scoped CI evidence reader. A failed exact-main CI run
+# counts for Meta only when the release commit's FIRST PARENT's copy of it,
+# told the paths the commit changes against that parent, accepts the run's
+# exact-tree attestation for Meta: the rule and job-to-product table that
+# meta-release.yml's gate applied, never the commit's own copy.
+EVIDENCE_READER = "scripts/ci-product-evidence.mjs"
+
+
+def ci_attestation(value, sha):
+    """The exact-tree attestation of the ci.yml run attempt `value`, bound to
+    that attempt, the source commit and its tree on main."""
+    name = f"meerkat-ci-attestation-{sha}-{value['run_attempt']}"
+    pages = api(repo_endpoint(f"actions/runs/{value['id']}/artifacts?name={name}&per_page=100"), pages=True)
+    found = [item for page in pages for item in page["artifacts"] if item["name"] == name and item["expired"] is False]
+    require(len(found) == 1, f"CI run {value['id']} attempt {value['run_attempt']} has no single unexpired "
+                             "exact-tree attestation")
+    item = found[0]
+    require(isinstance(item.get("digest"), str) and item["digest"].startswith("sha256:"),
+            "missing CI attestation ZIP digest")
+    with workspace() as work:
+        packed = download_artifact({"id": item["id"], "name": name, "digest": item["digest"][7:]}, value, work)
+        with zipfile.ZipFile(packed) as archive:
+            zip_members(archive, expected_member="attestation.json")
+            record = parse_json(archive.read("attestation.json"))
+    require(isinstance(record, dict) and record.get("schema_version") == 4
+            and record.get("validation_backend") == "github-hosted-cargo"
+            and record.get("repository") == repository() and record.get("commit_sha") == sha
+            and record.get("tree_sha") == git("rev-parse", "--verify", f"{sha}^{{tree}}")
+            and record.get("workflow") == "CI" and record.get("event") == "push" and record.get("ref") == MAIN
+            and record.get("workflow_run_id") == str(value["id"])
+            and record.get("workflow_run_attempt") == str(value["run_attempt"]),
+            "CI attestation does not bind this run attempt, the source commit and its tree on main")
+    return record
+
+
+def require_meta_scoped(value, sha):
+    """Refuse the failed ci.yml run attempt `value` unless the release
+    commit's first parent's evidence reader accepts it for Meta."""
+    record = ci_attestation(value, sha)
+    parent = git("rev-parse", "--verify", f"{sha}^1")
+    try:
+        reader = git("show", f"{parent}:{EVIDENCE_READER}")
+    except ProtocolError as error:
+        raise ProtocolError(f"the release commit's parent {parent} has no CI evidence reader ({EVIDENCE_READER}): "
+                            f"only a green CI run counts ({error})") from None
+    changed = git("diff", "--name-only", parent, sha)
+    with workspace() as work:
+        (work / "ci-product-evidence.mjs").write_text(reader + "\n")
+        (work / "changed-paths.txt").write_text(changed + "\n" if changed else "")
+        (work / "attestation.json").write_text(json.dumps(record))
+        result = subprocess.run(
+            ["node", str(work / "ci-product-evidence.mjs"), "accepts", "--product", "meta",
+             "--changed-paths", str(work / "changed-paths.txt"), str(work / "attestation.json")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    verdict = " ".join((result.stdout + result.stderr).decode(errors="replace").split())
+    require(result.returncode == 0, f"failed CI run {value['id']} attempt {value['run_attempt']} does not count "
+                                    f"for Meta: {verdict}")
+    print(f"failed CI run {value['id']} attempt {value['run_attempt']} counts for Meta: {verdict}", file=sys.stderr)
 
 
 def reread(label, read):
@@ -1370,7 +1434,9 @@ def verify_present_trailing(folder, inventory, sha, version, tag, work):
     it names. The manifest comes from the release when present, otherwise
     from that artifact, the way stage_candidate reads it: it must match the
     receipt and the release's source, version and tag, carry a valid
-    attestation, and name a green CI run. Every present attestation bundle
+    attestation, and name a CI run that counts for Meta (green, or red only
+    in rows Meta does not depend on; see require_meta_scoped). Every present
+    attestation bundle
     must be the one the candidate retained (the manifest's verifies the
     manifest; a target's verifies its archives, or equals the target
     artifact's when none of them is present yet). Every present archive must

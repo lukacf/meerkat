@@ -185,7 +185,8 @@ counts too when its attestation shows every failure in rows Meta does not
 depend on (Meta depends on Core's and Meta's rows; a Connect-only red row does
 not hold Meta back; the root's `scripts/ci-product-evidence.mjs`, as the
 release commit's first parent has it, judges it, and refuses a commit that
-changes what decides that evidence).
+changes what decides that evidence). Collection, promotion, recovery and the
+published-release check re-check the bound CI run the same way.
 A candidate whose wait runs out binds nothing; dispatch a new one once CI is
 green.
 

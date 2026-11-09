@@ -880,12 +880,17 @@ class CandidateProtocolTests(unittest.TestCase):
         self.command("recover")
         os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
         self.command("verify-published")
+        # A failed CI run counts only through its attestation: none here.
+        self.state["api"][helper.repo_endpoint(
+            f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1&per_page=100")] = [
+            {"artifacts": [], "total_count": 0}]
         for endpoint, change, message in (
             (f"actions/runs/{TRAILING_RUN}", {"conclusion": "failure"}, "not completed-success"),
             (f"actions/runs/{RUN}", {"conclusion": "cancelled"}, "not completed-success"),
-            (f"actions/runs/{CI}", {"conclusion": "failure"}, "not completed-success"),
+            (f"actions/runs/{CI}", {"conclusion": "failure"}, "exact-tree attestation"),
+            (f"actions/runs/{CI}", {"conclusion": "cancelled"}, "not completed-success"),
         ):
-            with self.subTest(endpoint=endpoint):
+            with self.subTest(endpoint=endpoint, change=change):
                 original = dict(self.state["api"][helper.repo_endpoint(endpoint)])
                 self.state["api"][helper.repo_endpoint(endpoint)].update(change)
                 self.save()
@@ -895,13 +900,15 @@ class CandidateProtocolTests(unittest.TestCase):
                 self.save()
 
     def test_core_verification_requires_the_manifests_ci_run_green(self):
+        """...or red only in rows Meta does not depend on: a red Meta row
+        fails the published-release check."""
         self.promote_core()
         os.environ.update(RELEASE_MODE="existing", ARTIFACT_SELECTION="")
         self.command("verify-published")
-        self.state["api"][helper.repo_endpoint(f"actions/runs/{CI}")].update(conclusion="failure")
-        self.save()
+        self.red_ci({"Main unit tests (meta)": "meta"})
         _, error = self.command("verify-published", success=False)
-        self.assertIn("not completed-success", error)
+        self.assertIn("does not count for Meta", error)
+        self.assertIn("meta depends on job Main unit tests (meta)", error)
 
     def test_assets_outside_the_tier_file_names_fail_verification(self):
         self.promote_core()
@@ -1290,16 +1297,22 @@ class CandidateProtocolTests(unittest.TestCase):
 
     def test_collection_refuses_rather_than_waits_while_main_ci_is_not_green(self):
         """Builds start right after the merge, so collection is where main CI
-        must already be green; an unfinished run is refused at once."""
+        must already be green (or red only in rows Meta does not depend on,
+        which its attestation shows); an unfinished run is refused at once,
+        and so is a failed run without an attestation."""
         endpoint = helper.repo_endpoint(f"actions/runs/{CI}")
-        for status, conclusion in (("in_progress", None), ("queued", None), ("completed", "failure")):
+        listing = helper.repo_endpoint(f"actions/runs/{CI}/artifacts?name=meerkat-ci-attestation-{SHA}-1&per_page=100")
+        self.state["api"][listing] = [{"artifacts": [], "total_count": 0}]
+        for status, conclusion, reason in (("in_progress", None, "not completed-success"),
+                                           ("queued", None, "not completed-success"),
+                                           ("completed", "failure", "exact-tree attestation")):
             with self.subTest(status=status, conclusion=conclusion):
                 self.state["api"][endpoint].update(status=status, conclusion=conclusion)
                 self.state["calls"] = []
                 self.save()
                 _, error = self.command("collect", "--output-dir", str(self.root / f"refused-{status}"),
                                         "--ci-run-id", str(CI), "--ci-run-attempt", "1", success=False)
-                self.assertIn("not completed-success", error)
+                self.assertIn(reason, error)
                 reads = [c for c in self.state["calls"] if c["args"][:2] == ["api", endpoint]]
                 self.assertEqual(len(reads), 1, "collection polled main CI instead of refusing")
                 self.assertFalse(any("/zip" in c["args"][1] for c in self.state["calls"] if c["args"][0] == "api"))

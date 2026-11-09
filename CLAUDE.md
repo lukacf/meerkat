@@ -712,7 +712,7 @@ and its CI must be green before a release tag (`require_ci_green`):
   took about 20 minutes. On a push or dispatch `example-web` gets 50 minutes,
   `integration` 70 and `mcp-confinement-positive` 50 (a pull request keeps
   25, 30 and 40), `feature-check` 60, `closure-check` 90, `clippy` and
-  `closure-tests` 120 (a pull request's Clippy 60) and `main-unit` 150:
+  `closure-tests` 120 (a pull request's Clippy 90) and `main-unit` 150:
   caps sized from cold runs after a meerkat-core change or a release
   version bump, which recompiles every workspace crate.
 - `push: main` only (no budget): `main-unit` over the whole workspace (the

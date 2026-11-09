@@ -35,6 +35,16 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat`: `member_tool_grant_applies`, whether a grant to a mob member
+  identity applies to the member's running build (a grant's `applies`), and
+  `wire_member_tool_grant_gate`, the member's gate as a grant list answers
+  it (`gate`). `tool_grants/grant` and `tool_grants/list` answer through
+  them, as Meta's `meta/tool_grants/grant` and `meta/tool_grants/list` now
+  do, so every grant surface answers both the same way. Core's answers do
+  not change.
+
 ### Fixed
 
 - `meerkat-runtime`: a run whose operation records an authorization audit

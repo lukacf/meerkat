@@ -5713,6 +5713,68 @@ mod tests {
         );
     }
 
+    /// A fallback harvest whose attempt ran and failed, and whose next
+    /// attempt the budget then does not admit within its wait, keeps one
+    /// record that says both: the failed attempt counts, and the error names
+    /// its failure beside the budget's denial.
+    ///
+    /// RED before the record named that failure: it counted the attempt and
+    /// named only the budget's denial.
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn a_failed_fallback_attempt_then_a_busy_budget_records_both() {
+        let dir = tempfile::tempdir().expect("memory dir");
+        let events = Arc::new(crate::memory::events::CollectingEventSink::new());
+        let (runtime, memory, distiller) = runtime_with_budgeted_memory(
+            dir.path(),
+            Arc::new(BudgetRowSessions {
+                privacy_failures: std::sync::atomic::AtomicUsize::new(1),
+            }),
+            &events,
+        );
+        let _held = distiller
+            .hold_budget()
+            .expect("the budget admits the holder");
+        let identity = AgentIdentity::parse("personal:alpha").expect("identity");
+        let session = SessionId::new();
+
+        runtime
+            .harvest_owed_compaction(
+                &identity,
+                &reset_of(&session),
+                &session.to_string(),
+                &memory,
+                OwedCompaction::Fallback {
+                    failed: None,
+                    published: None,
+                },
+                Owed {
+                    incarnation: "budget-rows",
+                    cursor: 1,
+                },
+                short_budget_limits(),
+            )
+            .await
+            .expect("the harvest is given up and recorded");
+
+        let failures = runtime
+            .lifecycle_effect_failures(0, 16)
+            .await
+            .expect("the recorded failures read");
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let ended = &failures[0];
+        assert_eq!(
+            (ended.cause, ended.attempts),
+            (LifecycleEffectFailureCause::BudgetBusy, 1),
+            "{ended:?}"
+        );
+        assert!(
+            ended.error.contains("the session's labels did not read")
+                && ended.error.contains("did not admit"),
+            "{ended:?}"
+        );
+    }
+
     /// A side effect whose run the realm's background budget admits waits
     /// for it, by default, at most as long as one run of the distiller's
     /// may take within a step (its pre-rotation bound, 15 seconds): the

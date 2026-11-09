@@ -163,9 +163,23 @@ them.
   identity to the runtime id of the incarnation it records), so code that
   builds the state literally must set it. The kernel
   `generated::mob::TransitionId` gains
-  `ResolveMemberDispatchAdmission{AskHost,Inherit,Refused,NoneRequired}`
-  in each of the phases `Running`, `Stopped`, `Completed` and `Destroyed`,
-  and `RecordMemberDispatchAdmissionLineageRunning` and
+  `ResolveMemberDispatchAdmissionAskHostRunning`,
+  `ResolveMemberDispatchAdmissionAskHostStopped`,
+  `ResolveMemberDispatchAdmissionAskHostCompleted`,
+  `ResolveMemberDispatchAdmissionAskHostDestroyed`,
+  `ResolveMemberDispatchAdmissionInheritRunning`,
+  `ResolveMemberDispatchAdmissionInheritStopped`,
+  `ResolveMemberDispatchAdmissionInheritCompleted`,
+  `ResolveMemberDispatchAdmissionInheritDestroyed`,
+  `ResolveMemberDispatchAdmissionRefusedRunning`,
+  `ResolveMemberDispatchAdmissionRefusedStopped`,
+  `ResolveMemberDispatchAdmissionRefusedCompleted`,
+  `ResolveMemberDispatchAdmissionRefusedDestroyed`,
+  `ResolveMemberDispatchAdmissionNoneRequiredRunning`,
+  `ResolveMemberDispatchAdmissionNoneRequiredStopped`,
+  `ResolveMemberDispatchAdmissionNoneRequiredCompleted`,
+  `ResolveMemberDispatchAdmissionNoneRequiredDestroyed`,
+  `RecordMemberDispatchAdmissionLineageRunning` and
   `RecordMemberDispatchAdmissionLineageStopped`. The enums
   `MemberDispatchAdmissionLineage`, `MemberDispatchAdmissionHostAnswer` and
   `MemberDispatchAdmissionVerdict` are new. Every new variant is appended
@@ -4901,6 +4915,15 @@ them.
   together.
 
 ### Known limitations
+
+- `meerkat-meta`: the harvest of a rotated, reset or retired session's
+  compactions into agent memory competes with other background memory
+  work for the agent memory background budget, which admits one task at
+  a time. A harvest that finds the budget busy at each of its three
+  attempts ends as a failed lifecycle effect ("budget denied: concurrency
+  ceiling reached"), and that session's compactions are not harvested
+  into memory. Several identities reset or rotated at once make this
+  likely; resetting or rotating them one at a time makes it less likely.
 
 - When an identity ends, its grants end with the grants of the session the
   mob holds for it then, but not those of an archived session the mob no

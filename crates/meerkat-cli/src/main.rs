@@ -2567,7 +2567,11 @@ enum AuthCommands {
     /// List auth profiles + backends + bindings for one realm.
     Profiles,
 
-    /// Inspect a single auth profile.
+    /// Inspect a single auth profile
+    ///
+    /// Prints its id, provider, auth method and credential source kind as
+    /// JSON. Credential values (an inline secret, a credential command's
+    /// arguments or environment values) are never printed.
     Profile {
         /// Auth profile id.
         profile_id: String,
@@ -6589,11 +6593,12 @@ async fn handle_auth_command(
                 .map_err(|e| anyhow::anyhow!("Realm config invalid: {e}"))?;
             match realm_set.auth_profiles.get(&profile_id) {
                 Some(profile) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(profile)
-                            .unwrap_or_else(|_| "<serialize error>".into())
-                    );
+                    // The `auth_profile` projection `auth/profile/get` returns:
+                    // what the profile is, never its credential material (an
+                    // inline secret, a credential command's arguments or env
+                    // values).
+                    let wire = meerkat_contracts::WireAuthProfile::from(profile);
+                    println!("{}", serde_json::to_string_pretty(&wire)?);
                 }
                 None => {
                     anyhow::bail!(

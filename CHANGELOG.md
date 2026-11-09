@@ -35,6 +35,16 @@ them.
 
 ## [Unreleased]
 
+### Security
+
+- `rkat`: `rkat auth profile <PROFILE_ID>` printed the whole auth profile, so
+  the secret of an `inline_secret` credential source, and the arguments and
+  environment values of a `command` source, reached its output and the
+  transcript of anything that ran it. It now prints the profile's `id`,
+  `provider`, `auth_method` and `source_kind`, the `auth_profile` shape
+  JSON-RPC `auth/profile/get` returns, and never a credential value.
+  Affects 0.6.0 through 0.9.11.
+
 ## [0.9.11] - 2026-11-09
 
 ### Highlights

@@ -9331,6 +9331,27 @@ mod tests {
                 .expect("the probe channel stays open")
         }
 
+        /// [`probe`] through the door an identity entry's turn takes: a
+        /// `mob/turn_start` on the rows' owner connection. External work
+        /// (`mob/member_send`) does not reach an identity entry.
+        async fn probe_entry(rig: &mut Rig, mob_id: &str, identity: &str) -> Probed {
+            ok(
+                rig,
+                "mob/turn_start",
+                serde_json::json!({
+                    "mob_id": mob_id,
+                    "agent_identity": identity,
+                    "prompt": "call shell",
+                }),
+                "the member takes a turn",
+            )
+            .await;
+            tokio::time::timeout(PROBE_BOUND, rig.probes.recv())
+                .await
+                .expect("the member's turn calls shell within the bound")
+                .expect("the probe channel stays open")
+        }
+
         fn identity_subject(mob_id: &str, identity: &str) -> serde_json::Value {
             serde_json::json!({"kind": "identity", "mob_id": mob_id, "identity": identity})
         }
@@ -10172,7 +10193,7 @@ mod tests {
             let mut grants = Vec::new();
             for identity in ["worker-1", "entry-1"] {
                 let grant = grant_identity_shell(&rig, "reset-grants", identity, 600_000).await;
-                let admitted = probe(&mut rig, "reset-grants", identity).await;
+                let admitted = probe_entry(&mut rig, "reset-grants", identity).await;
                 assert_eq!(
                     admitted.grant_refusal(),
                     None,
@@ -10199,7 +10220,7 @@ mod tests {
                     all[0]["status"], "revoked",
                     "the reset ended {identity}'s grant: {all:?}"
                 );
-                let declared_again = probe(&mut rig, "reset-grants", identity).await;
+                let declared_again = probe_entry(&mut rig, "reset-grants", identity).await;
                 assert_eq!(
                     declared_again.grant_refusal(),
                     Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
@@ -10756,7 +10777,7 @@ mod tests {
             let session_id = member_session(&rig, "unlist-grants", "entry-1").await;
             let identity_grant =
                 grant_identity_shell(&rig, "unlist-grants", "entry-1", 600_000).await;
-            let admitted = probe(&mut rig, "unlist-grants", "entry-1").await;
+            let admitted = probe_entry(&mut rig, "unlist-grants", "entry-1").await;
             assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
             // The dormant seat's session exists once its first turn built it.
             let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
@@ -10804,7 +10825,7 @@ mod tests {
                 session_id,
                 "the name listed again is seated on its own archived session"
             );
-            let listed_again = probe(&mut rig, "unlist-grants", "entry-1").await;
+            let listed_again = probe_entry(&mut rig, "unlist-grants", "entry-1").await;
             assert_eq!(
                 listed_again.grant_refusal(),
                 Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
@@ -10823,7 +10844,7 @@ mod tests {
             let session_id = member_session(&rig, "seal-grants", "entry-1").await;
             let identity_grant =
                 grant_identity_shell(&rig, "seal-grants", "entry-1", 600_000).await;
-            let admitted = probe(&mut rig, "seal-grants", "entry-1").await;
+            let admitted = probe_entry(&mut rig, "seal-grants", "entry-1").await;
             assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
             // The dormant seat's session exists once its first turn built it.
             let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;
@@ -10861,7 +10882,7 @@ mod tests {
             );
 
             declare_entry(&rig, "seal-grants", "entry-1").await;
-            let listed_again = probe(&mut rig, "seal-grants", "entry-1").await;
+            let listed_again = probe_entry(&mut rig, "seal-grants", "entry-1").await;
             assert_eq!(
                 listed_again.grant_refusal(),
                 Some(meerkat_core::tool_grant::TOOL_GRANT_REQUIRED_CODE),
@@ -10881,7 +10902,7 @@ mod tests {
             create_mob(&rig, "adopt-grants", shell_gated_role()).await;
             declare_entry(&rig, "adopt-grants", "entry-1").await;
             let grant = grant_identity_shell(&rig, "adopt-grants", "entry-1", 600_000).await;
-            let admitted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            let admitted = probe_entry(&mut rig, "adopt-grants", "entry-1").await;
             assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
 
             adopt_identity(&rig, "adopt-grants", "entry-1", None).await;
@@ -10899,7 +10920,7 @@ mod tests {
             assert_eq!(listed.len(), 1, "the identity keeps its grant: {listed:?}");
             assert_eq!(listed[0]["grant_id"], grant["grant_id"], "{listed:?}");
             assert_eq!(listed[0]["status"], "active", "{listed:?}");
-            let adopted = probe(&mut rig, "adopt-grants", "entry-1").await;
+            let adopted = probe_entry(&mut rig, "adopt-grants", "entry-1").await;
             assert_eq!(
                 adopted.grant_refusal(),
                 None,
@@ -11129,7 +11150,7 @@ mod tests {
             create_mob(&rig, "reset-retry", shell_gated_role()).await;
             declare_entry(&rig, "reset-retry", "entry-1").await;
             let grant = grant_identity_shell(&rig, "reset-retry", "entry-1", 600_000).await;
-            let admitted = probe(&mut rig, "reset-retry", "entry-1").await;
+            let admitted = probe_entry(&mut rig, "reset-retry", "entry-1").await;
             assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
             let reset = serde_json::json!({"mob_id": "reset-retry", "action": "reset"});
 
@@ -11186,7 +11207,7 @@ mod tests {
             let session_id = member_session(&rig, "reset-sessions", "entry-1").await;
             let identity_grant =
                 grant_identity_shell(&rig, "reset-sessions", "entry-1", 600_000).await;
-            let admitted = probe(&mut rig, "reset-sessions", "entry-1").await;
+            let admitted = probe_entry(&mut rig, "reset-sessions", "entry-1").await;
             assert_eq!(admitted.grant_refusal(), None, "{admitted:?}");
             // The dormant seat's session exists once its first turn built it.
             let session_grant = grant_session_shell(&rig, &session_id, 600_000).await;

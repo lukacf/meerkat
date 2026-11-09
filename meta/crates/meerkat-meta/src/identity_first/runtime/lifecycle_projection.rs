@@ -5265,7 +5265,7 @@ mod tests {
         let limits = budgeted_limits();
         let budget = crate::memory::BackgroundBudget::new(crate::memory::BackgroundBudgetConfig {
             runs_per_window: 10,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
             max_concurrent: 1,
         });
         let handed = StdMutex::new(Vec::new());
@@ -5476,6 +5476,7 @@ mod tests {
     /// store, and agent memory over a store in `dir` whose distiller reads
     /// `sessions` and emits its timeline events to `events`; and that
     /// distiller.
+    #[allow(clippy::expect_used)]
     fn runtime_with_budgeted_memory(
         dir: &std::path::Path,
         sessions: Arc<BudgetRowSessions>,
@@ -5556,6 +5557,7 @@ mod tests {
     /// RED before a harvest given up reported its denial: no denial of the
     /// budget reached the timeline.
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn a_harvest_given_up_on_a_busy_budget_reports_the_denial() {
         let dir = tempfile::tempdir().expect("memory dir");
         let events = Arc::new(crate::memory::events::CollectingEventSink::new());
@@ -5613,6 +5615,7 @@ mod tests {
     ///
     /// RED before such a harvest reported its denial: it was only logged.
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn a_handed_back_harvest_the_budget_does_not_admit_reports_the_denial() {
         let dir = tempfile::tempdir().expect("memory dir");
         let events = Arc::new(crate::memory::events::CollectingEventSink::new());
@@ -5653,6 +5656,7 @@ mod tests {
     /// RED before the record counted the batch: the fallback's record
     /// replaced the batch's failure and counted no attempt.
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn a_failed_batch_then_a_fallback_the_budget_keeps_busy_records_both() {
         let dir = tempfile::tempdir().expect("memory dir");
         let events = Arc::new(crate::memory::events::CollectingEventSink::new());

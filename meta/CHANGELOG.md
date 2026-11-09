@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- For Rust hosts that compose a gateway: the console profile's plan takes
+  a metadata store as the stdio profile's does
+  (`GatewayRuntimeBootstrapPlan::with_persistent_metadata`), and
+  `gateway_wiring::keep_identity_records_in_runtime_metadata` keeps an
+  identity runtime's records in its runtime's metadata store, as both stock
+  gateways and `UnifiedRuntimeBuilder` keep them.
+
 ### Fixed
 
 - `meta_gateway` launched with `persistent_sessions: true` keeps its

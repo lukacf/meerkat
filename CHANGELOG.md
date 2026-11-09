@@ -4925,6 +4925,22 @@ them.
   into memory. Several identities reset or rotated at once make this
   likely; resetting or rotating them one at a time makes it less likely.
 
+- `meerkat-meta`: the distillation of the session that a reset, role move,
+  rotation or unlisting ends tries the same budget once. When the budget is
+  busy at that moment, the distillation is skipped. It leaves no failed
+  lifecycle effect and no `lifecycle_effect_failed` event, only a warning
+  log line ("agent memory background budget: run skipped") and a
+  `memory.budget.denied` timeline event. The budget also admits at most 12
+  background memory runs per realm per hour by default
+  (`runtime_options.agent_memory.distiller.runs_per_hour`, 1 to 240), so a
+  burst of resets or rotations can use it up. Until its oldest runs are an
+  hour old, later harvests fail as above ("window budget exhausted") and
+  later distillations are skipped. Raising `runs_per_hour` lifts only the
+  hourly cap, not the one-task-at-a-time limit, which is fixed. Resetting or
+  rotating identities one at a time avoids most of both, though a
+  background memory run of a live member can still hold the budget at that
+  moment.
+
 - When an identity ends, its grants end with the grants of the session the
   mob holds for it then, but not those of an archived session the mob no
   longer holds for it: the old session of a respawn abandoned after its old

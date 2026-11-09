@@ -473,20 +473,15 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertEqual(legs, list(range(len(legs))))
         self.assertIn("\n      fail-fast: false\n", shard)
         self.assertIn(f"        run: python installer/tests/installer_shards.py ${{{{ matrix.shard }}}} {len(legs)} "
-                      "installer-shard-files.txt installer-shard-startup.txt\n", shard)
+                      "installer-shard-files.txt\n", shard)
         self.assertIn("        run: python -m pytest -vv --tb=short --durations=20 --junitxml=installer-pytest.xml "
                       "$(cat installer-shard-files.txt)\n", shard)
-        startup = shard.split("      - name: Application startup checks with this checkout's Meta SDK\n", 1)[1]
-        startup = startup.split("\n      - ", 1)[0]
-        self.assertIn("          PYTHONPATH: sdk/python:installer\n", startup)
-        self.assertIn("        if: ${{ !cancelled() }}\n", startup)
-        self.assertIn("python -m pytest -q --tb=short $(cat installer-shard-startup.txt)", startup)
         self.assertIn("      - name: Isolated controller subprocess checks\n        if: matrix.shard == 0\n", shard)
         self.assertNotIn("--maxfail", source)
-        # Each shard retains its run lists; backend fails unless together they
-        # ran every test file once and reran every listed file once.
+        # Each shard retains its run list; backend fails unless together they
+        # ran every test file once.
         self.assertIn("          name: installer-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}\n"
-                      "          path: |\n            meta/installer-shard-files.txt\n            meta/installer-shard-startup.txt\n"
+                      "          path: meta/installer-shard-files.txt\n"
                       "          if-no-files-found: error\n", shard)
         steps = [line.strip() for line in backend.splitlines() if line.startswith("      - ")]
         self.assertEqual(steps[:4], ["- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
@@ -517,20 +512,17 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertNotEqual(subprocess.run([sys.executable, "-c", script], cwd=folder, capture_output=True,
                                            text=True).returncode, 0)
 
-    def test_the_shard_plan_runs_every_file_and_every_rerun_exactly_once_and_balances_them(self):
+    def test_the_shard_plan_runs_every_file_exactly_once_and_balances_them(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         files = shards.test_files()
         self.assertGreater(len(files), 100)
         weighted = {name: float((index * 37) % 101) for index, name in enumerate(files)}
-        reruns = set(files[::5])
-        plan = shards.plan(weighted, 12, reruns)
-        ran = [name for mine, _ in plan for name in mine]
-        again = [name for _, rerun in plan for name in rerun]
+        plan = shards.plan(weighted, 12)
+        ran = [name for mine in plan for name in mine]
         self.assertEqual(sorted(ran), files)
-        self.assertEqual(sorted(again), sorted(reruns))
-        loads = [sum(weighted[name] for name in mine + rerun) for mine, rerun in plan]
+        loads = [sum(weighted[name] for name in mine) for mine in plan]
         self.assertLessEqual(max(loads) - min(loads), max(weighted.values()))
-        self.assertEqual(shards.plan(weighted, 12, reruns), plan)
+        self.assertEqual(shards.plan(weighted, 12), plan)
 
     def test_weights_use_recorded_seconds_and_fall_back_to_items_at_the_median_rate(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
@@ -541,10 +533,9 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertEqual(weighted, {"test_a.py": 20.0, "test_b.py": 40.0, "test_c.py": 6.0, "test_new.py": 6.0,
                                     "test_empty.py": 0.0})
         self.assertEqual(shards.weights({"test_x.py": 5}, {}), {"test_x.py": 5.0})
-        # The rerun of b is its own run of 40 s, so b's two runs land on different shards.
-        self.assertEqual(shards.plan(weighted, 2, {"test_b.py"}),
-                         [(["test_a.py", "test_b.py"], []),
-                          (["test_c.py", "test_empty.py", "test_new.py"], ["test_b.py"])])
+        # Heaviest first, each file goes to the shard with the least load so far.
+        self.assertEqual(shards.plan(weighted, 2),
+                         [["test_b.py"], ["test_a.py", "test_c.py", "test_empty.py", "test_new.py"]])
         folder = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, folder)
         (folder / "seconds.json").write_text('{"test_a.py": "slow"}')
@@ -563,7 +554,7 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertGreater(len(committed), 100)
         self.assertTrue(all(re.fullmatch(r"test_[A-Za-z0-9_]+\.py", name) for name in committed))
 
-    def test_the_gate_check_fails_unless_the_shards_ran_every_file_once_and_reran_every_listed_file_once(self):
+    def test_the_gate_check_fails_unless_the_shards_ran_every_file_once(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         files = shards.test_files()
         output = "".join(f"tests/{name}: {index % 7 + 1}\n" for index, name in enumerate(files))
@@ -574,8 +565,7 @@ class WorkflowShapeTests(unittest.TestCase):
             folder.mkdir()
             with mock.patch.object(shards.subprocess, "run",
                                    return_value=subprocess.CompletedProcess([], 0, output, "")):
-                shards.main([str(shard), "12", str(folder / "installer-shard-files.txt"),
-                             str(folder / "installer-shard-startup.txt")])
+                shards.main([str(shard), "12", str(folder / "installer-shard-files.txt")])
         with contextlib.redirect_stdout(io.StringIO()) as printed:
             shards.main(["verify", "12", str(plans)])
         self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", printed.getvalue())
@@ -603,9 +593,10 @@ class WorkflowShapeTests(unittest.TestCase):
                       .removeprefix("installer/tests/"), dropped)
         twice = (plans / "installer-shard-plan-4-1/installer-shard-files.txt").read_text()
         self.assertIn("ran more than once", refused(edit("installer-shard-files.txt", 5, lambda text: text + first(twice))))
-        self.assertIn("reran nowhere", refused(edit("installer-shard-startup.txt", next(
-            shard for shard in range(12) if (plans / f"installer-shard-plan-{shard}-1/installer-shard-startup.txt").read_text()),
-            lambda text: "".join(text.splitlines(keepends=True)[1:]))))
+        self.assertIn("ran but is not expected", refused(edit("installer-shard-files.txt", 6,
+            lambda text: text + "installer/tests/test_not_in_this_tree.py\n")))
+        self.assertIn("has no installer-shard-files.txt", refused(
+            lambda copy: (copy / "installer-shard-plan-2-1" / "installer-shard-files.txt").unlink()))
         self.assertIn("11 shard plans instead of 12", refused(lambda copy: shutil.rmtree(copy / "installer-shard-plan-7-1")))
         # A test file at any depth counts: one in a subdirectory ran nowhere.
         with self.assertRaises(SystemExit) as hidden:
@@ -619,7 +610,7 @@ class WorkflowShapeTests(unittest.TestCase):
         files = shards.test_files()
         nested = subprocess.CompletedProcess([], 0, f"tests/{files[0]}: 3\ntests/sub/test_nested.py: 2\n", "")
         with mock.patch.object(shards.subprocess, "run", return_value=nested), self.assertRaises(SystemExit) as refused:
-            shards.main(["0", "12", str(folder / "files.txt"), str(folder / "startup.txt")])
+            shards.main(["0", "12", str(folder / "files.txt")])
         self.assertIn("tests/sub/test_nested.py: 2", str(refused.exception))
         self.assertFalse((folder / "files.txt").exists())
 
@@ -630,54 +621,30 @@ class WorkflowShapeTests(unittest.TestCase):
         failed = subprocess.CompletedProcess([], 2, "ERROR tests/test_broken.py\n", "")
         with mock.patch.object(shards.subprocess, "run", return_value=failed), \
                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
-            shards.main(["0", "12", str(folder / "files.txt"), str(folder / "startup.txt")])
+            shards.main(["0", "12", str(folder / "files.txt")])
         self.assertIn("collection failed (exit 2)", str(refused.exception))
-        self.assertFalse((folder / "files.txt").exists() or (folder / "startup.txt").exists())
+        self.assertFalse((folder / "files.txt").exists())
         listed = subprocess.CompletedProcess([], 0, "tests/test_unknown_elsewhere.py: 3\n", "")
         with mock.patch.object(shards.subprocess, "run", return_value=listed), self.assertRaises(SystemExit):
-            shards.main(["0", "12", str(folder / "files.txt"), str(folder / "startup.txt")])
+            shards.main(["0", "12", str(folder / "files.txt")])
 
-    def test_the_shards_rerun_every_listed_startup_file_once_with_the_checkout_sdk(self):
+    def test_the_shards_run_every_test_file_once(self):
         shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         files = shards.test_files()
         output = "".join(f"tests/{name}: {index % 7 + 1}\n" for index, name in enumerate(files))
         folder = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, folder)
-        startup = shards.startup_files()
-        seen, rerun = [], []
+        seen = []
         for shard in range(12):
             with mock.patch.object(shards.subprocess, "run",
                                    return_value=subprocess.CompletedProcess([], 0, output, "")):
-                shards.main([str(shard), "12", str(folder / "files.txt"), str(folder / "startup.txt")])
+                shards.main([str(shard), "12", str(folder / "files.txt")])
             mine = (folder / "files.txt").read_text().splitlines()
-            again = (folder / "startup.txt").read_text().splitlines()
-            self.assertTrue(all(line.startswith("installer/tests/test_") for line in mine + again))
+            self.assertTrue(all(line.startswith("installer/tests/test_") for line in mine))
             seen += mine
-            rerun += again
         self.assertEqual(sorted(seen), [f"installer/tests/{name}" for name in files])
-        self.assertEqual(sorted(rerun), sorted(f"installer/tests/{name}" for name in startup))
-
-    def test_the_checkout_sdk_startup_list_names_every_startup_test(self):
-        """The list holds exactly the test files matching the startup pattern,
-        then five named extras the pattern misses, each with its reason."""
-        pattern = re.compile(r"templates_v2/app\.py|launch_host|application_startup")
-        tests = ROOT / "installer/tests"
-        matching = sorted(path.name for path in tests.glob("test_*.py") if pattern.search(path.read_text()))
-        listed = (tests / "checkout_sdk_startup_tests.txt").read_text().splitlines()
-        marker = listed.index("# Extras.")
-        main = [line for line in listed[:marker] if line and not line.startswith("#")]
-        extras = {}
-        for line in listed[marker + 1:]:
-            name, _, reason = line.partition("  # ")
-            extras[name] = reason
-        self.assertEqual(main, matching, "a test file matching the startup pattern is missing from the list, "
-                                         "or a listed one no longer matches")
-        self.assertEqual(sorted(extras), ["test_helperless_application_source.py", "test_implementation_fresh_build.py", "test_native_callback_member_contract.py", "test_native_console_login.py",
-                                          "test_product_start_entry.py"])
-        for name, reason in extras.items():
-            self.assertTrue((tests / name).is_file(), name)
-            self.assertGreater(len(reason.split()), 3, name)
-            self.assertIsNone(pattern.search((tests / name).read_text()), f"{name} matches; list it with the others")
+        with self.assertRaises(SystemExit):
+            shards.main(["0", "12", str(folder / "files.txt"), str(folder / "startup.txt")])
 
     def test_single_line_run_values_stay_plain_yaml_scalars(self):
         """A plain scalar cannot hold ": " or " #", nor start with a YAML

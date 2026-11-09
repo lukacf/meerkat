@@ -182,31 +182,17 @@ jobs:
           installer/tests/test_remote_interface_bundle.py
           --tb=short
       - name: Select this shard's test files
-        run: python installer/tests/installer_shards.py ${{ matrix.shard }} 12 installer-shard-files.txt installer-shard-startup.txt
+        run: python installer/tests/installer_shards.py ${{ matrix.shard }} 12 installer-shard-files.txt
       # The backend job checks these lists of every shard together.
       - name: Retain this shard's plan
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: installer-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: |
-            meta/installer-shard-files.txt
-            meta/installer-shard-startup.txt
+          path: meta/installer-shard-files.txt
           if-no-files-found: error
       # Every failure is reported: no failure limit stops a shard early.
       - name: Backend regression tests
         run: python -m pytest -vv --tb=short --durations=20 --junitxml=installer-pytest.xml $(cat installer-shard-files.txt)
-      # Application startup code runs against the selected product's Meta SDK,
-      # not the Guide SDK installed above. Rerun this shard's share of
-      # installer/tests/checkout_sdk_startup_tests.txt with this checkout's SDK,
-      # also after a failure above, so that every failure is reported.
-      - name: Application startup checks with this checkout's Meta SDK
-        if: ${{ !cancelled() }}
-        env:
-          PYTHONPATH: sdk/python:installer
-        run: |
-          if test -s installer-shard-startup.txt; then
-            python -m pytest -q --tb=short $(cat installer-shard-startup.txt)
-          fi
       # The backend job binds the versions every shard recorded.
       - name: Record the toolchain
         run: |
@@ -240,7 +226,7 @@ jobs:
           pattern: installer-shard-plan-*-${{ github.run_attempt }}
           path: meta/plans
       # Each shard planned on its own. Fail unless together they ran every
-      # installer test file once and reran every listed startup file once.
+      # installer test file once.
       - name: Check that the shards ran every test file once
         run: python3 installer/tests/installer_shards.py verify 12 plans
       - name: Collect the shards' toolchains

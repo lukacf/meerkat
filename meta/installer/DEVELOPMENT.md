@@ -105,15 +105,13 @@ Preserve the failure output and XML before making a correction. To run one
 shard's files as the workflow does:
 
 ```bash
-installer/.venv/bin/python installer/tests/installer_shards.py 3 12 shard-files.txt shard-startup.txt
+installer/.venv/bin/python installer/tests/installer_shards.py 3 12 shard-files.txt
 installer/.venv/bin/python -m pytest -vv --tb=short $(cat shard-files.txt)
 ```
 
-The shards also rerun each file listed in
-`installer/tests/checkout_sdk_startup_tests.txt` once, with
-`PYTHONPATH=sdk/python:installer`, so the startup code imports this checkout's
-Meta SDK rather than the Guide SDK: `$(cat shard-startup.txt)` holds a shard's
-share.
+The application startup code under test imports the same Meta SDK as the rest
+of the suite, this commit's `sdk/python`, so no file needs a second run with
+another SDK.
 
 Generated-host wiring checks use the installed Meta SDK, this commit's
 `sdk/python`, without a private source intake. Toolkit-specific doctor checks additionally require the selected
@@ -131,8 +129,9 @@ The animation-author tests use the selected Meta dispatcher's typed image
 content and native member/session contract with inert runtime fixtures. They do
 not establish rendered visual quality or a useful installed result. SDK
 byte-installation tests forbid SDK imports during installation/readback, while
-preserving genuine SDK modules already imported by the host. Do not replace the
-selected SDK with the current repository source merely to make these cases pass.
+preserving genuine SDK modules already imported by the host. Do not put
+`sdk/python` on the import path in place of the installed SDK merely to
+satisfy these cases.
 
 The Meta SDK the Guide runs accepts the public `spawn_helper(transport_timeout=...)`
 option. Forge passes the time remaining in the existing total 180-second visual

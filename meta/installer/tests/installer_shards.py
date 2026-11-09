@@ -1,11 +1,9 @@
 """Split the Forge backend suite into CI shards balanced on expected time.
 
 Every shard of the installer workflow computes the same plan. Each installer
-test file is one run, and each file checkout_sdk_startup_tests.txt lists is
-one more run with this checkout's Meta SDK. Heaviest first, each run goes to the shard with the
+test file is one run. Heaviest first, each run goes to the shard with the
 least expected time so far (ties go to the lower shard, equal runs in name
-order, a file's own run before its rerun), so the shards together run every
-collected test file exactly once and rerun every listed file exactly once. A
+order), so the shards together run every collected test file exactly once. A
 run weighs the seconds a hosted run recorded for its file in
 installer_shard_seconds.json, or, without a record, the file's collected item
 count at the recorded median seconds per item. Records only steer the
@@ -14,13 +12,11 @@ a collected file no plan can place, fails every shard: no shard runs a suite
 that silently lost a file. Because each shard plans on its own, the backend
 job then checks the shards' run lists together (verify).
 
-Usage: installer_shards.py SHARD COUNT FILES_OUT STARTUP_OUT writes the test
-files this shard runs to FILES_OUT and the listed files it reruns with this
-checkout's Meta SDK to STARTUP_OUT. installer_shards.py verify COUNT PLANS fails
-unless the COUNT shards' run lists, one folder each under PLANS, ran every
-installer test file once and reran every listed file once.
-installer_shards.py record JUNIT... rewrites installer_shard_seconds.json from a
-complete run's junit files.
+Usage: installer_shards.py SHARD COUNT FILES_OUT writes the test files this
+shard runs to FILES_OUT. installer_shards.py verify COUNT PLANS fails unless
+the COUNT shards' run lists, one folder each under PLANS, ran every installer
+test file once. installer_shards.py record JUNIT... rewrites
+installer_shard_seconds.json from a complete run's junit files.
 """
 from __future__ import annotations
 
@@ -33,7 +29,6 @@ import sys
 
 TESTS = Path(__file__).resolve().parent
 INSTALLER = TESTS.parent
-STARTUP_LIST = TESTS / "checkout_sdk_startup_tests.txt"
 SECONDS = TESTS / "installer_shard_seconds.json"
 COLLECTED = re.compile(r"tests/(test_[A-Za-z0-9_]+\.py): ([0-9]+)")
 COLLECTED_FILE = re.compile(r"\S+\.py: [0-9]+")
@@ -88,16 +83,15 @@ def weights(counts, recorded=None):
     return {name: recorded[name] if name in recorded else items * rate for name, items in counts.items()}
 
 
-def plan(weighted, shards, reruns=()):
-    """Each shard's (files, reruns): every file once, every rerun once, balanced."""
-    runs = [(weight, name, False) for name, weight in weighted.items()]
-    runs += [(weighted[name], name, True) for name in reruns if name in weighted]
-    loads, assigned = [0] * shards, [([], []) for _ in range(shards)]
-    for weight, name, rerun in sorted(runs, key=lambda run: (-run[0], run[1], run[2])):
+def plan(weighted, shards):
+    """Each shard's files: every file once, balanced."""
+    loads, assigned = [0] * shards, [[] for _ in range(shards)]
+    for weight, name in sorted(((weight, name) for name, weight in weighted.items()),
+                               key=lambda run: (-run[0], run[1])):
         shard = min(range(shards), key=lambda index: (loads[index], index))
-        assigned[shard][rerun].append(name)
+        assigned[shard].append(name)
         loads[shard] += weight
-    return [(sorted(files), sorted(again)) for files, again in assigned]
+    return [sorted(files) for files in assigned]
 
 
 def record(junit_files, path=SECONDS):
@@ -114,37 +108,26 @@ def record(junit_files, path=SECONDS):
     path.write_text(json.dumps({name: round(value, 1) for name, value in sorted(seconds.items())}, indent=1) + "\n")
 
 
-def verify(shards, plans, expected_files=None, expected_reruns=None):
-    """Fail unless the shards' run lists ran every test file once and reran every listed file once."""
+def verify(shards, plans, expected_files=None):
+    """Fail unless the shards' run lists ran every test file once."""
     expected_files = tracked_test_files() if expected_files is None else expected_files
-    expected_reruns = startup_files() if expected_reruns is None else expected_reruns
     folders = sorted(path for path in Path(plans).iterdir() if path.is_dir())
     problems = [] if len(folders) == shards else [f"{len(folders)} shard plans instead of {shards}"]
-    ran, reran = Counter(), Counter()
+    ran = Counter()
+    listing = "installer-shard-files.txt"
     for folder in folders:
-        for runs, name in ((ran, "installer-shard-files.txt"), (reran, "installer-shard-startup.txt")):
-            if not (folder / name).is_file():
-                problems.append(f"{folder.name} has no {name}")
-                continue
-            runs.update(line.removeprefix("installer/tests/") for line in (folder / name).read_text().splitlines())
-    for verb, runs, expected in (("ran", ran, expected_files), ("reran", reran, expected_reruns)):
-        for kind, names in ((f"{verb} nowhere", sorted(set(expected) - set(runs))),
-                            (f"{verb} more than once", sorted(name for name, count in runs.items() if count > 1)),
-                            (f"{verb} but is not expected", sorted(set(runs) - set(expected)))):
-            if names:
-                problems.append(f"{kind}: {', '.join(names)}")
+        if not (folder / listing).is_file():
+            problems.append(f"{folder.name} has no {listing}")
+            continue
+        ran.update(line.removeprefix("installer/tests/") for line in (folder / listing).read_text().splitlines())
+    for kind, names in (("ran nowhere", sorted(set(expected_files) - set(ran))),
+                        ("ran more than once", sorted(name for name, count in ran.items() if count > 1)),
+                        ("ran but is not expected", sorted(set(ran) - set(expected_files)))):
+        if names:
+            problems.append(f"{kind}: {', '.join(names)}")
     if problems:
         raise SystemExit("The shards did not run the suite exactly once. " + "; ".join(problems))
-    print(f"{len(folders)} shards ran {len(ran)} test files once and reran {len(reran)} listed files once.")
-
-
-def startup_files():
-    names = []
-    for line in STARTUP_LIST.read_text().splitlines():
-        entry = line.split("#", 1)[0].strip()
-        if entry:
-            names.append(entry)
-    return names
+    print(f"{len(folders)} shards ran {len(ran)} test files once.")
 
 
 def main(argv):
@@ -152,19 +135,13 @@ def main(argv):
         return record(argv[1:])
     if argv[:1] == ["verify"] and len(argv) == 3:
         return verify(int(argv[1]), argv[2])
-    if len(argv) != 4:
+    if len(argv) != 3:
         raise SystemExit(__doc__)
     shard, shards = int(argv[0]), int(argv[1])
     if not 0 <= shard < shards:
         raise SystemExit(f"Shard {shard} is outside 0..{shards - 1}.")
-    files = test_files()
-    startup = startup_files()
-    unknown = sorted(set(startup) - set(files))
-    if unknown:
-        raise SystemExit(f"{STARTUP_LIST.name} lists missing test files: {', '.join(unknown)}")
-    mine, again = plan(weights(collected_items(files)), shards, set(startup))[shard]
+    mine = plan(weights(collected_items(test_files())), shards)[shard]
     Path(argv[2]).write_text("".join(f"installer/tests/{name}\n" for name in mine))
-    Path(argv[3]).write_text("".join(f"installer/tests/{name}\n" for name in again))
 
 
 if __name__ == "__main__":

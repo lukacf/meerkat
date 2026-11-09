@@ -3700,4 +3700,97 @@ mod tests {
         let body = OpaqueProviderBody::from_value(&v);
         assert_eq!(body.as_value(), v);
     }
+
+    // The Claude effort level above `high` has two spellings: `xhigh`, which
+    // the model catalog advertises, the wire type writes and Anthropic
+    // receives, and `x_high`, which this type writes. Input accepts both.
+
+    #[test]
+    fn claude_effort_reads_the_xhigh_spelling() {
+        let effort: AnthropicEffort = serde_json::from_value(serde_json::json!("xhigh"))
+            .expect("the spelling the catalog and the wire type use reads");
+        assert_eq!(effort, AnthropicEffort::XHigh);
+    }
+
+    /// Pin: the written spelling stays `x_high` (stored sessions, schedule
+    /// keys and the published schemas carry it), and it still reads.
+    #[test]
+    fn claude_effort_keeps_writing_x_high() {
+        assert_eq!(
+            serde_json::to_value(AnthropicEffort::XHigh).expect("serialize"),
+            serde_json::json!("x_high")
+        );
+        let effort: AnthropicEffort =
+            serde_json::from_value(serde_json::json!("x_high")).expect("written spelling reads");
+        assert_eq!(effort, AnthropicEffort::XHigh);
+        assert_eq!(AnthropicEffort::XHigh.as_legacy_str(), "xhigh");
+    }
+
+    /// Pin: the generated schema lists the written spelling only (schemars
+    /// does not enumerate serde aliases), so the published schemas and the
+    /// generated SDK types do not change with the accepted input spelling.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn claude_effort_schema_lists_the_written_spelling() {
+        let schema = serde_json::to_value(schemars::schema_for!(AnthropicEffort)).expect("schema");
+        assert_eq!(
+            schema["enum"],
+            serde_json::json!(["low", "medium", "high", "max", "x_high"])
+        );
+    }
+
+    /// Every level a Claude catalog row can advertise in its `params_schema`
+    /// (`EffortLevel::as_wire_str`) reads as the typed effort.
+    #[test]
+    fn every_catalog_claude_effort_level_reads() {
+        use crate::model_profile::capabilities::EffortLevel;
+        for (level, effort) in [
+            (EffortLevel::Low, AnthropicEffort::Low),
+            (EffortLevel::Medium, AnthropicEffort::Medium),
+            (EffortLevel::High, AnthropicEffort::High),
+            (EffortLevel::Xhigh, AnthropicEffort::XHigh),
+            (EffortLevel::Max, AnthropicEffort::Max),
+        ] {
+            let parsed: AnthropicEffort =
+                serde_json::from_value(serde_json::json!(level.as_wire_str())).unwrap_or_else(
+                    |error| panic!("catalog level {} must read: {error}", level.as_wire_str()),
+                );
+            assert_eq!(parsed, effort);
+            assert_eq!(effort.as_legacy_str(), level.as_wire_str());
+        }
+    }
+
+    /// Session, run and turn params (RPC `session/create` and `turn/start`,
+    /// the CLI's `--params-json`, MCP `meerkat_run`, schedules) read the
+    /// Claude effort in either spelling, in every override form.
+    #[test]
+    fn provider_params_read_claude_xhigh_in_either_spelling() {
+        let xhigh = |params: &ProviderParamsOverride| {
+            matches!(
+                params.provider_tag,
+                Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                    effort: Some(AnthropicEffort::XHigh),
+                    ..
+                }))
+            )
+        };
+        for spelling in ["xhigh", "x_high"] {
+            let params = serde_json::json!({
+                "provider_tag": {"provider": "anthropic", "effort": spelling}
+            });
+            let parsed: ProviderParamsOverride = serde_json::from_value(params.clone())
+                .unwrap_or_else(|error| panic!("params with `{spelling}` must read: {error}"));
+            assert!(xhigh(&parsed), "{spelling}");
+            for turn in [
+                params.clone(),
+                serde_json::json!({"action": "set", "value": params}),
+            ] {
+                let parsed: TurnMetadataOverride<ProviderParamsOverride> =
+                    serde_json::from_value(turn).unwrap_or_else(|error| {
+                        panic!("turn params with `{spelling}` must read: {error}")
+                    });
+                assert!(parsed.as_set().is_some_and(xhigh), "{spelling}");
+            }
+        }
+    }
 }

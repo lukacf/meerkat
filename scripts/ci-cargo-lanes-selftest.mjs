@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { LANE_JOBS } from "./ci-product-evidence.mjs";
 import {
   CI_ROW_STEPS,
   rowStepBindings,
@@ -4073,6 +4074,12 @@ for (const path of [
     for (const [lane, size] of Object.entries(sizes)) {
       assert.equal(lanes[lane].length, size, `${paths}: row_products.${lane} lists every row`);
     }
+    // The CI gate's record joins each job to its row by the job's name, so
+    // no two rows of the plan may render the same name (main_unit and
+    // main_archive_run share the "Main unit tests (...)" template).
+    const rendered = Object.entries(lanes).flatMap(([lane, rows]) => rows.map((row) => LANE_JOBS[lane].name(row)));
+    const repeated = rendered.filter((name, index) => rendered.indexOf(name) !== index);
+    assert.deepEqual(repeated, [], `${paths}: rows of the plan share a job name`);
   }
   // A push runs no downstream Clippy row: the products' closure-check rows
   // type-check them against a changed Core, so those are the downstream

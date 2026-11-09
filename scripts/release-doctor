@@ -323,6 +323,12 @@ else
   bad "A release build job, local action or script names a path a reused prebuild may differ in, so a tag could publish artifacts its own commit would build differently (${non_inputs_contract//$'\n'/; })"
 fi
 
+if closures_contract="$(workflow_contract release-closures)"; then
+  pass "The release binaries and the Web SDK runtime compile no package under another product's root"
+else
+  bad "A release binary or the Web SDK runtime compiles a package under another product's root, which a reused prebuild may differ in (${closures_contract//$'\n'/; })"
+fi
+
 if baseline_contract="$(workflow_contract semver-baseline)"; then
   pass "Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
 else

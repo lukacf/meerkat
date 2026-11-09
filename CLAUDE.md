@@ -929,8 +929,9 @@ the release version); without a complete prebuild it builds as before. So
 does the tag run of a later commit whose changes since the prebuilt one are
 all non-inputs of Core's release artifacts (`scripts/release-prebuild-equivalent`:
 other products' roots except their `Cargo.toml` files, product changelogs, a
-short list of CI-only files; `make release-doctor` checks that no release
-build job, local action or script names such a path): an exact-commit
+short list of CI-only `scripts/ci-*` files; `make release-doctor` checks that
+no release build job, local action or script names such a path, and that the
+release binaries and the Web SDK runtime compile no product package): an exact-commit
 prebuild is still preferred (one still under way is waited for), an earlier
 commit's whose trailing lanes failed is never taken, and the stamps and
 attestations then name the

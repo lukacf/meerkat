@@ -2649,6 +2649,15 @@ PREBUILD_BUILD_JOBS = (
 )
 SCRIPT_REFERENCE = re.compile(r"(?<![A-Za-z0-9_.-])((?:scripts|tools)/[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*)")
 USES_REFERENCE = re.compile(r"\buses:\s*\S*?(\.github/(?:actions|workflows)/[A-Za-z0-9_.+-]+)")
+# A JavaScript or Python module's relative imports (`from "./x.mjs"`,
+# `import("./x.mjs")`, `require("./x")`), resolved against its directory.
+RELATIVE_IMPORT = re.compile(r"""(?:\bfrom\s+|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)["'](\.{1,2}/[^"'\s]+)["']""")
+# `npm run <script>` (or run-script) in a file that changes into a package's
+# directory (`cd <dir>`, `cd "${root}/<dir>"`); `node <file>` in the scripts
+# that package.json runs, resolved against that directory.
+NPM_RUN = re.compile(r"\bnpm\s+run(?:-script)?\s+([A-Za-z0-9:_.-]+)")
+CD_DIRECTORY = re.compile(r"""\bcd\s+["']?(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/)?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)""")
+NODE_SCRIPT = re.compile(r"\bnode\s+((?:\./)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:mjs|cjs|js))\b")
 
 
 def _code(text: str) -> str:
@@ -2667,29 +2676,78 @@ def _prebuild_equivalence():
     return module
 
 
+def _repository_file(path: Path) -> str | None:
+    """`path` relative to REPO_ROOT when it is a file there (an action
+    directory's action.yml for a directory), else None."""
+    if path.is_dir():
+        path = next((path / name for name in ("action.yml", "action.yaml") if (path / name).is_file()), path)
+    try:
+        resolved = path.resolve()
+        label = str(resolved.relative_to(REPO_ROOT.resolve()))
+    except (OSError, ValueError):
+        return None
+    return label if resolved.is_file() else None
+
+
+def _npm_scripts(directory: str, names: list[str]) -> tuple[list[str], list[str]]:
+    """The files the npm scripts `names` of the package in `directory` run
+    with node (following `npm run` inside them), and the package.json."""
+    manifest = REPO_ROOT / directory / "package.json"
+    try:
+        scripts = json.loads(manifest.read_text(encoding="utf-8")).get("scripts", {})
+    except (OSError, ValueError, AttributeError):
+        return [], []
+    files: list[str] = []
+    seen: set[str] = set()
+    pending = list(names)
+    while pending:
+        name = pending.pop()
+        if name in seen or not isinstance(scripts.get(name), str):
+            continue
+        seen.add(name)
+        command = scripts[name]
+        pending.extend(match.group(1) for match in NPM_RUN.finditer(command))
+        files.extend(f"{directory}/{match.group(1).removeprefix('./')}" for match in NODE_SCRIPT.finditer(command))
+    return files, [f"{directory}/package.json"]
+
+
 def _prebuild_build_closure(text: str) -> dict[str, str]:
     """Label -> code of each prebuild build job and of every local action,
-    reusable workflow and repository script it reaches."""
+    reusable workflow and repository file it reaches: the scripts and
+    actions named there, a module's relative imports, and the files the npm
+    scripts a script runs (`cd <package dir>` then `npm run <name>`) run with
+    node, with that package.json; transitively. A Make recipe, a cargo alias
+    or a script reached any other way is not followed."""
     texts = {f"{job} job": _code("\n".join(job_block(text, job))) for job in PREBUILD_BUILD_JOBS}
-    pending = list(texts.values())
+    pending = list(texts)
     while pending:
-        code = pending.pop()
-        references = [match.group(1) for match in SCRIPT_REFERENCE.finditer(code)]
-        references += [match.group(1) for match in USES_REFERENCE.finditer(code)]
+        label = pending.pop()
+        code = texts[label]
+        references = [REPO_ROOT / match.group(1) for match in SCRIPT_REFERENCE.finditer(code)]
+        references += [REPO_ROOT / match.group(1) for match in USES_REFERENCE.finditer(code)]
+        if not label.endswith(" job"):
+            here = (REPO_ROOT / label).parent
+            references += [here / match.group(1) for match in RELATIVE_IMPORT.finditer(code)]
+        npm_runs = [match.group(1) for match in NPM_RUN.finditer(code)]
+        if npm_runs:
+            for match in CD_DIRECTORY.finditer(code):
+                files, manifests = _npm_scripts(match.group(1), npm_runs)
+                references += [REPO_ROOT / path for path in (*files, *manifests)]
         for reference in references:
-            path = REPO_ROOT / reference
-            if path.is_dir():
-                path = next((path / name for name in ("action.yml", "action.yaml") if (path / name).is_file()), path)
-            if not path.is_file():
-                continue
-            label = str(path.relative_to(REPO_ROOT))
-            if label in texts:
+            found = _repository_file(reference)
+            if found is None:
+                # A relative import may leave out the extension.
+                found = next(
+                    (hit for suffix in (".mjs", ".js", ".cjs") if (hit := _repository_file(Path(f"{reference}{suffix}")))),
+                    None,
+                )
+            if found is None or found in texts:
                 continue
             try:
-                texts[label] = _code(path.read_text(encoding="utf-8"))
+                texts[found] = _code((REPO_ROOT / found).read_text(encoding="utf-8"))
             except UnicodeDecodeError:
-                texts[label] = ""
-            pending.append(texts[label])
+                texts[found] = ""
+            pending.append(found)
     return texts
 
 
@@ -2725,6 +2783,15 @@ def check_prebuild_non_inputs(text: str) -> list[str]:
         for path in helper.CI_ONLY_PATHS
         if not (REPO_ROOT / path).is_file()
     ]
+    # The helper comes from the release commit: a CI-only file outside
+    # scripts/ci-* could be one of its own inputs, so the helper refuses
+    # every prebuild while it lists one.
+    shape = getattr(helper, "CI_ONLY_SHAPE", None)
+    violations += [
+        f"{PREBUILD_EQUIVALENCE} lists the CI-only file {path}, outside scripts/ci-*, so it refuses every prebuild"
+        for path in helper.CI_ONLY_PATHS
+        if shape is None or not shape.fullmatch(path)
+    ]
     for label, code in sorted(_prebuild_build_closure(text).items()):
         for line in code.splitlines():
             for pattern, name, why in patterns:
@@ -2734,6 +2801,82 @@ def check_prebuild_non_inputs(text: str) -> list[str]:
 
 SEMVER_BASELINE_JOB = "publish_semver_baseline"
 SEMVER_BASELINE_ATTACH_JOB = "attach_semver_baseline"
+
+# The packages whose builds are Core's release artifacts: the four release
+# binaries' packages and the Web SDK's runtime.
+CORE_RELEASE_PACKAGES = ("rkat", "meerkat-rpc", "meerkat-rest", "meerkat-mcp-server", "meerkat-web-runtime")
+# A test's stand-in for `cargo metadata --no-deps --format-version 1` (a file).
+CARGO_METADATA_FIXTURE = "RELEASE_CONTRACT_CARGO_METADATA"
+
+
+def _workspace_packages() -> list[dict]:
+    """The workspace's packages, as `cargo metadata --no-deps` lists them."""
+    fixture = os.environ.get(CARGO_METADATA_FIXTURE)
+    if fixture:
+        return json.loads(Path(fixture).read_text(encoding="utf-8"))["packages"]
+    result = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ContractError(f"cargo metadata failed: {' '.join(result.stderr.split())[:200]}")
+    return json.loads(result.stdout)["packages"]
+
+
+def check_release_closures(text: str) -> list[str]:
+    """No Core release artifact compiles a product's package.
+
+    A tag publishes an earlier commit's prebuild when every path changed
+    since is a non-input of Core's release artifacts, and everything under
+    another product's root but its Cargo.toml files counts as one
+    (scripts/release-prebuild-equivalent). That holds only while the normal
+    and build dependency closures of CORE_RELEASE_PACKAGES, through the
+    workspace's path dependencies (optional and target-specific ones
+    included), hold no package under a product root.
+    """
+    helper = _prebuild_equivalence()
+    try:
+        roots, _ = helper.product_rules((REPO_ROOT / PRODUCTS_FILE).read_text(encoding="utf-8"))
+    except (OSError, helper.Refusal) as error:
+        return [f"{PRODUCTS_FILE}: {error}"]
+    packages = {package["name"]: package for package in _workspace_packages()}
+    workspace = REPO_ROOT.resolve()
+
+    def place(package: dict) -> str:
+        directory = Path(package["manifest_path"]).resolve().parent
+        try:
+            return f"{directory.relative_to(workspace)}/"
+        except ValueError:
+            return f"{directory}/"
+
+    violations = [f"no workspace package {name}, a Core release artifact" for name in CORE_RELEASE_PACKAGES
+                  if name not in packages]
+    for release in CORE_RELEASE_PACKAGES:
+        if release not in packages:
+            continue
+        reached: dict[str, str] = {release: release}
+        frontier = [release]
+        while frontier:
+            name = frontier.pop()
+            for dependency in packages[name].get("dependencies", []):
+                if dependency.get("kind") not in (None, "normal", "build") or not dependency.get("path"):
+                    continue
+                target = dependency["name"]
+                if target in packages and target not in reached:
+                    reached[target] = name
+                    frontier.append(target)
+        for name, via in sorted(reached.items()):
+            location = place(packages[name])
+            for root, product in roots.items():
+                if location.startswith(root):
+                    violations.append(
+                        f"{release}'s normal or build dependencies reach {name} ({location}, under {product}'s root "
+                        f"{root}) through {via}"
+                    )
+    return violations
 
 
 def _job_needs(text: str, job: str) -> list[str]:
@@ -4028,6 +4171,7 @@ CHECKS: dict[str, Callable[[str], list[str]]] = {
     "tag-validation": check_tag_validation,
     "prebuild": check_prebuild,
     "prebuild-non-inputs": check_prebuild_non_inputs,
+    "release-closures": check_release_closures,
     "semver-baseline": check_semver_baseline,
     "trailing-platforms": check_trailing_platforms,
     "token-permissions": check_token_permissions,

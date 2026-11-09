@@ -177,7 +177,12 @@ export function recordEvidence({ rowProducts, jobs, failedLanes, planErrors, wav
     if (!spec || !Array.isArray(rows)) continue;
     for (const row of rows) {
       const product = PRODUCTS.includes(row?.product) ? row.product : null;
-      planned.set(spec.name(row), { product, downstream: row?.downstream === true });
+      const entry = { product, downstream: row?.downstream === true };
+      const name = spec.name(row);
+      const earlier = planned.get(name);
+      // Two rows rendering one job name cannot be told apart: unknown.
+      const same = earlier && earlier.product === entry.product && earlier.downstream === entry.downstream;
+      planned.set(name, earlier && !same ? { product: null, downstream: false } : entry);
     }
   }
   return {

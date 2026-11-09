@@ -381,12 +381,17 @@ path changed between the two is a non-input of Core's release artifacts
 (`scripts/release-prebuild-equivalent`): a path under another product's root
 (except a `Cargo.toml` there, which the workspace resolves and
 `MODULE.bazel.lock` records), a product's changelog, or one of a short list of
-files only CI reads (the CI planner and its data). A release fix that touches
+files only CI reads (the CI planner and its data, each a `scripts/ci-*` file:
+the helper refuses every prebuild while it lists another). A release fix that touches
 only Connect, Meta, a changelog or the planner therefore reuses the prebuild
 of the release merge instead of rebuilding Core; any other path, an unreadable
 `ci/products.json` or a commit that is not an ancestor means a full build.
 `make release-doctor` checks that no release build job, local action or
-script it runs names such a path. The lookup prefers a run of exactly the tag
+script it runs names such a path (following the scripts named there, the
+local actions, a module's relative imports and the files the npm scripts a
+build script runs execute with node; not a Make recipe or a cargo alias), and
+that the normal and build dependencies of the release binaries and the Web
+SDK runtime reach no package under a product's root. The lookup prefers a run of exactly the tag
 commit: while one is still under way it waits for that run rather than take
 an earlier commit's, and it never takes an earlier commit's run whose
 Windows or Intel macOS lane or full binary build gate already failed, timed

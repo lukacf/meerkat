@@ -427,6 +427,17 @@ echo other >"${HISTORY}/connect/OTHER.md"
 git_history add -A
 git_history commit -q -m sibling
 SIBLING_SHA="$(git_history rev-parse HEAD)"
+# A Core file moved under a product's root, and a Core file deleted: both
+# change Core's sources, so both are inputs (git diff --no-renames lists the
+# old name of a rename, and a deletion).
+git_history switch -q -c rename "${FIX_SHA}"
+git_history mv crates/core/src/lib.rs connect/crates/app/src/moved.rs
+git_history commit -q -m rename
+RENAME_SHA="$(git_history rev-parse HEAD)"
+git_history switch -q -c deletion "${FIX_SHA}"
+git_history rm -q crates/core/src/lib.rs
+git_history commit -q -m deletion
+DELETION_SHA="$(git_history rev-parse HEAD)"
 git_history switch -q main
 
 # equivalent <label> <prebuild> <release> <expected status> [line the output must hold]
@@ -459,6 +470,25 @@ grep -Fq "is not an ancestor of ${FIX_SHA}" "${TEST_ROOT}/descendant.out" ||
   fail "descendant: the refusal is not named" "$(cat "${TEST_ROOT}/descendant.out")"
 equivalent unknown-commit "${SHA}" "${FIX_SHA}" 1
 equivalent malformed-commit main "${FIX_SHA}" 2
+equivalent rename-out-of-core "${FIX_SHA}" "${RENAME_SHA}" 1 "  crates/core/src/lib.rs: an input"
+equivalent deletion "${FIX_SHA}" "${DELETION_SHA}" 1 "  crates/core/src/lib.rs: an input"
+
+# A helper whose CI_ONLY_PATHS lists a file outside scripts/ci-* (here the
+# helper itself, which the release commit could then edit to serve itself)
+# refuses every prebuild of another commit.
+mutated_helper="${TEST_ROOT}/release-prebuild-equivalent"
+sed 's|^    "scripts/ci-cargo-lanes.mjs": "the CI planner",$|&\n    "scripts/release-prebuild-equivalent": "itself",|' \
+  "${REPO_ROOT}/scripts/release-prebuild-equivalent" >"${mutated_helper}"
+grep -Fq '"scripts/release-prebuild-equivalent": "itself"' "${mutated_helper}" || fail "ci-only-shape: the fixture did not apply"
+chmod +x "${mutated_helper}"
+set +e
+(cd "${HISTORY}" && "${mutated_helper}" "${BASE_SHA}" "${FIX_SHA}") >"${TEST_ROOT}/ci-only-shape.out" 2>&1
+status=$?
+set -e
+[[ "${status}" -eq 1 ]] || fail "ci-only-shape: expected status 1, got ${status}" "$(cat "${TEST_ROOT}/ci-only-shape.out")"
+grep -Fq "CI_ONLY_PATHS lists scripts/release-prebuild-equivalent, outside scripts/ci-*" "${TEST_ROOT}/ci-only-shape.out" ||
+  fail "ci-only-shape: the refusal is not named" "$(cat "${TEST_ROOT}/ci-only-shape.out")"
+echo "ok: ci-only-shape"
 
 # lookup_for <label> <release commit> <expected stdout> <expected status> [directory]
 lookup_for() {

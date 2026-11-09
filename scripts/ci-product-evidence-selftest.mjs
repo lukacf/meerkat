@@ -407,6 +407,17 @@ assert.match(
   const recorded = acceptance({ validation_result: "failure", plan: { mode: "workspace" }, product_evidence: evidence }, "core", { changedPaths: [] });
   assert.equal(recorded.accepted, false, "a recorded downstream failure refuses Core");
   assert.match(recorded.reasons.join(" "), /core depends on job Clippy \(downstream meta\)/, "for that failure");
+  // Two rows that render one job name with different products: unknown.
+  const shared = recordEvidence({
+    rowProducts: {
+      main_unit: [{ name: "x", product: "core" }],
+      main_archive_run: [{ name: "x", product: "connect" }, { name: "y", product: "meta" }, { name: "y", product: "meta" }],
+    },
+    jobs: [{ name: "Main unit tests (x)", conclusion: "success" }, { name: "Main unit tests (y)", conclusion: "success" }],
+    failedLanes: [],
+    planErrors: 0,
+  });
+  assert.deepEqual(shared.jobs.map((entry) => entry.product), [null, "meta"], "a job name two rows of other products share is unknown");
 }
 
 // --- Unplanned waves ----------------------------------------------------------

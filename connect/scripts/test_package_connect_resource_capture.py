@@ -127,7 +127,7 @@ class PackagingCaptureTests(unittest.TestCase):
         self.pip = self.upstream / "pip.pyz"; self.pip.write_bytes(b"inert pip")
         self.destination = self.root / "output"
         self.build_args = self.kwargs()
-        self.starter_pins = PACKAGE.STARTER
+        self.starters = PACKAGE.STARTERS
         if legacy:
             directory = self.root / "dist/legacy-library"; directory.mkdir(parents=True)
             moved = directory / self.archive.name
@@ -135,9 +135,10 @@ class PackagingCaptureTests(unittest.TestCase):
             self.selected["macos-arm64"].update(
                 library=(moved.name, PACKAGE.digest(moved), moved.stat().st_size),
                 library_dir="legacy-library")
-            starter = self.root / "dist/toolkit-setup-20261010-resource-selection-export"
+            export = self.selected["macos-arm64"]["starter"]
+            starter = self.root / "dist" / export
             shutil.copytree(self.starter, starter); self.starter = starter
-            self.starter_pins = {p.name: PACKAGE.digest(p) for p in starter.iterdir()}
+            self.starters = {export: {p.name: PACKAGE.digest(p) for p in starter.iterdir()}}
             self.build_args = {}
         self.inspected = []
 
@@ -161,7 +162,7 @@ class PackagingCaptureTests(unittest.TestCase):
     def patches(self, *, decompressor=None, unpack=None):
         stack = ExitStack()
         stack.enter_context(mock.patch.object(PACKAGE, "TARGETS", self.selected))
-        stack.enter_context(mock.patch.object(PACKAGE, "STARTER", self.starter_pins))
+        stack.enter_context(mock.patch.object(PACKAGE, "STARTERS", self.starters))
         stack.enter_context(mock.patch.object(PACKAGE, "PIP",
             (self.pip.name, PACKAGE.digest(self.pip), self.pip.stat().st_size)))
         stack.enter_context(mock.patch.object(PACKAGE.subprocess, "run", side_effect=decompressor or self.decompressor))

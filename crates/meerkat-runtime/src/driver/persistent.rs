@@ -875,6 +875,8 @@ impl PersistentRuntimeDriver {
         replacements: &[crate::input_state::InputStatePersistenceRecord],
     ) -> Result<InputStateBatchCasOutcome, RuntimeDriverError> {
         self.require_durability_ready()?;
+        let expected = self.committed_input_row_images(expected).await?;
+        let expected = expected.as_slice();
         match self.store.input_state_batch_cas_implementation_profile() {
             InputStateBatchCasImplementationProfile::MultiWriter => self
                 .store
@@ -936,6 +938,60 @@ impl PersistentRuntimeDriver {
                 })
             }
         }
+    }
+
+    /// The exact pre-image of a terminal input-state CAS: each live row as it
+    /// was last durably written. A row write freezes the row's authorization
+    /// audit; an operation of the row's run can stage a later observation on
+    /// the live row, where it waits for the row's next update. The terminal
+    /// replacement is that update, frozen from the live row, so it carries the
+    /// observation, and the stored row is the live row without it. Each live
+    /// row is therefore expected with the audit records its stored row holds
+    /// (`InputAuthorizationAudit::committed_image`); the store's exact compare
+    /// still refuses every other difference. Each row's live audit is frozen
+    /// once, first: the store serializes the pre-image only later, and an
+    /// observation staged in between waits for the row's next write like any
+    /// other instead of reaching the expected bytes. A row whose snapshot holds
+    /// no record cannot be ahead of its stored row and needs no read.
+    async fn committed_input_row_images(
+        &self,
+        live_rows: &[StoredInputState],
+    ) -> Result<Vec<StoredInputState>, RuntimeDriverError> {
+        let mut images = Vec::with_capacity(live_rows.len());
+        for live in live_rows {
+            let mut image = live.clone();
+            image.state.authorization_audit = live
+                .state
+                .authorization_audit
+                .freeze_for_persistence()
+                .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                    reason: error.to_string(),
+                })?;
+            if !image.state.authorization_audit.is_empty() {
+                let stored = self
+                    .store
+                    .load_input_state(&self.runtime_id, &live.state.input_id)
+                    .await
+                    .map_err(|error| RuntimeDriverError::RecoveryBackoff {
+                        reason: format!(
+                            "terminal input compare-and-swap could not read the stored row of \
+                             input {}: {error}",
+                            live.state.input_id
+                        ),
+                    })?;
+                if let Some(stored) = stored {
+                    image.state.authorization_audit = image
+                        .state
+                        .authorization_audit
+                        .committed_image(&stored.state.authorization_audit)
+                        .map_err(|error| RuntimeDriverError::RecoveryCorruption {
+                            reason: error.to_string(),
+                        })?;
+                }
+            }
+            images.push(image);
+        }
+        Ok(images)
     }
 
     /// Release terminal live state after its exact completion/publication CAS
@@ -5141,6 +5197,54 @@ mod tests {
                 .iter()
                 .all(|row| row.state.recovery_count == 1),
             "a stale delegator CAS must not mutate any durable row"
+        );
+    }
+
+    /// The pre-image of a terminal input CAS is a snapshot of each live row.
+    /// The store serializes it only later (after the stored reads of the other
+    /// rows it compares, and a host store's own gate and locks), and an
+    /// operation of a row's run can stage an audit observation on the live row
+    /// meanwhile. That observation waits for the row's next write; it must not
+    /// reach the expected bytes, or the compare loses against the stored row.
+    /// Both rows that skip the audit compare are covered: one with no audit
+    /// record, and one whose stored row is absent.
+    #[tokio::test]
+    async fn terminal_cas_pre_image_is_a_snapshot_of_the_live_row() {
+        let store: Arc<dyn RuntimeStore> = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn BlobStore> = Arc::new(meerkat_store::MemoryBlobStore::new());
+        let rid = LogicalRuntimeId::new("terminal-cas-pre-image-snapshot");
+        let driver = PersistentRuntimeDriver::new(rid, store, blob_store);
+        let session = SessionId::new();
+        let run = meerkat_core::lifecycle::RunId::new();
+        let without_audit = StoredInputState::new_accepted(InputId::new());
+        let without_stored_row = StoredInputState::new_accepted(InputId::new());
+        crate::input_audit::tests::stage_refusal_after_row_write(
+            &without_stored_row.state.authorization_audit,
+            &without_stored_row.state.input_id,
+            &session,
+            &run,
+        );
+        let live_rows = [without_audit, without_stored_row];
+        let images = driver.committed_input_row_images(&live_rows).await.unwrap();
+        let before = images
+            .iter()
+            .map(|image| String::from_utf8(serde_json::to_vec(image).unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        for live in &live_rows {
+            crate::input_audit::tests::stage_refusal_after_row_write(
+                &live.state.authorization_audit,
+                &live.state.input_id,
+                &session,
+                &run,
+            );
+        }
+        let after = images
+            .iter()
+            .map(|image| String::from_utf8(serde_json::to_vec(image).unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            before, after,
+            "an observation staged after the pre-image was taken changed it"
         );
     }
 

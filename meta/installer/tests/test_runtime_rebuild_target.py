@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from launchkit import server
 from launchkit.compiler import MOBKIT_VERSION
+from launchkit.local_application_registry import LocalApplicationRegistry
 from launchkit.runtime_selection import candidate_selection, selected_runtime_version
 from test_local_application_registry import (
     registry, product, no_product_execution, no_processes, build, accept_source_fixture, workspace,
@@ -64,6 +65,21 @@ async def test_rebuild_with_updated_runtime_without_a_selected_runtime_is_refuse
     saved, first, _ = await earlier_ordinary_build(f)
     monkeypatch.setattr(server, "implementation", f.implementation)
     monkeypatch.setattr(server, "application_host", None)
+    with pytest.raises(HTTPException) as refused:
+        await server.build_implementation(saved["id"], rebuild_request(saved, first))
+    assert refused.value.status_code == 409
+    assert "no selected Meta runtime" in refused.value.detail
+    assert f.implementation.selected_build_id(saved["id"]) == first["build_id"]
+
+
+async def test_rebuild_with_updated_runtime_under_a_launcher_without_a_runtime_is_refused_by_name(
+        registry, monkeypatch):
+    f = registry
+    saved, first, _ = await earlier_ordinary_build(f)
+    unselected = LocalApplicationRegistry(guide_store=f.store, implementation=f.implementation,
+        deployment=f.service)
+    monkeypatch.setattr(server, "implementation", f.implementation)
+    monkeypatch.setattr(server, "application_host", unselected)
     with pytest.raises(HTTPException) as refused:
         await server.build_implementation(saved["id"], rebuild_request(saved, first))
     assert refused.value.status_code == 409

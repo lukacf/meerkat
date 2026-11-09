@@ -3,12 +3,17 @@ import asyncio
 from dataclasses import replace
 import hashlib
 import json
+import tomllib
+from types import SimpleNamespace
 
 import pytest
 
-from launchkit import bootstrap, guide_runtime, guide_sdk
+from launchkit import bootstrap, guide_runtime, guide_sdk, planner, visual_review_runtime
 from launchkit.connect_installer_caller import CustodyError, ExactFile
+from launchkit.implementation_worker import implementation_mob_toml
+from launchkit.schema import DesignRequest
 from meerkat_meta.errors import GatewayStartupCleanupError
+from test_architect_startup_recovery import FakeRuntime, startup
 
 
 @pytest.fixture
@@ -102,6 +107,54 @@ def test_profile_authoring_emits_the_auth_binding_as_profile_toml(binding):
     for invalid in INVALID_BINDINGS:
         with pytest.raises(RuntimeError, match="invalid auth binding"):
             guide_runtime.model_profile_lines(route["provider"], route["model"], {**route, "auth_binding": invalid})
+
+
+@pytest.mark.parametrize("composition", ["setup team", "designer", "builder", "visual critic"])
+async def test_every_profile_forge_composes_names_the_selected_auth_binding(startup, monkeypatch, tmp_path, composition):
+    """Each mob Forge composes for its own agents names the launcher-selected
+    route's auth binding in every profile: the setup team, the planner's
+    designer, the builder's implementation and acceptance agents, and the
+    visual critic. The SDK is an inert double; no gateway, provider or native
+    process runs, and each start stops once its definition is composed."""
+    service, controller = startup
+    binding = {"realm": "fixture", "binding": "host", "profile": "work"}
+    route = {"provider": "openai", "model": "gpt-6.1-sol", "auth_binding": binding}
+    routed = bootstrap.SelectedGuideRuntime(bootstrap.selected_guide_runtime().gateway, guide_sdk.SELECTED_VERSION,
+        guide_sdk.declared_core_version(), "a" * 40, "b" * 40, route)
+    monkeypatch.setattr(bootstrap, "_selected_guide_runtime", routed)
+
+    class Composed(Exception):
+        """Stops a start once its mob definition is composed."""
+
+    if composition == "setup team":
+        controller.outcomes = [FakeRuntime()]
+        assert (await service.start())["status"] == "ready"
+        await service.shutdown()
+        definition = controller.mob_configs[-1]
+    elif composition == "designer":
+        controller.outcomes = [Composed()]
+        with pytest.raises(Composed):
+            await planner.design_team(DesignRequest(description="Plan a small research team."))
+        definition = controller.mob_configs[-1]
+    elif composition == "builder":
+        definition = implementation_mob_toml("openai", "gpt-6.1-sol",
+            model_configuration=routed.model_configuration, guide_runtime=routed)
+    else:
+        monkeypatch.setattr(visual_review_runtime, "planner_capability",
+            lambda: {"available": True, "provider": "openai"})
+        critic = visual_review_runtime.VisualReviewRuntime(tmp_path / "visual-critic")
+        critic.reviews = SimpleNamespace()
+        controller.outcomes = [Composed()]
+        with pytest.raises(Composed):
+            await critic.get_runtime()
+        definition = controller.mob_configs[-1]
+    profiles = tomllib.loads(definition)["profiles"]
+    assert set(profiles) == {"setup team": {"architect", "connectors", "reviewer", "visualizer"},
+        "designer": {"designer"}, "builder": {"implementation", "acceptance"},
+        "visual critic": {visual_review_runtime.REVIEW_PROFILE}}[composition]
+    for name, profile in profiles.items():
+        assert (profile["provider"], profile["model"], profile.get("auth_binding")) == (
+            "openai", "gpt-6.1-sol", binding), name
 
 
 def test_no_implicit_predecessor_runtime(monkeypatch):

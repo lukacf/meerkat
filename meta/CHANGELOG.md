@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Rust: `ErrorEvent::LifecycleEffectFailed` gains `cause`
+  (`LifecycleEffectFailureCause`, `#[serde(default)]`, left off the wire
+  while it is `failed`, so a serialized event reads as before). A host that
+  builds the variant literally adds `cause:
+  LifecycleEffectFailureCause::Failed`, and one that destructures it without
+  `..` names the field.
+
 ### Added
+
+- `LifecycleEffectFailureCause` (`failed`, `budget_busy`), carried by
+  `LifecycleEffectFailure::cause` and by `cause` on
+  `lifecycle_effect_failed`: `budget_busy` says the side effect did not run
+  because the realm's agent memory background budget did not admit its run
+  within its wait, and no attempt of it failed for that. Both are left out
+  while the cause is `failed`, so records and events written before read as
+  failed. The Python and TypeScript SDKs word such an event as a side
+  effect that did not run, after the attempts that failed before it when
+  there were any.
 
 - For Rust hosts that compose a gateway: the console profile's plan takes
   a metadata store as the stdio profile's does
@@ -17,6 +36,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gateways and `UnifiedRuntimeBuilder` keep them.
 
 ### Fixed
+
+- A retirement's harvest of the compactions its session holds no longer
+  ends failed because the realm's agent memory background budget was busy.
+  The budget admits one distiller run at a time, and each denial counted as
+  a failed attempt: a burst of retirements (resets of several identities, a
+  roster pass that unlists several) ended most harvests failed within two
+  seconds, after three denials, and nothing harvested their discards. A
+  denial is now no attempt: the harvest waits for the budget, asking again
+  each time a distiller run ends or the budget's hour's window frees a run,
+  15 seconds in all (the bound of one distiller run in a step). The wait
+  holds back the side effects after it on the lifecycle projection's lane,
+  every identity's, which is why it is that short. A harvest the budget did
+  not admit by then, or at once one whose window frees no run within that
+  wait, ends unrun, recorded with the cause `budget_busy`: in a burst, the
+  runs the budget admits within the wait go ahead and the rest end so. The
+  discards stay in the session's memory scope, unless the retirement is a
+  delete, which drops that scope next. A harvest given up so is reported as
+  a run the budget skipped (`memory.budget.denied`); when its settled
+  batch's harvest had failed first, the record counts that attempt and
+  names its failure, and so it does for an attempt of its fallback harvest
+  that failed before the budget kept the next one from running. When a run
+  ends, the first waiting harvest to find the budget free takes the run, so
+  the others do not read their discards again for it. A shutdown ends the
+  wait at once: nothing is recorded, and over a durable metadata store the
+  harvest runs again at the next start.
+
+- A retirement's transcript distillation (a reset's, a role move's, an
+  unlisting's, a rotation's) waits for a busy agent memory background
+  budget the same way. It tried the budget once, and a denial skipped it
+  with no lifecycle effect record and no `lifecycle_effect_failed` event,
+  so in a wave of retirements most retired sessions were never distilled.
+  One the budget still did not admit within its wait is recorded
+  (`lifecycle_effect_failed`, effect `distillation`, cause `budget_busy`).
 
 - `meta_gateway` launched with `persistent_sessions: true` keeps its
   metadata and its console log in its state directory

@@ -4613,6 +4613,89 @@ def check_buildbuddy_macos_x86(text: str) -> list[str]:
             f"`{BUILDBUDDY_RELEASE_SCRIPT}` {BUILDBUDDY_MACOS_X86_COMMAND} targets macOS {minimum.group(1)}, "
             f"newer than the {bound.group(1)} `{MACOS_X86_CHECK_SCRIPT}` accepts"
         )
+    if case is not None:
+        violations.extend(_check_macos_x86_tree_refusal(text, builder, builder_steps, lane, check, case))
+    return violations
+
+
+# The step of the BuildBuddy Intel macOS job that refuses, before anything
+# builds, a release tree whose launcher would target a newer macOS than the
+# inspection accepts (an older tag that an asset recovery checks out).
+MACOS_X86_TREE_STEP = "Refuse a release tree that builds Intel macOS for a newer macOS than the release accepts"
+
+
+def _check_macos_x86_tree_refusal(
+    text: str, builder: str, steps: list[Step], lane: str, check: str, case: re.Match[str]
+) -> list[str]:
+    """An asset recovery runs main's workflow on an existing tag's tree, so
+    the BuildBuddy Intel macOS job runs that tag's launcher: one cut before
+    the launcher pinned the Intel minimum builds for its shared minimum
+    (13.0), which the inspection after the build refuses. The job must refuse
+    such a tree before it builds, naming the GitHub-hosted backend that
+    recovers the tag, and build the release tree's own launcher. The step
+    runs, verbatim, against this tree's launcher and three older shapes: no
+    minimum in the Intel command, a minimum newer than the inspection
+    accepts, and no Intel command at all."""
+    names = [step.name for step in steps]
+    if MACOS_X86_TREE_STEP not in names:
+        return [
+            f"job `{builder}` has no step `{MACOS_X86_TREE_STEP}`: an asset recovery of a tag whose launcher builds "
+            "Intel macOS for macOS 13.0 fails only after the build, in the inspection, without naming the "
+            "GitHub-hosted backend that recovers it"
+        ]
+    index = names.index(MACOS_X86_TREE_STEP)
+    step = steps[index]
+    violations: list[str] = []
+    builds = [position for position, candidate in enumerate(steps) if BUILDBUDDY_RELEASE_SCRIPT in candidate.run]
+    if builds and index > builds[0]:
+        violations.append(f"job `{builder}` runs `{MACOS_X86_TREE_STEP}` after it builds")
+    tooling = [candidate for candidate in steps if candidate.nested("with").get("path") == ".release-tooling"]
+    if not tooling or MACOS_X86_CHECK_SCRIPT not in "\n".join(tooling[0].lines):
+        violations.append(
+            f"job `{builder}` must check out `{MACOS_X86_CHECK_SCRIPT}` with its release tooling, whose minimum "
+            f"`{MACOS_X86_TREE_STEP}` reads"
+        )
+    body = case.group(1)
+    without_minimum = re.sub(r" --macos_minimum_os=[0-9.]+", "", body)
+    newer = re.sub(r"--macos_minimum_os=[0-9.]+", "--macos_minimum_os=12.0", body)
+    start, end = case.span(1)
+    launchers = (
+        ("this tree's launcher", lane, True),
+        ("an older tag's launcher, whose Intel command sets no minimum", lane[:start] + without_minimum + lane[end:], False),
+        ("a launcher whose Intel minimum is newer than the inspection accepts", lane[:start] + newer + lane[end:], False),
+        ("a launcher without the Intel command", lane[: case.start()] + lane[case.end() :].split("\n", 1)[1], False),
+    )
+    recovery = EventContext(
+        label="the owner's BuildBuddy asset recovery of an existing tag",
+        event_name="workflow_dispatch",
+        ref="refs/heads/main",
+        actor="lukacf",
+        inputs={"release_tag": "v0.0.0", "publish_release_assets_only": "true", "release_backend": "buildbuddy"},
+        job_outputs={f"{CI_GREEN_JOB}.prebuild_tag": ""},
+    )
+    env = {key: render_strict(value, recovery) for key, value in step.env.items()}
+    for label, launcher, builds_it in launchers:
+        with tempfile.TemporaryDirectory(prefix="release-macos-x86-tree-") as scratch:
+            Path(scratch, "scripts").mkdir()
+            Path(scratch, BUILDBUDDY_RELEASE_SCRIPT).write_text(launcher, encoding="utf-8")
+            Path(scratch, ".release-tooling", "scripts").mkdir(parents=True)
+            Path(scratch, ".release-tooling", MACOS_X86_CHECK_SCRIPT).write_text(check, encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c", render_strict(step.raw_run, recovery)],
+                cwd=scratch,
+                env={**_runner_env(recovery), **env},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        output = " | ".join(line for line in (result.stdout + result.stderr).splitlines() if line.strip())
+        if builds_it and result.returncode != 0:
+            violations.append(f"step `{step.name}` refuses {label}: {output[:300]}")
+        if not builds_it and (result.returncode == 0 or "github-hosted" not in output):
+            violations.append(
+                f"step `{step.name}` does not refuse {label} with the GitHub-hosted backend's name "
+                f"(exit {result.returncode}): {output[:300]}"
+            )
     return violations
 
 

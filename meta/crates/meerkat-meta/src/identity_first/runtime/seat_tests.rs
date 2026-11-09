@@ -7252,6 +7252,200 @@ async fn a_harvest_the_budget_keeps_busy_past_its_wait_ends_unrun_with_its_cause
     holder.await.expect("the budget holder's run");
 }
 
+/// What the transcript of `session_key` holds: one message naming it.
+fn transcript_of(session_key: &str) -> String {
+    format!("TRANSCRIPT of {session_key}")
+}
+
+/// A transcript source that holds one message for every session
+/// ([`transcript_of`]), the budget holder's ([`BUDGET_HOLDER_DISCARD`]) for
+/// its session, and records each session whose transcript the distiller
+/// reads.
+#[derive(Default)]
+struct OneMessageEach(StdMutex<Vec<String>>);
+
+impl OneMessageEach {
+    fn reads_of(&self, session: &SessionId) -> usize {
+        let session = session.to_string();
+        lock(&self.0)
+            .iter()
+            .filter(|read| **read == session)
+            .count()
+    }
+}
+
+#[async_trait::async_trait]
+impl TranscriptSource for OneMessageEach {
+    async fn read(
+        &self,
+        session_key: &str,
+        from_index: u64,
+    ) -> Result<Option<TranscriptSlice>, DistillerError> {
+        lock(&self.0).push(session_key.to_string());
+        let text = if session_key == BUDGET_HOLDER_SESSION {
+            BUDGET_HOLDER_DISCARD.to_string()
+        } else {
+            transcript_of(session_key)
+        };
+        Ok(Some(TranscriptSlice {
+            session_key: session_key.to_string(),
+            start_index: from_index,
+            end_index: from_index + 1,
+            messages: vec![crate::memory::distiller::TranscriptMessage {
+                index: from_index,
+                role: "user",
+                text,
+            }],
+            head_revision: None,
+        }))
+    }
+}
+
+/// Agent memory over a store in `dir`, whose distiller reads transcripts
+/// through `transcripts`, has no compaction discard source (a harvest finds
+/// nothing to harvest), and asks `model`; and that distiller.
+fn memory_distilling(
+    dir: &std::path::Path,
+    transcripts: &Arc<OneMessageEach>,
+    model: &Arc<GatedModel>,
+) -> (AgentMemoryRuntimeInjector, Arc<DistillerEngine>) {
+    let store = Arc::new(crate::SqliteAgentMemoryStore::open(dir).expect("open the memory store"));
+    let distiller = Arc::new(DistillerEngine::new(
+        DistillerProfile::embedded_default(),
+        DistillerConfig {
+            enabled: true,
+            ..DistillerConfig::default()
+        },
+        Arc::new(GatedModelHandle(Arc::clone(model))),
+        store.clone(),
+        store.clone(),
+        Arc::clone(transcripts) as Arc<dyn TranscriptSource>,
+        None,
+        None,
+        "default",
+    ));
+    let injector = AgentMemoryRuntimeInjector::new(store, AgentMemoryConfig::default())
+        .with_distiller(Arc::clone(&distiller));
+    (injector, distiller)
+}
+
+/// A reset's distillation of the session it retires, while another
+/// distiller run holds the realm's background budget, is not skipped by the
+/// budget: it waits for the budget, and distills the transcript once the
+/// other run ends; nothing is recorded or reported as failed.
+///
+/// RED before the distillation waited for the budget: it tried the budget
+/// once, and a denial skipped it without a record or a report, so the
+/// transcript was never distilled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_s_distillation_waits_for_a_busy_budget_and_distills_once_it_frees() {
+    let alice = identity("personal:alice");
+    let retired = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    runtime.set_lifecycle_effect_limits(Duration::from_secs(30), 2);
+    register_live(&runtime, &core.core, spec(&alice), 0, retired.clone())
+        .await
+        .expect("registered live");
+    let errors = Arc::new(StdMutex::new(Vec::new()));
+    runtime.set_error_hook(Some(keeping_errors(&errors)));
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let transcripts = Arc::new(OneMessageEach::default());
+    let model = Arc::new(GatedModel::new());
+    let (memory, distiller) = memory_distilling(memory_dir.path(), &transcripts, &model);
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    // Another distiller run holds the realm's background budget: the
+    // distillation of the budget holder's transcript, inside its model call.
+    let holder = tokio::spawn({
+        let distiller = Arc::clone(&distiller);
+        async move {
+            distiller
+                .distill_now(
+                    "personal:holder",
+                    BUDGET_HOLDER_SESSION,
+                    crate::memory::distiller::DistillCause::Retire,
+                )
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !model.holding() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the budget holder's run never reached its model"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset rotates the identity");
+    let settle = tokio::spawn({
+        let runtime = Arc::clone(&runtime);
+        async move { runtime.settle_lifecycle_projection().await }
+    });
+    // The retirement's distillation read the session's transcript, and the
+    // budget did not admit its run.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while transcripts.reads_of(&retired) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retirement's distillation never read the session's transcript"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    model.open();
+    holder.await.expect("the budget holder's run");
+
+    let distilled = transcript_of(&retired.to_string());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !model.was_shown(&distilled) {
+        if tokio::time::Instant::now() >= deadline {
+            let failures = runtime
+                .lifecycle_effect_failures(0, 16)
+                .await
+                .expect("the recorded failures read");
+            panic!(
+                "the distillation of the retired session never ran once the budget freed: \
+                 recorded {failures:?}, reported {:?}",
+                lock(&errors)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(20), settle)
+        .await
+        .expect("the projection reaches the journal's head")
+        .expect("the settle task");
+    let failures = runtime
+        .lifecycle_effect_failures(0, 16)
+        .await
+        .expect("the recorded failures read");
+    assert!(
+        failures.is_empty(),
+        "nothing is recorded as failed: {failures:?}"
+    );
+    let reported = lock(&errors)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        reported.is_empty(),
+        "nothing is reported failed: {reported:?}"
+    );
+}
+
 /// The retirement hook of an incarnation a Meta step ended is called only
 /// once that step answered. The projection takes what the step kept for the
 /// hook (the registration it read before Core was asked, settled after Core

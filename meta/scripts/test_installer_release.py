@@ -1507,6 +1507,35 @@ class EvidenceTests(unittest.TestCase):
                     self.assertRaisesRegex(forge.ProtocolError, "no longer green"):
                 forge.recheck_forge_ci(manifest)
 
+    def test_publication_stays_on_the_attempt_it_bound_when_the_run_is_re_run(self):
+        """The shape of ci.yml run 42570473155: once a run is re-run, its own
+        record answers the newer attempt. A candidate bound to attempt 1 is
+        re-checked on attempt 1, whatever the re-run is doing, so re-running
+        the run (failed jobs routinely are) refuses no stage already bound to
+        it. A stage that wants the newer attempt binds it explicitly."""
+        github = self.github()
+        record = self.evidence(github)
+        self.assertEqual(record["run_attempt"], 1)
+        manifest = {"source_sha": SHA, "forge_ci": record}
+        github.extra[f"actions/runs/{FORGE_RUN}/attempts/1"] = github.runs[0]
+        for rerun in ({"status": "in_progress", "conclusion": None}, {"conclusion": "failure"}, {}):
+            github.extra[f"actions/runs/{FORGE_RUN}"] = {**github.runs[0], "run_attempt": 2, **rerun}
+            github.calls.clear()
+            with self.subTest(rerun=rerun), github.installed():
+                forge.recheck_forge_ci(manifest)
+                self.assertIn(f"actions/runs/{FORGE_RUN}/attempts/1", github.calls)
+                self.assertIn(f"actions/runs/{FORGE_RUN}/attempts/1/jobs?per_page=100", github.calls)
+                self.assertNotIn(f"actions/runs/{FORGE_RUN}", github.calls,
+                                 "publication read the run's latest attempt instead of the bound one")
+        # Attempt 2, bound explicitly, is judged on its own record and jobs.
+        github.extra[f"actions/runs/{FORGE_RUN}/attempts/2"] = {**github.runs[0], "run_attempt": 2}
+        github.jobs[(FORGE_RUN, 2)] = copy.deepcopy(github.jobs[(FORGE_RUN, 1)])
+        github.calls.clear()
+        with github.installed():
+            forge.recheck_forge_ci({"source_sha": SHA, "forge_ci": {**record, "run_attempt": 2}})
+        self.assertIn(f"actions/runs/{FORGE_RUN}/attempts/2", github.calls)
+        self.assertIn(f"actions/runs/{FORGE_RUN}/attempts/2/jobs?per_page=100", github.calls)
+
 
 def artifact_zip(path, members):
     with zipfile.ZipFile(path, "w") as archive:

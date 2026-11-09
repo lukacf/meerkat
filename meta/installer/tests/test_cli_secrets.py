@@ -101,13 +101,16 @@ def forge(tmp_path, monkeypatch):
     installs = Service(state, guide, NoImplementation(), operations)
     installs.service_manager = SimpleNamespace(capability=AsyncMock(return_value={"available": False}))
     saved = ProviderSettings(state, environ={})
+    ready = {"available": True, "status": "ready", "provider": "openai", "model": "gpt-5.5"}
     architect = SimpleNamespace(guide_context=None, proposal=None, guide_result=None, message_lock=asyncio.Lock(),
-                                refresh_status=AsyncMock(return_value={"available": True, "status": "ready",
-                                                                       "provider": "openai", "model": "gpt-5.5"}))
+                                start_lock=asyncio.Lock(), pending_interaction=None,
+                                refresh_status=AsyncMock(return_value=ready), start=AsyncMock(return_value=ready),
+                                stop_for_provider=AsyncMock(), status=lambda: {**ready, "status": "stopped"})
     monkeypatch.setattr(server, "guide", guide)
     monkeypatch.setattr(server, "guide_operations", operations)
     monkeypatch.setattr(server, "deployment", installs)
     monkeypatch.setattr(server, "architect", architect)
+    monkeypatch.setattr(server, "provider_owned_work", lambda: False)
     monkeypatch.setattr(server, "cloud_capability", lambda: {"available": False, "project": None, "reason": "test"})
     monkeypatch.setattr(server, "guide_timeline", SimpleNamespace(read=AsyncMock(return_value={
         "available": True, "frames": [], "next_cursor": None, "latest_cursor": None, "exhausted": True})))
@@ -165,23 +168,28 @@ async def test_every_command_keeps_secrets_out_of_output_children_and_logs(forge
     identity, folder, install = await installed(forge)
     blueprint = tmp_path / "plan.json"
     blueprint.write_text(json.dumps(forge.guide.store.get(identity)["blueprint"]))
+    request = (await run(forge, "installation", "stop", identity, "--no-wait", "--json")).document["request"]
     commands = [
-        ["version"], ["doctor"], ["provider", "status"], ["guide", "status"], ["setup", "list", "--all"],
+        ["version"], ["doctor"], ["provider", "status"], ["guide", "status"], ["guide", "start"], ["guide", "stop"],
+        ["setup", "list", "--all"],
         ["setup", "show", identity], ["setup", "timeline", identity], ["plan", "show", identity],
         ["plan", "export", identity], ["plan", "validate", str(blueprint)],
         ["plan", "package", identity, "--out", str(tmp_path / f"team-{mode[-1]}.zip")],
         [*install, "--dry-run"], install[:-1] + ["--folder", str(tmp_path / f"other-{mode[-1]}")],
         ["installation", "status", identity], ["installation", "log", identity],
+        ["installation", "log", identity, "--follow", "--timeout", "300ms"],
         ["installation", "open", identity], ["installation", "stop", identity, "--no-wait"],
+        ["installation", "request", identity, request],
         ["installation", "settings", "show", identity], ["installation", "export", identity, "--out", str(tmp_path / "x")],
         ["install", identity, "--team", "--folder", str(tmp_path / "new"), "--set", "OPENAI_API_KEY=" + "x" * 8],
-        ["installation", "start", identity], ["setup", "organization", identity],
+        ["installation", "start", identity], ["installation", "restart", identity], ["installation", "retry", identity],
+        ["installation", "cleanup", identity], ["setup", "organization", identity],
         ["setup", "revisit", identity, "purpose"], ["setup", "retry", identity],
     ]
     for argv in commands:
         result = await run(forge, "-v", *mode, *argv)
         clean(result, label=" ".join(argv))
-        assert result.code in (0, 2, 82, 83, 84, 85, 86), (argv, result.text)
+        assert result.code in (0, 2, 81, 82, 83, 84, 85, 86, 87), (argv, result.text)
     for record in caplog.records:
         assert CANARY not in record.getMessage()
     settings = await run(forge, "installation", "settings", "show", identity, "--json")

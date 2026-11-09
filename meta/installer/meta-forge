@@ -16,6 +16,7 @@ if [ ! -x "$root/.venv/bin/python" ]; then
     exec bash "$root/start.sh" --prepare-only
   ) 1>&2
 fi
-# -P: never import from the caller's working directory.
-export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+# -P and this PYTHONPATH alone: nothing is imported from the caller's working
+# directory or from the caller's PYTHONPATH.
+export PYTHONPATH="$root"
 exec "$root/.venv/bin/python" -B -P -m launchkit.cli "$@"

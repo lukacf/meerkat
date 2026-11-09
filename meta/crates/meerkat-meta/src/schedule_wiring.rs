@@ -4534,6 +4534,190 @@ external_addressable = true
         runtime.shutdown().await;
     }
 
+    /// A schedule fire addressed to an identity created at runtime (a created
+    /// entry of Core's mob, its record its row in the mob's identity store)
+    /// that this runtime has not registered goes through the identity's
+    /// door, over the production `MobSessionBridge`: the door registers the
+    /// identity from its row, and the fire reaches its member.
+    ///
+    /// RED before Meta served created identities: the fire ended
+    /// `TargetMissing` at the internal door, and nothing reached the member.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_schedule_fire_to_an_identity_created_at_runtime_is_delivered_through_its_door() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let llm_calls = Arc::new(AtomicUsize::new(0));
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let factory = AgentFactory::new(temp_dir.path()).comms(true);
+        let session_service = Arc::new(meerkat::build_ephemeral_service(
+            factory,
+            Config::default(),
+            4,
+        ));
+        let definition = meerkat_mob::MobDefinition::from_toml(
+            r#"
+[mob]
+id = "schedule-created"
+
+[profiles.general]
+model = "gpt-5.5"
+external_addressable = true
+"#,
+        )
+        .expect("schedule test mob definition");
+        let mob_spec = crate::mob_handle_runtime::MobBootstrapSpec::new(
+            definition,
+            meerkat_mob::MobStorage::in_memory(),
+            session_service,
+        )
+        .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
+            allow_ephemeral_sessions: true,
+            notify_orchestrator_on_resume: true,
+            default_llm_client: Some(Arc::new(CountingLlmClient {
+                calls: llm_calls.clone(),
+            })),
+        });
+        let runtime = crate::UnifiedRuntime::bootstrap(
+            mob_spec,
+            crate::MetaConfig {
+                modules: vec![],
+                discovery: crate::DiscoverySpec {
+                    namespace: "schedule-created".to_string(),
+                    modules: vec![],
+                },
+                pre_spawn: vec![],
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("bootstrap schedule test runtime");
+        let handle = runtime.mob_handle();
+
+        // An identity created at runtime: Core seats it Dormant, and its row
+        // in the mob's identity store holds its spec.
+        let operation = meerkat_mob::IdentityOperation::new(
+            "create-sched-keeper",
+            meerkat_core::approval::decision::Sha256Digest::of(b"create-sched-keeper").as_str(),
+        );
+        let created = handle
+            .create_store_owned_identities(
+                meerkat_mob::StoreOwnedIdentityCreate::new(
+                    operation,
+                    meerkat_mob::IdentityChangeRequesterInput::host("console"),
+                    vec![meerkat_mob::CreatedIdentityRequest::new(
+                        meerkat_mob::CreatedIdentitySpec::new("sched-keeper", "general"),
+                    )],
+                ),
+                meerkat_mob::IdentityChangeConsentInput::Policy(
+                    meerkat_mob::IdentityPolicyOutcome::Allow,
+                ),
+            )
+            .await
+            .map(|created| created.change);
+        assert!(
+            matches!(
+                created,
+                Ok(meerkat_mob::IdentityChangeOutcome::Committed { .. })
+            ),
+            "{created:?}"
+        );
+        let baseline_llm_calls = llm_calls.load(Ordering::SeqCst);
+
+        // This runtime has run no roster pass and registered nothing.
+        let identity_runtime = Arc::new(crate::identity_first::IdentityRuntime::new(
+            crate::identity_first::IdentityRuntimeConfig {
+                continuity_store: Arc::new(
+                    crate::identity_first::LocalContinuityStore::in_memory()
+                        .expect("identity store"),
+                ),
+                lease_provider: Arc::new(crate::identity_first::LocalLeaseProvider::new()),
+                runtime_instance_id: "schedule-created".to_string(),
+                has_runtime_store: true,
+                durability_policy: crate::identity_first::DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(crate::identity_first::MobSessionBridge::new(
+                    handle.clone(),
+                ))),
+                default_timeout: None,
+            },
+        ));
+
+        let schedule = Schedule::new(CreateScheduleRequest {
+            name: Some("identity-created".to_string()),
+            description: None,
+            trigger: TriggerSpec::Interval(IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: TargetBinding::session(SessionTargetBinding::ExactSession {
+                session_id: SessionId::new(),
+                action: ScheduledSessionAction::Prompt {
+                    prompt: meerkat_core::ContentInput::Text("deliver".to_string()),
+                    system_prompt: None,
+                    render_metadata: None,
+                    skill_refs: Vec::new(),
+                    additional_instructions: Vec::new(),
+                },
+            }),
+            misfire_policy: meerkat::MisfirePolicy::default(),
+            overlap_policy: meerkat::OverlapPolicy::default(),
+            missing_target_policy: meerkat::MissingTargetPolicy::default(),
+            labels: BTreeMap::new(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("schedule");
+        let occurrence = Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("occurrence");
+        let host = InternalDeliveryScheduleMobHost {
+            inner: Arc::new(NoopScheduleMobHost::new("unused fallback")),
+            handle: runtime.mob_handle(),
+            identity_runtime: Some(identity_runtime.clone()),
+        };
+        let delivery = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        let content = meerkat_core::ContentInput::Text("deliver".to_string());
+
+        let dispatch = host
+            .deliver_internal_member_prompt(
+                &occurrence,
+                &delivery,
+                "schedule-created",
+                "sched-keeper",
+                &content,
+            )
+            .await
+            .expect("the identity's door answers the fire, never a member door")
+            .expect("the fire is not deferred");
+        let terminal = dispatch.completion.await.expect("delivery terminal");
+        assert_eq!(
+            terminal.phase,
+            OccurrencePhase::Completed,
+            "the fire goes through the created identity's door: {:?}",
+            terminal.detail
+        );
+        assert!(
+            identity_runtime
+                .contains(
+                    &crate::identity_first::AgentIdentity::parse("sched-keeper").expect("identity")
+                )
+                .await,
+            "the door registered the created identity"
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while llm_calls.load(Ordering::SeqCst) <= baseline_llm_calls {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fire reaches the created identity's member"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        runtime.shutdown().await;
+    }
+
     /// A downstream app on 0.7.26 "last link" e2e: an agent-authored one-shot must
     /// DELIVER through the real schedule host — the full rpc_gateway chain
     /// (attach_schedule_tools_with_identity_targets → agent tool dispatch →

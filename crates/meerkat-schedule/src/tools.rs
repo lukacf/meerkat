@@ -133,23 +133,11 @@ const SUMMARY_ID_CHARS: usize = 200;
 /// trigger (a calendar that lists thousands of values, for one) is named by
 /// its type and timezone, with its serialized length.
 const SUMMARY_TRIGGER_BYTES: usize = 1_024;
-/// The target fields a summary keeps: what kind of target it is and which
-/// session, identity, mob, member, flow or host runnable it names. Everything
-/// else (the action, prompt, helper options, materialization spec, flow and
-/// runnable params) is payload and stays out of a summary.
-/// The fields of a serialized target that `meerkat_schedule_list`'s
-/// `target_id` filter compares: every id a target can name.
-const TARGET_ID_KEYS: &[&str] = &[
-    "session_id",
-    "bound_session_id",
-    "identity",
-    "mob_id",
-    "member_id",
-    "source_member_id",
-    "flow_id",
-    "runnable",
-];
-
+/// The target fields a summary keeps: what kind of target it is (the first
+/// two, `target_kind` and `type`) and which session, identity, mob, member,
+/// flow or host runnable it names. Everything else (the action, prompt,
+/// helper options, materialization spec, flow and runnable params) is payload
+/// and stays out of a summary.
 const SUMMARY_TARGET_KEYS: &[&str] = &[
     "target_kind",
     "type",
@@ -162,6 +150,13 @@ const SUMMARY_TARGET_KEYS: &[&str] = &[
     "flow_id",
     "runnable",
 ];
+
+/// The fields of a serialized target that `meerkat_schedule_list`'s
+/// `target_id` filter compares: every id a target can name, which is every
+/// field a summary keeps after its two kind fields. Read from
+/// [`SUMMARY_TARGET_KEYS`], so the filter matches each id a summary shows and
+/// nothing else.
+const TARGET_ID_KEYS: &[&str] = SUMMARY_TARGET_KEYS.split_at(2).1;
 
 #[derive(Debug, Deserialize)]
 struct UpdateScheduleArgs {
@@ -5174,6 +5169,21 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// The fields the `target_id` filter compares are the id fields a
+    /// summary keeps: the summary's list after its two kind fields, so
+    /// neither kind field is compared.
+    #[test]
+    fn the_target_id_fields_are_the_summary_id_fields() {
+        assert_eq!(&SUMMARY_TARGET_KEYS[..2], ["target_kind", "type"]);
+        assert_eq!(TARGET_ID_KEYS, &SUMMARY_TARGET_KEYS[2..]);
+        assert!(
+            TARGET_ID_KEYS
+                .iter()
+                .all(|key| !matches!(*key, "target_kind" | "type")),
+            "{TARGET_ID_KEYS:?}"
+        );
     }
 
     /// Malformed page options are refused as invalid arguments, never

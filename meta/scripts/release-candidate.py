@@ -21,7 +21,7 @@ input it binds still holds (floor-reuse); anything else runs the floor build.
 
 Selections are strict JSON objects (all hashes are lowercase SHA-256 hex):
   accepted-candidate: schema_version=1, kind, repository, run_id, run_attempt,
-    manifest_artifact={id, digest, manifest_sha256}; schema_version=2 and 3
+    manifest_artifact={id, digest, manifest_sha256}; schema_version=2, 3 and 4
     add tier ("core" or "trailing"), and match their manifest's schema.
   original-assets: schema_version=1, kind, repository, source_sha, version, tag,
     run_id, run_attempt, metadata={"index.json": hash, "checksums.sha256": hash},

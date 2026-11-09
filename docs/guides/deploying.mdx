@@ -560,6 +560,17 @@ workflow run and commit that produced it:
 gh attestation verify rkat-0.8.32-x86_64-unknown-linux-gnu.tar.gz --repo lukacf/meerkat
 ```
 
+A release can publish the archives prebuilt at an earlier commit whose
+changes since touch none of their inputs. Their attestations then name that
+prebuilt commit, not the tag's, and the release carries
+`prebuild-source-<version>.txt`, which names both commits and the prebuild
+run and lists every path changed between them with the reason it is no
+input. Verify such an archive against the prebuilt commit:
+
+```bash
+gh attestation verify rkat-0.8.32-x86_64-unknown-linux-gnu.tar.gz --repo lukacf/meerkat --source-digest <prebuilt commit>
+```
+
 ### Linux glibc floor
 
 The Linux GNU binaries are built inside the `buildpack-deps:bullseye` image

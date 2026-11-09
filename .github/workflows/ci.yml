@@ -642,7 +642,7 @@ jobs:
       - name: Release doctor workflow assertions still bind
         run: scripts/test-release-doctor-workflow-contract.sh
 
-      - name: Release prebuild lookup selects only usable exact-commit prebuilds
+      - name: Release prebuild lookup selects only usable prebuilds that serve the commit
         run: scripts/test-release-find-prebuild.sh
 
       - name: Standalone census check passes only on a green main run at the given commit

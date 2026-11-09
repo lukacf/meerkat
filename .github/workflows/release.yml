@@ -2204,7 +2204,7 @@ jobs:
           pattern: meerkat-*
           path: release-artifacts
 
-      - name: Download the archives of the exact-commit prebuild
+      - name: Download the archives of the prebuild
         if: ${{ needs.release_prebuild.outputs.run_id != '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -2304,9 +2304,11 @@ jobs:
           [[ "${checked}" -eq 12 ]] || { echo "expected 12 critical archives, checked ${checked}" >&2; exit 1; }
           echo "Every binary in ${checked} critical archives embeds ${version} and passes the test-code marker guard"
 
-      # The archives just verified were compiled from the tag's tree. Its
-      # built-binary test hooks must reach debug builds only: an older tree's
-      # binaries honour them and carry no marker the packaging scan can see.
+      # The archives just verified were compiled from the tag's tree, or from
+      # an earlier commit's whose changes since touch none of their inputs
+      # (scripts/release-prebuild-equivalent). The tag's built-binary test
+      # hooks must reach debug builds only: an older tree's binaries honour
+      # them and carry no marker the packaging scan can see.
       - name: Require the release tree to gate its test hooks
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -2323,6 +2325,51 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
           generate_release_notes: true
+          overwrite_files: false
+          tag_name: ${{ github.ref_name }}
+
+      # A tag that publishes an earlier commit's prebuild says so on the
+      # release: its archives' attestations and source stamps, and the Web
+      # SDK package's, name that prebuilt commit, not the tag's.
+      # prebuild-source-<version>.txt names both commits and the prebuild
+      # run, and lists every path changed between them with its reason
+      # (scripts/release-prebuild-equivalent). Add-only, as every upload.
+      - name: Describe the prebuilt commit of an earlier commit's prebuild
+        if: ${{ needs.release_prebuild.outputs.run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          PREBUILD_RUN_ID: ${{ needs.release_prebuild.outputs.run_id }}
+          PREBUILD_RUN_ATTEMPT: ${{ needs.release_prebuild.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          prebuilt="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PREBUILD_RUN_ID}" --jq .head_sha)"
+          if [[ "${prebuilt}" == "${tag_commit}" ]]; then
+            echo "The prebuild is of ${RELEASE_TAG}'s own commit ${tag_commit}."
+            exit 0
+          fi
+          version="${RELEASE_TAG#v}"
+          note="prebuild-source/prebuild-source-${version//\//-}.txt"
+          mkdir -p prebuild-source
+          {
+            echo "Release ${RELEASE_TAG} (commit ${tag_commit}) publishes the release archives and the @rkat/web"
+            echo "package that release.yml run ${PREBUILD_RUN_ID} (attempt ${PREBUILD_RUN_ATTEMPT}) prebuilt at commit ${prebuilt}."
+            echo "Their build attestations and source stamps name ${prebuilt}; verify an archive with"
+            echo "  gh attestation verify <archive> --repo ${GITHUB_REPOSITORY} --source-digest ${prebuilt}"
+            echo
+            scripts/release-prebuild-equivalent "${prebuilt}" "${tag_commit}"
+          } > "${note}"
+          echo "Describing the prebuilt commit in $(basename "${note}")"
+
+      # Nothing to upload when the prebuild is of the tag's own commit.
+      - name: Publish the prebuilt commit description
+        if: ${{ needs.release_prebuild.outputs.run_id != '' }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: prebuild-source/*.txt
+          draft: false
+          fail_on_unmatched_files: false
           overwrite_files: false
           tag_name: ${{ github.ref_name }}
 
@@ -2818,7 +2865,7 @@ jobs:
       # A tag whose commit was prebuilt: the prebuild run's archives, stamps
       # and attestations; verify-release-asset-provenance --source-run binds
       # them to that run before anything is published.
-      - name: Download the archives of the exact-commit prebuild
+      - name: Download the archives of the prebuild
         if: ${{ needs.release_prebuild.outputs.run_id != '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -2944,9 +2991,10 @@ jobs:
           fi
 
       # Every archive above, reused or rebuilt, was compiled from the tag's
-      # tree. Its built-binary test hooks must reach debug builds only: an
-      # older tree's binaries honour them and carry no marker the packaging
-      # scan can see, so an old tag's archives fail closed here.
+      # tree, or from an earlier commit's whose changes since touch none of
+      # their inputs. The tag's built-binary test hooks must reach debug
+      # builds only: an older tree's binaries honour them and carry no marker
+      # the packaging scan can see, so an old tag's archives fail closed here.
       - name: Require the release tree to gate its test hooks
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}

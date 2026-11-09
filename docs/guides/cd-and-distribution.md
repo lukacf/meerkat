@@ -438,8 +438,18 @@ SHA, CI workflow run and attempt, branch, and event to backend
 `github-hosted-cargo`, its aggregate `validation_result`, the selected lane
 `plan`, and every lane's `component_results`. The release gate downloads it
 from the successful exact-main workflow run (for a maintenance release, the
-push run on its release branch) and verifies every required field
-before tag-triggered publication starts. A release-projection run (plan mode
+push run on its release branch), or from a failed run of that kind whose
+attestation's `product_evidence` shows every failure in rows Core does not
+depend on, and verifies every required field
+before tag-triggered publication starts. Its `validation_result` is `success`
+only when every step of the CI gate before the attestation succeeded. The
+failed run is judged by the release commit's first parent's copy of
+`scripts/ci-product-evidence.mjs`, told the paths the commit changes against
+that parent; a commit that changes that script, the planner,
+`ci/products.json`, `scripts/ci-products.mjs` or `ci.yml` needs a green run,
+and so does every release whose product is Connect. Meta's gate and its
+candidate collection, promotion and recovery apply the same reader for Meta.
+A release-projection run (plan mode
 `release-projection`) also records `reused_test_evidence`: the first-parent
 commit and tree and the CI run and attempt it reused. The release gate then
 runs the parent's own copies of the classifier and the evidence script to
@@ -450,9 +460,11 @@ workspace, records every lane as successful and is not itself a reuse. The consu
 supported legacy schema-1 Cargo, schema-2 BuildBuddy, and schema-3
 BuildBuddy-plus-dense-Mob attestations; the current producer does not emit
 those formats.
-Manual recovery dispatches still require successful exact-main CI (for a
+Manual recovery dispatches still require exact-main CI (for a
 maintenance release, the push CI on its release branch) for the
-selected release commit. When release validation applies, the dispatch runs
+selected release commit: a successful run, or a failed one the product-scoped
+evidence accepts for Core as above (a dispatch does not verify the retained
+attestation again). When release validation applies, the dispatch runs
 the selected validation lane directly rather than requiring a retained **CI**
 attestation artifact. Narrow `assets`,
 `packages`, `web-sdk`, and `web-sdk-publish` modes repair one publication
@@ -510,6 +522,7 @@ head, which never reaches `main` before the tag.
 - A push to `release/<version>` writes the exact-tree CI attestation and,
   for a `Cargo.toml` or `CHANGELOG.md` change, the readiness push evidence,
   as a push to `main` does. `require_ci_green` accepts a successful push run
+  (or a failed one the product-scoped evidence accepts for Core)
   of `ci.yml` at exactly the release commit on `main` or on
   `release/<version>`, where `<version>` is the checked-out workspace version
   the tag is bound to, and requires the verified attestation's ref to be

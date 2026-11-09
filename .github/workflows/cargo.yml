@@ -743,7 +743,7 @@ jobs:
 
       # A tag publishes a pre-tag prebuild's artifacts only when this lookup
       # selects a complete prebuild of exactly its commit.
-      - name: Verify the release prebuild lookup selects only complete exact-commit prebuilds
+      - name: Verify the release prebuild lookup selects only complete prebuilds that serve the commit
         run: scripts/test-release-find-prebuild.sh
 
       - name: Verify parallel release packaging stays isolated and fails closed

@@ -32,7 +32,10 @@ shutdown horizon an installer test pins, and a toolchain that fits the
 workflow's declared versions. A pull request run never counts: it tests
 GitHub's merge of its head into the base (refs/pull/N/merge), not its head
 commit. If no dispatched run did, it refuses until the installer workflow is
-dispatched for that commit.
+dispatched for that commit. That run tested the commit's own meta/sdk/python,
+while each package carries the published client wheel of the Guide's Meta
+release, so the candidate and its publication also refuse unless that tree is
+the one at the Guide's release commit (guide.meta_source in the inputs).
 
 Paths: git reads at a commit name repository paths (Meta's tree under meta/);
 checkout reads (ROOT) name paths under Meta's own directory.
@@ -143,6 +146,9 @@ DOWNLOAD_ATTEMPTS = 3
 INSTALLER_CI = ".github/workflows/meta-installer.yml"
 EVIDENCE_TREES = tuple(META_DIR + path for path in (
     "console", "installer", "packages/console-components", "packages/console-core", "sdk/python"))
+# The Meta SDK the installer workflow tests: a release commit's must be the
+# tree of the Guide's Meta release commit, whose published wheel a package carries.
+GUIDE_SDK_TREE = META_DIR + "sdk/python"
 # installer/tests/test_gateway_shutdown_horizon.py reads the shutdown horizon
 # the gateway source advertises, so the bound run must have tested it too.
 EVIDENCE_FILES = (INSTALLER_CI, *(META_DIR + path for path in (
@@ -660,6 +666,23 @@ def tuple_differences(wanted, observed):
                   if wanted[group].get(path) != observed[group].get(path))
 
 
+def require_guide_release_sdk(objects, commit, tested):
+    """The Meta SDK the installer workflow tested, this commit's sdk/python,
+    must be the Guide client a package carries: the published wheel of the
+    Guide's Meta release. Refuse unless `tested` is that release commit's tree."""
+    found = objects.lookup(commit, META_DIR + INPUTS)
+    require(found is not None and found[0] == "blob", f"{META_DIR}{INPUTS} is not a file at {commit}")
+    value = rc.parse_json(objects.blob_text(found[1]))
+    require(isinstance(value, dict) and isinstance(value.get("guide"), dict),
+            f"{META_DIR}{INPUTS} at {commit} names no Guide release")
+    source = rc.digest(value["guide"].get("meta_source"), "guide meta_source", 40)
+    released = objects.lookup(source, GUIDE_SDK_TREE)
+    require(released is not None and released[0] == "tree" and released[1] == tested,
+            f"{GUIDE_SDK_TREE} at {commit} differs from the Guide's Meta release at {source}: the installer "
+            "workflow tests this commit's Meta SDK, while the package carries that release's published client. "
+            f"Release Forge from a commit whose {GUIDE_SDK_TREE} is the release's")
+
+
 def declared_toolchain(objects, files):
     text = objects.blob_text(files[INSTALLER_CI])
     pythons = set(re.findall(r"python-version:\s*['\"]?([0-9][0-9.]*)['\"]?", text))
@@ -712,9 +735,11 @@ def forge_ci_evidence(sha, work, objects=None):
     commit's Forge inputs, preferring a run of this commit itself. A pull
     request run tested a merge commit, not its head_sha, so it never counts.
     Refuses when no dispatched run did, after re-listing the runs: the
-    listing can omit a run for minutes."""
+    listing can omit a run for minutes. Refuses at once when the Meta SDK
+    those runs test is not the Guide's release SDK."""
     objects = objects or GitObjects()
     wanted = evidence_tuple(objects, sha)
+    require_guide_release_sdk(objects, sha, wanted["trees"][GUIDE_SDK_TREE])
     declared = declared_toolchain(objects, wanted["files"])
     endpoint = rc.repo_endpoint(
         f"actions/workflows/{PurePosixPath(INSTALLER_CI).name}/runs?event=workflow_dispatch&status=success"
@@ -758,6 +783,7 @@ def recheck_forge_ci(manifest):
     wanted = evidence_tuple(objects, manifest["source_sha"])
     require(record["tuple"] == wanted and evidence_tuple(objects, record["head_sha"]) == wanted,
             "the bound Forge run no longer tested this candidate's Forge inputs")
+    require_guide_release_sdk(objects, manifest["source_sha"], wanted["trees"][GUIDE_SDK_TREE])
     run = rc.api(rc.repo_endpoint(f"actions/runs/{record['run_id']}"))
     require(run["id"] == record["run_id"] and run["run_attempt"] == record["run_attempt"]
             and run["head_sha"] == record["head_sha"] and run["path"] == INSTALLER_CI

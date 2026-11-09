@@ -63,6 +63,11 @@ published: after a release, fill them from it together with the agent-team
 runtime (`launchkit/public_meta_runtime.py`: its wheel's SHA-256, its release
 fixture under `installer/tests/fixtures/` and its model catalog, recorded with
 `python -m launchkit.public_meta_runtime`).
+The installer workflow tests the release commit's own `meta/sdk/python`, while
+the package carries that release's published client, so a candidate and its
+publication refuse unless the commit's `meta/sdk/python` is the tree at
+`meta_source`: cut Forge from a commit whose Meta SDK is unchanged since the
+Guide's Meta release.
 Inputs must be public, and they must not carry private paths, user names or
 host details. A target without pins is not built.
 

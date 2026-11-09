@@ -7446,6 +7446,102 @@ async fn a_reset_s_distillation_waits_for_a_busy_budget_and_distills_once_it_fre
     );
 }
 
+/// A reset's distillation the realm's background budget does not admit
+/// within its wait ends unrun, with the cause `budget_busy`: recorded and
+/// reported, where a denial skipped it without a word.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_distillation_the_budget_keeps_busy_past_its_wait_ends_unrun_with_its_cause() {
+    let alice = identity("personal:alice");
+    let retired = SessionId::new();
+    let core = Arc::new(SeatCore::default());
+    core.core.keep_journal();
+    let runtime = runtime_over(None, &core);
+    runtime.bind_lifecycle_projection(None);
+    runtime.set_lifecycle_effect_limits(Duration::from_secs(30), 2);
+    runtime.set_lifecycle_effect_budget_wait(Duration::from_millis(300));
+    register_live(&runtime, &core.core, spec(&alice), 0, retired.clone())
+        .await
+        .expect("registered live");
+    let errors = Arc::new(StdMutex::new(Vec::new()));
+    runtime.set_error_hook(Some(keeping_errors(&errors)));
+    let memory_dir = tempfile::tempdir().expect("memory dir");
+    let transcripts = Arc::new(OneMessageEach::default());
+    let model = Arc::new(GatedModel::new());
+    let (memory, distiller) = memory_distilling(memory_dir.path(), &transcripts, &model);
+    runtime.set_agent_memory(Some(memory)).await;
+    runtime.settle_lifecycle_projection().await;
+
+    // Another distiller run holds the realm's background budget: the
+    // distillation of the budget holder's transcript, inside its model call.
+    let holder = tokio::spawn({
+        let distiller = Arc::clone(&distiller);
+        async move {
+            distiller
+                .distill_now(
+                    "personal:holder",
+                    BUDGET_HOLDER_SESSION,
+                    crate::memory::distiller::DistillCause::Retire,
+                )
+                .await
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !model.holding() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the budget holder's run never reached its model"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    runtime
+        .reset_tracked(&alice)
+        .await
+        .expect("the reset rotates the identity");
+    // The distillation waits out its wait, and the projection goes on.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        runtime.settle_lifecycle_projection(),
+    )
+    .await
+    .expect("the distillation's wait ends");
+
+    let failures = runtime
+        .lifecycle_effect_failures(0, 16)
+        .await
+        .expect("the recorded failures read");
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    let unrun = &failures[0];
+    assert_eq!(
+        (unrun.effect, unrun.cause, unrun.attempts),
+        (
+            crate::runtime::LifecycleEffectKind::Distillation,
+            crate::runtime::LifecycleEffectFailureCause::BudgetBusy,
+            0
+        ),
+        "{unrun:?}"
+    );
+    let reported = lock(&errors)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::unified_runtime::types::ErrorEvent::LifecycleEffectFailed { .. }
+            )
+        })
+        .map(|event| serde_json::to_value(event).expect("the event serializes"))
+        .collect::<Vec<_>>();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert_eq!(reported[0]["effect"], "distillation", "{reported:?}");
+    assert_eq!(reported[0]["cause"], "budget_busy", "{reported:?}");
+    assert!(
+        !model.was_shown(&transcript_of(&retired.to_string())),
+        "the session's transcript never reached the model"
+    );
+
+    model.open();
+    holder.await.expect("the budget holder's run");
+}
+
 /// The retirement hook of an incarnation a Meta step ended is called only
 /// once that step answered. The projection takes what the step kept for the
 /// hook (the registration it read before Core was asked, settled after Core

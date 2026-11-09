@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   unrun, recorded with the cause `budget_busy`; the session's memory keeps
   its discards unless the retirement is a delete.
 
+- A retirement's transcript distillation (a reset's, a role move's, an
+  unlisting's, a rotation's) waits for a busy agent memory background
+  budget the same way. It tried the budget once, and a denial skipped it
+  without a record or a report, so in a wave of retirements most retired
+  sessions were never distilled. One the budget still did not admit within
+  its wait is recorded (`lifecycle_effect_failed`, effect `distillation`,
+  cause `budget_busy`).
+
 ## [0.9.11] - 2026-11-09
 
 Meta 0.9.11 is part of Meerkat 0.9.11 (Core 0.9.11, Meta 0.9.11 and Connect

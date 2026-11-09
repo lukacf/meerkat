@@ -701,21 +701,35 @@ impl AgentMemoryRuntimeInjector {
     }
 
     /// [`Self::distill_before_rotation`], answering whether the run ended
-    /// within the distiller's pre-rotation bound, or the bound it did not
-    /// end within. Without a distiller there is nothing to wait for.
+    /// within the distiller's pre-rotation bound: `Ok` once it did, whatever
+    /// it distilled; [`DistillerRunError::Busy`] when the realm's background
+    /// budget did not admit the run, so it was not made (unreported: the
+    /// caller waits for the budget, [`Self::until_budget_admits`], and asks
+    /// again); [`DistillerRunError::Failed`] with the bound it did not end
+    /// within. Without a distiller there is nothing to wait for.
     pub(crate) async fn distill_before_rotation_within_bound(
         &self,
         identity: &AgentIdentity,
         session_key: &str,
         cause: crate::memory::distiller::DistillCause,
-    ) -> Result<(), std::time::Duration> {
-        match self.distiller.as_ref() {
-            Some(distiller) => {
-                distiller
-                    .distill_before_rotation_within_bound(identity.as_str(), session_key, cause)
-                    .await
+    ) -> Result<(), DistillerRunError> {
+        let Some(distiller) = self.distiller.as_ref() else {
+            return Ok(());
+        };
+        match distiller
+            .distill_before_rotation_within_bound(identity.as_str(), session_key, cause)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(crate::memory::distiller::BoundedRunError::Busy(denied)) => {
+                Err(DistillerRunError::Busy(denied))
             }
-            None => Ok(()),
+            Err(crate::memory::distiller::BoundedRunError::TimedOut(bound)) => {
+                Err(DistillerRunError::Failed(format!(
+                    "timed out: the distillation did not finish within {} ms",
+                    bound.as_millis()
+                )))
+            }
         }
     }
 

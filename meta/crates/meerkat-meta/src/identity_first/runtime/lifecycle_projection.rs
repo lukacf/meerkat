@@ -52,11 +52,11 @@
 //! harvest of the compactions a retired session holds is attempted once
 //! with the batch the step's settle answered, then, when that failed or no
 //! batch came back, through a read of the session's memory, at most
-//! [`EFFECT_ATTEMPTS`] times, each within that bound. A harvest the realm's
-//! agent memory background budget does not admit was not attempted: it
-//! waits for the budget, asking again each time it may admit a run, at
-//! most [`EFFECT_BUDGET_WAIT`] in all, and one the budget still did not
-//! admit by then ends unrun, recorded with the cause
+//! [`EFFECT_ATTEMPTS`] times, each within that bound. A harvest or a
+//! distillation the realm's agent memory background budget does not admit
+//! was not attempted: each waits for the budget, asking again each time it
+//! may admit a run, at most [`EFFECT_BUDGET_WAIT`] in all, and one the
+//! budget still did not admit by then ends unrun, recorded with the cause
 //! [`LifecycleEffectFailureCause::BudgetBusy`]. An answer
 //! the host gives (an error of the hook or of `after_create`) is final. A
 //! side effect that failed is recorded durably
@@ -270,15 +270,16 @@ const EFFECT_ATTEMPTS: u32 = 3;
 const EFFECT_RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 /// The longest a side effect whose run the realm's agent memory background
-/// budget admits (a compaction harvest) waits for that budget, in all. The
-/// budget admits one distiller run of a realm at a time, and a lane runs up
-/// to [`EFFECT_CONCURRENCY`] identities' side effects at once, each
-/// retirement owing up to two distiller runs (its harvest and its
-/// distillation): a lane's burst of retirements (resets across a mob, a
-/// roster pass that unlists several identities) queues some thirty runs,
-/// which at the few seconds a run takes are through in a few minutes. The
-/// bound also caps how long a budget that no run frees (a run that does
-/// not end) holds a side effect, and the side effects after it, back.
+/// budget admits (a compaction harvest, a distillation) waits for that
+/// budget, in all. The budget admits one distiller run of a realm at a
+/// time, and a lane runs up to [`EFFECT_CONCURRENCY`] identities' side
+/// effects at once, each retirement owing up to two distiller runs (its
+/// harvest and its distillation): a lane's burst of retirements (resets
+/// across a mob, a roster pass that unlists several identities) queues some
+/// thirty runs, which at the few seconds a run takes are through in a few
+/// minutes. The bound also caps how long a budget that no run frees (a run
+/// that does not end) holds a side effect, and the side effects after it,
+/// back.
 const EFFECT_BUDGET_WAIT: Duration = Duration::from_mins(5);
 
 /// How many runs in a row may fail before the projection reads as stalled.
@@ -375,13 +376,13 @@ where
 }
 
 /// [`bounded`], for a side effect whose run the realm's agent memory
-/// background budget admits (a compaction harvest). An attempt the budget
-/// did not admit ([`DistillerRunError::Busy`]) was not made: it does not
-/// count, and the side effect waits until the budget may admit a run
-/// (`admits`, at most until `wait_until`), then asks again. When the budget
-/// did not admit one by then, it ends with the budget's denial
-/// (`DistillerRunError::Busy`); an attempt that was made and failed counts,
-/// as in [`bounded`].
+/// background budget admits (a compaction harvest, a distillation). An
+/// attempt the budget did not admit ([`DistillerRunError::Busy`]) was not
+/// made: it does not count, and the side effect waits until the budget may
+/// admit a run (`admits`, at most until `wait_until`), then asks again.
+/// When the budget did not admit one by then, it ends with the budget's
+/// denial (`DistillerRunError::Busy`); an attempt that was made and failed
+/// counts, as in [`bounded`].
 async fn bounded_admitted<T, F, Fut, W, WFut>(
     limits: EffectLimits,
     wait_until: tokio::time::Instant,
@@ -4302,26 +4303,53 @@ impl IdentityRuntime {
                     )
                     .await?;
                 }
-                if let Some(cause) = owes.distill
-                    && let Err(bound) = memory
-                        .distill_before_rotation_within_bound(identity, session_key, cause)
-                        .await
-                {
-                    let failed = FailedEffect {
-                        identity,
-                        member: &retirement.member,
-                        generation: retirement.generation,
-                        session: retirement.session.as_ref(),
-                        effect: LifecycleEffectKind::Distillation,
-                        attempts: 1,
-                        error: format!(
-                            "timed out: the distillation did not finish within {} ms",
-                            bound.as_millis()
-                        ),
-                        cause: LifecycleEffectFailureCause::Failed,
+                if let Some(cause) = owes.distill {
+                    // Attempted once, once the realm's background budget
+                    // admits it.
+                    let distilled = bounded_admitted(
+                        EffectLimits {
+                            attempts: 1,
+                            ..limits
+                        },
+                        tokio::time::Instant::now() + limits.budget_wait,
+                        move || {
+                            memory.distill_before_rotation_within_bound(
+                                identity,
+                                session_key,
+                                cause,
+                            )
+                        },
+                        move |wait: Duration| memory.until_budget_admits(wait),
+                    )
+                    .await;
+                    let ended = match distilled.outcome {
+                        Ok(()) => None,
+                        Err(DistillerRunError::Failed(error)) => {
+                            Some((error, LifecycleEffectFailureCause::Failed))
+                        }
+                        Err(DistillerRunError::Busy(denied)) => Some((
+                            format!(
+                                "the realm's background budget did not admit the distillation \
+                                 within {} ms: {denied}",
+                                limits.budget_wait.as_millis()
+                            ),
+                            LifecycleEffectFailureCause::BudgetBusy,
+                        )),
                     };
-                    self.record_lifecycle_effect_failure(owed, &failed).await?;
-                    self.report_lifecycle_effect_failure(&failed);
+                    if let Some((error, ended_by)) = ended {
+                        let failed = FailedEffect {
+                            identity,
+                            member: &retirement.member,
+                            generation: retirement.generation,
+                            session: retirement.session.as_ref(),
+                            effect: LifecycleEffectKind::Distillation,
+                            attempts: distilled.attempts,
+                            error,
+                            cause: ended_by,
+                        };
+                        self.record_lifecycle_effect_failure(owed, &failed).await?;
+                        self.report_lifecycle_effect_failure(&failed);
+                    }
                 }
                 if owes.drop_scope {
                     let dropped = bounded(limits, move || async move {

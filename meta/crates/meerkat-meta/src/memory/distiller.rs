@@ -2007,30 +2007,40 @@ impl DistillerEngine {
         }
     }
 
-    /// Pre-rotation hook body (respawn/retire/delete): bounded, best-effort
-    /// — rotation proceeds on timeout with a loud skip.
+    /// Pre-rotation hook body (respawn/retire/delete): bounded and
+    /// best-effort, so rotation proceeds on timeout with a loud skip. A run
+    /// the realm's background budget does not admit is skipped, and the
+    /// denial reported.
     pub async fn distill_before_rotation(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         cause: DistillCause,
     ) {
-        let _ = self
+        if let Err(BoundedRunError::Busy(denied)) = self
             .distill_before_rotation_within_bound(identity, session_key, cause)
-            .await;
+            .await
+        {
+            self.budget.report_denied(&self.realm, "distiller", &denied);
+        }
     }
 
     /// [`Self::distill_before_rotation`], answering whether the run ended
-    /// within the pre-rotation bound, or the bound it did not end within.
+    /// within the pre-rotation bound: the realm's background budget's
+    /// denial of the run, unreported ([`BoundedRunError::Busy`]: the caller
+    /// waits for the budget, [`Self::until_budget_admits`], and asks again,
+    /// or reports it), or the bound it did not end within.
     pub(crate) async fn distill_before_rotation_within_bound(
         self: &Arc<Self>,
         identity: &str,
         session_key: &str,
         cause: DistillCause,
-    ) -> Result<(), Duration> {
+    ) -> Result<(), BoundedRunError> {
         let timeout = self.pre_rotation_timeout;
-        match tokio::time::timeout(timeout, self.distill_now(identity, session_key, cause)).await {
-            Ok(_) => Ok(()),
+        let run = self.distill_or_busy(identity, session_key, cause, None, true);
+        match tokio::time::timeout(timeout, run).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(denied)) => Err(BoundedRunError::Busy(denied)),
             Err(_) => {
                 tracing::warn!(
                     identity,
@@ -2054,7 +2064,7 @@ impl DistillerEngine {
                         },
                     );
                 }
-                Err(timeout)
+                Err(BoundedRunError::TimedOut(timeout))
             }
         }
     }

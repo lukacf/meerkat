@@ -38,10 +38,11 @@ that removes its pins; when that change lands the entry is stale and goes.
 
 `--write` first moves every plain-text pin of a dependency manifest
 (package.json and a lock's root package, pyproject.toml, a requirements file,
-Cargo.toml) to the version of the package it pins; the version bumps run it so
-that a bump moves those pins in the same commit. A registry lock entry and a
-requirement with a hash cannot move this way and stay findings, as do pins in
-prose and code, which the docs stamper or a person moves.
+Cargo.toml) that no allow entry covers to the version of the package it pins;
+the version bumps run it so that a bump moves those pins in the same commit. A
+registry lock entry and a requirement with a hash cannot move this way and stay
+findings, as do pins in prose and code, which the docs stamper or a person
+moves.
 
 usage: check_inrepo_version_pins.py [--root DIR] [--config FILE] [--write]
 Exit 0 when clean, 1 on a finding or a stale allowlist entry, 2 on an error.
@@ -619,6 +620,12 @@ def move_version(text: str, pinned: str, expected: str) -> str:
     return re.sub(rf"(?<![0-9.]){re.escape(pinned)}(?![0-9]|\.[0-9])", expected, text, count=1)
 
 
+def covering(finding: Finding, allowlist: list[AllowEntry]) -> list[AllowEntry]:
+    """The allow entries with a `match` that cover a finding."""
+    return [entry for entry in allowlist
+            if entry.match is not None and entry.path.match(finding.path) and entry.match.search(finding.pin)]
+
+
 def manifest_file(path: str) -> bool:
     """The files --write edits: dependency manifests and locks, never prose or code."""
     name = PurePosixPath(path).name
@@ -673,20 +680,22 @@ def run(root: Path, config_path: Path, write: bool, out=sys.stdout, err=sys.stde
         allowlist = load_allowlist(config)
         findings = scan(root, inventory, tracked, allowlist)
         if write:
-            for path in write_pins(root, findings):
+            # An allowed pin (an upgrade fixture, or a pin another change removes)
+            # stays as it is: only the pins the check would report move.
+            unallowed = [finding for finding in findings if not covering(finding, allowlist)]
+            for path in write_pins(root, unallowed):
                 print(f"moved in-repo pins in {path}", file=out)
             allowlist = load_allowlist(config)
             findings = scan(root, inventory, tracked, allowlist)
     except (PinError, OSError, ValueError, tomllib.TOMLDecodeError, re.error) as error:
         print(f"check_inrepo_version_pins: {error}", file=err)
         return 2
-    matching = [entry for entry in allowlist if entry.match is not None]
     reported = []
     for finding in findings:
-        covering = [entry for entry in matching if entry.path.match(finding.path) and entry.match.search(finding.pin)]
-        for entry in covering:
+        entries = covering(finding, allowlist)
+        for entry in entries:
             entry.used += 1
-        if not covering:
+        if not entries:
             reported.append(finding)
     stale = [entry for entry in allowlist if entry.used == 0]
     for finding in reported:
@@ -709,7 +718,8 @@ def main(argv=None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--config", type=Path, help=f"default: <root>/{CONFIG}")
     parser.add_argument("--write", action="store_true",
-                        help="first move every plain-text pin to the version of the package it pins")
+                        help="first move every plain-text pin no allow entry covers to the version of the package "
+                             "it pins")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     return run(root, args.config or root / CONFIG, args.write)

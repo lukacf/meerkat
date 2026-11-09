@@ -277,6 +277,24 @@ class WriteTests(GuardTest):
         self.assertNotIn("package.json", err)
         self.assertNotIn("pyproject.toml", err)
 
+    def test_write_leaves_allowed_pins_in_place(self):
+        # An allowed pin (an upgrade fixture, or a pin another change removes) is not
+        # this check's to move: --write moves only the pins it would report.
+        project = self.repo.write("meta/tool/pyproject.toml", '[project]\nname = "demo-tool"\nversion = "0.3.1"\n'
+                                  'dependencies = ["demo-meta==1.4.0"]\n[project.optional-dependencies]\n'
+                                  'test = ["old-meta==0.8.4", "demo-meta==1.4.1"]\n')
+        self.repo.allow(path="meta/tool/pyproject.toml", match="^demo-meta==1\\.4\\.0$",
+                        reason="The release another change moves.",
+                        removed_by="the change that runs the tool on the version in the tree")
+        self.repo.allow(path="meta/tool/pyproject.toml", match="^old-meta==",
+                        reason="The former name an upgrade test installs.")
+        code, out, err = self.repo.run(write=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn("moved in-repo pins in meta/tool/pyproject.toml", out)
+        self.assertEqual(project.read_text(), '[project]\nname = "demo-tool"\nversion = "0.3.1"\n'
+                         'dependencies = ["demo-meta==1.4.0"]\n[project.optional-dependencies]\n'
+                         'test = ["old-meta==0.8.4", "demo-meta==1.4.2"]\n')
+
     def test_a_version_bump_with_write_leaves_the_check_clean(self):
         # The release bumps move the packages' own versions, then run --write: every
         # plain-text pin on the bumped packages follows in the same commit.

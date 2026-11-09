@@ -2143,6 +2143,7 @@ BINARY_BUILD_JOBS = (
     "build_binaries_buildbuddy",
     "build_binaries_windows_cross",
     "build_binaries_macos_x86_cross",
+    "build_binaries_buildbuddy_macos_x86",
 )
 CRITICAL_PUBLISH_JOB = "publish_critical_release_assets"
 WEB_SDK_BUILD_JOB = "build_web_sdk_package"
@@ -2564,6 +2565,7 @@ def check_prebuild(text: str) -> list[str]:
 PREBUILD_BUILD_JOBS = (
     *BINARY_BUILD_JOBS,
     "verify_windows_binaries",
+    "verify_macos_x86_binaries",
     WEB_SDK_BUILD_JOB,
     "build_binaries_critical_gate",
     "build_binaries_gate",
@@ -2746,7 +2748,13 @@ def check_semver_baseline(text: str) -> list[str]:
 GH_UPLOAD_CLOBBER = re.compile(r"gh release upload(?:[^\n]|\\\n)*--clobber")
 CRITICAL_TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin")
 TRAILING_TARGETS = ("x86_64-apple-darwin", "x86_64-pc-windows-msvc")
-TRAILING_BUILD_JOBS = ("build_binaries_windows_cross", "verify_windows_binaries", "build_binaries_macos_x86_cross")
+TRAILING_BUILD_JOBS = (
+    "build_binaries_windows_cross",
+    "verify_windows_binaries",
+    "build_binaries_macos_x86_cross",
+    "build_binaries_buildbuddy_macos_x86",
+    "verify_macos_x86_binaries",
+)
 RELEASE_BINARIES = ("rkat", "rkat-rpc", "rkat-rest", "rkat-mcp")
 GH_RELEASE_ACTION = "softprops/action-gh-release"
 
@@ -4183,7 +4191,7 @@ def check_buildbuddy_macos_x86(text: str) -> list[str]:
     if case is None or bound is None or minimum is None:
         violations.append(
             f"`{BUILDBUDDY_RELEASE_SCRIPT}` {BUILDBUDDY_MACOS_X86_COMMAND} must set `--macos_minimum_os` "
-            f"(the default otherwise follows the SDK), no newer than `{MACOS_X86_CHECK_SCRIPT}` accepts"
+            f"(otherwise the launcher's shared macOS minimum applies), no newer than `{MACOS_X86_CHECK_SCRIPT}` accepts"
         )
     elif _version_tuple(minimum.group(1)) > _version_tuple(bound.group(1)):
         violations.append(

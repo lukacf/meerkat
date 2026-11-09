@@ -480,8 +480,8 @@ elif name == "prebuild-moving-checkout":
 elif name == "prebuild-builds-anyway":
     # A tag whose commit was prebuilt rebuilds every binary anyway.
     needle = "      needs.release_prebuild.outputs.run_id == '' &&\n"
-    if text.count(needle) != 4:
-        raise SystemExit(f"fixture `{name}` expects four binary build guards, found {text.count(needle)}")
+    if text.count(needle) != 5:
+        raise SystemExit(f"fixture `{name}` expects five binary build guards, found {text.count(needle)}")
     text = text.replace(needle, "")
 elif name == "prebuild-reuse-unverified":
     # The publisher takes the prebuild's archives through the exact-tag
@@ -796,14 +796,16 @@ pathlib.Path(destination).write_text(text)
 PYEOF
 }
 
-# mutate_tree <name> <root>: copy the committed .github tree under <root>
-# and mutate one of its workflows or local actions; the checker reads local
-# actions and the other workflows from there (--repo-root).
+# mutate_tree <name> <root>: copy the committed .github tree and the Intel
+# macOS lane's scripts under <root> and mutate one of those files; the
+# checker reads local actions, the other workflows and those scripts from
+# there (--repo-root).
 mutate_tree() {
   local name="$1"
   local root="$2"
-  mkdir -p "$root"
+  mkdir -p "${root}/scripts"
   cp -R "${REPO_ROOT}/.github" "${root}/.github"
+  cp "${REPO_ROOT}/scripts/buildbuddy-bazel-poc" "${REPO_ROOT}/scripts/check-macos-x86-release-binary" "${root}/scripts/"
   "$PYTHON" - "$root" "$name" <<'PYEOF'
 import pathlib
 import sys
@@ -1044,6 +1046,21 @@ elif name == "cache-token-job-action":
         "\n"
         "    - name: Checkout tap\n",
     )
+elif name == "macos-x86-minimum-unset":
+    # The BuildBuddy Intel macOS build keeps the launcher's shared macOS
+    # minimum, newer than some supported Intel Macs run.
+    replace_once(
+        "scripts/buildbuddy-bazel-poc",
+        " --macos_minimum_os=11.0)\n",
+        ")\n",
+    )
+elif name == "macos-x86-minimum-too-new":
+    # The BuildBuddy Intel macOS build targets a macOS the inspection refuses.
+    replace_once(
+        "scripts/buildbuddy-bazel-poc",
+        " --macos_minimum_os=11.0)\n",
+        " --macos_minimum_os=13.0)\n",
+    )
 else:
     raise SystemExit(f"unknown tree fixture `{name}`")
 PYEOF
@@ -1273,7 +1290,7 @@ expect_fail_named prebuild-reuse-no-wait "${TEST_ROOT}/prebuild-reuse-no-wait.ym
   "must wait for the prebuild run's \`Release binary build gate\`" prebuild
 mutate prebuild-gate-waits-trailing "${TEST_ROOT}/prebuild-gate-waits-trailing.yml"
 expect_fail_named prebuild-gate-waits-trailing "${TEST_ROOT}/prebuild-gate-waits-trailing.yml" \
-  "job \`release_prebuild_gate\` waits for \`build_binaries_gate\`" trailing-platforms
+  "job \`release_prebuild_gate\` waits for \`build_binaries_buildbuddy_macos_x86\`, \`build_binaries_gate\`" trailing-platforms
 mutate prebuild-critical-full-gate "${TEST_ROOT}/prebuild-critical-full-gate.yml"
 expect_fail_named prebuild-critical-full-gate "${TEST_ROOT}/prebuild-critical-full-gate.yml" \
   "expected \`Release critical binary build gate\`" prebuild
@@ -1304,7 +1321,7 @@ expect_fail_named semver-baseline-after-release "${TEST_ROOT}/semver-baseline-af
 
 mutate trailing-gates-critical "${TEST_ROOT}/trailing-gates-critical.yml"
 expect_fail_named trailing-gates-critical "${TEST_ROOT}/trailing-gates-critical.yml" \
-  "waits for \`build_binaries_gate\`, \`build_binaries_macos_x86_cross\`" trailing-platforms
+  "waits for \`build_binaries_buildbuddy_macos_x86\`, \`build_binaries_gate\`, \`build_binaries_macos_x86_cross\`" trailing-platforms
 mutate trailing-overwrites "${TEST_ROOT}/trailing-overwrites.yml"
 expect_fail_named trailing-overwrites "${TEST_ROOT}/trailing-overwrites.yml" \
   "release uploads are add-only" trailing-platforms
@@ -1502,6 +1519,13 @@ expect_fail_named macos-x86-gates-critical "${TEST_ROOT}/doctor-macos-x86-gates-
   "job \`build_binaries_critical_gate\` waits for \`build_binaries_buildbuddy_macos_x86\`" buildbuddy-macos-x86
 expect_fail_named macos-x86-unverified "${TEST_ROOT}/doctor-macos-x86-unverified.yml" \
   "0 macOS runner jobs run \`scripts/check-macos-x86-release-binary\`" buildbuddy-macos-x86
+# The lane targets a macOS version the inspection accepts.
+mutate_tree macos-x86-minimum-unset "${TEST_ROOT}/macos-x86-minimum-unset"
+expect_tree_fail_named macos-x86-minimum-unset "${TEST_ROOT}/macos-x86-minimum-unset" \
+  "release-build-macos-x86 must set \`--macos_minimum_os\`" buildbuddy-macos-x86
+mutate_tree macos-x86-minimum-too-new "${TEST_ROOT}/macos-x86-minimum-too-new"
+expect_tree_fail_named macos-x86-minimum-too-new "${TEST_ROOT}/macos-x86-minimum-too-new" \
+  "release-build-macos-x86 targets macOS 13.0, newer than the 11.0" buildbuddy-macos-x86
 
 mutate semver-baseline-gates-homebrew "${TEST_ROOT}/doctor-baseline.yml"
 run_doctor "${TEST_ROOT}/doctor-baseline.yml" "${TEST_ROOT}/doctor-baseline.log"

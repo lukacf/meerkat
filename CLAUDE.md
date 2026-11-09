@@ -836,12 +836,16 @@ workspace-mode parent run for it). Any other attestation, legacy schemas
 included, keeps Cargo validation on the tag. Cargo validation is also the
 manual-dispatch fallback.
 The owner-selected BuildBuddy release backend (remote.buildbuddy.io) covers
-the critical Linux (x86_64, aarch64) and macOS arm64 binaries. The trailing
-platforms build in their own jobs on either backend: Windows release
-binaries are cross-compiled with cargo-xwin (clang-cl, lld-link, the Windows
-SDK) on a GitHub-hosted Ubuntu runner and then executed for verification on a
-windows-2025-vs2026 runner, and Intel macOS binaries are cross-compiled on an
-Apple silicon runner (macos-15). The critical archives publish as soon as
+the critical Linux (x86_64, aarch64) and macOS arm64 binaries, and in a job of
+its own the Intel macOS ones (`release-build-macos-x86`: cross-compiled on the
+macOS arm64 lane's Apple-silicon executors for macOS 11.0, then run and
+inspected on an Apple silicon runner, macos-15). The trailing platforms build
+in their own jobs: Windows release binaries are cross-compiled with cargo-xwin
+(clang-cl, lld-link, the Windows SDK) on a GitHub-hosted Ubuntu runner and
+then executed for verification on a windows-2025-vs2026 runner on either
+backend, and on the GitHub-hosted backend Intel macOS binaries are
+cross-compiled on an Apple silicon runner (macos-15). The critical archives
+publish as soon as
 their lane passes; the trailing ones are added afterwards, add-only, with the
 complete manifest and the Homebrew formula.
 
@@ -867,7 +871,7 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 | `release_semver_gate` | Tags and full/package dispatches | After `require_ci_green`, verifies unexpired exact-tree, exact-version push readiness evidence (from `main`, or from the release branch of the tag's version for a maintenance release) on the normal tag/explicit-tag path; narrower manual measurement/recovery exceptions are described in the release guide |
 | `release_prebuild` | Tag runs | Finds a usable pre-tag prebuild for the tag commit (`scripts/release-find-prebuild`: a `release.yml` dispatch on main at that commit or, failing a usable one, at an ancestor whose prebuild serves it, every path changed since being a non-input of Core's release artifacts per `scripts/release-prebuild-equivalent` (another product's root other than its `Cargo.toml` files, a product changelog, or a short list of CI-only files); whose `Release prebuild gate` succeeded, so its critical binaries and Web SDK package are ready while its trailing lanes may still run, and whose critical artifacts have not expired; a gate that has not concluded is waited for, unless a job it needs already failed, timed out or was cancelled); when found, the build jobs below are skipped and the publishers use that run's artifacts, after checking the commit again |
 | `build_binaries` / `build_binaries_buildbuddy` / `build_binaries_critical_gate` | Tags without a prebuild, manual asset recovery, or a prebuild dispatch | The selected BuildBuddy or GitHub-hosted lane builds the critical platforms (Linux x86_64 and aarch64, macOS arm64); each target packages 4 binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`); the critical gate requires the selected lane (or, when the archives come from a prebuild or `assets_run_id`, that every build job was skipped) |
-| `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_macos_x86_cross` / `build_binaries_gate` | Same | The trailing platforms on either backend: Windows cross-compiled from Linux with cargo-xwin and run on windows-2025-vs2026, Intel macOS cross-compiled on Apple silicon (`macos-15`); the full gate requires the selected critical lane plus every trailing job |
+| `build_binaries_windows_cross` / `verify_windows_binaries` / `build_binaries_buildbuddy_macos_x86` / `verify_macos_x86_binaries` / `build_binaries_macos_x86_cross` / `build_binaries_gate` | Same | The trailing platforms: Windows cross-compiled from Linux with cargo-xwin and run on windows-2025-vs2026 (either backend); Intel macOS on BuildBuddy (`release-build-macos-x86`, macOS 11.0) and then run and inspected on Apple silicon (`macos-15`) on the BuildBuddy backend, or cross-compiled on Apple silicon (`macos-15`) on the GitHub-hosted backend; the full gate requires the selected critical lane plus every trailing job of that backend; the critical gate and publisher wait for none of them |
 | `build_web_sdk_package` | Tags without a prebuild, package/Web recovery without a reused artifact, or a prebuild dispatch | After `require_ci_green`, beside the release validation and the semver gate, builds the `@rkat/web` package artifact, stamps it with its commit, package and tarball digest, and attests it; Cargo runs four jobs while the tree's `scripts/release-web-sdk-rustc-wrapper` keeps the memory-heavy wasm32 crates off the catalog's rustc, or one job for a tree without a matching wrapper |
 | `release_prebuild_gate` | Prebuild dispatches | Passes once the critical binary build gate and the Web SDK package succeeded (the run's trailing lanes continue); the marker `release_prebuild` requires of a prebuild run |
 | `publish_critical_release_assets` | Tags | As soon as the critical gate passes, verifies and publishes exactly the Linux and macOS arm64 archives (add-only, no manifest); waits for no trailing job |
@@ -884,7 +888,7 @@ or from the release branch of the tag's version; PR and manual artifacts are pre
 | Linux x86_64 | `x86_64-unknown-linux-gnu` | critical |
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | critical |
 | macOS ARM64 | `aarch64-apple-darwin` | critical |
-| macOS x86_64 | `x86_64-apple-darwin` | trailing (cross-compiled on Apple silicon) |
+| macOS x86_64 | `x86_64-apple-darwin` | trailing (cross-compiled on Apple silicon: BuildBuddy's executors, or a hosted runner on the GitHub-hosted backend) |
 | Windows x86_64 | `x86_64-pc-windows-msvc` | trailing (cross-compiled on Linux) |
 
 **Manual recovery through the release facade:**

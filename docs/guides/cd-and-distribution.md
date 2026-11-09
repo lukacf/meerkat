@@ -272,9 +272,9 @@ The residual: the pins are only as trustworthy as the release that produced
 them. The attested identity names the workflow and its ref, and `main` names
 no commit: the release version is bound by the attested subject name. The
 GitHub-hosted runner is the job that attested; on a BuildBuddy release the
-Linux (x86_64 and arm64) and macOS arm64 binaries are compiled by BuildBuddy
-remote execution, so BuildBuddy's executors and cache are part of what the
-pins trust. Anyone
+Linux (x86_64 and arm64) and macOS (arm64 and Intel) binaries are compiled by
+BuildBuddy remote execution, so BuildBuddy's executors and cache are part of
+what the pins trust. Anyone
 able to run this repository's release workflow can produce attested
 archives, and a package whose own files were replaced after it was built
 pins whatever digests it then carries.
@@ -359,9 +359,12 @@ backend its critical lanes queue behind other runners and miss the tag run's
 wait, as v0.9.3's GitHub-hosted prebuild did. `make release-prebuild` reads that
 backend from the repository variable. It
 does not wait for CI: it builds every release binary (the critical Linux and
-macOS arm64 ones on BuildBuddy or the GitHub-hosted lane, Intel macOS
-cross-compiled on Apple silicon, Windows cross-compiled with cargo-xwin and
-verified on a Windows runner) and the Web SDK package from exactly the
+macOS arm64 ones on BuildBuddy or the GitHub-hosted lane, Intel macOS on the
+same backend: cross-compiled on BuildBuddy's Apple-silicon executors for
+macOS 11.0 and then run and inspected on a hosted Apple silicon runner, or
+cross-compiled on that runner on the GitHub-hosted backend; Windows
+cross-compiled with cargo-xwin and verified on a Windows runner) and the Web
+SDK package from exactly the
 dispatched commit, stamps each archive with that commit, attests and uploads
 everything, and publishes nothing. Its `Release prebuild gate` job passes
 once the critical binaries and the Web SDK package succeeded; the trailing
@@ -531,7 +534,8 @@ Automatic tag packaging selects BuildBuddy only when `github.actor` is
 literally `lukacf` and the repository variable
 `MEERKAT_RELEASE_BUILDBUDDY` is `true` or `1`. For eligible manual dispatches,
 explicit `release_backend=buildbuddy` selects BuildBuddy validation and
-Linux and macOS arm64 packaging only for that same literal actor; it does not also
+Linux and macOS (arm64 and Intel) packaging only for that same literal actor;
+it does not also
 require the automatic-selection variable. This is a named-actor condition,
 not a general owner/admin permission check.
 
@@ -543,7 +547,11 @@ RELEASE_BACKEND=buildbuddy make release-workflow VERSION=vX.Y.Z
 
 On eligible manual dispatches, other actors use GitHub-hosted Cargo validation
 and Linux and macOS arm64 packaging even when they request
-`release_backend=buildbuddy`. Windows and Intel macOS packaging and every
+`release_backend=buildbuddy`. Intel macOS follows the selected backend: the
+owner's BuildBuddy releases cross-compile it on BuildBuddy
+(`release-build-macos-x86`, for macOS 11.0) and run and inspect it on a hosted
+Apple silicon runner; every other release cross-compiles it on that runner.
+Windows packaging and every
 credentialed registry publish still run on GitHub-hosted runners, and the exact-main GitHub Actions CI requirement remains
 in force. This release
 backend selection is separate from per-push CI, which is Cargo-only on

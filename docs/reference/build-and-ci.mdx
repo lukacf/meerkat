@@ -640,8 +640,10 @@ and publishes the platform-specific release artifacts from the attested
 source. The critical Linux and macOS arm64 archives publish first; Windows
 binaries are cross-compiled and packaged with cargo-xwin (clang-cl, lld-link,
 the Windows SDK) on a hosted Ubuntu runner, then executed for verification on
-a windows-2025-vs2026 runner, and Intel macOS binaries are cross-compiled on an
-Apple silicon runner; those trailing archives are added afterwards, never
+a windows-2025-vs2026 runner, and Intel macOS binaries are cross-compiled on
+Apple silicon (on the owner's BuildBuddy backend by its Apple-silicon
+executors, then run and inspected on a hosted Apple silicon runner; on the
+GitHub-hosted backend by that runner); those trailing archives are added afterwards, never
 replacing a published asset. A pre-tag prebuild
 (`make release-prebuild`, a `release.yml` dispatch on `main` that publishes
 nothing) can build all of those artifacts for the release commit before the
@@ -655,7 +657,8 @@ of the identical tree, including its release tag, validates the pushed object
 and checked-out `HEAD` identity and then reuses the complete gate result.
 
 BuildBuddy remains an opt-in developer backend, the nightly full graph, and
-the release-tag validation and Linux and macOS arm64 packaging backend.
+the release-tag validation and Linux and macOS (arm64 and Intel) packaging
+backend.
 `.github/workflows/buildbuddy.yml` is `workflow_call`-only; `nightly.yml` and
 `release.yml` call it, `ci.yml` never does.
 

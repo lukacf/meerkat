@@ -7,7 +7,7 @@ the build of the same commit, in a release the same release's artifacts. A
 pin of an in-repo package is therefore either a same-commit reference (a
 path, `file:`, `link:` or workspace dependency) or names exactly the
 package's version in this tree; a range may admit later versions but no
-earlier one.
+earlier one, and its ceiling must admit the version here.
 
 The in-repo packages and their versions come from the tree itself: the Cargo
 workspace members (and the root table's renamed entries), every package.json
@@ -49,8 +49,11 @@ constant the file no longer holds is stale.
 
 `--write` first moves every plain-text pin of a dependency manifest
 (package.json and a lock's root package, pyproject.toml, a requirements file,
-Cargo.toml) that no allow entry covers to the version of the package it pins;
-the version bumps run it so that a bump moves those pins in the same commit. A
+Cargo.toml) that no allow entry covers to the version of the package it pins,
+and a range's ceiling that version reaches to the next release that may break
+it (the next minor on the 0.x line, else the next major: `>=0.9.11 <0.10.0`
+becomes `>=0.10.0 <0.11.0`); the version bumps run it so that a bump moves
+those pins in the same commit. A
 registry lock entry and a requirement with a hash cannot move this way and stay
 findings, as do pins in prose and code, which the docs stamper or a person
 moves.
@@ -117,6 +120,47 @@ def below(pinned: str, expected: str) -> bool:
     return pinned_key is not None and expected_key is not None and pinned_key < expected_key
 
 
+def full_version(value: str) -> str:
+    """A one- or two-part version with its missing parts as zero: 0.10 is 0.10.0."""
+    return ".".join((value.split(".") + ["0", "0"])[:3])
+
+
+def next_breaking(version: str) -> str:
+    """The first release after `version` that may break it: the next minor on the 0.x line, else the next major."""
+    major, minor = version_key(version)[:2]
+    return f"0.{minor + 1}.0" if major == 0 else f"{major + 1}.0.0"
+
+
+CEILING_RE = re.compile(r"(<=|<)[ \t]*v?(\d+(?:\.\d+){0,2})(?![0-9.])")
+
+
+def range_admits(spec: str, version: str) -> bool:
+    """Whether some alternative of an npm range or PEP 440 specifier has no ceiling at or below `version`."""
+    target = version_key(version)
+    if target is None:
+        return True
+    for alternative in spec.split("||"):
+        if all((bound := version_key(full_version(match.group(2)))) is None
+               or (bound > target if match.group(1) == "<" else bound >= target)
+               for match in CEILING_RE.finditer(alternative)):
+            return True
+    return False
+
+
+def move_range(spec: str, pinned: str, expected: str) -> str:
+    """Move a range's floor to `expected`, and a ceiling it reaches to the next release that may break."""
+    moved = move_version(spec, pinned, expected) if pinned and pinned != expected else spec
+    target = version_key(expected)
+
+    def lift(match):
+        bound = version_key(full_version(match.group(2)))
+        reached = bound is not None and target is not None and (bound <= target if match.group(1) == "<"
+                                                                 else bound < target)
+        return f"<{next_breaking(expected)}" if reached else match.group(0)
+
+    return CEILING_RE.sub(lift, moved)
+
+
 def normalize_pypi(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
@@ -146,12 +190,17 @@ class Finding:
     # A pin of a published release input, and the release before `expected` it may also name.
     published: bool = False
     previous: str = ""
+    # A range whose ceiling shuts out `expected`.
+    excludes: bool = False
 
     def describe(self) -> str:
         where = f"{self.path}:{self.line}" if self.line else self.path
         if self.shape == "retired-repository":
             return (f"{where}: {self.pin}: a release of the retired standalone repository; "
                     f"use {self.package} {self.expected} of this repository")
+        if self.excludes and not below(self.pinned, self.expected):
+            return (f"{where}: {self.shape} {self.pin}: admits no {self.package} {self.expected}, its version in this "
+                    f"tree (a ceiling at or below it)")
         if self.published:
             allowed = (f"a published release input names {self.expected} or the release before it, {self.previous}"
                        if self.previous else
@@ -432,7 +481,7 @@ class Scanner:
         # requirement) or names the repository owner.
         self.cheap_re = re.compile(r"\d\.\d+\.\d|lukacf/|\"[=^~<>]*\d+\.\d+\"")
 
-    def check(self, path, line, shape, pin, key, pinned, movable=False):
+    def check(self, path, line, shape, pin, key, pinned, movable=False, spec=None):
         if key is None:
             return
         name, expected = self.inventory.expected(key)
@@ -447,8 +496,11 @@ class Scanner:
             self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, False,
                                          published=True, previous=previous or ""))
             return
-        if pinned is None or below(pinned, expected):
-            self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, movable))
+        # A range must also admit the version here: a ceiling at or below it shuts it out.
+        excludes = spec is not None and not range_admits(spec, expected)
+        if pinned is None or below(pinned, expected) or excludes:
+            self.findings.append(Finding(path, line, shape, pin, name, pinned or "", expected, movable,
+                                         excludes=excludes))
 
     def scan(self, path: str) -> None:
         name = PurePosixPath(path).name
@@ -487,7 +539,7 @@ class Scanner:
             return
         floor = npm_floor(spec)
         line = self.line_of(text, f'"{name}": "{spec}"')
-        self.check(path, line, kind, f"{name}@{spec}", key_of("npm", name), floor, floor is not None)
+        self.check(path, line, kind, f"{name}@{spec}", key_of("npm", name), floor, floor is not None, spec)
 
     def scan_package_lock(self, path: str, text: str) -> None:
         data = self._json(text)
@@ -573,7 +625,7 @@ class Scanner:
                        match.group(2), movable=not DIGEST_RE.search(line) and not name.endswith(".json"))
         for match in self.requirement_re.finditer(line):
             self.check(path, number, "requirement", match.group(0), key_of("pypi", match.group(1)),
-                       pep440_floor(match.group(2)), "--hash" not in line)
+                       pep440_floor(match.group(2)), "--hash" not in line, match.group(2))
         for match in self.npm_spec_re.finditer(line):
             if self.inventory.get("npm", match.group(1)) is not None:
                 self.check(path, number, "npm-spec", match.group(0), key_of("npm", match.group(1)),
@@ -594,7 +646,7 @@ class Scanner:
                 continue
             floor = npm_floor(match.group(2))
             self.check(path, number, "npm-entry", match.group(0), key_of("npm", match.group(1)), floor,
-                       floor is not None)
+                       floor is not None, match.group(2))
         match = self.cargo_line_re.match(line)
         if match:
             crate, plain, table = match.group(1), match.group(2), match.group(3)
@@ -764,7 +816,7 @@ def write_pins(root: Path, findings: list[Finding]) -> list[str]:
             for finding in items:
                 index = finding.line - 1
                 if 0 <= index < len(lines) and finding.pin in lines[index]:
-                    moved = move_version(finding.pin, finding.pinned, finding.expected)
+                    moved = move_range(finding.pin, finding.pinned, finding.expected)
                     lines[index] = lines[index].replace(finding.pin, moved, 1)
             updated = "\n".join(lines)
         if updated != text:
@@ -779,7 +831,7 @@ def write_npm_manifest(text: str, items: list[Finding]) -> str:
         name, _, spec = finding.pin[1:].partition("@") if finding.pin.startswith("@") else finding.pin.partition("@")
         name = ("@" + name) if finding.pin.startswith("@") else name
         old = f'"{name}": "{spec}"'
-        new = f'"{name}": "{move_version(spec, finding.pinned, finding.expected)}"'
+        new = f'"{name}": "{move_range(spec, finding.pinned, finding.expected)}"'
         text = text.replace(old, new)
     return text
 

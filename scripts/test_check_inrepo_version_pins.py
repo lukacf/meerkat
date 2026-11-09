@@ -313,6 +313,59 @@ class WriteTests(GuardTest):
         self.assertEqual(code, 0, err)
         self.assertIn("demo-meta==1.4.3", (self.repo.root / "connect/py/pyproject.toml").read_text())
 
+    def test_a_paired_bump_to_the_next_minor_on_the_zero_line_moves_ceilings(self):
+        # On the 0.x line a minor release may break, so a range ends below the next minor.
+        # A paired bump to 0.10.0 moves each range's floor and ceiling together: the check
+        # is green after the bump with nothing left to edit.
+        directory = tempfile.TemporaryDirectory(prefix="inrepo pins zero line ")
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        subprocess.run(["git", "-c", "init.defaultBranch=main", "init", "-q", str(root)], check=True)
+        repo = Repo(root, version="0.9.11")
+        peers = {"@rkat/demo": ">=0.9.11 <0.10.0", "@rkat/demo-meta": ">=0.9.11 <0.10.0"}
+        manifest = repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "0.9.11",
+            "devDependencies": {"@rkat/demo": "file:../../sdk"}, "peerDependencies": peers}, indent=2) + "\n")
+        lock = repo.write("connect/sdk/package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {"": {
+            "name": "@rkat/demo-connect", "version": "0.9.11", "peerDependencies": peers}}}, indent=2) + "\n")
+        project = repo.write("connect/py/pyproject.toml", '[project]\nname = "demo-py"\nversion = "0.9.11"\n'
+                             '[project.optional-dependencies]\nhost = ["demo-meta>=0.9.11,<0.10"]\n')
+        code, _, err = repo.run()
+        self.assertEqual(code, 0, err)
+        # The paired bump: every product's own version moves to 0.10.0.
+        Repo(root, version="0.10.0")
+        for path in (manifest, lock, project):
+            path.write_text(path.read_text().replace('"version": "0.9.11"', '"version": "0.10.0"')
+                            .replace('version = "0.9.11"', 'version = "0.10.0"'))
+        code, _, err = repo.run(write=True)
+        self.assertEqual(code, 0, err)
+        for path in (manifest, lock):
+            self.assertIn('"@rkat/demo": ">=0.10.0 <0.11.0"', path.read_text())
+            self.assertIn('"@rkat/demo-meta": ">=0.10.0 <0.11.0"', path.read_text())
+        self.assertIn('host = ["demo-meta>=0.10.0,<0.11.0"]', project.read_text())
+        code, _, err = repo.run()
+        self.assertEqual(code, 0, err)
+
+    def test_a_major_bump_moves_ceilings_to_the_next_major(self):
+        manifest = self.repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "1.4.2",
+            "peerDependencies": {"@rkat/demo": ">=1.4.2 <2.0.0"}}, indent=2) + "\n")
+        self.assertClean()
+        Repo(self.repo.root, version="2.0.0")
+        code, _, err = self.repo.run(write=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn('"@rkat/demo": ">=2.0.0 <3.0.0"', manifest.read_text())
+
+    def test_a_range_that_admits_no_version_here_is_refused_and_moved(self):
+        manifest = self.repo.write("connect/sdk/package.json", json.dumps({
+            "name": "@rkat/demo-connect", "version": "1.4.2",
+            "peerDependencies": {"@rkat/demo": ">=1.4.2 <1.4.2"}}, indent=2) + "\n")
+        self.assertFindings("peerDependencies @rkat/demo@>=1.4.2 <1.4.2: admits no @rkat/demo 1.4.2, its version in "
+                            "this tree")
+        code, _, err = self.repo.run(write=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn('"@rkat/demo": ">=1.4.2 <2.0.0"', manifest.read_text())
+
 
 class PublishedInputTests(GuardTest):
     """Published release inputs pin assets by digest: this tree's version or the release before it."""

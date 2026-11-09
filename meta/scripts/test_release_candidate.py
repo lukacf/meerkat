@@ -225,6 +225,9 @@ class CandidateProtocolTests(unittest.TestCase):
     def setUp(self):
         self.root = Path.cwd() / (".release-candidate-test-" + uuid.uuid4().hex)
         self.root.mkdir()
+        # Registered at once: the directory goes even when the rest of setUp
+        # fails.
+        self.addCleanup(shutil.rmtree, self.root, True)
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         gh = bin_dir / "gh"
@@ -266,9 +269,15 @@ class CandidateProtocolTests(unittest.TestCase):
         # the commit changes these paths against it.
         self.parent_reader = True
         self.changed_paths = ("meta/crates/meerkat-meta/src/lib.rs",)
+        # Root build inputs whose id differs from the default, by "REV:PATH".
+        self.root_inputs = {}
         for name, effect in (("index_entries", self.index_response),
                              ("core_crate_list", lambda: list(CORE_CRATE_NAMES)),
                              ("rustc_version", lambda: self.toolchain)):
+            # An older release-candidate.py may lack one: only the tests of
+            # what it lacks fail then, so the suite still shows which.
+            if not hasattr(helper, name):
+                continue
             patch = mock.patch.object(helper, name, side_effect=effect)
             patch.start()
             self.addCleanup(patch.stop)
@@ -276,7 +285,6 @@ class CandidateProtocolTests(unittest.TestCase):
         self.git_patch.start()
         self.addCleanup(self.env_patch.stop)
         self.addCleanup(self.git_patch.stop)
-        self.addCleanup(shutil.rmtree, self.root)
         self.state["api"][helper.repo_endpoint(f"git/ref/tags/{TAG}")] = {
             "object": {"type": "commit", "sha": SHA}}
         self.state["api"][helper.repo_endpoint(f"actions/runs/{RUN}")] = self.run_info()
@@ -321,6 +329,10 @@ class CandidateProtocolTests(unittest.TestCase):
             return EVIDENCE_READER.read_text().strip()
         if args == ("diff", "--name-only", PARENT_SHA, SHA):
             return "\n".join(self.changed_paths)
+        if args[:3] == ("rev-parse", "--verify", "--quiet"):
+            # A root build input's id: the same at every revision unless a
+            # test says otherwise ("" when the revision has no such path).
+            return self.root_inputs.get(args[3], "root-input:" + args[3].split(":", 1)[1])
         if args[:2] == ("rev-parse", "--verify") and args[2].endswith(":crates"):
             if args[2] not in self.crates_trees:
                 raise helper.ProtocolError(f"git rev-parse failed: fatal: invalid object name '{args[2]}'")
@@ -1024,6 +1036,24 @@ class CandidateProtocolTests(unittest.TestCase):
         self.assertLess(self.git_calls.index(("show", f"{SHA}:Cargo.toml")), fetch)
         self.assertLess(fetch, self.git_calls.index(("rev-parse", "--verify", f"{CORE_TAG}^{{commit}}:crates")))
         self.assertTrue((self.root / "assets-match").is_dir())
+
+    def test_promotion_refuses_a_candidate_built_with_other_root_build_inputs_than_cores_tag(self):
+        """Besides crates/, the workspace's root manifest, lock, toolchain and
+        Cargo configuration decide how the gateways compile Core: each must
+        be Core's tag's (a tag that only changed Cargo.lock does not admit a
+        candidate built with the older lock), and a path neither has is
+        equal."""
+        core, _ = self.tier_candidate("core", RUN, 300)
+        for path in helper.CORE_ROOT_INPUTS:
+            for case, overrides in (("differs", {f"{CORE_TAG}^{{commit}}:{path}": "f" * 40}),
+                                    ("only the source has it", {f"{CORE_TAG}^{{commit}}:{path}": ""})):
+                with self.subTest(path=path, case=case):
+                    self.root_inputs = overrides
+                    _, error = self.stage_core(core, f"{path.strip('.')}-{case.split()[0]}", success=False)
+                    self.assertIn(f"{path} differ from Core's v{CORE}", error)
+                    self.assertFalse(self.writes())
+        self.root_inputs = {f"{SHA}:.cargo": "", f"{CORE_TAG}^{{commit}}:.cargo": ""}
+        self.stage_core(core, "neither")
 
     def test_promotion_refuses_a_candidate_whose_core_is_not_cores_tag(self):
         """The check the legs made before schema 3 (git diff --quiet v<Core>

@@ -2321,6 +2321,7 @@ const core = {
 process.env.RELEASE_SHA = scenario.sha;
 process.env.CI_BYPASS = scenario.bypass;
 process.env.RUNNER_TEMP = scenario.runner_temp;
+process.env.RELEASE_MODE = scenario.mode;
 (async () => {
   try {
     await new AsyncFunction("require", "github", "context", "core", body)(
@@ -2336,7 +2337,7 @@ process.env.RUNNER_TEMP = scenario.runner_temp;
 
 
 def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None, sha="deadbeef", bypass="false",
-                     attestations=(), reader=False, parent_reader="real", changed=()):
+                     attestations=(), reader=False, parent_reader="real", changed=(), mode="promote"):
     """Run the gate in a scratch directory: `reader` gives the job the
     product-scoped evidence reader, both the checkout's own copy of
     scripts/ci-product-evidence.mjs (which must never judge: the release
@@ -2357,7 +2358,7 @@ def run_polling_gate(body, ci, *, meta_push=None, meta_dispatch=None, jobs=None,
         runner_temp = tmp / "runner-temp"
         scenario = {"sha": sha, "bypass": bypass, "ci": ci,
                     "meta": {"push": meta_push or [[]], "workflow_dispatch": meta_dispatch or [[]]},
-                    "jobs": jobs or {}, "artifacts": artifacts, "runner_temp": str(runner_temp)}
+                    "jobs": jobs or {}, "artifacts": artifacts, "runner_temp": str(runner_temp), "mode": mode}
         for name, text in (("harness.js", POLLING_GATE_HARNESS), ("gate.js", body),
                            ("scenario.json", json.dumps(scenario))):
             (tmp / name).write_text(text)
@@ -2518,6 +2519,27 @@ class MetaCiGateTests(unittest.TestCase):
         result = self.gate([[red], [rerun], [{**red, "run_attempt": 2}]], reader=True,
                            attestations=((42, 1, self.scoped({"Clippy (core)": "core"})), (42, 2, self.scoped(connect))))
         self.accepted(result, attempt="2")
+
+    def test_a_candidate_waits_longer_for_its_release_merges_ci(self):
+        """A candidate starts at the release merge, beside that commit's own
+        cold exact-main CI run, so its gate waits up to 240 minutes; every
+        other mode starts after CI ran and waits up to 120."""
+        pending = {**self.CI, "status": "in_progress", "conclusion": None}
+        result = self.gate([[pending]], mode="candidate")
+        self.assertIn("has no green exact-main CI after 240 minutes", result["failed"])
+        self.assertGreaterEqual(result["elapsed_minutes"], 240)
+        for mode in ("promote", "existing"):
+            with self.subTest(mode=mode):
+                result = self.gate([[pending]], mode=mode)
+                self.assertIn("has no green exact-main CI after 120 minutes", result["failed"])
+                self.assertLess(result["elapsed_minutes"], 240)
+
+    def test_the_floor_check_outlasts_its_wait_and_build(self):
+        """floor_check waits up to 60 minutes for Core's crates, then binds a
+        record and builds the floor (28 to 45 minutes measured): its runner
+        timeout leaves room for both, so a late Core publication ends in the
+        wait's own message."""
+        self.assertRegex(job_block("floor_check", META_RELEASE_WORKFLOW), r"\n    timeout-minutes: 120\n")
 
     def test_a_red_run_is_judged_by_the_release_commits_parent_never_by_the_commit_itself(self):
         """The release commit's first parent's copy of the reader judges a

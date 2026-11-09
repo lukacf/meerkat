@@ -104,6 +104,11 @@ TIERED_SCHEMA = 4
 CORE_CRATES = "crates"
 CORE_TAG_PREFIX = "v"
 CORE_MANIFEST = "Cargo.toml"
+# The workspace's root build inputs besides crates/: the root manifest
+# (workspace dependencies, the release profile), the lock, the toolchain and
+# Cargo's configuration. A candidate's source commit must carry the same ones
+# as Core's tag, or its gateways embed Core built otherwise than released.
+CORE_ROOT_INPUTS = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo")
 # The published-floor record (schema 4). Core's crates are those of the
 # checkout's CORE_CRATE_LIST, Meta's the meta publish_order of PRODUCTS.
 FLOOR_RECORD_KEYS = "core_version core_crates source_sha crates_tree lock_sha256 meta_crates toolchain"
@@ -316,12 +321,25 @@ def core_crates_tree(revision):
     return digest(git("rev-parse", "--verify", f"{revision}:{CORE_CRATES}"), "Core crates tree", 40)
 
 
+def root_input_ids(revision):
+    """Each of CORE_ROOT_INPUTS at a revision: its blob or tree id, or None
+    when the revision has no such path."""
+    ids = {}
+    for path in CORE_ROOT_INPUTS:
+        try:
+            ids[path] = git("rev-parse", "--verify", "--quiet", f"{revision}:{path}") or None
+        except ProtocolError:
+            ids[path] = None
+    return ids
+
+
 def require_released_core(manifest, sha):
     """A schema 3 candidate embeds only released Core: the crates/ tree its
     attested manifest binds is its source commit's, and equals the tree of
-    Core's tag of the version the workspace declares. The tag is fetched from
-    origin first; a missing tag refuses. Earlier schemas bind no tree: their
-    candidates built against published Core, or, in this repository,
+    Core's tag of the version the workspace declares, and so does each of
+    the workspace's root build inputs (CORE_ROOT_INPUTS). The tag is fetched
+    from origin first; a missing tag refuses. Earlier schemas bind no tree:
+    their candidates built against published Core, or, in this repository,
     compared crates/ with that tag in their build legs."""
     if manifest["schema_version"] < 3:
         return
@@ -333,6 +351,11 @@ def require_released_core(manifest, sha):
     require(core_crates_tree(f"{tag}^{{commit}}") == bound,
             f"{CORE_CRATES}/ differs from Core's {CORE_TAG_PREFIX}{core}: this candidate embeds unreleased Core. "
             "Release Core first, or release in lockstep from one commit.")
+    source, released = root_input_ids(sha), root_input_ids(f"{tag}^{{commit}}")
+    differing = [path for path in CORE_ROOT_INPUTS if source[path] != released[path]]
+    require(not differing,
+            f"{', '.join(differing)} differ from Core's {CORE_TAG_PREFIX}{core}: this candidate built Core with other "
+            "root build inputs than Core's release. Release in lockstep from one commit.")
 
 
 def write_outputs(values):

@@ -192,6 +192,7 @@ jobs:
         env:
           RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
           CI_BYPASS: ${{ needs.resolve_release.outputs.ci_bypass }}
+          RELEASE_MODE: ${{ needs.resolve_release.outputs.mode }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -200,7 +201,12 @@ jobs:
               core.info("Dry-run dispatch with no release_tag: nothing is published. Skipping the CI check.");
               return;
             }
-            const timeoutMs = 120 * 60 * 1000;
+            // A candidate starts at the release merge (make release-prebuild),
+            // beside that commit's own exact-main CI, whose cold run can take
+            // longer than 120 minutes (main-unit alone may take 150): it waits
+            // up to 240. Every other mode starts once CI ran and waits 120.
+            const timeoutMinutes = process.env.RELEASE_MODE === "candidate" ? 240 : 120;
+            const timeoutMs = timeoutMinutes * 60 * 1000;
             const pollMs = 30 * 1000;
             const started = Date.now();
             let cancelledReported = false;
@@ -361,9 +367,9 @@ jobs:
               if (Date.now() - started >= timeoutMs) {
                 core.setFailed(
                   success
-                    ? `Release commit ${ref} has no green Meta CI run that ran Meta's lanes after 120 minutes ` +
+                    ? `Release commit ${ref} has no green Meta CI run that ran Meta's lanes after ${timeoutMinutes} minutes ` +
                         `(${meta.count} run(s) found). Dispatch meta-ci.yml on main at this commit.`
-                    : `Release commit ${ref} has no green exact-main CI after 120 minutes (${runs.length} run(s) found). ` +
+                    : `Release commit ${ref} has no green exact-main CI after ${timeoutMinutes} minutes (${runs.length} run(s) found). ` +
                         `A tag is not evidence: fix the red, or re-run a cancelled run.`
                 );
                 return;
@@ -436,7 +442,10 @@ jobs:
       (needs.resolve_release.outputs.mode != 'candidate' ||
        needs.resolve_release.outputs.tier == 'core')
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # The 60-minute wait for Core's crates, then a floor record, a
+    # re-resolution and the floor build (28 to 45 minutes measured): a late
+    # Core publication ends in the wait's own message, not a runner timeout.
+    timeout-minutes: 120
     outputs:
       core_version: ${{ steps.declared.outputs.core_version }}
       record: ${{ steps.bind.outputs.record }}

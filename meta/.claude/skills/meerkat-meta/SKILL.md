@@ -654,7 +654,7 @@ After merging the final release-version/dependency commit, use
 `make release-candidate SOURCE_SHA=<full-sha> TIER=trailing`. The dispatch must
 snapshot that same main SHA. Each run builds/signs/packages one tier (core:
 Linux x86_64 and aarch64, macOS arm64; trailing: macOS x86_64, Windows) beside
-the push-to-main CI run of that SHA, waits at collection (up to 120 minutes)
+the push-to-main CI run of that SHA, waits at collection (up to 240 minutes)
 until that CI run and a Meta CI run that ran Meta's lanes are green (a red CI
 run counts when its attestation shows every failure in rows Meta does not
 depend on, such as a Connect-only row), and emits

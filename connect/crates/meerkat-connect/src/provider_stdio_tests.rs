@@ -119,7 +119,11 @@ impl Fixture {
         });
         let persistence = ProviderAuthPersistence::new(
             tokens.clone(),
-            Arc::new(FileLockCoordinator::new(root.path().join("locks"))),
+            // The coordinator's credential root (its lock directory's parent)
+            // is the file store's, so the fence it takes covers the store.
+            Arc::new(FileLockCoordinator::new(
+                root.path().join("credentials").join("refresh-locks"),
+            )),
         );
         let mut startup = SessionStartup::open(storage).await.unwrap();
         startup.factory = startup
@@ -501,19 +505,23 @@ async fn private_provider_use_rechecks_after_action_wait() {
         let config = fixture.config.clone();
         let file = fixture.tokens.file.clone();
         let key = TokenKey::from_credential_identity(&fixture.target.credential_identity);
+        let credentials = fixture._root.path().join("credentials");
         let result = drive(
             &mut fixture,
             |mut prompts, _retire, _completed| async move {
                 let held = prompt(&mut prompts, "provider_target").await;
                 // A real native file-store credential arrives after the initial
                 // Missing observation. This makes the actual Use branch reachable.
-                file.save(
-                    &meerkat_core::AdmissionGuard::none(),
-                    &key,
-                    &PersistedTokens::api_key(KEY),
-                )
-                .await
+                // A direct save outside any coordinator takes the credential
+                // fence of the key's realm under the store's root itself.
+                let fence = meerkat_core::AdmissionGuard::try_acquire(vec![
+                    meerkat_core::AdmissionFence::credentials(&credentials, key.realm()).unwrap(),
+                ])
                 .unwrap();
+                file.save(&fence, &key, &PersistedTokens::api_key(KEY))
+                    .await
+                    .unwrap();
+                drop(fence);
                 select(held);
                 let held = prompt(&mut prompts, "provider_action").await;
                 assert!(

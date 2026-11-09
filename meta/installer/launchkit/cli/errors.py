@@ -9,6 +9,7 @@ from __future__ import annotations
 EXIT_CODES = {
     "operation_failed": 1,
     "operation_interrupted": 1,
+    "internal_error": 1,
     "usage": 2,
     "invalid_request": 2,
     "server_unavailable": 80,

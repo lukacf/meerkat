@@ -196,7 +196,11 @@ async def doctor_command(context):
     try:
         client = await context.client(compatible=False)
     except CliError as error:
-        add("fail", "port", error.detail)
+        if error.code == "prerequisite_unavailable":
+            add("fail", "environment", error.detail + " Prepare it with bash start.sh --prepare-only in the Forge "
+                "folder.")
+        else:
+            add("fail", "port", error.detail)
         client = None
     capabilities = None
     if client is not None:

@@ -417,6 +417,14 @@ async def run_async(argv, *, stdin=None, stdout=None, stderr=None, environ=None,
         error = interrupted(context)
         output.failure(context.command, error)
         return error.exit_code
+    except Exception as defect:
+        # A defect of this command: still one typed outcome, without the exception's text, which may hold
+        # values from Forge or from the command line.
+        error = CliError("internal_error", f"meta-forge stopped on an unexpected error ({type(defect).__name__}). "
+                         "Work it already sent to Forge may continue.", next=context.next_steps(),
+                         request=context.request)
+        output.failure(context.command, error)
+        return error.exit_code
     finally:
         await context.close()
 

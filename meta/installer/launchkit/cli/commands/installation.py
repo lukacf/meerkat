@@ -410,6 +410,9 @@ async def installation_request(context):
     if not UUID.fullmatch(args.request_id):
         raise CliError("usage", "The action request ID is the UUID the action printed.",
                        next=[step("meta-forge installation request --help", "See this command's usage.")])
+    if args.deployment is not None and not UUID.fullmatch(args.deployment):
+        raise CliError("usage", "--deployment takes the installation's ID, the UUID installation status prints.",
+                       next=[step("meta-forge installation request --help", "See this command's usage.")])
     client = await context.client()
     identity = await client.resolve_setup(args.setup)
     deployment_id = args.deployment or (await read_receipt(client, identity)).get("deployment_id")

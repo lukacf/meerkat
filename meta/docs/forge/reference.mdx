@@ -224,7 +224,7 @@ exit code.
 | Exit code | `error.code` | Meaning |
 | --- | --- | --- |
 | 0 | | Success. |
-| 1 | `operation_failed`, `operation_interrupted` | Forge reports that the operation failed or was interrupted. |
+| 1 | `operation_failed`, `operation_interrupted`, `internal_error` | Forge reports that the operation failed or was interrupted, or `meta-forge` stopped on an unexpected error. |
 | 2 | `usage`, `invalid_request` | Wrong arguments, or Forge refused the request. |
 | 80 | `server_unavailable`, `server_incompatible` | No Forge server of this release answers. |
 | 81 | `not_found` | No such setup, installation or record. |

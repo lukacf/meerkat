@@ -849,7 +849,8 @@ async def chat_command(context):
                 elif command == "/retry":
                     state = await read_state(client, identity)
                     operation = state.get("operation") or {}
-                    if operation.get("status") not in ("failed", "interrupted"):
+                    if (operation.get("status") not in ("failed", "interrupted")
+                            or not isinstance(operation.get("request"), dict)):
                         out.line("There is no interrupted or failed turn to resend.")
                         continue
                     out.line("(resending your saved answer...)")

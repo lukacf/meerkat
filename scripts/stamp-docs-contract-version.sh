@@ -74,9 +74,6 @@ MARKERS = [
         re.compile(r"cargo install rkat --version"),
         ".claude/skills/meerkat-platform/",
     ),
-    # A documented verification of a release archive names the archive of the
-    # release the docs describe.
-    (re.compile(r"gh attestation verify rkat-"), "docs/"),
 ]
 
 # `ContractVersion` also serializes in struct form

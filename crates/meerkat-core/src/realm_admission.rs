@@ -1334,8 +1334,9 @@ mod os {
     use std::path::Path;
 
     /// The mode of a fence file: the owner and the group can open it to
-    /// lock it, nobody else can.
-    const FENCE_MODE: u32 = 0o640;
+    /// lock it, nobody else can. The platform's mode type (`mode_t` is u16 on
+    /// Darwin).
+    const FENCE_MODE: rustix::fs::RawMode = 0o640;
 
     /// The open flags every participant uses: read only (`flock` needs no
     /// write access), never through a final symbolic link, never blocking

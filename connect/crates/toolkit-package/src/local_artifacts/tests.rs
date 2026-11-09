@@ -1149,7 +1149,7 @@ fn read_rejects_fifo_without_waiting_for_a_writer() {
     let tree_path = fixture.path(prepared.evidence()).join("tree");
     std::fs::set_permissions(&tree_path, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::remove_file(tree_path.join("server")).unwrap();
-    fs::mkfifoat(&prepared.tree, "server", Mode::from_raw_mode(FILE_MODE)).unwrap();
+    fs::mkfifoat(&prepared.tree, "server", Mode::RUSR).unwrap();
     std::fs::set_permissions(&tree_path, std::fs::Permissions::from_mode(DIRECTORY_MODE)).unwrap();
     assert!(prepared.read("server", 1024).is_err());
 }

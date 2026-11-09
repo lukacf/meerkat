@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import subprocess
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -308,11 +309,10 @@ def opened(result, path):
             and Path(os.fsdecode(arguments[0])).resolve() == target]
 
 
-@pytest.mark.parametrize("reader", ["--text-file", "--attach", "plan validate", "chat /attach"])
-async def test_every_file_option_refuses_private_files_without_reading_them(forge, reader):
-    identity = (await run(forge, "setup", "new", "--json")).document["setup"]
+async def refusal_problems(forge, reader, identity, files):
+    """What went wrong when each file reaches the option: not refused, opened, sent or shown."""
     problems = []
-    for label, path in private_files(forge).items():
+    for label, path in files.items():
         forge.transport.requests.clear()
         if reader == "chat /attach":
             result = await run(forge, "chat", identity, stdin=Terminal(f"/attach {path}\n/quit\n"), terminal=True)
@@ -329,6 +329,34 @@ async def test_every_file_option_refuses_private_files_without_reading_them(forg
             ("opened", bool(opened(result, path))), (f"sent {sent}", bool(sent)),
             ("a child process carried the canary", any(mentions(arguments) for event, arguments
                                                         in result.events_seen if event != "open"))) if found]
+    return problems
+
+
+@pytest.mark.parametrize("reader", ["--text-file", "--attach", "plan validate", "chat /attach"])
+async def test_every_file_option_refuses_private_files_without_reading_them(forge, reader):
+    identity = (await run(forge, "setup", "new", "--json")).document["setup"]
+    problems = await refusal_problems(forge, reader, identity, private_files(forge))
+    assert not problems, f"{reader}: " + "; ".join(problems)
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").is_file(), reason="this platform has no /proc")
+@pytest.mark.parametrize("reader", ["--text-file", "--attach", "plan validate", "chat /attach"])
+async def test_every_file_option_refuses_process_environments(forge, reader):
+    """/proc shows the environment of this command (/proc/self/environ) and of every other process of the same
+    user: here another process that holds the canary, also reached through a symbolic link."""
+    other = subprocess.Popen(["sleep", "60"], env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                                   "OPENAI_API_KEY": CANARY})
+    try:
+        link = forge.root / "environment.txt"
+        link.symlink_to(f"/proc/{other.pid}/environ")
+        files = {"this command's environment": Path("/proc/self/environ"),
+                 "another process's environment": Path(f"/proc/{other.pid}/environ"),
+                 "a link to another process's environment": link}
+        identity = (await run(forge, "setup", "new", "--json")).document["setup"]
+        problems = await refusal_problems(forge, reader, identity, files)
+    finally:
+        other.kill()
+        other.wait()
     assert not problems, f"{reader}: " + "; ".join(problems)
 
 

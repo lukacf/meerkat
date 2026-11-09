@@ -2396,3 +2396,133 @@ fn a_candidate_launch_refuses_an_attention_dismissal() {
     assert!(refused.contains(&crate::rpc::CONSOLE_ATTENTION_DISMISS_METHOD));
     assert!(!refused.contains(&crate::rpc::CONSOLE_ATTENTION_METHOD));
 }
+
+/// The console gateway's composition (the profile `meta_gateway` runs) of the
+/// mob `mob_id`, keeping its metadata and its console log in the state
+/// directory `dir` as a persistent `meta_gateway` launch keeps them (its
+/// mob and sessions stay in memory), with the agent `alpha` seeded, and the
+/// console its router serves under sign-in.
+async fn console_gateway_profile(
+    dir: &std::path::Path,
+    mob_id: &str,
+) -> Result<(Arc<UnifiedRuntime>, Router), BoxError> {
+    let layout =
+        crate::storage_layout::MetaStorageLayout::with_injected_roots(dir.to_path_buf(), None);
+    let metadata: Arc<dyn PersistentMetadataStore> = Arc::new(
+        crate::runtime::SqliteMetadataStore::open(layout.metadata_db()?.path)?,
+    );
+    let console_log = Arc::new(crate::console_aggregator::SqliteConsoleLogStore::open(
+        layout.console_db()?.path,
+    )?);
+    let sessions = dir.join("sessions");
+    std::fs::create_dir_all(&sessions)?;
+    let service: Arc<dyn meerkat_mob::MobSessionService> =
+        Arc::new(meerkat::build_ephemeral_service(
+            meerkat::AgentFactory::new(&sessions),
+            meerkat::Config::default(),
+            4,
+        ));
+    let definition =
+        meerkat_mob::MobDefinition::from_toml(&format!("[mob]\nid = \"{mob_id}\"\n{PROFILES}"))?;
+    let spec = crate::mob_handle_runtime::MobBootstrapSpec::new(
+        definition,
+        meerkat_mob::MobStorage::in_memory(),
+        service,
+    )
+    .with_options(crate::mob_handle_runtime::MobBootstrapOptions {
+        allow_ephemeral_sessions: true,
+        notify_orchestrator_on_resume: true,
+        default_llm_client: Some(Arc::new(meerkat_client::TestClient::default())),
+    });
+    let plan = crate::gateway_composition::GatewayRuntimeBootstrapPlan::console_http(
+        spec,
+        crate::types::MetaConfig {
+            modules: Vec::new(),
+            discovery: crate::types::DiscoverySpec {
+                namespace: mob_id.to_string(),
+                modules: Vec::new(),
+            },
+            pre_spawn: Vec::new(),
+        },
+        Duration::from_secs(10),
+    )
+    .with_persistent_metadata(metadata);
+    let mut composition = crate::gateway_composition::GatewayComposition::prepare(
+        crate::gateway_composition::GatewayCompatibilityProfile::ConsoleHttp,
+        plan,
+    )
+    .bootstrap()
+    .await?;
+    composition.runtime_mut().set_console_log_store(console_log);
+    composition
+        .runtime_mut()
+        .activate_without_identity_context()
+        .await?;
+    let owner = composition.into_shared_runtime();
+    seeded_member(owner.mob_runtime(), "worker", "alpha", &[]).await?;
+    let app = owner.build_console_json_router_with_policy(
+        decisions(true, false),
+        Arc::new(AllowAllConsoleVisibilityPolicy),
+    );
+    Ok((owner, app))
+}
+
+/// The console gateway's composition over a state directory's metadata store
+/// and console log keeps a person's request across restarts: after a
+/// restart the request is known, its reply is delivered once (the same
+/// reply again answers the first delivery's receipt), as an item of the
+/// person's attention list, and the list still holds the item after the next
+/// restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_console_gateway_profile_keeps_requests_and_replies_across_restarts() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let mob_id = format!("console-profile-durable-{}", uuid::Uuid::new_v4().simple());
+    let alice = alice();
+    let interaction = {
+        let (owner, app) = console_gateway_profile(dir.path(), &mob_id).await?;
+        let sent = send(&app, Some(&alice), "alpha", "profile-request").await;
+        let _ = owner.shutdown().await;
+        interaction_of(&sent)
+    };
+
+    let delivered = {
+        let (owner, app) = console_gateway_profile(dir.path(), &mob_id).await?;
+        let replies = owner.console_replies().expect("replies");
+        let delivered = replies.deliver(&interaction, "reply-1", REPLY_TEXT).await;
+        assert!(
+            is_attention(&delivered),
+            "the request made before the restart is known after it, and its reply is an item \
+             of the person's list: {delivered:?}"
+        );
+        assert_eq!(
+            replies.deliver(&interaction, "reply-1", REPLY_TEXT).await,
+            delivered,
+            "the same reply again answers the first delivery's receipt"
+        );
+        let items = attention(&app, &alice).await.expect("Alice's list");
+        assert!(
+            items.len() == 1 && carries_reply(&items[0]),
+            "Alice's list holds the reply: {items:#?}"
+        );
+        let _ = owner.shutdown().await;
+        delivered
+    };
+
+    let (owner, app) = console_gateway_profile(dir.path(), &mob_id).await?;
+    let items = attention(&app, &alice).await.expect("Alice's list");
+    assert!(
+        items.len() == 1 && carries_reply(&items[0]),
+        "the list still holds the item after a restart: {items:#?}"
+    );
+    assert_eq!(
+        owner
+            .console_replies()
+            .expect("replies")
+            .deliver(&interaction, "reply-1", REPLY_TEXT)
+            .await,
+        delivered,
+        "the reply stays delivered once across a restart"
+    );
+    let _ = owner.shutdown().await;
+    Ok(())
+}

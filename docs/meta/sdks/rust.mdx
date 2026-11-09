@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from Meerkat Meta main at [01453e56759b](https://github.com/lukacf/meerkat/commit/01453e56759be007de027cab94c6e37053481da3) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [24be5586ae58](https://github.com/lukacf/meerkat/commit/24be5586ae58bdb1763240fb5bfed7bb74d8ed46) on 2026-11-09; Meta version 0.9.11 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -402,9 +402,9 @@ that never answers delays later side effects by at most its bound. Calls are
 attempted at least once: a gateway stopped between the seat and the call
 (killed, or a shutdown whose share of the drain window closed first) makes
 it at its next start when its metadata store is durable (`rpc_gateway` over
-a state directory or a host store realm; `meta_gateway` keeps it in memory,
-so there it holds within the process only), and one stopped during the call
-may make it again, so key what it does by the session. The context's `model`
+a state directory or a host store realm; a launch that keeps it in memory
+holds it within the process only), and one stopped during the call may make
+it again, so key what it does by the session. The context's `model`
 is the build's model, else the model of the profile when the mob definition
 declares it inline; it is empty for a realm-bound profile the build sets no
 model for. A call made at a later start reports the identity's roster labels

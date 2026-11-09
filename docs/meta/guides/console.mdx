@@ -4,7 +4,7 @@ description: "Embedded Meta console with configurable branding, grouped roster, 
 icon: "desktop"
 ---
 
-*Mirrored from Meerkat Meta main at [01453e56759b](https://github.com/lukacf/meerkat/commit/01453e56759be007de027cab94c6e37053481da3) on 2026-11-09; Meta version 0.9.11 at that commit.*
+*Mirrored from Meerkat Meta main at [24be5586ae58](https://github.com/lukacf/meerkat/commit/24be5586ae58bdb1763240fb5bfed7bb74d8ed46) on 2026-11-09; Meta version 0.9.11 at that commit.*
 
 Meta ships a web-based operator console through its HTTP composition. The
 console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
@@ -253,13 +253,16 @@ Gateway custody also differs. `rpc_gateway` installs a SQLite console timeline
 store only when its init request configures `persistent_state`; long-lived
 `--persistent` process mode alone does not make the timeline durable. Without
 persistent state, its timeline stays in memory. The console-only
-`meta_gateway` also keeps its timeline in memory. Do not infer timeline
-durability from the presence of the same browser shell and route names.
+`meta_gateway` installs the same store in its state directory when it runs
+with `persistent_sessions: true`, and keeps its timeline in memory without
+them. Do not infer timeline durability from the presence of the same browser
+shell and route names.
 
 The console audit log (`meta/console/audit`, which `audit.view` reads) and
 the gating state follow the metadata store the same way: durable for
-`rpc_gateway` over persistent state or a host store realm, kept for the
-process on `meta_gateway`. Both reads report it as `retention`.
+`rpc_gateway` over persistent state or a host store realm and for
+`meta_gateway` with persistent sessions, kept for the process otherwise.
+Both reads report it as `retention`.
 
 ## Layout
 
@@ -620,7 +623,8 @@ replies: a request from an open console, a service or a token that names no
 person has no private reply route, and a reply to it is refused. The
 attention list is kept in the realm's metadata store, as the console audit
 log is: across restarts for `rpc_gateway` over a state directory or a host
-store realm, and for the life of the process on `meta_gateway`.
+store realm and for `meta_gateway` with persistent sessions, and for the
+life of the process otherwise.
 
 ### Schedules
 

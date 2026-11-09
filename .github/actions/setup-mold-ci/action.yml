@@ -1,0 +1,46 @@
+name: Setup mold for CI
+description: >-
+  Install the mold linker as the system linker, as rui314/setup-mold v1 did
+  for these lanes: the mold release named below, unpacked into /usr/local,
+  with the system's ld pointing at it. The release archive comes through the
+  GitHub API with the job's own token first
+  (scripts/ci-release-asset-download), and from the anonymous release URL,
+  with the retries rui314/setup-mold used, only when there is no token or
+  that fails: on 2026-11-08 the release host answered anonymous downloads
+  with 504 for hours while the API's downloads kept working. The token is
+  unset before anything else runs.
+
+runs:
+  using: composite
+  steps:
+    - name: Install mold
+      if: ${{ runner.os == 'Linux' }}
+      shell: bash
+      env:
+        # Renovate proposes a new mold release here (renovate.json).
+        MOLD_VERSION: "3.0.0"
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        echo "mold ${MOLD_VERSION}"
+        if [[ "$(whoami)" == root ]]; then sudo=(); else sudo=(sudo); fi
+        asset="mold-${MOLD_VERSION}-$(uname -m)-linux.tar.gz"
+        dir="${RUNNER_TEMP}/mold-install"
+        mkdir -p "${dir}"
+        fetched=false
+        if bash "${GITHUB_ACTION_PATH}/../../../scripts/ci-release-asset-download" \
+          rui314/mold "v${MOLD_VERSION}" "${asset}" "${dir}/${asset}"; then
+          fetched=true
+        fi
+        unset GH_TOKEN
+        if [[ "${fetched}" == true ]]; then
+          "${sudo[@]}" tar -C /usr/local --strip-components=1 --no-overwrite-dir -xzf "${dir}/${asset}"
+        else
+          wget -O- --timeout=10 --waitretry=3 --retry-connrefused --progress=dot:mega \
+            "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/${asset}" \
+            | "${sudo[@]}" tar -C /usr/local --strip-components=1 --no-overwrite-dir -xzf -
+        fi
+        ld="$(realpath /usr/bin/ld)"
+        if [[ "${ld}" != /usr/local/bin/mold ]]; then
+          "${sudo[@]}" ln -sf /usr/local/bin/mold "${ld}"
+        fi

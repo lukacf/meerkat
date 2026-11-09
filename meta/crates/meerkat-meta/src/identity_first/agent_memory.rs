@@ -533,6 +533,31 @@ pub struct AgentMemoryRuntimeInjector {
     hygienist: Option<Arc<crate::memory::hygienist::HygienistEngine>>,
 }
 
+/// Why a run of the Distiller a lifecycle side effect asked for did not
+/// end with what that side effect owes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DistillerRunError {
+    /// The realm's background budget did not admit the run, so it was not
+    /// made: the budget is busy, and the run may be asked for again once it
+    /// may admit one.
+    Busy(crate::memory::BudgetDenied),
+    /// The run was made and did not end with what was owed: why (a
+    /// timeout, a failed read or extraction).
+    Failed(String),
+}
+
+impl std::fmt::Display for DistillerRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy(denied) => write!(
+                f,
+                "the realm's background budget did not admit the run: {denied}"
+            ),
+            Self::Failed(error) => f.write_str(error),
+        }
+    }
+}
+
 impl AgentMemoryRuntimeInjector {
     pub fn new(provider: Arc<dyn AgentMemoryProvider>, config: AgentMemoryConfig) -> Self {
         Self {
@@ -676,21 +701,37 @@ impl AgentMemoryRuntimeInjector {
     }
 
     /// [`Self::distill_before_rotation`], answering whether the run ended
-    /// within the distiller's pre-rotation bound, or the bound it did not
-    /// end within. Without a distiller there is nothing to wait for.
+    /// within the distiller's pre-rotation bound: `Ok` once it did, whatever
+    /// it distilled; [`DistillerRunError::Busy`] when the realm's background
+    /// budget did not admit the run, so it was not made (unreported: the
+    /// caller has a wait take the run for it, [`Self::until_budget_admits`],
+    /// and asks again with it `reserved`); [`DistillerRunError::Failed`]
+    /// with the bound it did not end within. Without a distiller there is
+    /// nothing to wait for.
     pub(crate) async fn distill_before_rotation_within_bound(
         &self,
         identity: &AgentIdentity,
         session_key: &str,
         cause: crate::memory::distiller::DistillCause,
-    ) -> Result<(), std::time::Duration> {
-        match self.distiller.as_ref() {
-            Some(distiller) => {
-                distiller
-                    .distill_before_rotation_within_bound(identity.as_str(), session_key, cause)
-                    .await
+        reserved: Option<crate::memory::BudgetPermit>,
+    ) -> Result<(), DistillerRunError> {
+        let Some(distiller) = self.distiller.as_ref() else {
+            return Ok(());
+        };
+        match distiller
+            .distill_before_rotation_within_bound(identity.as_str(), session_key, cause, reserved)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(crate::memory::distiller::BoundedRunError::Busy(denied)) => {
+                Err(DistillerRunError::Busy(denied))
             }
-            None => Ok(()),
+            Err(crate::memory::distiller::BoundedRunError::TimedOut(bound)) => {
+                Err(DistillerRunError::Failed(format!(
+                    "timed out: the distillation did not finish within {} ms",
+                    bound.as_millis()
+                )))
+            }
         }
     }
 
@@ -707,30 +748,73 @@ impl AgentMemoryRuntimeInjector {
     /// discards read from its memory. `follow_up` fires the compaction
     /// follow-up, for a session that goes on; a retirement's harvest of a
     /// session it ends passes `false`. `Ok` once the discards reached the
-    /// distiller, or there was nothing to read; `Err` with why they did
-    /// not (a timeout, a denial of the realm's budget, a failed read or
-    /// extraction). Without a Distiller there is nothing to harvest.
+    /// distiller, or there was nothing to read; [`DistillerRunError::Busy`]
+    /// when the realm's background budget did not admit the run, so it was
+    /// not made (unreported: the caller has a wait take the run for it,
+    /// [`Self::until_budget_admits`], and asks again with it `reserved`);
+    /// and [`DistillerRunError::Failed`] with why it did not harvest them (a
+    /// timeout, a failed read or extraction). Without a Distiller there is
+    /// nothing to harvest.
     pub(crate) async fn harvest_compaction_within_bound(
         &self,
         identity: &AgentIdentity,
         session_key: &str,
         discards: Option<Vec<crate::memory::distiller::DiscardEntry>>,
         follow_up: bool,
-    ) -> Result<(), String> {
+        reserved: Option<crate::memory::BudgetPermit>,
+    ) -> Result<(), DistillerRunError> {
         let Some(distiller) = self.distiller.as_ref() else {
             return Ok(());
         };
         match distiller
-            .harvest_compaction_within_bound(identity.as_str(), session_key, discards, follow_up)
+            .harvest_compaction_within_bound(
+                identity.as_str(),
+                session_key,
+                discards,
+                follow_up,
+                reserved,
+            )
             .await
         {
             Ok(outcome) if outcome.compaction_harvest_satisfied() => Ok(()),
-            Ok(crate::memory::distiller::DistillOutcome::Skipped { reason }) => Err(reason),
-            Ok(outcome) => Err(format!("{outcome:?}")),
-            Err(bound) => Err(format!(
-                "timed out: no answer within {} ms",
-                bound.as_millis()
-            )),
+            Ok(crate::memory::distiller::DistillOutcome::Skipped { reason }) => {
+                Err(DistillerRunError::Failed(reason))
+            }
+            Ok(outcome) => Err(DistillerRunError::Failed(format!("{outcome:?}"))),
+            Err(crate::memory::distiller::BoundedRunError::Busy(denied)) => {
+                Err(DistillerRunError::Busy(denied))
+            }
+            Err(crate::memory::distiller::BoundedRunError::TimedOut(bound)) => {
+                Err(DistillerRunError::Failed(format!(
+                    "timed out: no answer within {} ms",
+                    bound.as_millis()
+                )))
+            }
+        }
+    }
+
+    /// Wait until the realm's background budget admits a run of the
+    /// Distiller, at most `wait`, for a caller whose run it did not admit
+    /// ([`DistillerRunError::Busy`]), and take that run for the caller: it
+    /// asks again with it `reserved`, so no other waiter takes it in
+    /// between. Answers the denial that stood when the wait ran out. Without
+    /// a Distiller nothing waits, and there is no run to take.
+    pub(crate) async fn until_budget_admits(
+        &self,
+        wait: std::time::Duration,
+    ) -> Result<Option<crate::memory::BudgetPermit>, crate::memory::BudgetDenied> {
+        match self.distiller.as_ref() {
+            Some(distiller) => distiller.until_budget_admits(wait).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Say loudly that a run of the Distiller the realm's background budget
+    /// did not admit is given up on `denied`: the warning and the
+    /// `memory.budget.denied` timeline event a run the budget skips has.
+    pub(crate) fn report_budget_denied(&self, denied: &crate::memory::BudgetDenied) {
+        if let Some(distiller) = self.distiller.as_ref() {
+            distiller.report_budget_denied(denied);
         }
     }
 

@@ -14,6 +14,9 @@ use toolkit_store::SqliteStore;
 // Bounds process custody without evicting an accepted native call. Completed,
 // cancelled and expired canonical B rows release their own entries.
 const MAX_ACTIVE_ATTACHMENTS_PER_ORIGINAL: usize = 64;
+// The time one readiness observation may spend in native reads: each
+// operation's wait and the optional failure metadata. The currentness fences
+// around them are not counted.
 const OBSERVATION_BUDGET: Duration = Duration::from_millis(250);
 type NativeCall =
     Pin<Box<dyn Future<Output = Result<LiveMcpAttachmentReceipt, LiveMcpAttachError>> + Send>>;
@@ -64,6 +67,15 @@ enum ServiceAttachmentReadiness {
         failure: meerkat_toolkit::setup::ApprovedServiceAttachmentFailure,
         observation: Option<meerkat_toolkit::setup::ApprovedServiceAttachmentObservation>,
     },
+}
+
+// A native read that started with `deadline` set to its start plus the
+// remaining budget has just ended: charge its time to the budget and answer
+// whether it ended by that deadline.
+fn spend_native_read(budget: &mut Duration, deadline: tokio::time::Instant) -> bool {
+    let now = tokio::time::Instant::now();
+    *budget = deadline.saturating_duration_since(now);
+    now <= deadline
 }
 
 // Only this bounded projection may leave the native host. Server identifiers,
@@ -315,6 +327,10 @@ impl PrivateOriginals {
         &self,
         held: &HeldServiceAttachment,
     ) -> Result<(), PrivateOriginalError> {
+        #[cfg(test)]
+        if let Some(delay) = self.attachment_fence_delay_for_test.get() {
+            tokio::time::sleep(*delay).await;
+        }
         self.observe_service_mcp_attachment(
             &held.reference,
             &held.control,
@@ -322,6 +338,12 @@ impl PrivateOriginals {
         )
         .await?;
         self.attachment_current(held)
+    }
+
+    /// Delays every currentness fence of an accepted attachment by `delay`.
+    #[cfg(test)]
+    fn delay_attachment_fences_for_test(&self, delay: Duration) {
+        assert!(self.attachment_fence_delay_for_test.set(delay).is_ok());
     }
 
     /// Preparation reads only the canonical reviewed installation and existing
@@ -503,7 +525,9 @@ impl PrivateOriginals {
 
     /// One bounded readiness observation of the exact accepted attempt. An
     /// observation timeout cancels only this read, never native connection work
-    /// or its retained call. It cannot authorize a replacement attachment.
+    /// or its retained call. It cannot authorize a replacement attachment. Its
+    /// budget bounds the native reads only, so a currentness fence slower than
+    /// the whole budget cannot leave an operation without its wait.
     async fn service_attachment_ready(
         &self,
         held: &Arc<HeldServiceAttachment>,
@@ -516,21 +540,19 @@ impl PrivateOriginals {
         {
             return Err(PrivateOriginalError::Conflict);
         }
-        let deadline = tokio::time::Instant::now() + OBSERVATION_BUDGET;
+        let mut budget = OBSERVATION_BUDGET;
         let mut generation = None;
         for operation in &held.operations {
             self.attachment_current_after_read(held).await?;
-            if tokio::time::Instant::now() >= deadline {
+            if budget.is_zero() {
                 attachment_diagnostic("readiness_observation", "budget_elapsed_before_wait");
                 return Ok(ServiceAttachmentReadiness::Pending);
             }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let observed = tokio::time::timeout_at(
-                deadline,
-                receipt.attempt.wait(operation.as_str(), remaining),
-            )
-            .await;
-            let within_deadline = tokio::time::Instant::now() <= deadline;
+            let deadline = tokio::time::Instant::now() + budget;
+            let observed =
+                tokio::time::timeout_at(deadline, receipt.attempt.wait(operation.as_str(), budget))
+                    .await;
+            let within_deadline = spend_native_read(&mut budget, deadline);
             // The canonical source/task/grant owner is reopened after every
             // native await. A cached AccessView or ready bit is insufficient.
             self.attachment_current_after_read(held).await?;
@@ -568,21 +590,22 @@ impl PrivateOriginals {
                         }
                         _ => meerkat_toolkit::setup::ApprovedServiceAttachmentFailure::Rejected,
                     };
-                    // Metadata is optional and shares the existing readiness
-                    // deadline. A slow read cannot erase a timely failure.
-                    let observation = if tokio::time::Instant::now() < deadline {
+                    // Metadata is optional and shares the remaining readiness
+                    // budget. A slow read cannot erase a timely failure.
+                    let observation = if budget.is_zero() {
+                        None
+                    } else {
+                        let deadline = tokio::time::Instant::now() + budget;
                         let metadata =
                             tokio::time::timeout_at(deadline, receipt.attempt.setup_failure())
                                 .await;
-                        let metadata_in_time = tokio::time::Instant::now() <= deadline;
+                        let metadata_in_time = spend_native_read(&mut budget, deadline);
                         self.attachment_current_after_read(held).await?;
                         if metadata_in_time {
                             metadata.ok().flatten().and_then(project_setup_failure)
                         } else {
                             None
                         }
-                    } else {
-                        None
                     };
                     return Ok(ServiceAttachmentReadiness::Failed {
                         failure,

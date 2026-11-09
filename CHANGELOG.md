@@ -46,6 +46,7 @@ them.
   available", every OAuth sign-in failed to start, and sign-ins that another
   process had persisted were not found. The authority now uses the newest
   handle of the store that is still open. Affects 0.6.0 through 0.9.11.
+
 - `meerkat-runtime`: a run whose operation records an authorization audit
   observation after the run's terminal input rows were written now settles
   in the same process. The observation waits on the live input row for the

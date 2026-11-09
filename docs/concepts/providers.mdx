@@ -407,6 +407,11 @@ typed `provider_params.provider_tag` envelope for provider-specific fields:
     cache restarts at the first dropped block; Meerkat logs a warning
     naming each dropped block.
 
+    A session that moves from Claude Fable 5.2 to any model other than
+    Claude Mythos 5.2 loses Fable 5.2's thinking for the turns that run
+    there, because Anthropic drops those blocks for every other model; the
+    request still succeeds.
+
     Anthropic also supports `top_k` and the prompt-cache policies `automatic`
     (the default on the Anthropic API, Vertex, and Foundry), `system_prefix`,
     `system_and_conversation`, and `disabled`, plus `cache_ttl` (`5m`, the

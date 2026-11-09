@@ -31,8 +31,10 @@ DISPATCH_PASS="PASS Publishing dispatches are bound to their version's tag"
 DISPATCH_FAIL="FAIL A publishing dispatch without release_tag could publish a branch tip as the tagged version"
 TAG_VALIDATION_PASS="PASS Tag releases skip Cargo validation only on an exact-tree CI attestation that proves its lanes ran"
 TAG_VALIDATION_FAIL="FAIL Tag releases may skip Cargo validation only on an exact-tree CI attestation that proves its lanes ran"
-PREBUILD_PASS="PASS Pre-tag prebuilds publish nothing, and a tag publishes its own commit's prebuild only through the attested-archive verification"
-PREBUILD_FAIL="FAIL A pre-tag prebuild must publish nothing, and a tag may publish its commit's prebuild only through the attested-archive verification"
+PREBUILD_PASS="PASS Pre-tag prebuilds publish nothing, and a tag publishes the prebuild of its own commit, or of an ancestor whose changes since are all non-inputs, only through the attested-archive verification"
+PREBUILD_FAIL="FAIL A pre-tag prebuild must publish nothing, and a tag may publish the prebuild of its own commit, or of an ancestor whose changes since are all non-inputs, only through the attested-archive verification"
+NON_INPUTS_PASS="PASS No release build job, local action or script names a path a reused prebuild may differ in (another product's root, a product changelog, a CI-only file)"
+NON_INPUTS_FAIL="FAIL A release build job, local action or script names a path a reused prebuild may differ in"
 BASELINE_PASS="PASS Semver baseline rustdoc builds alongside the release and gates nothing; it attaches only to a published release, never replacing an attached one"
 BASELINE_FAIL="FAIL The semver baseline rustdoc must stay off every path a user waits on"
 TRAILING_PASS="PASS Linux and macOS arm64 assets publish without waiting for the trailing Intel macOS and Windows lanes; no upload replaces a published asset"
@@ -485,7 +487,7 @@ elif name == "prebuild-reuse-unverified":
     # drops the --source-run binding.
     pattern = re.compile(
         r'          if \[\[ -n "\$\{PREBUILD_RUN_ID\}" \]\]; then\n'
-        r"            # The tag commit's pre-tag prebuild(?:.*\n)*?          elif "
+        r"            # The tag's pre-tag prebuild(?:.*\n)*?          elif "
     )
     text, count = pattern.subn("          if ", text)
     if count != 1:
@@ -497,6 +499,34 @@ elif name == "prebuild-web-unverified":
     if match is None:
         raise SystemExit(f"fixture `{name}` expects the Web SDK verification step")
     text = text[: match.start()] + text[match.end() :]
+elif name == "prebuild-web-unbound":
+    # The prebuilt package is no longer bound to the prebuild's commit.
+    match = re.search(
+        r"      - name: Bind the prebuilt Web SDK package to its commit\n"
+        r"(?:        .*\n|\n)*?(?=      #|      - name: )",
+        text,
+    )
+    if match is None:
+        raise SystemExit(f"fixture `{name}` expects the Web SDK binding step")
+    text = text[: match.start()] + text[match.end() :]
+elif name == "prebuild-lookup-shallow":
+    # The lookup checks out the tag commit alone: no ancestor can be compared.
+    replace_once(
+        "          fetch-depth: 0\n          sparse-checkout: |\n            scripts/release-find-prebuild\n",
+        "          sparse-checkout: |\n            scripts/release-find-prebuild\n",
+    )
+elif name == "prebuild-build-names-ci-file":
+    # A build job names a CI-only file a reused prebuild may differ in.
+    replace_once(
+        "  build_web_sdk_package:\n    name: Build Web SDK package\n",
+        "  build_web_sdk_package:\n    name: Build Web SDK package (lanes from scripts/ci-cargo-lanes.mjs)\n",
+    )
+elif name == "prebuild-build-names-product-root":
+    # A build job names another product's root.
+    replace_once(
+        "  build_binaries_macos_x86_cross:\n    name: Cross-compile and package Intel macOS surface binaries on Apple silicon",
+        "  build_binaries_macos_x86_cross:\n    name: Cross-compile and package Intel macOS surface binaries with connect/ resources on Apple silicon",
+    )
 elif name == "prebuild-any-backend":
     # The request no longer checks the backend, so a GitHub-hosted prebuild
     # can race a BuildBuddy tag run (v0.9.3).
@@ -1198,6 +1228,18 @@ expect_fail_named prebuild-reuse-unverified "${TEST_ROOT}/prebuild-reuse-unverif
 mutate prebuild-web-unverified "${TEST_ROOT}/prebuild-web-unverified.yml"
 expect_fail_named prebuild-web-unverified "${TEST_ROOT}/prebuild-web-unverified.yml" \
   "must verify the prebuilt package's attestation" prebuild
+mutate prebuild-web-unbound "${TEST_ROOT}/prebuild-web-unbound.yml"
+expect_fail_named prebuild-web-unbound "${TEST_ROOT}/prebuild-web-unbound.yml" \
+  "must bind the prebuilt package to the prebuild's commit" prebuild
+mutate prebuild-lookup-shallow "${TEST_ROOT}/prebuild-lookup-shallow.yml"
+expect_fail_named prebuild-lookup-shallow "${TEST_ROOT}/prebuild-lookup-shallow.yml" \
+  "must check out the whole history (fetch-depth: 0)" prebuild
+mutate prebuild-build-names-ci-file "${TEST_ROOT}/prebuild-build-names-ci-file.yml"
+expect_fail_named prebuild-build-names-ci-file "${TEST_ROOT}/prebuild-build-names-ci-file.yml" \
+  "build_web_sdk_package job names scripts/ci-cargo-lanes.mjs" prebuild-non-inputs
+mutate prebuild-build-names-product-root "${TEST_ROOT}/prebuild-build-names-product-root.yml"
+expect_fail_named prebuild-build-names-product-root "${TEST_ROOT}/prebuild-build-names-product-root.yml" \
+  "build_binaries_macos_x86_cross job names connect/ (connect's root)" prebuild-non-inputs
 mutate prebuild-reuse-no-wait "${TEST_ROOT}/prebuild-reuse-no-wait.yml"
 expect_fail_named prebuild-reuse-no-wait "${TEST_ROOT}/prebuild-reuse-no-wait.yml" \
   "must wait for the prebuild run's \`Release binary build gate\`" prebuild
@@ -1371,7 +1413,7 @@ run_doctor() {
 }
 
 run_doctor "$WORKFLOW" "${TEST_ROOT}/doctor-committed.log"
-for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
+for line in "$SEMVER_PASS" "$SLO_PASS" "$DISPATCH_PASS" "$TAG_VALIDATION_PASS" "$PREBUILD_PASS" "$NON_INPUTS_PASS" "$BASELINE_PASS" "$TRAILING_PASS" "$WINDOWS_PASS" "$TOKEN_PASS" "$WEB_TOOLS_PASS" "$CACHES_PASS"; do
   if ! grep -Fxq "$line" "${TEST_ROOT}/doctor-committed.log"; then
     fail "doctor does not report \`${line}\` for the committed workflow" \
       "$(cat "${TEST_ROOT}/doctor-committed.log")"
@@ -1406,6 +1448,13 @@ run_doctor "${TEST_ROOT}/doctor-prebuild.yml" "${TEST_ROOT}/doctor-prebuild.log"
 if ! grep -Fq "$PREBUILD_FAIL" "${TEST_ROOT}/doctor-prebuild.log"; then
   fail "doctor does not report \`${PREBUILD_FAIL}\` for a workflow whose prebuild publishes" \
     "$(cat "${TEST_ROOT}/doctor-prebuild.log")"
+fi
+
+mutate prebuild-build-names-ci-file "${TEST_ROOT}/doctor-non-inputs.yml"
+run_doctor "${TEST_ROOT}/doctor-non-inputs.yml" "${TEST_ROOT}/doctor-non-inputs.log"
+if ! grep -Fq "$NON_INPUTS_FAIL" "${TEST_ROOT}/doctor-non-inputs.log"; then
+  fail "doctor does not report \`${NON_INPUTS_FAIL}\` for a workflow whose build job names a CI-only file" \
+    "$(cat "${TEST_ROOT}/doctor-non-inputs.log")"
 fi
 
 mutate semver-baseline-gates-homebrew "${TEST_ROOT}/doctor-baseline.yml"

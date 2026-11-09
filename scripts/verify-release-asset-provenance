@@ -35,9 +35,12 @@ the run if it was re-run since (its latest attempt is not <n>).
 
 A pre-tag prebuild run (one with a "Release prebuild gate" job) never waited
 for exact-main CI, so it is refused as a source run unless --prebuild says the
-caller is the tag run of exactly that prebuild's commit: GITHUB_REF must be
-refs/tags/<release-tag>, the run's head must be the tag commit itself (not an
-ancestor), and its Release prebuild gate must have succeeded.
+caller is a tag run that requires that CI itself: GITHUB_REF must be
+refs/tags/<release-tag>, the run's Release prebuild gate must have succeeded,
+and the run's head must be the tag commit itself or an ancestor whose
+prebuild serves it (scripts/release-prebuild-equivalent: every path changed
+since is a non-input of Core's release artifacts). The stamps then name the
+run's head.
 EOF
   exit 2
 }
@@ -48,6 +51,7 @@ source_gate="Release binary build gate"
 source_attempt=""
 prebuild=false
 stamps_dir=""
+stamped_source=""
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --recovery-source)
@@ -122,14 +126,15 @@ if [[ -n "${source_run}" ]]; then
     echo "run ${source_run}: ${source_gate} did not succeed (${build_gate:-absent})" >&2
     exit 1
   fi
-  # A prebuild never waited for exact-main CI: only the tag run of exactly
-  # its commit, which required that CI itself, may publish its archives.
+  # A prebuild never waited for exact-main CI: only a tag run, which required
+  # that CI itself, may publish its archives, and only of the tag commit or
+  # of an ancestor whose prebuild serves it.
   # Every release.yml dispatch lists the gate, but only a prebuild runs it
   # (its always() condition never skips there): a skipped gate marks an
   # ordinary dispatch, whose archives an asset recovery may reuse.
   prebuild_gate="$(awk -F '\t' '$1 == "Release prebuild gate" { print $2 }' <<<"${jobs_json}")"
   if [[ -n "${prebuild_gate}" && "${prebuild_gate}" != "skipped" && "${prebuild}" != "true" ]]; then
-    echo "run ${source_run} is a pre-tag prebuild; only the tag run of its exact commit may publish its archives (--prebuild)" >&2
+    echo "run ${source_run} is a pre-tag prebuild; only a tag run may publish its archives (--prebuild)" >&2
     exit 1
   fi
   if [[ "${prebuild}" == "true" ]]; then
@@ -143,9 +148,15 @@ if [[ -n "${source_run}" ]]; then
       exit 1
     fi
     if [[ "${run_sha}" != "${tag_commit}" ]]; then
-      echo "run ${source_run} built ${run_sha}, not the ${2:-} commit ${tag_commit:-unknown}" >&2
-      exit 1
+      if ! equivalence="$("$(dirname "${BASH_SOURCE[0]}")/release-prebuild-equivalent" "${run_sha}" "${tag_commit:-unknown}" 2>&1)"; then
+        echo "run ${source_run} built ${run_sha}, not the ${2:-} commit ${tag_commit:-unknown}, and that prebuild does not serve it:" >&2
+        echo "${equivalence}" >&2
+        exit 1
+      fi
+      echo "${equivalence}"
     fi
+    # The prebuild stamped its own checkout: the tag commit or that ancestor.
+    stamped_source="${run_sha}"
   fi
   recovery_source="${run_sha}"
   echo "source run ${source_run}: release.yml on main at ${run_sha}, ${source_gate} passed"
@@ -241,6 +252,9 @@ if [[ "${stamp_count}" -eq 0 && -n "${source_run}" ]]; then
   exit 0
 fi
 
+# Each stamp names the tree its build job checked out: the tag commit, or a
+# prebuild's own commit (checked above to be the tag commit or to serve it).
+expected_source="${stamped_source:-${release_sha}}"
 for archive in "${archives[@]}"; do
   name="$(basename "${archive}")"
   verify_recovery_attestation "${archive}"
@@ -254,10 +268,14 @@ for archive in "${archives[@]}"; do
   fi
   verify_recovery_attestation "${stamps[0]}"
   stamped="$(tr -d '[:space:]' < "${stamps[0]}")"
-  if [[ "${stamped}" != "${release_sha}" ]]; then
-    echo "${name}: built from ${stamped}, expected the ${release_tag} commit ${release_sha}" >&2
+  if [[ "${stamped}" != "${expected_source}" ]]; then
+    if [[ "${expected_source}" == "${release_sha}" ]]; then
+      echo "${name}: built from ${stamped}, expected the ${release_tag} commit ${release_sha}" >&2
+    else
+      echo "${name}: built from ${stamped}, expected the prebuild's commit ${expected_source}, which serves ${release_tag}" >&2
+    fi
     exit 1
   fi
-  echo "verified recovery provenance: ${name} <- release.yml@${recovery_source} (refs/heads/main), source tree ${release_sha}"
+  echo "verified recovery provenance: ${name} <- release.yml@${recovery_source} (refs/heads/main), source tree ${expected_source}"
 done
-echo "Verified ${#archives[@]} recovery archive attestations for ${release_tag}: built by release.yml at ${recovery_source} from the ${release_sha} tree"
+echo "Verified ${#archives[@]} recovery archive attestations for ${release_tag}: built by release.yml at ${recovery_source} from the ${expected_source} tree"

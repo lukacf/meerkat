@@ -71,10 +71,22 @@ key_for() {
 }
 
 runs_url="repos/${REPO}/actions/workflows/release.yml/runs?event=workflow_dispatch&branch=main&head_sha=${SHA}&per_page=100"
+# Every recent dispatch on main: where runs of earlier commits come from.
+others_url="repos/${REPO}/actions/workflows/release.yml/runs?event=workflow_dispatch&branch=main&per_page=100"
+
+# listing <url> <run json>...
+listing() {
+  local url="$1"
+  shift
+  local joined
+  joined="$(IFS=,; printf '%s' "$*")"
+  printf '{"workflow_runs": [%s]}\n' "${joined}" >"${FIXTURES}/$(key_for "${url}").json"
+}
 
 reset() {
   rm -rf "${FIXTURES}"
   mkdir -p "${FIXTURES}"
+  listing "${others_url}"
 }
 
 # run_json <id> <status> [path] [event] [branch] [sha] [repo] [started] [actor]
@@ -304,6 +316,9 @@ runs "" "$(run_json 601 completed)"
 lookup jobs-api-failure "" 1
 jobs 601 success
 lookup artifacts-api-failure "" 1
+complete_artifacts 601
+rm "${FIXTURES}/$(key_for "${others_url}").json"
+lookup other-runs-api-failure "" 1
 
 # 11. A malformed commit is refused.
 set +e
@@ -342,5 +357,148 @@ while IFS= read -r pattern; do
   [[ "${matched}" == true ]] || fail "critical-job-names: CRITICAL_JOBS pattern '${pattern}' names no job of release.yml"
 done <<<"${patterns}"
 echo "ok: critical-job-names"
+
+# 13. A prebuild of another commit serves the release only through
+#     scripts/release-prebuild-equivalent: that commit is an ancestor of the
+#     release commit, and every path changed since is under another product's
+#     root (not a Cargo.toml there), a product's changelog or a CI-only file.
+#     A fixture history (ci/products.json is the real one) provides the
+#     commits; a run of exactly the release commit still comes first.
+HISTORY="${TEST_ROOT}/history"
+git_history() {
+  git -C "${HISTORY}" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false "$@"
+}
+mkdir -p "${HISTORY}/ci" "${HISTORY}/crates/core/src" "${HISTORY}/connect/crates/app/src" "${HISTORY}/scripts"
+git_history init -q -b main
+cp "${REPO_ROOT}/ci/products.json" "${HISTORY}/ci/products.json"
+echo 'pub fn core() {}' >"${HISTORY}/crates/core/src/lib.rs"
+echo '# Changelog' >"${HISTORY}/CHANGELOG.md"
+printf '[package]\nname = "app"\n' >"${HISTORY}/connect/crates/app/Cargo.toml"
+echo 'pub fn app() {}' >"${HISTORY}/connect/crates/app/src/lib.rs"
+echo '// planner' >"${HISTORY}/scripts/ci-cargo-lanes.mjs"
+git_history add -A
+git_history commit -q -m base
+BASE_SHA="$(git_history rev-parse HEAD)"
+echo '- a fix' >>"${HISTORY}/CHANGELOG.md"
+echo '- a fix' >"${HISTORY}/connect/CHANGELOG.md"
+echo 'pub fn app_fix() {}' >>"${HISTORY}/connect/crates/app/src/lib.rs"
+mkdir -p "${HISTORY}/meta"
+echo notes >"${HISTORY}/meta/NOTES.md"
+echo '// planner, fixed' >>"${HISTORY}/scripts/ci-cargo-lanes.mjs"
+git_history add -A
+git_history commit -q -m fix
+FIX_SHA="$(git_history rev-parse HEAD)"
+echo 'pub fn core_fix() {}' >>"${HISTORY}/crates/core/src/lib.rs"
+git_history commit -q -am core
+CORE_SHA="$(git_history rev-parse HEAD)"
+git_history switch -q -c manifest "${FIX_SHA}"
+echo 'version = "0.0.1"' >>"${HISTORY}/connect/crates/app/Cargo.toml"
+git_history commit -q -am manifest
+MANIFEST_SHA="$(git_history rev-parse HEAD)"
+git_history switch -q -c products "${FIX_SHA}"
+echo '{}' >"${HISTORY}/ci/products.json"
+git_history commit -q -am products
+PRODUCTS_SHA="$(git_history rev-parse HEAD)"
+git_history switch -q -c sibling "${BASE_SHA}"
+echo other >"${HISTORY}/connect/OTHER.md"
+git_history add -A
+git_history commit -q -m sibling
+SIBLING_SHA="$(git_history rev-parse HEAD)"
+git_history switch -q main
+
+# equivalent <label> <prebuild> <release> <expected status> [line the output must hold]
+equivalent() {
+  local label="$1" status
+  set +e
+  (cd "${HISTORY}" && "${REPO_ROOT}/scripts/release-prebuild-equivalent" "$2" "$3") >"${TEST_ROOT}/${label}.out" 2>&1
+  status=$?
+  set -e
+  [[ "${status}" -eq "$4" ]] || fail "${label}: expected status $4, got ${status}" "$(cat "${TEST_ROOT}/${label}.out")"
+  if [[ -n "${5:-}" ]] && ! grep -Fxq -- "$5" "${TEST_ROOT}/${label}.out"; then
+    fail "${label}: no line '$5'" "$(cat "${TEST_ROOT}/${label}.out")"
+  fi
+  echo "ok: ${label}"
+}
+equivalent same-commit "${FIX_SHA}" "${FIX_SHA}" 0
+for line in "  CHANGELOG.md: core's changelog" "  connect/CHANGELOG.md: connect's changelog" \
+  "  connect/crates/app/src/lib.rs: under connect's root connect/" "  meta/NOTES.md: under meta's root meta/" \
+  "  scripts/ci-cargo-lanes.mjs: read only by CI (the CI planner)"; do
+  equivalent non-inputs-only "${BASE_SHA}" "${FIX_SHA}" 0 "${line}"
+done
+equivalent core-source "${BASE_SHA}" "${CORE_SHA}" 1 "  crates/core/src/lib.rs: an input"
+equivalent product-manifest "${FIX_SHA}" "${MANIFEST_SHA}" 1 "  connect/crates/app/Cargo.toml: an input"
+equivalent unreadable-products "${FIX_SHA}" "${PRODUCTS_SHA}" 1
+grep -Fq "ci/products.json is unreadable" "${TEST_ROOT}/unreadable-products.out" ||
+  fail "unreadable-products: the refusal is not named" "$(cat "${TEST_ROOT}/unreadable-products.out")"
+equivalent sibling "${SIBLING_SHA}" "${FIX_SHA}" 1
+equivalent descendant "${CORE_SHA}" "${FIX_SHA}" 1
+grep -Fq "is not an ancestor of ${FIX_SHA}" "${TEST_ROOT}/descendant.out" ||
+  fail "descendant: the refusal is not named" "$(cat "${TEST_ROOT}/descendant.out")"
+equivalent unknown-commit "${SHA}" "${FIX_SHA}" 1
+equivalent malformed-commit main "${FIX_SHA}" 2
+
+# lookup_for <label> <release commit> <expected stdout> <expected status> [directory]
+lookup_for() {
+  local label="$1" release="$2" expected="$3" expected_status="$4" output status
+  set +e
+  output="$(cd "${5:-${HISTORY}}" && PATH="${TEST_ROOT}/bin:${PATH}" FIXTURES="${FIXTURES}" \
+    GITHUB_REPOSITORY="${REPO}" MEERKAT_PREBUILD_POLL_SECONDS=0 MEERKAT_PREBUILD_WAIT_SECONDS=600 \
+    "${LOOKUP}" "${release}" 2>"${TEST_ROOT}/${label}.err")"
+  status=$?
+  set -e
+  if [[ "${status}" -ne "${expected_status}" || "${output}" != "${expected}" ]]; then
+    fail "${label}: expected status ${expected_status} and output '${expected}', got ${status} and '${output}'" \
+      "$(cat "${TEST_ROOT}/${label}.err")"
+  fi
+  echo "ok: ${label}"
+}
+exact_url() {
+  printf 'repos/%s/actions/workflows/release.yml/runs?event=workflow_dispatch&branch=main&head_sha=%s&per_page=100' "${REPO}" "$1"
+}
+usable() {
+  local run_id
+  for run_id in "$@"; do
+    jobs "${run_id}" success
+    complete_artifacts "${run_id}"
+  done
+}
+
+reset
+listing "$(exact_url "${FIX_SHA}")"
+listing "${others_url}" "$(run_json 801 completed "" "" "" "${BASE_SHA}")"
+usable 801
+lookup_for ancestor-serves "${FIX_SHA}" "801 2" 0
+grep -Fq "prebuilt the critical release artifacts of ${BASE_SHA}, which serve ${FIX_SHA}" "${TEST_ROOT}/ancestor-serves.err" ||
+  fail "ancestor-serves: the log does not name both commits" "$(cat "${TEST_ROOT}/ancestor-serves.err")"
+lookup_for no-history "${FIX_SHA}" "" 0 "${TEST_ROOT}"
+
+reset
+listing "$(exact_url "${FIX_SHA}")" "$(run_json 802 completed "" "" "" "${FIX_SHA}")"
+listing "${others_url}" "$(run_json 803 completed "" "" "" "${BASE_SHA}")" "$(run_json 802 completed "" "" "" "${FIX_SHA}")"
+usable 802 803
+lookup_for exact-commit-first "${FIX_SHA}" "802 2" 0
+
+reset
+listing "$(exact_url "${FIX_SHA}")" "$(run_json 804 in_progress "" "" "" "${FIX_SHA}")"
+listing "${others_url}" "$(run_json 805 completed "" "" "" "${BASE_SHA}")" "$(run_json 804 in_progress "" "" "" "${FIX_SHA}")"
+jobs 804 pending
+usable 805
+lookup_for usable-ancestor-while-exact-runs "${FIX_SHA}" "805 2" 0
+
+for case in "core-change ${CORE_SHA} ${BASE_SHA} ${FIX_SHA}" "manifest-change ${MANIFEST_SHA} ${FIX_SHA}" \
+  "sibling ${FIX_SHA} ${SIBLING_SHA}" "descendant ${FIX_SHA} ${CORE_SHA}"; do
+  read -r label release prebuilt <<<"${case}"
+  reset
+  listing "$(exact_url "${release}")"
+  others=()
+  run_id=810
+  for commit in ${prebuilt}; do
+    run_id=$((run_id + 1))
+    others+=("$(run_json "${run_id}" completed "" "" "" "${commit}")")
+    usable "${run_id}"
+  done
+  listing "${others_url}" "${others[@]}"
+  lookup_for "refused-${label}" "${release}" "" 0
+done
 
 echo "release-find-prebuild contract holds"

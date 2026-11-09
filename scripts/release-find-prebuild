@@ -3,13 +3,17 @@
 #
 # Usage: release-find-prebuild <release-commit-sha>
 #
-# Prints "<run id> <run attempt>" of the newest release.yml run that prebuilt
-# the release artifacts of exactly <release-commit-sha>, or nothing when there
-# is none:
+# Prints "<run id> <run attempt>" of the release.yml run whose prebuilt
+# release artifacts serve <release-commit-sha>, or nothing when there is none:
 #   - a workflow_dispatch run of .github/workflows/release.yml on main in this
-#     repository (GITHUB_REPOSITORY) whose head is that commit, started and
-#     triggered by the repository owner (or an account listed in
-#     MEERKAT_PREBUILD_ACTORS);
+#     repository (GITHUB_REPOSITORY), started and triggered by the repository
+#     owner (or an account listed in MEERKAT_PREBUILD_ACTORS);
+#   - whose head is that commit or, failing a usable run of exactly it, an
+#     ancestor whose prebuild serves it: every path changed between the two is
+#     a non-input of Core's release artifacts (scripts/release-prebuild-equivalent,
+#     which needs this checkout's history; without it only the exact commit
+#     qualifies). Runs of exactly the commit come first, then the others, each
+#     newest first;
 #   - whose "Release prebuild gate" job succeeded (only a
 #     prebuild_release_artifacts dispatch has that job, and it passes once the
 #     critical Linux and macOS arm64 binaries and the Web SDK package are
@@ -25,12 +29,14 @@
 # The default leaves about 45 minutes over the slowest gate measured on the
 # backend tags select (v0.9.2's BuildBuddy prebuild: 94.7 minutes). A run one
 # of whose CRITICAL_JOBS (the jobs the gate needs) failed, timed out or was
-# cancelled is given up at once: its gate can no longer pass.
+# cancelled is given up at once: its gate can no longer succeed. A usable run is
+# taken even while a run listed before it is still waited for.
 #
 # The id is only a pointer, pinned to the attempt examined here: the
 # publishing jobs verify every archive and the Web SDK package against their
-# build attestations, and that attempt's gates, before anything is published.
-# "No prebuild" exits 0 with empty output; an API failure exits non-zero.
+# build attestations, that attempt's gates and the commit equivalence again,
+# before anything is published. "No prebuild" exits 0 with empty output; an
+# API failure exits non-zero.
 
 set -euo pipefail
 shopt -s inherit_errexit
@@ -38,6 +44,7 @@ shopt -s inherit_errexit
 PREBUILD_GATE_JOB="Release prebuild gate"
 CRITICAL_TARGETS=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin)
 WEB_SDK_ARTIFACT="rkat-web-package"
+EQUIVALENCE="$(dirname "${BASH_SOURCE[0]}")/release-prebuild-equivalent"
 # Display names, a glob for the matrix legs.
 CRITICAL_JOBS=(
   "Require green CI"
@@ -70,20 +77,24 @@ log() {
   printf '%s\n' "$*" >&2
 }
 
-# id<TAB>status<TAB>started-epoch<TAB>attempt for every candidate run, newest
-# first.
-candidate_runs() {
-  local listing
+equivalence_cache="$(mktemp -d "${TMPDIR:-/tmp}/release-find-prebuild.XXXXXX")"
+trap 'rm -rf "${equivalence_cache}"' EXIT
+
+# id<TAB>status<TAB>started-epoch<TAB>attempt<TAB>head of every release.yml
+# dispatch on main in this repository, by an allowed actor, that the runs
+# query $1 lists, newest first.
+list_runs() {
+  local query="$1" listing
   listing="$(gh api \
-    "repos/${repository}/actions/workflows/release.yml/runs?event=workflow_dispatch&branch=main&head_sha=${release_sha}&per_page=100" \
+    "repos/${repository}/actions/workflows/release.yml/runs?${query}" \
     --jq '.workflow_runs[] | [.id, .status, .path, .event, .head_branch, .head_sha, .repository.full_name, (.run_started_at // .created_at), .run_attempt, (.actor.login // ""), (.triggering_actor.login // ""), (.repository.owner.login // "")] | @tsv')" ||
-    { log "cannot list release.yml runs of ${release_sha}"; return 1; }
+    { log "cannot list release.yml runs (${query})"; return 1; }
   local id status path event branch sha repo started attempt actor trigger owner allowed
   while IFS=$'\t' read -r id status path event branch sha repo started attempt actor trigger owner; do
     [[ -n "${id}" ]] || continue
     # The query parameters filter server-side; check every field again.
     if [[ "${path}" != ".github/workflows/release.yml" || "${event}" != "workflow_dispatch" ||
-          "${branch}" != "main" || "${sha}" != "${release_sha}" || "${repo}" != "${repository}" ]]; then
+          "${branch}" != "main" || "${repo}" != "${repository}" ]]; then
       continue
     fi
     allowed=" ${MEERKAT_PREBUILD_ACTORS:-${owner}} "
@@ -91,8 +102,43 @@ candidate_runs() {
       log "run ${id}: started by ${actor:-unknown}, triggered by ${trigger:-unknown}; only${allowed%% }may prebuild a release"
       continue
     fi
-    printf '%s\t%s\t%s\t%s\n' "${id}" "${status}" "$(date -u -d "${started}" +%s)" "${attempt}"
+    printf '%s\t%s\t%s\t%s\t%s\n' "${id}" "${status}" "$(date -u -d "${started}" +%s)" "${attempt}" "${sha}"
   done <<<"${listing}" | sort -t $'\t' -k1,1nr
+}
+
+# Whether a prebuild of commit $1, which is not the release commit, serves the
+# release (scripts/release-prebuild-equivalent), decided once per commit.
+serves_release() {
+  local commit="$1" verdict
+  verdict="${equivalence_cache}/${commit}"
+  if [[ ! -f "${verdict}" ]]; then
+    if [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] && "${EQUIVALENCE}" "${commit}" "${release_sha}" >"${verdict}.log" 2>&1; then
+      echo serves >"${verdict}"
+      log "$(cat "${verdict}.log")"
+    else
+      echo refused >"${verdict}"
+      log "$(head -n 1 "${verdict}.log" 2>/dev/null || echo "${commit}: not a commit")"
+    fi
+  fi
+  [[ "$(cat "${verdict}")" == serves ]]
+}
+
+# id<TAB>status<TAB>started-epoch<TAB>attempt<TAB>head for every candidate run:
+# the runs of exactly the release commit, then the runs of other commits whose
+# prebuild serves it, each newest first.
+candidate_runs() {
+  local exact others id status started attempt sha
+  exact="$(list_runs "event=workflow_dispatch&branch=main&head_sha=${release_sha}&per_page=100")" || return 1
+  others="$(list_runs "event=workflow_dispatch&branch=main&per_page=100")" || return 1
+  while IFS=$'\t' read -r id status started attempt sha; do
+    [[ -n "${id}" && "${sha}" == "${release_sha}" ]] || continue
+    printf '%s\t%s\t%s\t%s\t%s\n' "${id}" "${status}" "${started}" "${attempt}" "${sha}"
+  done <<<"${exact}"
+  while IFS=$'\t' read -r id status started attempt sha; do
+    [[ -n "${id}" && "${sha}" != "${release_sha}" ]] || continue
+    serves_release "${sha}" || continue
+    printf '%s\t%s\t%s\t%s\t%s\n' "${id}" "${status}" "${started}" "${attempt}" "${sha}"
+  done <<<"${others}"
 }
 
 # The prebuild gate's conclusion: success, failure, ..., "pending" while it
@@ -158,15 +204,15 @@ artifacts_downloadable() {
 while true; do
   runs="$(candidate_runs)"
   pending=0
-  while IFS=$'\t' read -r run_id status started attempt; do
+  while IFS=$'\t' read -r run_id status started attempt sha; do
     [[ -n "${run_id}" ]] || continue
     gate="$(prebuild_gate_state "${run_id}")"
     if [[ "${gate}" == "pending" || ( "${gate}" == "absent" && "${status}" != "completed" ) ]]; then
       if (($(date -u +%s) - started < wait_seconds)); then
-        log "run ${run_id} for ${release_sha} is ${status} and its ${PREBUILD_GATE_JOB} has not concluded; waiting for it"
+        log "run ${run_id} for ${sha} is ${status} and its ${PREBUILD_GATE_JOB} has not concluded; waiting for it"
         pending=1
       else
-        log "run ${run_id} for ${release_sha}: no ${PREBUILD_GATE_JOB} conclusion ${wait_seconds}s after it started; not waiting longer"
+        log "run ${run_id} for ${sha}: no ${PREBUILD_GATE_JOB} conclusion ${wait_seconds}s after it started; not waiting longer"
       fi
       continue
     fi
@@ -177,7 +223,11 @@ while true; do
     if ! artifacts_downloadable "${run_id}"; then
       continue
     fi
-    log "run ${run_id} attempt ${attempt} prebuilt the critical release artifacts of ${release_sha} (run ${status})"
+    if [[ "${sha}" == "${release_sha}" ]]; then
+      log "run ${run_id} attempt ${attempt} prebuilt the critical release artifacts of ${release_sha} (run ${status})"
+    else
+      log "run ${run_id} attempt ${attempt} prebuilt the critical release artifacts of ${sha}, which serve ${release_sha} (run ${status})"
+    fi
     printf '%s %s\n' "${run_id}" "${attempt}"
     exit 0
   done <<<"${runs}"

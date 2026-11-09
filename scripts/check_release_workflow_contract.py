@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -1983,6 +1985,10 @@ PREBUILD_INPUT = "prebuild_release_artifacts"
 PREBUILD_LOOKUP_JOB = "release_prebuild"
 PREBUILD_GATE_JOB = "release_prebuild_gate"
 PREBUILD_LOOKUP_SCRIPT = "scripts/release-find-prebuild"
+# Decides whether the prebuild of an earlier commit serves a tag commit; its
+# non-input rules are the ones check_prebuild_non_inputs applies.
+PREBUILD_EQUIVALENCE = "scripts/release-prebuild-equivalent"
+PRODUCTS_FILE = "ci/products.json"
 PREBUILD_BACKEND_REFUSAL = "A release prebuild builds with the backend its tag run selects"
 PROVENANCE_VERIFIER = "scripts/verify-release-asset-provenance"
 BINARY_BUILD_JOBS = (
@@ -2079,11 +2085,14 @@ def check_prebuild(text: str) -> list[str]:
     A `prebuild_release_artifacts` dispatch on main builds every release
     binary and the Web SDK package of the exact dispatched commit, runs no
     release validation or semver measurement, and publishes nothing. A tag
-    push looks the prebuild of its own commit up (`release_prebuild`); when
-    one is found it builds nothing, publishes that run's archives only after
+    push looks up the prebuild of its own commit, or of an ancestor whose
+    prebuild serves it (`release_prebuild`, with the history and
+    `scripts/release-prebuild-equivalent` in its checkout); when one is found
+    it builds nothing, publishes that run's archives only after
     `verify-release-asset-provenance --source-run` (the assets_run_id trust
-    path) and the Web SDK package only after its attestation is verified;
-    when none is found it builds as before.
+    path) and the Web SDK package only after binding it to the prebuild's
+    commit and verifying its attestation; when none is found it builds as
+    before.
     """
     violations: list[str] = []
     names = _job_names(text)
@@ -2338,6 +2347,32 @@ def check_prebuild(text: str) -> list[str]:
             f"job `{WEB_SDK_PUBLISH_JOB}` must verify the prebuilt package's attestation "
             f"(`gh attestation verify ... --source-ref refs/heads/main`) before publishing on {reused.label}"
         )
+    # The prebuilt package names the prebuild's commit, which is the tag's or
+    # an ancestor whose prebuild serves it: the job binds the package to that
+    # commit through the equivalence helper before verifying its attestation.
+    bind_index = next((index for index, step in web_steps if PREBUILD_EQUIVALENCE in step.run), None)
+    if bind_index is None or verify_index is None or bind_index > verify_index:
+        violations.append(
+            f"job `{WEB_SDK_PUBLISH_JOB}` must bind the prebuilt package to the prebuild's commit with "
+            f"`{PREBUILD_EQUIVALENCE}` before verifying its attestation on {reused.label}"
+        )
+    # The lookup compares the prebuilds of earlier commits with the tag
+    # commit: its checkout holds the history, the helper and the products.
+    checkouts = [
+        step
+        for step in job_steps(job_block(text, PREBUILD_LOOKUP_JOB))
+        if CHECKOUT_ACTION in step.fields.get("uses", "")
+    ]
+    sparse = checkouts[0].raw_with("sparse-checkout") if len(checkouts) == 1 else ""
+    if (
+        len(checkouts) != 1
+        or checkouts[0].nested("with").get("fetch-depth") != "0"
+        or not all(path in sparse.split() for path in (PREBUILD_LOOKUP_SCRIPT, PREBUILD_EQUIVALENCE, PRODUCTS_FILE))
+    ):
+        violations.append(
+            f"job `{PREBUILD_LOOKUP_JOB}` must check out the whole history (fetch-depth: 0) with "
+            f"`{PREBUILD_LOOKUP_SCRIPT}`, `{PREBUILD_EQUIVALENCE}` and `{PRODUCTS_FILE}`"
+        )
 
     # 7. A prebuild builds with the backend its tag run selects: on the other
     #    one its critical lanes queue behind other runners and miss the tag's
@@ -2372,6 +2407,104 @@ def check_prebuild(text: str) -> list[str]:
                             f"step `{request.name}` {'refuses' if refused else 'accepts'} {context.label}, "
                             f"whose tag run builds on {selected}"
                         )
+    return violations
+
+
+# The jobs that build or gate the artifacts a prebuild provides. Their text,
+# the local actions and reusable workflows they use, and the repository
+# scripts named there (transitively) are what a reused prebuild's commit and
+# the tag commit must agree on.
+PREBUILD_BUILD_JOBS = (
+    *BINARY_BUILD_JOBS,
+    "verify_windows_binaries",
+    WEB_SDK_BUILD_JOB,
+    "build_binaries_critical_gate",
+    "build_binaries_gate",
+    PREBUILD_GATE_JOB,
+)
+SCRIPT_REFERENCE = re.compile(r"(?<![A-Za-z0-9_.-])((?:scripts|tools)/[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*)")
+USES_REFERENCE = re.compile(r"\buses:\s*\S*?(\.github/(?:actions|workflows)/[A-Za-z0-9_.+-]+)")
+
+
+def _code(text: str) -> str:
+    """The text without its comment lines (`#` first in YAML, shell and Python)."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _prebuild_equivalence():
+    """scripts/release-prebuild-equivalent as a module: its non-input rules."""
+    path = REPO_ROOT / PREBUILD_EQUIVALENCE
+    if not path.is_file():
+        raise ContractError(f"{PREBUILD_EQUIVALENCE} does not exist")
+    loader = importlib.machinery.SourceFileLoader("release_prebuild_equivalent", str(path))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def _prebuild_build_closure(text: str) -> dict[str, str]:
+    """Label -> code of each prebuild build job and of every local action,
+    reusable workflow and repository script it reaches."""
+    texts = {f"{job} job": _code("\n".join(job_block(text, job))) for job in PREBUILD_BUILD_JOBS}
+    pending = list(texts.values())
+    while pending:
+        code = pending.pop()
+        references = [match.group(1) for match in SCRIPT_REFERENCE.finditer(code)]
+        references += [match.group(1) for match in USES_REFERENCE.finditer(code)]
+        for reference in references:
+            path = REPO_ROOT / reference
+            if path.is_dir():
+                path = next((path / name for name in ("action.yml", "action.yaml") if (path / name).is_file()), path)
+            if not path.is_file():
+                continue
+            label = str(path.relative_to(REPO_ROOT))
+            if label in texts:
+                continue
+            try:
+                texts[label] = _code(path.read_text(encoding="utf-8"))
+            except UnicodeDecodeError:
+                texts[label] = ""
+            pending.append(texts[label])
+    return texts
+
+
+def check_prebuild_non_inputs(text: str) -> list[str]:
+    """No release build job, local action or script names a prebuild non-input.
+
+    A tag publishes the prebuild of an earlier commit when every path changed
+    since is a non-input of Core's release artifacts
+    (scripts/release-prebuild-equivalent): under another product's root, a
+    product's changelog, or a CI-only file. That holds only while nothing that
+    builds those artifacts reads such a path: the jobs that build or gate
+    them, the local actions and reusable workflows they use, and the
+    repository scripts named there, transitively (comment lines aside). Every
+    CI-only file the helper lists must also exist.
+    """
+    helper = _prebuild_equivalence()
+    try:
+        roots, changelogs = helper.product_rules((REPO_ROOT / PRODUCTS_FILE).read_text(encoding="utf-8"))
+    except (OSError, helper.Refusal) as error:
+        return [f"{PRODUCTS_FILE}: {error}"]
+    names = {path: f"CI-only ({reason})" for path, reason in helper.CI_ONLY_PATHS.items()}
+    names.update({path: f"{product}'s changelog" for path, product in changelogs.items()})
+    patterns = [
+        (re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(name)}(?![A-Za-z0-9_.-])"), name, why)
+        for name, why in names.items()
+    ]
+    patterns += [
+        (re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(root)}"), root, f"{product}'s root")
+        for root, product in roots.items()
+    ]
+    violations = [
+        f"{PREBUILD_EQUIVALENCE} lists the CI-only file {path}, which does not exist"
+        for path in helper.CI_ONLY_PATHS
+        if not (REPO_ROOT / path).is_file()
+    ]
+    for label, code in sorted(_prebuild_build_closure(text).items()):
+        for line in code.splitlines():
+            for pattern, name, why in patterns:
+                if pattern.search(line):
+                    violations.append(f"{label} names {name} ({why}): {line.strip()[:120]}")
     return violations
 
 SEMVER_BASELINE_JOB = "publish_semver_baseline"
@@ -3669,6 +3802,7 @@ CHECKS: dict[str, Callable[[str], list[str]]] = {
     "dispatch-binding": check_dispatch_binding,
     "tag-validation": check_tag_validation,
     "prebuild": check_prebuild,
+    "prebuild-non-inputs": check_prebuild_non_inputs,
     "semver-baseline": check_semver_baseline,
     "trailing-platforms": check_trailing_platforms,
     "token-permissions": check_token_permissions,

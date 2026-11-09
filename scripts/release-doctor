@@ -312,9 +312,15 @@ else
 fi
 
 if prebuild_contract="$(workflow_contract prebuild)"; then
-  pass "Pre-tag prebuilds publish nothing, and a tag publishes its own commit's prebuild only through the attested-archive verification"
+  pass "Pre-tag prebuilds publish nothing, and a tag publishes the prebuild of its own commit, or of an ancestor whose changes since are all non-inputs, only through the attested-archive verification"
 else
-  bad "A pre-tag prebuild must publish nothing, and a tag may publish its commit's prebuild only through the attested-archive verification (${prebuild_contract//$'\n'/; })"
+  bad "A pre-tag prebuild must publish nothing, and a tag may publish the prebuild of its own commit, or of an ancestor whose changes since are all non-inputs, only through the attested-archive verification (${prebuild_contract//$'\n'/; })"
+fi
+
+if non_inputs_contract="$(workflow_contract prebuild-non-inputs)"; then
+  pass "No release build job, local action or script names a path a reused prebuild may differ in (another product's root, a product changelog, a CI-only file)"
+else
+  bad "A release build job, local action or script names a path a reused prebuild may differ in, so a tag could publish artifacts its own commit would build differently (${non_inputs_contract//$'\n'/; })"
 fi
 
 if baseline_contract="$(workflow_contract semver-baseline)"; then

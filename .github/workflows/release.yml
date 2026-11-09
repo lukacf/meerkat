@@ -1043,21 +1043,26 @@ jobs:
             --release-sha "${release_sha}" \
             --changelog .semver-recovery-policy/CHANGELOG.md
 
-  # A tag run publishes the artifacts of a successful pre-tag prebuild of
-  # exactly its commit instead of rebuilding them: a release.yml run
-  # dispatched on main at the tag commit with prebuild_release_artifacts,
-  # whose Release prebuild gate succeeded (critical binaries and Web SDK
-  # package ready; its trailing lanes may still be running) and whose
-  # critical artifacts have not expired (scripts/release-find-prebuild; a
-  # gate that has not concluded is waited for unless a job it needs already
-  # failed). Its run id is the only thing reused: publish_github_release
-  # verifies every archive exactly as for an assets_run_id recovery (each one
-  # and its source stamp attested by release.yml at that commit on
-  # refs/heads/main, the run's binary build gate green, every binary
-  # embedding the release version), and publish_web_sdk verifies the package
-  # attestation and version. No prebuild: the tag builds as before.
+  # A tag run publishes the artifacts of a successful pre-tag prebuild instead
+  # of rebuilding them: a release.yml run dispatched on main with
+  # prebuild_release_artifacts at the tag commit or, failing a usable one, at
+  # an ancestor whose prebuild serves it (every path changed since is a
+  # non-input of Core's release artifacts: another product's root, a product
+  # changelog or a CI-only file, scripts/release-prebuild-equivalent), whose
+  # Release prebuild gate succeeded (critical binaries and Web SDK package
+  # ready; its trailing lanes may still be running) and whose critical
+  # artifacts have not expired (scripts/release-find-prebuild; a gate that
+  # has not concluded is waited for unless a job it needs already failed).
+  # Its run id is the only thing reused: publish_github_release verifies
+  # every archive exactly as for an assets_run_id recovery (each one and its
+  # source stamp attested by release.yml at that run's commit on
+  # refs/heads/main, the commit checked again to be the tag's or to serve
+  # it, the run's binary build gate green, every binary embedding the release
+  # version), and publish_web_sdk binds the package to that commit the same
+  # way and verifies its attestation and version. No prebuild: the tag builds
+  # as before.
   release_prebuild:
-    name: Find exact-commit release prebuild
+    name: Find a release prebuild for the tag commit
     needs: [require_ci_green]
     if: ${{ startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
@@ -1070,14 +1075,19 @@ jobs:
       # that attempt and refuse a prebuild re-run after the lookup.
       run_attempt: ${{ steps.lookup.outputs.run_attempt }}
     steps:
+      # The whole history lets the lookup compare an earlier commit's
+      # prebuild with the tag commit.
       - name: Checkout release tooling
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          fetch-depth: 0
           sparse-checkout: |
             scripts/release-find-prebuild
+            scripts/release-prebuild-equivalent
+            ci/products.json
           sparse-checkout-cone-mode: false
 
-      - name: Find a successful prebuild of the tag commit
+      - name: Find a successful prebuild that serves the tag commit
         id: lookup
         shell: bash
         env:
@@ -1098,12 +1108,23 @@ jobs:
           fi
           run_id="${run_id:-}"
           echo "run_attempt=${run_attempt:-}" >> "${GITHUB_OUTPUT}"
+          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${run_id}" ]]; then
             echo "Publishing the prebuilt artifacts of release run ${run_id} (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}); no binary or Web SDK build in this run."
+            # The commit the prebuild built, and every path changed since
+            # with the reason it is no input (the publishers check it again).
+            if prebuilt="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" --jq .head_sha)"; then
+              {
+                echo "### Release prebuild"
+                echo "Run ${run_id} attempt ${run_attempt}, tag commit ${release_sha}:"
+                echo '```'
+                scripts/release-prebuild-equivalent "${prebuilt}" "${release_sha}" || true
+                echo '```'
+              } >> "${GITHUB_STEP_SUMMARY}"
+            fi
           else
-            echo "No complete prebuild of ${release_sha}; this run builds every release artifact."
+            echo "No usable prebuild for ${release_sha}; this run builds every release artifact."
           fi
-          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
 
   build_binaries:
     name: Build and package surface binaries with GitHub-hosted runners (${{ matrix.surface.bin }}, ${{ matrix.platform.target }})
@@ -2789,12 +2810,13 @@ jobs:
             exit 1
           fi
           if [[ -n "${PREBUILD_RUN_ID}" ]]; then
-            # The tag commit's pre-tag prebuild, verified exactly like an
+            # The tag's pre-tag prebuild, verified exactly like an
             # assets_run_id recovery: release.yml dispatched on main at a
             # commit in this tag's history with a green binary build gate,
             # every archive and its stamp attested by release.yml at that
-            # commit on refs/heads/main, and every stamp naming this tag's
-            # commit (release_prebuild only selects a run at exactly it).
+            # commit on refs/heads/main, and every stamp naming that commit,
+            # which must be this tag's commit or an ancestor whose prebuild
+            # serves it (scripts/release-prebuild-equivalent).
             scripts/verify-release-asset-provenance \
               --source-run "${PREBUILD_RUN_ID}" \
               --source-attempt "${PREBUILD_RUN_ATTEMPT}" \
@@ -3377,6 +3399,9 @@ jobs:
           # Bind helper scripts and package metadata to the same release as
           # the artifact, even when a later main dispatches the recovery job.
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          # The history lets a prebuilt package of an earlier commit be
+          # compared with the release commit.
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -3457,14 +3482,33 @@ jobs:
             }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # A prebuilt package was built from the prebuild run's commit: this
+      # release's commit, or an ancestor whose prebuild serves it (every path
+      # changed since is a non-input of Core's release artifacts,
+      # scripts/release-prebuild-equivalent). Its stamp and its attestation
+      # must name that commit.
+      - name: Bind the prebuilt Web SDK package to its commit
+        id: package_source
+        if: ${{ needs.release_prebuild.outputs.run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREBUILD_RUN_ID: ${{ needs.release_prebuild.outputs.run_id }}
+          RELEASE_SHA: ${{ needs.require_ci_green.outputs.sha }}
+        run: |
+          set -euo pipefail
+          prebuilt="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PREBUILD_RUN_ID}" --jq .head_sha)"
+          scripts/release-prebuild-equivalent "${prebuilt}" "${RELEASE_SHA}"
+          echo "commit=${prebuilt}" >> "${GITHUB_OUTPUT}"
+
       # The package must have been built from this checkout, the commit
-      # Require green CI passed: the build job's stamp names its checkout,
-      # and the tarball must be the stamped one and carry this checkout's
-      # package name and version. An artifact without a stamp (built before
-      # stamping) is refused.
+      # Require green CI accepted, or from the prebuild commit bound above: the
+      # build job's stamp names its checkout, and the tarball must be the
+      # stamped one and carry this checkout's package name and version. An
+      # artifact without a stamp (built before stamping) is refused.
       - name: Verify Web SDK package source
         env:
           RELEASE_SHA: ${{ needs.require_ci_green.outputs.sha }}
+          PACKAGE_SOURCE: ${{ steps.package_source.outputs.commit || needs.require_ci_green.outputs.sha }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -3479,8 +3523,8 @@ jobs:
           stamp_tarball="$(jq -er .tarball "${stamp}")"
           stamp_sha256="$(jq -er .tarball_sha256 "${stamp}")"
           [[ "${RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "Require green CI reported no release commit (${RELEASE_SHA:-empty})" >&2; exit 1; }
-          if [[ "${stamp_commit}" != "${RELEASE_SHA}" || "${RELEASE_SHA}" != "${head}" ]]; then
-            echo "Web SDK package source mismatch: stamp ${stamp_commit}, Require green CI ${RELEASE_SHA}, checkout ${head}" >&2
+          if [[ "${stamp_commit}" != "${PACKAGE_SOURCE}" || "${RELEASE_SHA}" != "${head}" ]]; then
+            echo "Web SDK package source mismatch: stamp ${stamp_commit}, expected ${PACKAGE_SOURCE}; Require green CI ${RELEASE_SHA}, checkout ${head}" >&2
             exit 1
           fi
           tarball_sha256="$(sha256sum "${tarball}" | cut -d' ' -f1)"
@@ -3496,14 +3540,15 @@ jobs:
           fi
           echo "Web SDK package ${expected} built from ${head} (sha256 ${tarball_sha256})"
 
-      # A package from the tag commit's pre-tag prebuild must be attested by
-      # release.yml at exactly this commit on refs/heads/main (the prebuild
-      # ran there) and pack this release's version.
+      # A package from a pre-tag prebuild must be attested by release.yml at
+      # exactly the prebuild's commit, bound above, on refs/heads/main (the
+      # prebuild ran there) and pack this release's version.
       - name: Verify the prebuilt Web SDK package
         if: ${{ needs.release_prebuild.outputs.run_id != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_SOURCE: ${{ steps.package_source.outputs.commit }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -3512,10 +3557,10 @@ jobs:
             echo "expected exactly one prebuilt @rkat/web package, found ${#packages[@]}" >&2
             exit 1
           fi
-          release_sha="$(git rev-parse HEAD)"
+          [[ "${PACKAGE_SOURCE}" =~ ^[0-9a-f]{40}$ ]] || { echo "no prebuild commit was bound (${PACKAGE_SOURCE:-empty})" >&2; exit 1; }
           gh attestation verify "${packages[0]}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --source-digest "${release_sha}" \
+            --source-digest "${PACKAGE_SOURCE}" \
             --source-ref refs/heads/main \
             --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
             >/dev/null
@@ -3525,7 +3570,7 @@ jobs:
             echo "prebuilt @rkat/web packs ${packed}, this release is ${expected}" >&2
             exit 1
           fi
-          echo "Verified prebuilt @rkat/web ${packed}: attested by release.yml at ${release_sha} on refs/heads/main"
+          echo "Verified prebuilt @rkat/web ${packed}: attested by release.yml at ${PACKAGE_SOURCE} on refs/heads/main"
 
       - name: Publish Web SDK
         env:

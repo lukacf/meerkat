@@ -314,7 +314,7 @@ pins whatever digests it then carries.
    (or, for a [maintenance release](#maintenance-releases), a push to its
    release branch).
 4. In parallel, verify registry credentials, consume declared-break evidence,
-   and either find the complete prebuild of the tag commit or build the
+   and either find a complete prebuild for the tag commit or build the
    platform binaries and the Web SDK package artifact.
 5. Publish the critical Linux (x86_64, aarch64) and macOS arm64 archives as
    soon as their lane passes (`publish_critical_release_assets`), without
@@ -373,9 +373,22 @@ candidate whose `crates/` tree differs from the tree of that tag.
 
 The tag run looks the prebuild up after `require_ci_green`
 (`release_prebuild`, `scripts/release-find-prebuild`): a `release.yml`
-dispatch on `main` at exactly the tag commit, in this repository, started
-and triggered by the repository owner, whose `Release prebuild gate` passed
-and whose critical artifacts have not expired; the publishers verify the run
+dispatch on `main`, in this repository, started and triggered by the
+repository owner, whose `Release prebuild gate` succeeded and whose critical
+artifacts have not expired, at the tag commit or, failing a usable one, at an
+ancestor whose prebuild serves it. A prebuild serves a later commit when every
+path changed between the two is a non-input of Core's release artifacts
+(`scripts/release-prebuild-equivalent`): a path under another product's root
+(except a `Cargo.toml` there, which the workspace resolves and
+`MODULE.bazel.lock` records), a product's changelog, or one of a short list of
+files only CI reads (the CI planner and its data). A release fix that touches
+only Connect, Meta, a changelog or the planner therefore reuses the prebuild
+of the release merge instead of rebuilding Core; any other path, an unreadable
+`ci/products.json` or a commit that is not an ancestor means a full build.
+`make release-doctor` checks that no release build job, local action or
+script it runs names such a path. The lookup prefers a run of exactly the tag
+commit, and the job summary lists every changed path with its reason;
+the publishers verify the run
 attempt the lookup examined and refuse it if the run was re-run since;
 a gate that has not concluded yet is waited for, because the prebuild
 finishes no later than a fresh build would, for up to 140 minutes from the
@@ -388,15 +401,16 @@ skips every build job and publishes that run's artifacts after the same
 verification as an `--assets-run-id` recovery
 (`verify-release-asset-provenance --source-run`: every archive and its stamp
 attested by `release.yml` at that commit on `refs/heads/main`, the stamp
-naming the tag commit, every binary embedding the release version; a
-prebuild run is accepted as a source only by the tag run of exactly its
-commit, never by an asset recovery, because a prebuild does not wait for
+naming that commit, which must be the tag commit or serve it, every binary
+embedding the release version; a prebuild run is accepted as a source only by
+a tag run, never by an asset recovery, because a prebuild does not wait for
 exact-main CI):
 `publish_critical_release_assets` publishes the critical archives at once,
 and `publish_github_release` adds the trailing ones after the prebuild's
 `Release binary build gate` passed (if that run's trailing lanes failed, an
-asset recovery publishes them). `publish_web_sdk` verifies the package's
-attestation and version before publishing. Without a usable prebuild the tag
+asset recovery publishes them). `publish_web_sdk` binds the package to the
+prebuild's commit the same way and verifies its attestation and version
+before publishing. Without a usable prebuild the tag
 builds everything as before. The prebuild never relaxes a publication gate:
 exact-main CI, semver evidence and registry credentials are still required by
 the tag run itself.

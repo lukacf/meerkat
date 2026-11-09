@@ -2218,7 +2218,9 @@ jobs:
           persist-credentials: false
 
       # As in build_binaries_buildbuddy: the setup action, the scripts it
-      # runs and the test-code marker guard come from the workflow's commit.
+      # runs and the test-code marker guard come from the workflow's commit,
+      # and so does the Intel macOS inspection whose minimum the next step
+      # reads.
       - name: Checkout release tooling
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -2227,11 +2229,49 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .github/actions/setup-buildbuddy-ci/action.yml
+            scripts/check-macos-x86-release-binary
             scripts/check-release-binary-markers
             scripts/check-release-binary-sqlite-profile
             scripts/ci-pin-rust-toolchain-env
             scripts/install-buildbuddy-cli
           sparse-checkout-cone-mode: false
+
+      # An asset recovery runs this workflow on an existing tag's tree, and
+      # so that tag's launcher. A tag cut before the launcher pinned the
+      # Intel minimum (release-build-macos-x86 without --macos_minimum_os)
+      # builds for the launcher's shared minimum, 13.0, which the inspection
+      # after the build refuses: refuse such a tree here, before anything
+      # builds, and name the GitHub-hosted backend, whose cross-build the
+      # inspection accepts, as the way to recover that tag.
+      - name: Refuse a release tree that builds Intel macOS for a newer macOS than the release accepts
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prebuild_release_artifacts == 'true' && needs.require_ci_green.outputs.prebuild_tag || github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          bound="$(sed -n 's/^max_minos="\${MEERKAT_MACOS_X86_MAX_MINOS:-\([0-9.][0-9.]*\)}"$/\1/p' .release-tooling/scripts/check-macos-x86-release-binary)"
+          if [[ -z "${bound}" ]]; then
+            echo "::error::cannot read the newest macOS minimum scripts/check-macos-x86-release-binary accepts" >&2
+            exit 1
+          fi
+          # The minimum the checked-out launcher's Intel command sets, comments
+          # left out; none means the launcher's shared minimum applies.
+          minimum="$(awk '
+            /^  release-build-macos-x86\)$/ { inside = 1; next }
+            inside && /^    ;;$/ { exit }
+            inside && /^ *#/ { next }
+            inside && match($0, /--macos_minimum_os=[0-9.]+/) { print substr($0, RSTART + 19, RLENGTH - 19); exit }
+          ' scripts/buildbuddy-bazel-poc)"
+          recover="Recover ${RELEASE_TAG}'s assets on the GitHub-hosted backend: RELEASE_BACKEND=github-hosted VERSION=${RELEASE_TAG} make release-assets (release_backend=github-hosted)."
+          if [[ -z "${minimum}" ]]; then
+            echo "::error::${RELEASE_TAG}'s scripts/buildbuddy-bazel-poc sets no macOS minimum for release-build-macos-x86, so it builds the Intel macOS binaries for its shared minimum (13.0), newer than the ${bound} the Intel macOS inspection accepts. ${recover}" >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n%s\n' "${minimum}" "${bound}" | sort -V | head -n 1)" != "${minimum}" ]]; then
+            echo "::error::${RELEASE_TAG}'s scripts/buildbuddy-bazel-poc builds the Intel macOS binaries for macOS ${minimum}, newer than the ${bound} the Intel macOS inspection accepts. ${recover}" >&2
+            exit 1
+          fi
+          echo "${RELEASE_TAG}'s launcher builds the Intel macOS binaries for macOS ${minimum}; the inspection accepts ${bound} at most."
 
       - uses: ./.release-tooling/.github/actions/setup-buildbuddy-ci
         with:

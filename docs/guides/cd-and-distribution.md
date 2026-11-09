@@ -575,6 +575,11 @@ and Linux and macOS arm64 packaging even when they request
 owner's BuildBuddy releases cross-compile it on BuildBuddy
 (`release-build-macos-x86`, for macOS 11.0) and run and inspect it on a hosted
 Apple silicon runner; every other release cross-compiles it on that runner.
+An asset recovery of a tag cut before its launcher pinned that minimum would
+build Intel macOS on BuildBuddy for macOS 13.0, which the inspection refuses,
+so the BuildBuddy job refuses such a tag before it builds: recover its assets
+on the GitHub-hosted backend (`RELEASE_BACKEND=github-hosted VERSION=vX.Y.Z
+make release-assets`).
 Windows packaging and every
 credentialed registry publish still run on GitHub-hosted runners, and the exact-main GitHub Actions CI requirement remains
 in force. This release

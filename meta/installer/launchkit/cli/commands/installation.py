@@ -103,6 +103,15 @@ async def read_receipt(client, identity):
         raise
 
 
+def unchanged(before, after):
+    """Whether an installation record read after a lost install answer is still the record read before the
+    request. Forge writes a record at every admission (updated_at and a progress entry), and reinstalling
+    into the folder of a stopped installation keeps its deployment ID, so an unchanged record shows nothing
+    of the request."""
+    return before is not None and all(before.get(key) == after.get(key)
+                                      for key in ("deployment_id", "updated_at", "progress"))
+
+
 def receipt_events(context, receipt, seen):
     """Emit what changed in the receipt since the last read."""
     command = context.command
@@ -319,6 +328,14 @@ async def install_command(context):
             "source_digest": options.get("source_digest"), "destination": folder,
             "settings": {**provided, "MOBKIT_PORT": str(port)},
             "use_host_provider_credentials": bool(reused), "execution_mode": args.mode}
+    # The installation record as it is before this request: after a lost answer, only a record this request
+    # changed is its outcome.
+    try:
+        before = await read_receipt(client, identity)
+    except CliError as error:
+        if error.code != "not_found" or error.detail != NO_INSTALLATION:
+            raise
+        before = None
     context.resume = [status_step(identity, wait=True)]
     try:
         _, receipt = await client.post(guide_path(identity, "/deployment"), json=body)
@@ -332,8 +349,9 @@ async def install_command(context):
             receipt = await read_receipt(client, identity)
         except CliError:
             raise error from None
-        if receipt.get("destination") != folder or receipt.get("source_id") != options.get("source_id"):
-            error.next = [status_step(identity)]
+        if (receipt.get("destination") != folder or receipt.get("source_id") != options.get("source_id")
+                or unchanged(before, receipt)):
+            error.next = [status_step(identity, wait=True)]
             raise error from None
     context.output.event("install", "admitted", deployment_id=receipt.get("deployment_id"),
                          message=f"installation {short(receipt.get('deployment_id'))} admitted")
